@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch
-from encoder_settings import apply_settings
+from encoder_settings import apply_settings, read_settings
 
 
 class SettingsTests(unittest.TestCase):
@@ -11,6 +11,19 @@ class SettingsTests(unittest.TestCase):
         self.active = {'platform': 'Original', 'server': 'Primary', 'key': 'secret', 'passphrase': 'phrase'}
         self.platform = {'customizableUrlEnabled': True, 'profiles': [self.profile]}
         self.target = dict(self.active, server='Custom', quality='High', url=self.values['url'])
+
+    @patch('encoder_settings.rest')
+    def test_read_settings_returns_server_name_without_credentials(self, api):
+        active = {'platform': 'Original', 'server': 'Primary', 'quality': 'High', 'key': 'stream-secret',
+                  'url': 'srt://user:password@receiver:9000/live?token=hidden', 'passphrase': 'hidden-passphrase'}
+        platform = {'customizableUrlEnabled': True, 'profiles': [self.profile], 'servers': [], 'key': 'platform-secret'}
+        api.side_effect = [active, platform, {'status': 'Idle'}, ['Original']]
+        result = read_settings(self.encoder)
+        self.assertEqual(result['server'], 'Primary')
+        self.assertEqual(result['url'], 'srt://receiver:9000/live')
+        self.assertNotIn('stream-secret', str(result))
+        self.assertNotIn('password', str(result))
+        self.assertNotIn('hidden-passphrase', str(result))
 
     @patch('encoder_settings.rest')
     def test_live_stream_cannot_be_edited(self, api):

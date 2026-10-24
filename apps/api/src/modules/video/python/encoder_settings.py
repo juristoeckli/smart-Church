@@ -54,7 +54,7 @@ def read_settings(encoder):
     # Keep credentials out of read responses and DOM by default.
     parsed = urllib.parse.urlsplit(url)
     url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.split('@')[-1], parsed.path, '', ''))
-    return {'platform': active['platform'], 'quality': active['quality'], 'url': url,
+    return {'platform': active['platform'], 'server': active.get('server', ''), 'quality': active['quality'], 'url': url,
             'protocol': parsed.scheme.lower(), 'has_key': bool(active.get('key')),
             'profiles': platform['profiles'], 'status': rest(encoder, '/livestreams/0')['status'],
             'presets': rest(encoder, '/livestreams/platforms'),
