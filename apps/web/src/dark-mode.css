@@ -302,3 +302,17 @@
   border-color: #2d3931;
   color: #9ca99f;
 }
+
+:root[data-theme="dark"] .branding-preview {
+  background: #fff;
+  border-color: #3a473d;
+}
+
+:root[data-theme="dark"] .branding-upload {
+  background: #171f1a;
+  border-color: #38473c;
+}
+
+:root[data-theme="dark"] .branding-help {
+  color: #9ca99f;
+}

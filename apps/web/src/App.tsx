@@ -30,6 +30,7 @@ const navigation = [
 ];
 
 const today = new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
+const defaultLogoUrl = "/gfc-logo.svg";
 
 function initials(contact: Contact) {
   return `${contact.firstName[0] ?? ""}${contact.lastName[0] ?? ""}`.toUpperCase();
@@ -52,6 +53,13 @@ function App() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
+  const [logoUnavailable, setLogoUnavailable] = useState(false);
+  const [isBrandingOpen, setIsBrandingOpen] = useState(false);
+  const [brandingDraft, setBrandingDraft] = useState<string | null>(null);
+  const [isBrandingSaving, setIsBrandingSaving] = useState(false);
+
+  const logoSrc = logoDataUrl || defaultLogoUrl;
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -72,6 +80,20 @@ function App() {
       .catch((error: unknown) => setLoadError(error instanceof Error ? error.message : "Could not load contacts."))
       .finally(() => setIsLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetch("/api/branding")
+      .then(async (response) => {
+        if (!response.ok) return;
+        const result = await response.json() as { logoDataUrl: string | null };
+        setLogoDataUrl(result.logoDataUrl);
+      })
+      .catch(() => {
+        // The supplied GfC logo remains the default when local settings are unavailable.
+      });
+  }, []);
+
+  useEffect(() => setLogoUnavailable(false), [logoSrc]);
 
   const visibleContacts = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -119,15 +141,59 @@ function App() {
     window.setTimeout(() => setNotice(""), 4000);
   }
 
+  function openBrandingSettings() {
+    setBrandingDraft(logoDataUrl);
+    setIsBrandingOpen(true);
+  }
+
+  function selectBrandingLogo(file: File | undefined) {
+    if (!file) return;
+    if (!new Set(["image/png", "image/jpeg", "image/webp"]).has(file.type)) {
+      setNotice("Choose a PNG, JPEG, or WebP image.");
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setNotice("The logo image must be under 2 MB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setBrandingDraft(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => setNotice("Could not read that logo image.");
+    reader.readAsDataURL(file);
+  }
+
+  async function saveBranding() {
+    setIsBrandingSaving(true);
+    try {
+      const uploadedLogo = typeof brandingDraft === "string" && brandingDraft.startsWith("data:image/")
+        ? brandingDraft
+        : null;
+      const response = await fetch("/api/branding", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ logoDataUrl: uploadedLogo }),
+      });
+      const result = await response.json() as { logoDataUrl?: string | null; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not save site branding.");
+      setLogoDataUrl(result.logoDataUrl ?? null);
+      setIsBrandingOpen(false);
+      setNotice("Site logo saved.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save site branding.");
+    } finally {
+      setIsBrandingSaving(false);
+    }
+    window.setTimeout(() => setNotice(""), 4000);
+  }
+
   const memberCount = contacts.filter((contact) => contact.status === "member").length;
   const visitorCount = contacts.filter((contact) => contact.status === "visitor").length;
 
   return (
     <div className="app-frame">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
-        <a className="brand" href="#home" aria-label="Smart Church home">
-          <span className="brand-mark"><Church size={21} strokeWidth={1.8} /></span>
-          <span className="brand-name">smart<span>church</span></span>
+        <a className="brand" href="#home" aria-label="Church home">
+          {logoUnavailable ? <><span className="brand-mark"><Church size={21} strokeWidth={1.8} /></span><span className="brand-name">smart<span>church</span></span></> : <img className="brand-custom-logo" src={logoSrc} alt="GfC logo" onError={() => setLogoUnavailable(true)} />}
         </a>
 
         <button className="church-switcher" type="button" aria-label="Select church">
@@ -147,7 +213,7 @@ function App() {
 
         <div className="sidebar-bottom">
           <button className="nav-item" type="button" onClick={() => setNotice("Notifications will be added in a later step.")}><Bell size={18} strokeWidth={1.8} /><span>Notifications</span><span className="notification-dot" /></button>
-          <button className="nav-item" type="button" onClick={() => setNotice("Settings will be added in a later step.")}><Settings2 size={18} strokeWidth={1.8} /><span>Settings</span></button>
+          <button className="nav-item" type="button" onClick={openBrandingSettings}><Settings2 size={18} strokeWidth={1.8} /><span>Settings</span></button>
           <button className="nav-item" type="button" onClick={() => setNotice("Help will be added in a later step.")}><CircleHelp size={18} strokeWidth={1.8} /><span>Help & support</span></button>
           <div className="profile-card">
             <div className="profile-avatar">JM</div>
@@ -203,6 +269,8 @@ function App() {
       {notice && <div className="toast" role="status"><Check size={17} />{notice}<button className="toast-close" type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
 
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
+
+      {isBrandingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsBrandingOpen(false)}><section className="modal branding-modal" role="dialog" aria-modal="true" aria-labelledby="branding-title"><div className="modal-heading"><div><span className="eyebrow">SITE ADMINISTRATION</span><h2 id="branding-title">Site logo</h2><p>Choose the logo shown at the top of the sidebar.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsBrandingOpen(false)}><X size={19} /></button></div><div className="branding-preview"><img src={brandingDraft || defaultLogoUrl} alt="Logo preview" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div><label className="branding-upload">Upload a logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectBrandingLogo(event.currentTarget.files?.[0])} /></label><p className="branding-help">PNG, JPEG, or WebP · up to 2 MB. The GfC logo is used by default.</p><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setBrandingDraft(null)}>Use GfC default</button><button className="button button-secondary" type="button" onClick={() => setIsBrandingOpen(false)}>Cancel</button><button className="button button-primary" type="button" disabled={isBrandingSaving} onClick={saveBranding}>{isBrandingSaving ? "Saving…" : "Save logo"}</button></div><p className="modal-demo-footnote">Local development only. Admin sign-in will protect branding settings when authentication is added.</p></section></div>}
     </div>
   );
 }
