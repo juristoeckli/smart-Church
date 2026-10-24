@@ -2,7 +2,7 @@
 
 A modular, department-isolated application with one shared web/desktop interface, optional offline operation, trusted server-to-server sharing and extensible worker processes.
 
-**Status: local development foundation.** The People directory now reads and saves contacts through Core API into a configured PostgreSQL department. Authentication and permission checks are still in progress; keep this API bound to localhost and use fictional data only until those are implemented.
+**Status: local development foundation.** The People directory and Services & events schedule read and save department-scoped data through Core API into PostgreSQL. The GfC location and site logo are configurable. Authentication and permission checks are still in progress; keep this API bound to localhost and use fictional data only until those are implemented.
 
 ## Start here
 

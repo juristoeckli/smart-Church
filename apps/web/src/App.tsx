@@ -19,7 +19,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import type { Contact, ContactStatus } from "@smart-church/contracts";
+import type { Contact, ContactStatus, DepartmentProfile } from "@smart-church/contracts";
 import { ServicesEvents } from "./ServicesEvents";
 
 const navigation = [
@@ -32,7 +32,11 @@ const navigation = [
 
 const today = new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
 const defaultLogoUrl = "/gfc-logo.svg";
-const departmentLocation = "Steffisburg";
+const defaultDepartment: DepartmentProfile = {
+  id: "",
+  location: "Steffisburg",
+  timeZone: "Europe/Zurich",
+};
 
 function initials(contact: Contact) {
   return `${contact.firstName[0] ?? ""}${contact.lastName[0] ?? ""}`.toUpperCase();
@@ -61,6 +65,10 @@ function App() {
   const [isBrandingOpen, setIsBrandingOpen] = useState(false);
   const [brandingDraft, setBrandingDraft] = useState<string | null>(null);
   const [isBrandingSaving, setIsBrandingSaving] = useState(false);
+  const [department, setDepartment] = useState<DepartmentProfile>(defaultDepartment);
+  const [departmentDraft, setDepartmentDraft] = useState(defaultDepartment);
+  const [isDepartmentOpen, setIsDepartmentOpen] = useState(false);
+  const [isDepartmentSaving, setIsDepartmentSaving] = useState(false);
 
   const logoSrc = logoDataUrl || defaultLogoUrl;
 
@@ -93,6 +101,18 @@ function App() {
       })
       .catch(() => {
         // The supplied GfC logo remains the default when local settings are unavailable.
+      });
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/department")
+      .then(async (response) => {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error ?? "Could not load department settings.");
+        setDepartment(result as DepartmentProfile);
+      })
+      .catch(() => {
+        // The environment defaults remain visible when the local database is unavailable.
       });
   }, []);
 
@@ -189,20 +209,47 @@ function App() {
     window.setTimeout(() => setNotice(""), 4000);
   }
 
+  function openDepartmentSettings() {
+    setDepartmentDraft(department);
+    setIsDepartmentOpen(true);
+  }
+
+  async function saveDepartmentSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsDepartmentSaving(true);
+    try {
+      const response = await fetch("/api/department", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ location: departmentDraft.location, timeZone: departmentDraft.timeZone }),
+      });
+      const result = await response.json() as DepartmentProfile | { error?: string };
+      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save department settings." : "Could not save department settings.");
+      setDepartment(result);
+      setIsDepartmentOpen(false);
+      setNotice("Department settings saved.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save department settings.");
+    } finally {
+      setIsDepartmentSaving(false);
+    }
+    window.setTimeout(() => setNotice(""), 4000);
+  }
+
   const memberCount = contacts.filter((contact) => contact.status === "member").length;
   const visitorCount = contacts.filter((contact) => contact.status === "visitor").length;
 
   return (
     <div className="app-frame">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
-        <a className="brand" href="#home" aria-label={`Church home · ${departmentLocation}`}>
+        <a className="brand" href="#home" aria-label={`Church home · ${department.location}`}>
           {logoUnavailable ? <><span className="brand-mark"><Church size={21} strokeWidth={1.8} /></span><span className="brand-name">smart<span>church</span></span></> : <img className="brand-custom-logo" src={logoSrc} alt="GfC logo" onError={() => setLogoUnavailable(true)} />}
-          <span className="brand-location">{departmentLocation}</span>
+          <span className="brand-location">{department.location}</span>
         </a>
 
-        <button className="church-switcher" type="button" aria-label="Select church">
+        <button className="church-switcher" type="button" aria-label="Location settings" onClick={openDepartmentSettings}>
           <span className="church-avatar">G</span>
-          <span className="church-details"><strong>Grace Community</strong><small>Zurich, Switzerland</small></span>
+          <span className="church-details"><strong>GfC</strong><small>{department.location}</small></span>
           <ChevronDown size={16} />
         </button>
 
@@ -244,7 +291,7 @@ function App() {
         </header>
 
         <div className="page-wrap">
-          {page === "Services & events" ? <ServicesEvents onNotice={setNotice} /> : <>
+          {page === "Services & events" ? <ServicesEvents departmentLocation={department.location} departmentTimeZone={department.timeZone} onNotice={setNotice} /> : <>
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Database unavailable · ${loadError}` : "Local workspace · People are saved to the configured department database"}</div>
 
           <section className="page-heading">
@@ -268,7 +315,7 @@ function App() {
             <div className="directory-toolbar"><div className="search-field"><Search size={17} /><input aria-label="Search people" placeholder="Search by name, email, or phone..." value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>⌘ K</kbd></div><div className="filter-tabs" role="tablist" aria-label="Filter by status"><button className={statusFilter === "all" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={statusFilter === "all"} onClick={() => setStatusFilter("all")}>All <span>{contacts.length}</span></button><button className={statusFilter === "member" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={statusFilter === "member"} onClick={() => setStatusFilter("member")}>Members <span>{contacts.filter((contact) => contact.status === "member").length}</span></button><button className={statusFilter === "visitor" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={statusFilter === "visitor"} onClick={() => setStatusFilter("visitor")}>Visitors <span>{contacts.filter((contact) => contact.status === "visitor").length}</span></button></div><button className="icon-button sort-button" type="button" aria-label="Sort people" onClick={() => setNotice("People are currently sorted by first name.")}><SlidersHorizontal size={17} /></button></div>
 
             <div className="table-scroll"><table className="people-table"><thead><tr><th><input type="checkbox" aria-label="Select all people" onChange={() => setNotice("Bulk actions will be available when contact data is connected.")} /></th><th>PERSON</th><th>STATUS</th><th>EMAIL ADDRESS</th><th>PHONE</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
-              {visibleContacts.map((contact, index) => <tr key={contact.id}><td><input type="checkbox" aria-label={`Select ${contact.firstName} ${contact.lastName}`} /></td><td><div className="person-cell"><div className={`person-avatar avatar-${index % 6}`}>{initials(contact)}</div><div><strong>{contact.firstName} {contact.lastName}</strong><small>Zurich campus</small></div></div></td><td><span className={`status-pill ${contact.status === "member" ? "status-member" : "status-visitor"}`}><span />{contact.status === "member" ? "Member" : "Visitor"}</span></td><td className="muted-cell">{contact.email || "—"}</td><td className="muted-cell">{contact.phone || "—"}</td><td><button className="row-more" type="button" aria-label={`More actions for ${contact.firstName} ${contact.lastName}`} onClick={() => setNotice("Contact profiles will be added in a later step.")}>•••</button></td></tr>)}
+              {visibleContacts.map((contact, index) => <tr key={contact.id}><td><input type="checkbox" aria-label={`Select ${contact.firstName} ${contact.lastName}`} /></td><td><div className="person-cell"><div className={`person-avatar avatar-${index % 6}`}>{initials(contact)}</div><div><strong>{contact.firstName} {contact.lastName}</strong><small>{department.location}</small></div></div></td><td><span className={`status-pill ${contact.status === "member" ? "status-member" : "status-visitor"}`}><span />{contact.status === "member" ? "Member" : "Visitor"}</span></td><td className="muted-cell">{contact.email || "—"}</td><td className="muted-cell">{contact.phone || "—"}</td><td><button className="row-more" type="button" aria-label={`More actions for ${contact.firstName} ${contact.lastName}`} onClick={() => setNotice("Contact profiles will be added in a later step.")}>•••</button></td></tr>)}
               {visibleContacts.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? "Loading people…" : loadError ? "People could not be loaded." : "No people yet. Add someone to get started."}</td></tr>}
             </tbody></table></div>
             <footer className="table-footer"><span>Showing <strong>{visibleContacts.length ? 1 : 0}–{visibleContacts.length}</strong> of <strong>{visibleContacts.length}</strong> people</span><div className="pagination"><button className="page-button" type="button" disabled>Previous</button><button className="page-number" type="button" aria-current="page">1</button><button className="page-button" type="button" disabled>Next</button></div></footer>
@@ -284,6 +331,7 @@ function App() {
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
 
       {isBrandingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsBrandingOpen(false)}><section className="modal branding-modal" role="dialog" aria-modal="true" aria-labelledby="branding-title"><div className="modal-heading"><div><span className="eyebrow">SITE ADMINISTRATION</span><h2 id="branding-title">Site logo</h2><p>Choose the logo shown at the top of the sidebar.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsBrandingOpen(false)}><X size={19} /></button></div><div className="branding-preview"><img src={brandingDraft || defaultLogoUrl} alt="Logo preview" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div><label className="branding-upload">Upload a logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectBrandingLogo(event.currentTarget.files?.[0])} /></label><p className="branding-help">PNG, JPEG, or WebP · up to 2 MB. The GfC logo is used by default.</p><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setBrandingDraft(null)}>Use GfC default</button><button className="button button-secondary" type="button" onClick={() => setIsBrandingOpen(false)}>Cancel</button><button className="button button-primary" type="button" disabled={isBrandingSaving} onClick={saveBranding}>{isBrandingSaving ? "Saving…" : "Save logo"}</button></div><p className="modal-demo-footnote">Local development only. Admin sign-in will protect branding settings when authentication is added.</p></section></div>}
+      {isDepartmentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsDepartmentOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="department-title"><div className="modal-heading"><div><span className="eyebrow">GFC LOCATION</span><h2 id="department-title">Location settings</h2><p>Set the location shown across this workspace.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsDepartmentOpen(false)}><X size={19} /></button></div><form onSubmit={saveDepartmentSettings}><label>Location<input autoFocus required maxLength={120} value={departmentDraft.location} onChange={(event) => setDepartmentDraft((current) => ({ ...current, location: event.target.value }))} placeholder="Steffisburg" /></label><label>Time zone<input required maxLength={80} value={departmentDraft.timeZone} onChange={(event) => setDepartmentDraft((current) => ({ ...current, timeZone: event.target.value }))} placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsDepartmentOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Saving…" : "Save details"}</button></div></form><p className="modal-demo-footnote">Local development only. Authentication and admin permissions are not yet implemented.</p></section></div>}
     </div>
   );
 }

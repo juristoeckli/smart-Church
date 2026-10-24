@@ -25,3 +25,11 @@ export interface ServiceEvent {
 }
 
 export type CreateServiceEvent = Omit<ServiceEvent, "id">;
+
+export interface DepartmentProfile {
+  id: string;
+  location: string;
+  timeZone: string;
+}
+
+export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;

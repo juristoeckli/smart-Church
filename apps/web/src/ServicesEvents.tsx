@@ -11,21 +11,27 @@ const eventKinds: { value: ServiceEventKind; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-function localDateString(date = new Date()) {
-  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
-  return localDate.toISOString().slice(0, 10);
+function departmentDateString(timeZone: string, date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
 }
 
 function formatEventDate(value: string) {
-  return new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric" })
-    .format(new Date(`${value}T12:00:00`));
+  return new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" })
+    .format(new Date(`${value}T12:00:00Z`));
 }
 
 function formatShortDate(value: string) {
-  const date = new Date(`${value}T12:00:00`);
+  const date = new Date(`${value}T12:00:00Z`);
   return {
-    day: new Intl.DateTimeFormat("en-GB", { day: "2-digit" }).format(date),
-    month: new Intl.DateTimeFormat("en-GB", { month: "short" }).format(date).toUpperCase(),
+    day: new Intl.DateTimeFormat("en-GB", { day: "2-digit", timeZone: "UTC" }).format(date),
+    month: new Intl.DateTimeFormat("en-GB", { month: "short", timeZone: "UTC" }).format(date).toUpperCase(),
   };
 }
 
@@ -48,7 +54,7 @@ function eventPayload(form: HTMLFormElement): CreateServiceEvent {
   };
 }
 
-export function ServicesEvents({ onNotice }: { onNotice: (message: string) => void }) {
+export function ServicesEvents({ departmentLocation, departmentTimeZone, onNotice }: { departmentLocation: string; departmentTimeZone: string; onNotice: (message: string) => void }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -77,7 +83,7 @@ export function ServicesEvents({ onNotice }: { onNotice: (message: string) => vo
 
   useEffect(() => { void loadEvents(); }, []);
 
-  const today = localDateString();
+  const today = departmentDateString(departmentTimeZone);
   const currentMonth = today.slice(0, 7);
   const upcomingEvents = useMemo(() => events.filter((event) => event.eventDate >= today), [events, today]);
   const thisMonthCount = events.filter((event) => event.eventDate.startsWith(currentMonth) && event.eventDate >= today).length;
@@ -146,7 +152,7 @@ export function ServicesEvents({ onNotice }: { onNotice: (message: string) => vo
     <>
       <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}>
         <span className="demo-dot" />
-        {loadError ? `Events unavailable · ${loadError}` : "Local workspace · Services and events are saved for Steffisburg"}
+        {loadError ? `Events unavailable · ${loadError}` : `Local workspace · Services and events are saved for ${departmentLocation}`}
         {loadError && <button className="event-retry" type="button" onClick={() => void loadEvents()}>Try again</button>}
       </div>
 
@@ -184,15 +190,15 @@ export function ServicesEvents({ onNotice }: { onNotice: (message: string) => vo
           })}
           {filteredEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? "Loading the schedule…" : loadError ? "The schedule could not be loaded." : query ? "No gatherings match your search." : filter === "past" ? "There are no past gatherings yet." : "No gatherings scheduled. Add your first service or event."}</td></tr>}
         </tbody></table></div>
-        <footer className="table-footer"><span>Showing <strong>{filteredEvents.length}</strong> of <strong>{events.length}</strong> gatherings</span><span className="event-footer-note">Times are shown in your local timezone.</span></footer>
+        <footer className="table-footer"><span>Showing <strong>{filteredEvents.length}</strong> of <strong>{events.length}</strong> gatherings</span><span className="event-footer-note">Times use {departmentTimeZone}.</span></footer>
       </section>
 
       <footer className="page-footer"><span>Make room for what brings us together.</span><span>© 2026 Smart Church</span></footer>
 
       {isModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsModalOpen(false)}><section className="modal event-modal" role="dialog" aria-modal="true" aria-labelledby="event-modal-title"><div className="modal-heading"><div><span className="eyebrow">CHURCH SCHEDULE</span><h2 id="event-modal-title">{editingEvent ? "Edit gathering" : "Add a gathering"}</h2><p>Share the details so everyone knows when and where to meet.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsModalOpen(false)}><X size={19} /></button></div><form key={editingEvent?.id ?? "new-event"} onSubmit={saveEvent}>
         <label>Title<input name="title" autoFocus required maxLength={160} defaultValue={editingEvent?.title ?? ""} placeholder="Sunday worship service" /></label>
-        <div className="form-row"><label>Type<select name="kind" defaultValue={editingEvent?.kind ?? "service"}>{eventKinds.map((kind) => <option value={kind.value} key={kind.value}>{kind.label}</option>)}</select></label><label>Location<input name="location" required maxLength={160} defaultValue={editingEvent?.location ?? "Steffisburg"} placeholder="Church hall" /></label></div>
-        <div className="form-row event-time-row"><label>Date<input type="date" name="eventDate" required defaultValue={editingEvent?.eventDate ?? localDateString()} /></label><label>Starts at<input type="time" name="startTime" required defaultValue={editingEvent?.startTime ?? "10:00"} /></label><label>Ends at <span className="optional-label">Optional</span><input type="time" name="endTime" defaultValue={editingEvent?.endTime ?? ""} /></label></div>
+        <div className="form-row"><label>Type<select name="kind" defaultValue={editingEvent?.kind ?? "service"}>{eventKinds.map((kind) => <option value={kind.value} key={kind.value}>{kind.label}</option>)}</select></label><label>Location<input name="location" required maxLength={160} defaultValue={editingEvent?.location ?? departmentLocation} placeholder="Church hall" /></label></div>
+        <div className="form-row event-time-row"><label>Date<input type="date" name="eventDate" required defaultValue={editingEvent?.eventDate ?? departmentDateString(departmentTimeZone)} /></label><label>Starts at<input type="time" name="startTime" required defaultValue={editingEvent?.startTime ?? "10:00"} /></label><label>Ends at <span className="optional-label">Optional</span><input type="time" name="endTime" defaultValue={editingEvent?.endTime ?? ""} /></label></div>
         <label>Description <span className="optional-label">Optional</span><textarea name="description" maxLength={2000} rows={3} defaultValue={editingEvent?.description ?? ""} placeholder="A few helpful details for the community" /></label>
         <div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsModalOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Check size={16} /> {isSaving ? "Saving…" : editingEvent ? "Save changes" : "Add to schedule"}</button></div>
       </form></section></div>}

@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
-import type { Contact, CreateContact, CreateServiceEvent, ServiceEvent } from "@smart-church/contracts";
+import type { Contact, CreateContact, CreateServiceEvent, DepartmentProfile, ServiceEvent, UpdateDepartmentProfile } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
@@ -59,6 +59,49 @@ function validateServiceEvent(event: CreateServiceEvent) {
 }
 
 app.get("/api/health", async () => ({ status: databaseReady ? "ok" : "database_unavailable" }));
+
+app.get("/api/department", async (_request, reply): Promise<DepartmentProfile | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
+  const result = await pool.query(
+    "SELECT id, name, time_zone FROM departments WHERE id = $1",
+    [departmentId],
+  );
+  const row = result.rows[0];
+  if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
+  return { id: row.id, location: row.name, timeZone: row.time_zone };
+});
+
+app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
+  schema: {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      required: ["location", "timeZone"],
+      properties: {
+        location: { type: "string", minLength: 1, maxLength: 120 },
+        timeZone: { type: "string", minLength: 1, maxLength: 80 },
+      },
+    },
+  },
+}, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to save department settings." });
+  const location = request.body.location.trim();
+  const timeZone = request.body.timeZone.trim();
+  if (!location || !timeZone) return reply.code(400).send({ error: "Location and time zone are required." });
+  try {
+    new Intl.DateTimeFormat("en", { timeZone });
+  } catch {
+    return reply.code(400).send({ error: "Choose a valid time zone, such as Europe/Zurich." });
+  }
+  const result = await pool.query(
+    `UPDATE departments SET name = $2, time_zone = $3, updated_at = now()
+      WHERE id = $1 RETURNING id, name, time_zone`,
+    [departmentId, location, timeZone],
+  );
+  const row = result.rows[0];
+  if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
+  return { id: row.id, location: row.name, timeZone: row.time_zone };
+});
 
 app.get("/api/branding", async (_request, reply): Promise<{ logoDataUrl: string | null } | { error: string }> => {
   if (!databaseReady || !pool) {

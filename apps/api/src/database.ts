@@ -7,7 +7,7 @@ const migrationDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../
 
 const connectionString = process.env.DATABASE_URL;
 export const departmentId = process.env.SMART_CHURCH_DEPARTMENT_ID ?? "00000000-0000-4000-8000-000000000001";
-export const departmentName = process.env.SMART_CHURCH_DEPARTMENT_NAME ?? "Grace Community";
+export const departmentName = process.env.SMART_CHURCH_DEPARTMENT_NAME ?? "Steffisburg";
 export const pool = connectionString
   ? new Pool({ connectionString, connectionTimeoutMillis: 5_000, max: 10 })
   : undefined;
@@ -39,7 +39,7 @@ export async function initializeDatabase() {
     }
     await client.query(
       `INSERT INTO departments (id, name) VALUES ($1, $2)
-       ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
+       ON CONFLICT (id) DO NOTHING`,
       [departmentId, departmentName],
     );
   } catch (error) {
