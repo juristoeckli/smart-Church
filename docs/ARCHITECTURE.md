@@ -190,4 +190,4 @@ Only create code directories as implemented. Module UI is colocated with its mod
 
 Milestone 1: Core, departments, login, permissions, worker management, required System Management and Notifications, and one small example module. Build a working browser slice first. Later milestones add Electron/offline, sharing/trust, files/history, deployment/backup/update flows and optional device modules. See [milestones](MILESTONES.md).
 
-No code or features are implemented by this planning commit.
+Implementation has started with the TypeScript workspace, shared contact types, a localhost Core API and a PostgreSQL-backed People directory scoped to a configured development department. First-run setup, authentication, user-selected department context, permissions and module workers remain to be implemented.

@@ -1,13 +1,13 @@
 # Delivery plan
 
-Status: planning only. No application implementation exists yet.
+Status: implementation started. The TypeScript workspace, shared contact types, Core API and PostgreSQL-backed local People directory are in place. Local authentication and permission checks remain outstanding.
 
 ## Milestone 1 — foundation
 
 Agreed scope: Core, departments, local login, permissions, worker management, required Notifications/System Management modules and one example module.
 
-- [ ] [M1: Set up TypeScript workspace and shared contracts](https://github.com/juristoeckli/smart-Church/issues/1)
-- [ ] [M1: Implement installation setup and department isolation](https://github.com/juristoeckli/smart-Church/issues/2)
+- [x] [M1: Set up TypeScript workspace and shared contracts](https://github.com/juristoeckli/smart-Church/issues/1)
+- [ ] [M1: Implement installation setup and department isolation](https://github.com/juristoeckli/smart-Church/issues/2) — development contacts are scoped to a configured department; first-run setup and user-selected department context remain outstanding.
 - [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3)
 - [ ] [M1: Implement module SDK and worker supervision](https://github.com/juristoeckli/smart-Church/issues/4)
 - [ ] [M1: Build shared React shell and example module](https://github.com/juristoeckli/smart-Church/issues/5)
