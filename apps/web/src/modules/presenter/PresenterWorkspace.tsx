@@ -217,8 +217,29 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   }
 
   async function copyOutputLink(link: string) {
-    try { await navigator.clipboard.writeText(link); setNotice("Presenter link copied."); }
-    catch { setNotice("Could not copy the link. Open it and copy it from the browser address bar."); }
+    try {
+      if (!navigator.clipboard?.writeText || !window.isSecureContext) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(link);
+      setNotice("Presenter link copied.");
+      return;
+    } catch {
+      const input = document.createElement("textarea");
+      input.value = link;
+      input.setAttribute("readonly", "");
+      input.style.position = "fixed";
+      input.style.opacity = "0";
+      document.body.append(input);
+      input.select();
+      let copied = false;
+      try { copied = document.execCommand("copy"); } catch { /* Clipboard access may be blocked on HTTP. */ }
+      input.remove();
+      if (copied) {
+        setNotice("Presenter link copied.");
+        return;
+      }
+      window.prompt("Copy Presenter output link:", link);
+      setNotice("Clipboard access is blocked here. Copy the link from the dialog.");
+    }
   }
 
   async function openSong(song: SongSummary) {
