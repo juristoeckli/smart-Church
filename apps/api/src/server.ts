@@ -1,6 +1,6 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, DepartmentProfile, LoginCredentials, ServiceEvent, UpdateDepartmentProfile } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
@@ -9,6 +9,16 @@ let firstRunSetupCode: string | null = null;
 const sessionCookieName = "smart_church_session";
 const sessionLifetimeSeconds = 24 * 60 * 60;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
+
+declare module "fastify" {
+  interface FastifyRequest {
+    authenticatedUser: AuthenticatedUser | null;
+    activeDepartmentRole: "site_admin" | "member" | null;
+  }
+}
+
+app.decorateRequest("authenticatedUser", null);
+app.decorateRequest("activeDepartmentRole", null);
 
 function cookieValue(cookieHeader: string | undefined, name: string) {
   return cookieHeader?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -63,7 +73,7 @@ function setupCodeMatches(candidate: string) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-async function activeDepartmentId(request: { headers: Record<string, unknown> }, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
+async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, requireSiteAdmin = false) {
   if (!pool) return null;
   const header = request.headers["x-department-id"];
   const selectedId = typeof header === "string" ? header : departmentId;
@@ -71,12 +81,29 @@ async function activeDepartmentId(request: { headers: Record<string, unknown> },
     reply.code(400).send({ error: "Choose a valid location." });
     return null;
   }
-  const result = await pool.query("SELECT id FROM departments WHERE id = $1", [selectedId]);
+  const result = await pool.query(
+    `SELECT m.role
+       FROM department_memberships m
+       JOIN departments d ON d.id = m.department_id
+      WHERE m.department_id = $1 AND m.user_id = $2`,
+    [selectedId, request.authenticatedUser?.id],
+  );
   if (!result.rowCount) {
-    reply.code(404).send({ error: "This location could not be found." });
+    reply.code(403).send({ error: "You do not have access to this location." });
+    return null;
+  }
+  request.activeDepartmentRole = result.rows[0].role;
+  if (requireSiteAdmin && request.activeDepartmentRole !== "site_admin") {
+    reply.code(403).send({ error: "Site administrator access is required for this action." });
     return null;
   }
   return selectedId;
+}
+
+function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
+  if (request.authenticatedUser?.role === "server_admin") return true;
+  reply.code(403).send({ error: "Server administrator access is required." });
+  return false;
 }
 
 async function createSession(userId: string, reply: { header: (name: string, value: string) => unknown }) {
@@ -94,7 +121,8 @@ app.addHook("preHandler", async (request, reply) => {
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
-  if (user.role !== "server_admin") return reply.code(403).send({ error: "Server administrator access is required." });
+  request.authenticatedUser = user;
+  reply.header("Cache-Control", "no-store");
 });
 
 type ServiceEventRow = {
@@ -212,6 +240,10 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     );
     const row = result.rows[0];
     user = { id: row.id, email: row.email, displayName: row.display_name, role: row.role };
+    await client.query(
+      "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
+      [user.id, departmentId],
+    );
     await client.query("COMMIT");
     firstRunSetupCode = null;
   } catch (error) {
@@ -270,10 +302,142 @@ app.post("/api/auth/logout", async (request, reply) => {
   return { ok: true };
 });
 
-app.get("/api/departments", async (_request, reply): Promise<DepartmentProfile[] | { error: string }> => {
+app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  const result = await pool.query(
+    `SELECT u.id, u.email, u.display_name, u.role,
+            COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role))
+              FILTER (WHERE m.department_id IS NOT NULL), '[]'::json) AS memberships
+       FROM app_users u
+       LEFT JOIN department_memberships m ON m.user_id = u.id
+      WHERE u.role = 'user'
+      GROUP BY u.id
+      ORDER BY u.display_name, u.email`,
+  );
+  return result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, memberships: row.memberships }));
+});
+
+app.post<{ Body: CreateSiteUser }>("/api/users", {
+  schema: {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      required: ["email", "displayName", "password", "memberships"],
+      properties: {
+        email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        displayName: { type: "string", minLength: 1, maxLength: 100 },
+        password: { type: "string", minLength: 12, maxLength: 128 },
+        memberships: {
+          type: "array", minItems: 1, maxItems: 100,
+          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } },
+        },
+      },
+    },
+  },
+}, async (request, reply): Promise<SiteUser | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const displayName = request.body.displayName.trim();
+  const memberships = request.body.memberships;
+  if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
+  if (new Set(memberships.map((membership) => membership.departmentId)).size !== memberships.length) {
+    return reply.code(400).send({ error: "Choose each location only once." });
+  }
+  const id = randomUUID();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const user = await client.query(
+      `INSERT INTO app_users (id, email, display_name, password_hash, role)
+       VALUES ($1, $2, $3, $4, 'user') RETURNING id, email, display_name`,
+      [id, email, displayName, hashPassword(request.body.password)],
+    );
+    for (const membership of memberships) {
+      await client.query(
+        "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, $3)",
+        [id, membership.departmentId, membership.role],
+      );
+    }
+    await client.query("COMMIT");
+    return reply.code(201).send({ id: user.rows[0].id, email: user.rows[0].email, displayName: user.rows[0].display_name, memberships });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
+    if ((error as { code?: string }).code === "23503") return reply.code(400).send({ error: "One of the selected locations no longer exists." });
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayName" | "memberships"> }>("/api/users/:id", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: {
+      type: "object", additionalProperties: false, required: ["email", "displayName", "memberships"],
+      properties: {
+        email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        displayName: { type: "string", minLength: 1, maxLength: 100 },
+        memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } } },
+      },
+    },
+  },
+}, async (request, reply): Promise<SiteUser | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const displayName = request.body.displayName.trim();
+  const memberships = request.body.memberships;
+  if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
+  if (request.params.id === request.authenticatedUser?.id && memberships.length === 0) {
+    return reply.code(400).send({ error: "Keep at least one site membership on your own account." });
+  }
+  if (new Set(memberships.map((membership) => membership.departmentId)).size !== memberships.length) {
+    return reply.code(400).send({ error: "Choose each location only once." });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const updated = await client.query(
+      "UPDATE app_users SET email = $2, display_name = $3 WHERE id = $1 AND role = 'user' RETURNING id, email, display_name",
+      [request.params.id, email, displayName],
+    );
+    if (!updated.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    await client.query("DELETE FROM department_memberships WHERE user_id = $1", [request.params.id]);
+    for (const membership of memberships) {
+      await client.query(
+        "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, $3)",
+        [request.params.id, membership.departmentId, membership.role],
+      );
+    }
+    await client.query("COMMIT");
+    return { id: updated.rows[0].id, email: updated.rows[0].email, displayName: updated.rows[0].display_name, memberships };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
+    if ((error as { code?: string }).code === "23503") return reply.code(400).send({ error: "One of the selected locations no longer exists." });
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
-  const result = await pool.query("SELECT id, name, time_zone FROM departments ORDER BY name");
-  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone }));
+  const result = await pool.query(
+    `SELECT d.id, d.name, d.time_zone, m.role
+       FROM department_memberships m
+       JOIN departments d ON d.id = m.department_id
+      WHERE m.user_id = $1
+      ORDER BY d.name`,
+    [request.authenticatedUser?.id],
+  );
+  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role }));
 });
 
 app.post<{ Body: CreateDepartment }>("/api/departments", {
@@ -290,6 +454,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   },
 }, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to create locations." });
+  if (!requireServerAdmin(request, reply)) return reply;
   const location = request.body.location.trim();
   const timeZone = request.body.timeZone.trim();
   if (!location || !timeZone) return reply.code(400).send({ error: "Location and time zone are required." });
@@ -298,12 +463,27 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   } catch {
     return reply.code(400).send({ error: "Choose a valid time zone, such as Europe/Zurich." });
   }
-  const result = await pool.query(
-    "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone",
-    [randomUUID(), location, timeZone],
-  );
-  const row = result.rows[0];
-  return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone });
+  const id = randomUUID();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query(
+      "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone",
+      [id, location, timeZone],
+    );
+    await client.query(
+      "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
+      [request.authenticatedUser!.id, id],
+    );
+    await client.query("COMMIT");
+    const row = result.rows[0];
+    return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin" });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 app.get("/api/department", async (request, reply): Promise<DepartmentProfile | { error: string }> => {
@@ -316,7 +496,7 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole! };
 });
 
 app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
@@ -333,7 +513,7 @@ app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
   },
 }, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to save department settings." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
   const location = request.body.location.trim();
   const timeZone = request.body.timeZone.trim();
@@ -350,7 +530,7 @@ app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin" };
 });
 
 app.get("/api/branding", async (_request, reply): Promise<{ logoDataUrl: string | null } | { error: string }> => {
@@ -380,6 +560,7 @@ app.put<{ Body: { logoDataUrl: string | null } }>("/api/branding", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to save site branding." });
   }
+  if (!requireServerAdmin(request, reply)) return reply;
 
   let mimeType: "image/png" | "image/jpeg" | "image/webp" | null = null;
   let imageData: Buffer | null = null;
@@ -429,8 +610,8 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     id: row.id,
     firstName: row.first_name,
     lastName: row.last_name,
-    ...(row.email ? { email: row.email } : {}),
-    ...(row.phone ? { phone: row.phone } : {}),
+    ...(request.activeDepartmentRole === "site_admin" && row.email ? { email: row.email } : {}),
+    ...(request.activeDepartmentRole === "site_admin" && row.phone ? { phone: row.phone } : {}),
     status: row.status,
   }));
 });
@@ -454,7 +635,7 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
 
   const firstName = request.body.firstName.trim();
@@ -504,7 +685,7 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
   const event = {
     ...request.body,
@@ -536,7 +717,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
   const event = {
     ...request.body,
@@ -568,7 +749,7 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
   const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });

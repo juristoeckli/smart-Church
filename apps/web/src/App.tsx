@@ -22,7 +22,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, DepartmentProfile } from "@smart-church/contracts";
+import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, SiteUser } from "@smart-church/contracts";
 import { Authentication } from "./Authentication";
 import { ServicesEvents } from "./ServicesEvents";
 
@@ -40,6 +40,7 @@ const defaultDepartment: DepartmentProfile = {
   id: "",
   location: "Location not configured",
   timeZone: "Europe/Zurich",
+  role: "member",
 };
 
 function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, departmentId = "") {
@@ -83,6 +84,12 @@ function App() {
   const [isDepartmentOpen, setIsDepartmentOpen] = useState(false);
   const [isAddingLocation, setIsAddingLocation] = useState(false);
   const [isDepartmentSaving, setIsDepartmentSaving] = useState(false);
+  const [isUserAccessOpen, setIsUserAccessOpen] = useState(false);
+  const [siteUsers, setSiteUsers] = useState<SiteUser[]>([]);
+  const [isUsersLoading, setIsUsersLoading] = useState(false);
+  const [isUserSaving, setIsUserSaving] = useState(false);
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [userMemberships, setUserMemberships] = useState<Record<string, "site_admin" | "member">>({});
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthenticatedUser | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
@@ -322,6 +329,66 @@ function App() {
     }
   }
 
+  async function openUserAccess() {
+    setIsUserAccessOpen(true);
+    setIsUsersLoading(true);
+    try {
+      const response = await fetch("/api/users");
+      const result = await response.json() as SiteUser[] | { error?: string };
+      if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? "Could not load users." : "Could not load users.");
+      setSiteUsers(result);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load users.");
+    } finally {
+      setIsUsersLoading(false);
+    }
+  }
+
+  function editSiteUser(user: SiteUser) {
+    setEditingUserId(user.id);
+    setUserMemberships(Object.fromEntries(user.memberships.map(({ departmentId, role }) => [departmentId, role])));
+  }
+
+  function startNewSiteUser() {
+    setEditingUserId(null);
+    setUserMemberships(department.id ? { [department.id]: "member" } : {});
+  }
+
+  async function saveSiteUser(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    const memberships = Object.entries(userMemberships).map(([departmentId, role]) => ({ departmentId, role }));
+    if (!memberships.length) {
+      setNotice("Assign this account to at least one site.");
+      return;
+    }
+    const payload = {
+      email: String(values.get("email")).trim(),
+      displayName: String(values.get("displayName")).trim(),
+      memberships,
+      ...(!editingUserId ? { password: String(values.get("password")) } : {}),
+    } as CreateSiteUser;
+    setIsUserSaving(true);
+    try {
+      const response = await fetch(editingUserId ? `/api/users/${editingUserId}` : "/api/users", {
+        method: editingUserId ? "PUT" : "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json() as SiteUser | { error?: string };
+      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save user access." : "Could not save user access.");
+      setSiteUsers((current) => editingUserId
+        ? current.map((user) => user.id === result.id ? result : user)
+        : [...current, result].sort((a, b) => a.displayName.localeCompare(b.displayName)));
+      setEditingUserId(result.id);
+      setNotice(editingUserId ? "User access updated." : "User account created.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save user access.");
+    } finally {
+      setIsUserSaving(false);
+    }
+  }
+
   async function signOut() {
     try {
       await fetch("/api/auth/logout", { method: "POST" });
@@ -333,8 +400,12 @@ function App() {
       setLogoDataUrl(null);
       setDepartment(defaultDepartment);
       setDepartments([]);
+      setSiteUsers([]);
+      setEditingUserId(null);
+      setUserMemberships({});
       setIsBrandingOpen(false);
       setIsDepartmentOpen(false);
+      setIsUserAccessOpen(false);
     }
   }
 
@@ -345,6 +416,8 @@ function App() {
   if (!authUser) return <Authentication setupRequired={setupRequired} unavailableMessage={authUnavailableMessage} onAuthenticated={(user) => { setAuthUnavailableMessage(""); setSetupRequired(false); setAuthUser(user); }} />;
 
   const userInitials = authUser.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || authUser.email[0]?.toUpperCase() || "U";
+  const canManageSite = department.role === "site_admin";
+  const editingUser = siteUsers.find((user) => user.id === editingUserId) ?? null;
 
   return (
     <div className="app-frame">
@@ -376,10 +449,11 @@ function App() {
           <button className="nav-item" type="button" onClick={() => setIsMySettingsOpen(true)}><Settings2 size={18} strokeWidth={1.8} /><span>My Settings</span></button>
           <button className="nav-item" type="button" onClick={() => setIsServerSettingsOpen(true)}><Server size={18} strokeWidth={1.8} /><span>Server settings</span></button>
           {authUser.role === "server_admin" && <button className="nav-item" type="button" onClick={openDepartmentSettings}><Building2 size={18} strokeWidth={1.8} /><span>Manage sites</span></button>}
+          {authUser.role === "server_admin" && <button className="nav-item" type="button" onClick={() => { setMenuOpen(false); startNewSiteUser(); void openUserAccess(); }}><UsersRound size={18} strokeWidth={1.8} /><span>User access</span></button>}
           <button className="nav-item" type="button" onClick={() => setNotice("Help will be added in a later step.")}><CircleHelp size={18} strokeWidth={1.8} /><span>Help & support</span></button>
           <div className="profile-card">
             <div className="profile-avatar">{userInitials}</div>
-            <div className="profile-details"><strong>{authUser.displayName}</strong><small>Server Administrator</small></div>
+            <div className="profile-details"><strong>{authUser.displayName}</strong><small>{authUser.role === "server_admin" ? "Server Administrator" : canManageSite ? "Site Administrator" : "Site Member"}</small></div>
             <button className="icon-button profile-menu" type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()}><LogOut size={16} /></button>
           </div>
         </div>
@@ -395,7 +469,7 @@ function App() {
         </header>
 
         <div className="page-wrap">
-          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} onNotice={setNotice} /> : <>
+          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} canManage={canManageSite} onNotice={setNotice} /> : <>
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Workspace unavailable · ${loadError}` : `People are saved for ${department.location}`}</div>
 
           <section className="page-heading">
@@ -404,7 +478,7 @@ function App() {
               <h1>People</h1>
               <p className="page-subtitle">A thoughtful place to care for the people in your church.</p>
             </div>
-            <button className="button button-primary" type="button" onClick={() => setIsAddOpen(true)}><Plus size={18} /> Add a person</button>
+            {canManageSite && <button className="button button-primary" type="button" onClick={() => setIsAddOpen(true)}><Plus size={18} /> Add a person</button>}
           </section>
 
           <section className="stat-grid" aria-label="People summary">
@@ -435,6 +509,8 @@ function App() {
       {isMySettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsMySettingsOpen(false)}><section className="modal my-settings-modal" role="dialog" aria-modal="true" aria-labelledby="my-settings-title"><div className="modal-heading"><div><span className="eyebrow">PERSONAL PREFERENCES</span><h2 id="my-settings-title">My Settings</h2><p>Choose how Smart Church looks for you.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsMySettingsOpen(false)}><X size={19} /></button></div><section className="my-settings-section" aria-labelledby="appearance-title"><div><h3 id="appearance-title">Appearance</h3><p>Choose light or dark mode for this browser.</p></div><div className="theme-options" role="group" aria-label="Color theme"><button className={`theme-option ${theme === "light" ? "theme-option-active" : ""}`} type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}><Sun size={17} />Light</button><button className={`theme-option ${theme === "dark" ? "theme-option-active" : ""}`} type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}><Moon size={17} />Dark</button></div></section><p className="modal-demo-footnote">Preferences are saved on this device.</p></section></div>}
 
       {isServerSettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsServerSettingsOpen(false)}><section className="modal server-settings-modal" role="dialog" aria-modal="true" aria-labelledby="server-settings-title"><div className="modal-heading"><div><span className="eyebrow">SITE SWITCHER</span><h2 id="server-settings-title">Switch site</h2><p>Choose the GfC site you want to work in on this server.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsServerSettingsOpen(false)}><X size={19} /></button></div><div className="server-site-list" role="group" aria-label="Sites on this server">{departments.map((site) => <button className={`server-site-choice ${site.id === department.id ? "server-site-choice-active" : ""}`} type="button" aria-current={site.id === department.id ? "true" : undefined} key={site.id} onClick={() => { switchDepartment(site.id); setIsServerSettingsOpen(false); }}><span className="server-settings-icon"><Server size={18} /></span><span className="server-site-details"><strong>{site.location}</strong><small>{site.timeZone}</small></span><span className="server-site-state">{site.id === department.id ? "Current site" : "Switch"}</span></button>)}{departments.length === 0 && <p className="server-settings-empty">No sites are configured on this server yet.</p>}</div><p className="modal-demo-footnote">Signed in as Server Administrator</p></section></div>}
+
+      {isUserAccessOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsUserAccessOpen(false)}><section className="modal user-access-modal" role="dialog" aria-modal="true" aria-labelledby="user-access-title"><div className="modal-heading"><div><span className="eyebrow">SERVER ADMINISTRATION</span><h2 id="user-access-title">User access</h2><p>Create local accounts and choose the sites they can use.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsUserAccessOpen(false)}><X size={19} /></button></div><div className="user-access-layout"><aside className="user-access-list"><button className="button button-secondary user-add-button" type="button" onClick={startNewSiteUser}><Plus size={16} /> Add user</button>{isUsersLoading ? <p className="user-access-empty">Loading accounts…</p> : siteUsers.length === 0 ? <p className="user-access-empty">No local users yet.</p> : siteUsers.map((user) => <button className={`user-access-item ${editingUserId === user.id ? "user-access-item-active" : ""}`} type="button" key={user.id} onClick={() => editSiteUser(user)}><strong>{user.displayName}</strong><small>{user.email}</small><span>{user.memberships.length} {user.memberships.length === 1 ? "site" : "sites"}</span></button>)}</aside><form className="user-access-form" onSubmit={saveSiteUser}><div className="user-access-form-heading"><h3>{editingUserId ? "Edit user access" : "Create account"}</h3><p>Members can view basic people details. Site administrators can manage people, events and site settings.</p></div><label>Full name<input key={`name-${editingUserId ?? "new"}`} name="displayName" defaultValue={editingUser?.displayName ?? ""} required maxLength={100} /></label><label>Email address<input key={`email-${editingUserId ?? "new"}`} name="email" type="email" defaultValue={editingUser?.email ?? ""} required maxLength={254} /></label>{!editingUserId && <label>Initial password<input name="password" type="password" minLength={12} required autoComplete="new-password" /><small className="user-access-hint">At least 12 characters. Give it to the user directly; password reset is not available yet.</small></label>}<fieldset className="user-membership-fieldset"><legend>Site memberships</legend>{departments.map((site) => <div className="user-membership-row" key={site.id}><label className="user-membership-check"><input type="checkbox" checked={Boolean(userMemberships[site.id])} onChange={(event) => setUserMemberships((current) => { const next = { ...current }; if (event.target.checked) next[site.id] = "member"; else delete next[site.id]; return next; })} /><span><strong>{site.location}</strong><small>{site.timeZone}</small></span></label>{userMemberships[site.id] && <select aria-label={`${site.location} role`} value={userMemberships[site.id]} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: event.target.value as "site_admin" | "member" }))}><option value="member">Member</option><option value="site_admin">Site administrator</option></select>}</div>)}{departments.length === 0 && <p className="user-access-empty">Create a site before assigning access.</p>}</fieldset><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsUserAccessOpen(false)}>Close</button><button className="button button-primary" type="submit" disabled={isUserSaving || isUsersLoading || departments.length === 0}><Check size={16} />{isUserSaving ? "Saving…" : editingUserId ? "Save access" : "Create user"}</button></div><p className="modal-demo-footnote">Membership changes take effect on the next request.</p></form></div></section></div>}
 
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
 

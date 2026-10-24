@@ -30,6 +30,7 @@ export interface DepartmentProfile {
   id: string;
   location: string;
   timeZone: string;
+  role: "site_admin" | "member";
 }
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
@@ -40,7 +41,21 @@ export interface AuthenticatedUser {
   id: string;
   email: string;
   displayName: string;
-  role: "server_admin";
+  role: "server_admin" | "user";
+}
+
+export interface SiteUser {
+  id: string;
+  email: string;
+  displayName: string;
+  memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
+}
+
+export interface CreateSiteUser {
+  email: string;
+  displayName: string;
+  password: string;
+  memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
 }
 
 export interface AuthStatus {

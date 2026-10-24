@@ -54,7 +54,7 @@ function eventPayload(form: HTMLFormElement): CreateServiceEvent {
   };
 }
 
-export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, onNotice }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; onNotice: (message: string) => void }) {
+export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, canManage, onNotice }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; canManage: boolean; onNotice: (message: string) => void }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -166,14 +166,14 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           <h1>Services &amp; events</h1>
           <p className="page-subtitle">Keep your church gatherings and community moments in one shared schedule.</p>
         </div>
-        <button className="button button-primary" type="button" onClick={openCreateModal}><Plus size={18} /> Add event</button>
+        {canManage && <button className="button button-primary" type="button" onClick={openCreateModal}><Plus size={18} /> Add event</button>}
       </section>
 
       <section className="stat-grid event-stat-grid" aria-label="Schedule summary">
         <article className="stat-card"><div className="stat-icon stat-icon-green"><CalendarDays size={19} /></div><div className="stat-content"><span>Upcoming events</span><strong>{upcomingEvents.length}</strong><small>From today onwards</small></div></article>
         <article className="stat-card"><div className="stat-icon stat-icon-blue"><Clock3 size={19} /></div><div className="stat-content"><span>This month</span><strong>{thisMonthCount}</strong><small>Still to come</small></div></article>
         <article className="stat-card event-next-card"><div className="stat-icon stat-icon-amber"><MapPin size={19} /></div><div className="stat-content"><span>Next gathering</span><strong className="event-next-title">{upcomingEvents[0]?.title ?? "Nothing planned yet"}</strong><small>{upcomingEvents[0] ? `${formatEventDate(upcomingEvents[0].eventDate)} · ${upcomingEvents[0].startTime}` : "Add your first service or event"}</small></div></article>
-        <button className="stat-card stat-card-action event-create-card" type="button" onClick={openCreateModal}><span className="import-icon"><Plus size={19} /></span><span className="stat-content"><span>Planning ahead</span><strong className="stat-action-title">Schedule a gathering</strong><small>Add it for your community</small></span><span className="card-arrow">↗</span></button>
+        {canManage && <button className="stat-card stat-card-action event-create-card" type="button" onClick={openCreateModal}><span className="import-icon"><Plus size={19} /></span><span className="stat-content"><span>Planning ahead</span><strong className="stat-action-title">Schedule a gathering</strong><small>Add it for your community</small></span><span className="card-arrow">↗</span></button>}
       </section>
 
       <section className="directory-card">
@@ -190,7 +190,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         <div className="table-scroll"><table className="people-table event-table"><thead><tr><th>DATE</th><th>GATHERING</th><th>TIME</th><th>LOCATION</th><th>TYPE</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
           {filteredEvents.map((event) => {
             const date = formatShortDate(event.eventDate);
-            return <tr key={event.id}><td><div className="event-date-badge"><strong>{date.day}</strong><span>{date.month}</span></div></td><td><div className="event-name-cell"><strong>{event.title}</strong>{event.description && <small>{event.description}</small>}</div></td><td className="event-time-cell">{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</td><td><span className="event-location-cell"><MapPin size={13} />{event.location}</span></td><td><span className={`event-kind event-kind-${event.kind}`}>{eventKindLabel(event.kind)}</span></td><td><div className="event-actions"><button className="event-action" type="button" aria-label={`Edit ${event.title}`} onClick={() => openEditModal(event)}><Pencil size={15} /></button><button className="event-action event-delete-action" type="button" aria-label={`Delete ${event.title}`} onClick={() => void deleteEvent(event)}><Trash2 size={15} /></button></div></td></tr>;
+            return <tr key={event.id}><td><div className="event-date-badge"><strong>{date.day}</strong><span>{date.month}</span></div></td><td><div className="event-name-cell"><strong>{event.title}</strong>{event.description && <small>{event.description}</small>}</div></td><td className="event-time-cell">{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</td><td><span className="event-location-cell"><MapPin size={13} />{event.location}</span></td><td><span className={`event-kind event-kind-${event.kind}`}>{eventKindLabel(event.kind)}</span></td><td>{canManage && <div className="event-actions"><button className="event-action" type="button" aria-label={`Edit ${event.title}`} onClick={() => openEditModal(event)}><Pencil size={15} /></button><button className="event-action event-delete-action" type="button" aria-label={`Delete ${event.title}`} onClick={() => void deleteEvent(event)}><Trash2 size={15} /></button></div>}</td></tr>;
           })}
           {filteredEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? "Loading the schedule…" : loadError ? "The schedule could not be loaded." : query ? "No gatherings match your search." : filter === "past" ? "There are no past gatherings yet." : "No gatherings scheduled. Add your first service or event."}</td></tr>}
         </tbody></table></div>

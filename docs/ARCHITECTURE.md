@@ -18,7 +18,7 @@ Baseline:
 
 An installation is one server deployment for the GfC organization. It may host multiple locations, each isolated as a logical area (stored as a department in the current database model). Location IDs remain stable when moving between installations. Companies normally have separate deployments; no shared cross-company hosting is required.
 
-Location data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated active-location context. Users can belong to multiple locations with different rights. Switching location must not mix caches, pending edits, records or permissions. The current local prototype supports location creation and switching for the Server Administrator; individual membership and permission checks remain to be implemented.
+Location data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated active-location context. Users can belong to multiple locations with different rights. Switching location must not mix caches, pending edits, records or permissions. The current prototype stores explicit `site_admin` and `member` memberships and checks them for location-scoped API requests. Members can read the schedule and basic people details; site administrators can change site data and see contact email/phone fields. This is an initial coarse permission model; granular and field-level permission administration remains future work.
 
 Modules are installed/enabled installation-wide, not separately per department. Enabled modules have separate department data/settings. Required modules cannot be disabled. Disabling an optional module preserves its data.
 
@@ -100,7 +100,7 @@ Separate contacts, local access accounts and authentication identities:
 - Local passwords remain at the home installation; later LDAP/external providers are possible.
 - Link identities with origin installation/user IDs, never merge automatically by email.
 
-Department roles and installation roles are separate. Department administrators manage their own access; installation administration is not automatic permission to read department records through the app. Underlying host administrators still have technical power over local data.
+Department roles and installation roles are separate. The target is for department administrators to manage access within their own location; in this prototype, the account-access screen is restricted to Server Administrators. Installation administration is not automatic permission to read department records through the app. The prototype keeps Server Administrator separate from local user accounts and requires an explicit location membership for scoped data access. Underlying host administrators still have technical power over local data.
 
 Cross-installation system administration and cross-department user management are independent extra privileges for selected central staff, not inherited by every server administrator. Destination installations explicitly authorise scope. Initial setup can connect to an existing installation and explicitly grant selected central IT users immediate management access. Keep an independent/local setup path and a local recovery administrator.
 

@@ -1,14 +1,14 @@
 # Delivery plan
 
-Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC locations/logo, and first local Server Administrator sign-in are in place. Location memberships, scoped permissions, worker management and remaining Milestone 1 modules are still outstanding.
+Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC locations/logo, local sign-in, explicit location memberships, and initial server-enforced access checks are in place. Fine-grained permissions, worker management and remaining Milestone 1 modules are still outstanding.
 
 ## Milestone 1 — foundation
 
 Agreed scope: Core, departments, local login, permissions, worker management, required Notifications/System Management modules and one example module.
 
 - [x] [M1: Set up TypeScript workspace and shared contracts](https://github.com/juristoeckli/smart-Church/issues/1)
-- [ ] [M1: Implement installation setup and location isolation](https://github.com/juristoeckli/smart-Church/issues/2) — first Server Administrator setup and location switching are in place; per-location memberships, permissions and worker-backed example records remain outstanding.
-- [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3)
+- [ ] [M1: Implement installation setup and location isolation](https://github.com/juristoeckli/smart-Church/issues/2) — first Server Administrator setup, location switching, explicit memberships and API location checks are in place; worker-backed example records and end-to-end isolation verification remain outstanding.
+- [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3) — local users can be assigned to locations as members or site administrators; coarse role checks are in place, with granular permissions and complete account lifecycle work still outstanding.
 - [ ] [M1: Implement module SDK and worker supervision](https://github.com/juristoeckli/smart-Church/issues/4)
 - [ ] [M1: Build shared React shell and example module](https://github.com/juristoeckli/smart-Church/issues/5)
 - [ ] [M1: Add required Notifications module](https://github.com/juristoeckli/smart-Church/issues/6)
