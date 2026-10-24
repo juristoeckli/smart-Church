@@ -121,6 +121,40 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
   return selectedId;
 }
 
+async function activeVideoDepartment(request: FastifyRequest, reply: FastifyReply, permission: "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin" = "video_basic") {
+  if (!databaseReady || !pool) {
+    reply.code(503).send({ error: "The account database is unavailable." });
+    return null;
+  }
+  const selectedId = await activeDepartmentId(request, reply);
+  if (!selectedId) return null;
+  const result = await pool.query(
+    `SELECT d.enabled_modules, m.role, m.video_permissions
+       FROM departments d
+       JOIN department_memberships m ON m.department_id = d.id
+      WHERE d.id = $1 AND m.user_id = $2`,
+    [selectedId, request.authenticatedUser?.id],
+  );
+  const access = result.rows[0];
+  if (!access?.enabled_modules?.includes("video")) {
+    reply.code(404).send({ error: "The Video module is not enabled for this site." });
+    return null;
+  }
+  const grants = new Set<string>(access.video_permissions ?? []);
+  const hasGrant = permission === "video_basic"
+    ? grants.size > 0
+    : permission === "streaming_operator"
+      ? grants.has("streaming_operator") || grants.has("stream_admin")
+      : permission === "routing_user"
+        ? grants.has("routing_user") || grants.has("routing_admin")
+        : grants.has(permission);
+  if (access.role !== "site_admin" && !hasGrant) {
+    reply.code(403).send({ error: "Video module access is required." });
+    return null;
+  }
+  return selectedId;
+}
+
 function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
   if (request.authenticatedUser?.role === "server_admin") return true;
   reply.code(403).send({ error: "Server administrator access is required." });
@@ -389,7 +423,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
             phones.phone_numbers, relations.relationships
        FROM app_users u
        LEFT JOIN LATERAL (
-         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role)), '[]'::json) AS memberships
+         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role, 'videoPermissions', m.video_permissions, 'presenterPermissions', m.presenter_permissions)), '[]'::json) AS memberships
            FROM department_memberships m WHERE m.user_id = u.id
        ) memberships ON true
        LEFT JOIN LATERAL (
@@ -507,7 +541,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
           type: "array", maxItems: 100,
-          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } },
+          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } },
         },
       },
     },
@@ -550,8 +584,8 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     );
     for (const membership of memberships) {
       await client.query(
-        "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, $3)",
-        [id, membership.departmentId, membership.role],
+        "INSERT INTO department_memberships (user_id, department_id, role, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5)",
+        [id, membership.departmentId, membership.role, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
       );
     }
     await insertUserPhoneNumbers(client, id, phoneNumbers);
@@ -589,7 +623,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         city: { type: "string", maxLength: 100 },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
-        memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } } },
+        memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } } },
       },
     },
   },
@@ -640,8 +674,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     }
     for (const membership of memberships) {
       await client.query(
-        "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, $3)",
-        [request.params.id, membership.departmentId, membership.role],
+        "INSERT INTO department_memberships (user_id, department_id, role, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5)",
+        [request.params.id, membership.departmentId, membership.role, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
       );
     }
     await client.query("COMMIT");
@@ -728,24 +762,24 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
   if (request.authenticatedUser?.role === "server_admin") {
     const result = await pool.query(
-      `SELECT d.id, d.name, d.time_zone, m.role
+      `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, COALESCE(m.video_permissions, '{}'::TEXT[]) AS video_permissions, COALESCE(m.presenter_permissions, '{}'::TEXT[]) AS presenter_permissions
          FROM departments d
          LEFT JOIN department_memberships m
            ON m.department_id = d.id AND m.user_id = $1
         ORDER BY d.name`,
       [request.authenticatedUser.id],
     );
-    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned" }));
+    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions }));
   }
   const result = await pool.query(
-    `SELECT d.id, d.name, d.time_zone, m.role
+    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, m.video_permissions, m.presenter_permissions
        FROM department_memberships m
        JOIN departments d ON d.id = m.department_id
       WHERE m.user_id = $1
       ORDER BY d.name`,
     [request.authenticatedUser?.id],
   );
-  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role }));
+  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions }));
 });
 
 app.post<{ Body: CreateDepartment }>("/api/departments", {
@@ -776,7 +810,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   try {
     await client.query("BEGIN");
     const result = await client.query(
-      "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone",
+      "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone, enabled_modules",
       [id, location, timeZone],
     );
     await client.query(
@@ -785,7 +819,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
     );
     await client.query("COMMIT");
     const row = result.rows[0];
-    return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin" });
+    return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin", enabledModules: row.enabled_modules, videoPermissions: [] });
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -799,12 +833,15 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
   const selectedDepartmentId = await activeDepartmentId(request, reply);
   if (!selectedDepartmentId) return reply;
   const result = await pool.query(
-    "SELECT id, name, time_zone FROM departments WHERE id = $1",
-    [selectedDepartmentId],
+    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.video_permissions, m.presenter_permissions
+       FROM departments d
+       JOIN department_memberships m ON m.department_id = d.id
+      WHERE d.id = $1 AND m.user_id = $2`,
+    [selectedDepartmentId, request.authenticatedUser?.id],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole! };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole!, enabledModules: row.enabled_modules, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions };
 });
 
 app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
@@ -833,12 +870,12 @@ app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
   }
   const result = await pool.query(
     `UPDATE departments SET name = $2, time_zone = $3, updated_at = now()
-      WHERE id = $1 RETURNING id, name, time_zone`,
+      WHERE id = $1 RETURNING id, name, time_zone, enabled_modules`,
     [selectedDepartmentId, location, timeZone],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin" };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin", enabledModules: row.enabled_modules };
 });
 
 app.get("/api/branding", async (_request, reply): Promise<{ logoDataUrl: string | null } | { error: string }> => {
@@ -1073,7 +1110,7 @@ const videoBodySchema = {
 
 app.get("/api/video/status", async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeVideoDepartment(request, reply);
   if (!selectedDepartmentId) return reply;
   const worker = videoWorker?.state ?? { state: "starting", error: null };
   if (!videoWorker || worker.state === "unconfigured") {
@@ -1093,7 +1130,7 @@ app.get<{ Querystring: { device?: string; site_id?: string } }>("/api/video/hist
   schema: { querystring: { type: "object", additionalProperties: false, required: ["device"], properties: { device: { type: "string", minLength: 1, maxLength: 80 }, site_id: { type: "string", minLength: 1, maxLength: 80 } } } },
 }, async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeVideoDepartment(request, reply);
   if (!selectedDepartmentId) return reply;
   if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
   try {
@@ -1115,7 +1152,18 @@ app.post<{ Params: { operation: string }; Body: Record<string, unknown> }>("/api
   if (!videoPostOperations.has(request.params.operation)) return reply.code(404).send({ error: "Video operation is unavailable." });
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!validVideoMutation(request, reply)) return reply;
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const operation = request.params.operation;
+  const subOperation = typeof request.body.operation === "string" ? request.body.operation : "";
+  const requiredPermission = operation === "command" || operation === "restart-site"
+    ? "streaming_operator"
+    : operation === "encoder-settings"
+      ? ["read", "read-preset", "xml-preview", "xml-target"].includes(subOperation) ? "video_basic" : "stream_admin"
+      : operation === "videohub-route"
+        ? "routing_user"
+        : operation === "videohub-presets"
+          ? ["lock", "rename", "delete"].includes(subOperation) ? "routing_admin" : ["save", "import", "recall"].includes(subOperation) ? "routing_user" : "video_basic"
+          : "video_basic";
+  const selectedDepartmentId = await activeVideoDepartment(request, reply, requiredPermission);
   if (!selectedDepartmentId) return reply;
   if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
   const { site: _site, actor: _actor, department_id: _departmentId, ...data } = request.body;

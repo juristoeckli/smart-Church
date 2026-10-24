@@ -31,7 +31,13 @@ export interface DepartmentProfile {
   location: string;
   timeZone: string;
   role: "site_admin" | "member" | "unassigned";
+  enabledModules?: Array<"video" | "presenter">;
+  videoPermissions?: VideoPermission[];
+  presenterPermissions?: PresenterPermission[];
 }
+
+export type VideoPermission = "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin";
+export type PresenterPermission = "editor" | "operator" | "admin";
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
 
@@ -59,7 +65,7 @@ export interface SiteUser {
   phoneNumbers: UserPhoneNumber[];
   relationships: UserRelationship[];
   accountRole: "server_admin" | "user";
-  memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
+  memberships: Array<{ departmentId: string; role: "site_admin" | "member"; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[] }>;
 }
 
 export interface CreateSiteUser {
@@ -75,7 +81,7 @@ export interface CreateSiteUser {
   relationships?: UserRelationshipInput[];
   password: string;
   accountRole: "server_admin" | "user";
-  memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
+  memberships: Array<{ departmentId: string; role: "site_admin" | "member"; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[] }>;
 }
 
 export type UserPhoneLabel = "home" | "mobile" | "work" | "work_mobile";
