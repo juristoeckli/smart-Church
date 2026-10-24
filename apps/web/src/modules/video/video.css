@@ -103,6 +103,7 @@
 .video-equipment-copy small{color:var(--muted);font-size:8px;overflow-wrap:anywhere}
 .video-encoder-card{display:grid;gap:8px;padding:9px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--panel) 94%,var(--green-soft))}
 .video-encoder-hardware{display:block;width:100%;height:auto;max-height:160px;border-radius:7px}
+.video-onair-lit{filter:drop-shadow(0 0 6px #f51d34cc)}
 .video-onair-flash{animation:video-onair-blink .8s steps(1,end) infinite}
 @keyframes video-onair-blink{50%{opacity:.15}}
 .video-encoder-details{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--panel) 76%,var(--line))}

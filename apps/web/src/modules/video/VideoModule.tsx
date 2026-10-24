@@ -256,6 +256,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
   const stateHasProblem = Object.entries(encoder.state ?? {}).some(([key, value]) => /error|fault|warning|problem/i.test(key) && value != null && !/^(?:\s*|none|false|0|ok|no)$/i.test(String(value).trim()));
   const streamProblem = live && (Boolean(encoder.error) || stateHasProblem || /error|fail|warn|problem|lost|drop/i.test(reportedStatus));
   const onAirFlash = streamProblem ? "video-onair-flash" : undefined;
+  const onAirTextClass = live ? `video-onair-lit${streamProblem ? " video-onair-flash" : ""}` : undefined;
   const statusColor = live ? "#f51d34" : ready ? "#edf1f4" : "#f0b64c";
   const telemetryLed = !connected ? "#e9a536" : live ? "#f51d34" : "#64db86";
   return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} illustrated front panel, ${status}`}>
@@ -271,8 +272,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
       {[{ x: 291, y: 55, text: "ON AIR", active: live }, { x: 456, y: 55, text: "MENU" }, { x: 291, y: 185, text: "OFF" }, { x: 456, y: 185, text: "SET" }, { x: 291, y: 315, text: "CALL" }, { x: 456, y: 315, text: "LOCK" }].map((button) => <g key={button.text}>
         <rect x={button.x - 2} y={button.y - 4} width="144" height="108" rx="17" fill="#090a0b" stroke="#050607" strokeWidth="5" />
         <rect x={button.x + 5} y={button.y + 3} width="130" height="94" rx="13" fill={button.active ? "#202124" : "#25272a"} stroke="#45474a" strokeWidth="3" />
-        {button.text === "ON AIR" && live && <rect className={onAirFlash} x={button.x + 10} y={button.y + 8} width="120" height="84" rx="10" fill="#ff1c35" opacity={streamProblem ? .52 : .32} />}
-        <text className={button.text === "ON AIR" ? onAirFlash : undefined} x={button.x + 70} y={button.y + 59} fill={button.active ? "#ff1d35" : "#f2f3f4"} fontSize={button.text.length > 4 ? 28 : 30}>{button.text}</text>
+        <text className={button.text === "ON AIR" ? onAirTextClass : undefined} x={button.x + 70} y={button.y + 59} fill={button.active ? "#ff1d35" : "#f2f3f4"} fontSize={button.text.length > 4 ? 28 : 30}>{button.text}</text>
       </g>)}
     </g>
     <rect x="693" y="45" width="510" height="386" rx="17" fill="#090b0e" stroke="#0b0c0d" strokeWidth="8" />
