@@ -253,6 +253,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
   const ready = status === "BEREIT";
   const live = status === "LIVE";
   const statusColor = live ? "#f51d34" : ready ? "#edf1f4" : "#f0b64c";
+  const telemetryLed = !connected ? "#e9a536" : live ? "#f51d34" : "#64db86";
   return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} illustrated front panel, ${status}`}>
     <rect x="3" y="5" width="1494" height="490" rx="20" fill="#111214" stroke="#08090a" strokeWidth="5" />
     <rect x="8" y="10" width="1484" height="480" rx="16" fill="#36383b" stroke="#707175" strokeWidth="3" />
@@ -274,7 +275,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <path d="M707 117h482M707 203h482" stroke="#26313d" strokeWidth="4" />
     <text x="728" y="96" fill="#eff3f6" fontFamily="Arial, sans-serif" fontSize="24">{stateBitrate(encoder.state)}</text>
     <text x="858" y="96" fill="#eff3f6" fontFamily="Arial, sans-serif" fontSize="24">{stateMetric(encoder.state, "Duration")}</text>
-    <circle cx="1115" cy="84" r="9" fill={connected ? "#ff2637" : "#e9a536"} />
+    <circle cx="1115" cy="84" r="9" fill={telemetryLed} />
     <text x="1134" y="93" fill="#d8dee3" fontFamily="Arial, sans-serif" fontSize="20">{stateMetric(encoder.state, "Cache Used")}</text>
     <text x="948" y="184" fill={statusColor} fontFamily="Arial, sans-serif" fontSize="72" fontWeight="700" textAnchor="middle">{status}</text>
     <rect x="707" y="205" width="482" height="212" fill="#142533" />
@@ -284,7 +285,14 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <text x="948" y="358" fill="#a8c5d4" fontFamily="Arial, sans-serif" fontSize="24" textAnchor="middle">{live ? "STREAMING" : ready ? "VIDEO PREVIEW" : "ENCODER STATUS"}</text>
     <text x="948" y="387" fill="#7693a2" fontFamily="Arial, sans-serif" fontSize="17" textAnchor="middle">{stringValue(encoder.ip) || "STATUS MONITOR"}</text>
     <text x="1241" y="105" fill="#d9dadd" fontFamily="Arial, sans-serif" fontSize="22">Blackmagicdesign</text>
-    <g fill="#ff9f12"><rect x="1439" y="49" width="21" height="23" rx="5"/><rect x="1439" y="79" width="21" height="23" rx="5"/><rect x="1439" y="109" width="21" height="23" rx="5"/></g>
+    <g>
+      <rect x="1439" y="49" width="21" height="23" rx="5" fill="#17191b" stroke="#111214" strokeWidth="3" />
+      <rect x="1442" y="52" width="15" height="17" rx="3" fill={connected ? "#72ed85" : "#46494d"} />
+      <rect x="1439" y="79" width="21" height="23" rx="5" fill="#17191b" stroke="#111214" strokeWidth="3" />
+      <rect x="1442" y="82" width="15" height="17" rx="3" fill={live ? "#ff2637" : "#46494d"} />
+      <rect x="1439" y="109" width="21" height="23" rx="5" fill="#17191b" stroke="#111214" strokeWidth="3" />
+      <rect x="1442" y="112" width="15" height="17" rx="3" fill={ready ? "#ffad24" : !connected ? "#ffad24" : "#46494d"} />
+    </g>
     <circle cx="1379" cy="272" r="99" fill="#0b0c0e" stroke="#181a1c" strokeWidth="7" />
     <circle cx="1379" cy="272" r="80" fill="#2d3034" stroke="#55585d" strokeWidth="5" />
     <circle cx="1379" cy="272" r="69" fill="#303337" stroke="#3b3e42" strokeWidth="2" />
