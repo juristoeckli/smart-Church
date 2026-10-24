@@ -51,6 +51,11 @@ export interface SiteUser {
   email?: string;
   username: string;
   displayName: string;
+  birthday?: string;
+  street?: string;
+  streetNumber?: string;
+  postalCode?: string;
+  city?: string;
   accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
 }
@@ -59,6 +64,11 @@ export interface CreateSiteUser {
   email?: string;
   username: string;
   displayName: string;
+  birthday?: string;
+  street?: string;
+  streetNumber?: string;
+  postalCode?: string;
+  city?: string;
   password: string;
   accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;

@@ -34,6 +34,24 @@ function hashPassword(password: string) {
   return `scrypt$${salt.toString("hex")}$${derived.toString("hex")}`;
 }
 
+function validBirthday(value: string | undefined) {
+  if (!value) return true;
+  const match = /^(\d{2}):(\d{2}):(\d{4})$/.exec(value);
+  if (!match) return false;
+  const [, dayText, monthText, yearText] = match;
+  const day = Number(dayText);
+  const month = Number(monthText);
+  const year = Number(yearText);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+function birthdayToIso(value: string | undefined) {
+  if (!value) return null;
+  const [day, month, year] = value.split(":");
+  return `${year}-${month}-${day}`;
+}
+
 const dummyPasswordHash = hashPassword(randomBytes(32).toString("hex"));
 
 function verifyPassword(password: string, encoded: string) {
@@ -327,7 +345,8 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.username, u.display_name, u.role AS account_role,
+    `SELECT u.id, u.email, u.username, u.display_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
+            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role,
             COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role))
               FILTER (WHERE m.department_id IS NOT NULL), '[]'::json) AS memberships
        FROM app_users u
@@ -335,7 +354,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
       GROUP BY u.id
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, accountRole: row.account_role, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), accountRole: row.account_role, memberships: row.memberships }));
 });
 
 app.post<{ Body: CreateSiteUser }>("/api/users", {
@@ -348,6 +367,11 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
+        birthday: { type: "string", pattern: "^\\d{2}:\\d{2}:\\d{4}$" },
+        street: { type: "string", maxLength: 160 },
+        streetNumber: { type: "string", maxLength: 24 },
+        postalCode: { type: "string", maxLength: 20 },
+        city: { type: "string", maxLength: 100 },
         password: { type: "string", minLength: 6, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
@@ -363,9 +387,15 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
+  const birthday = request.body.birthday?.trim() || undefined;
+  const street = request.body.street?.trim() || null;
+  const streetNumber = request.body.streetNumber?.trim() || null;
+  const postalCode = request.body.postalCode?.trim() || null;
+  const city = request.body.city?.trim() || null;
   const accountRole = request.body.accountRole;
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
+  if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
   if (accountRole === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can grant Server Administrator access." });
   }
@@ -380,9 +410,10 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   try {
     await client.query("BEGIN");
     const user = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, username, display_name`,
-      [id, email, username, displayName, hashPassword(request.body.password), accountRole],
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11)
+       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city`,
+      [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city],
     );
     for (const membership of memberships) {
       await client.query(
@@ -391,7 +422,8 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       );
     }
     await client.query("COMMIT");
-    return reply.code(201).send({ id: user.rows[0].id, ...(user.rows[0].email ? { email: user.rows[0].email } : {}), username: user.rows[0].username, displayName: user.rows[0].display_name, accountRole, memberships });
+    const row = user.rows[0];
+    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), accountRole, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
@@ -402,7 +434,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "memberships"> }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "memberships"> }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -411,6 +443,11 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
+        birthday: { type: "string", pattern: "^\\d{2}:\\d{2}:\\d{4}$" },
+        street: { type: "string", maxLength: 160 },
+        streetNumber: { type: "string", maxLength: 24 },
+        postalCode: { type: "string", maxLength: 20 },
+        city: { type: "string", maxLength: 100 },
         memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } } },
       },
     },
@@ -421,8 +458,14 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
+  const birthday = request.body.birthday?.trim() || undefined;
+  const street = request.body.street?.trim() || null;
+  const streetNumber = request.body.streetNumber?.trim() || null;
+  const postalCode = request.body.postalCode?.trim() || null;
+  const city = request.body.city?.trim() || null;
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
+  if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
   if (request.params.id === request.authenticatedUser?.id && memberships.length === 0) {
     return reply.code(400).send({ error: "Keep at least one site membership on your own account." });
   }
@@ -433,8 +476,12 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   try {
     await client.query("BEGIN");
     const updated = await client.query(
-      "UPDATE app_users SET email = $2, username = $3, display_name = $4 WHERE id = $1 RETURNING id, email, username, display_name, role",
-      [request.params.id, email, username, displayName],
+      `UPDATE app_users SET email = $2, username = $3, display_name = $4, birthday = $5::date,
+              street = $6, street_number = $7, postal_code = $8, city = $9
+        WHERE id = $1
+        RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
+                  street, street_number, postal_code, city, role`,
+      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -448,7 +495,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       );
     }
     await client.query("COMMIT");
-    return { id: updated.rows[0].id, ...(updated.rows[0].email ? { email: updated.rows[0].email } : {}), username: updated.rows[0].username, displayName: updated.rows[0].display_name, accountRole: updated.rows[0].role, memberships };
+    const row = updated.rows[0];
+    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), accountRole: row.role, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
