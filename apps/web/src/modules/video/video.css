@@ -1,4 +1,4 @@
-.video-module{display:grid;gap:18px;color:var(--ink)}
+.video-module{display:grid;align-content:start;gap:18px;color:var(--ink)}
 .page-wrap-video{width:100%;max-width:none;padding:20px 26px 18px}
 .page-wrap-video .video-module{min-height:calc(100vh - 105px)}
 .page-wrap-video .video-module:has(.video-routing-page){grid-template-rows:auto auto minmax(0,1fr) auto}
