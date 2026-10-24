@@ -202,7 +202,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
         location: { type: "string", minLength: 1, maxLength: 120 },
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
-        password: { type: "string", minLength: 12, maxLength: 128 },
+        password: { type: "string", minLength: 6, maxLength: 128 },
       },
     },
   },
@@ -306,16 +306,15 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.display_name, u.role,
+    `SELECT u.id, u.email, u.display_name, u.role AS account_role,
             COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role))
               FILTER (WHERE m.department_id IS NOT NULL), '[]'::json) AS memberships
        FROM app_users u
        LEFT JOIN department_memberships m ON m.user_id = u.id
-      WHERE u.role = 'user'
       GROUP BY u.id
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, accountRole: row.account_role, memberships: row.memberships }));
 });
 
 app.post<{ Body: CreateSiteUser }>("/api/users", {
@@ -323,13 +322,14 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     body: {
       type: "object",
       additionalProperties: false,
-      required: ["email", "displayName", "password", "memberships"],
+      required: ["email", "displayName", "password", "accountRole", "memberships"],
       properties: {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
-        password: { type: "string", minLength: 12, maxLength: 128 },
+        password: { type: "string", minLength: 6, maxLength: 128 },
+        accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
-          type: "array", minItems: 1, maxItems: 100,
+          type: "array", maxItems: 100,
           items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } },
         },
       },
@@ -340,8 +340,15 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   if (!requireServerAdmin(request, reply)) return reply;
   const email = request.body.email.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
+  const accountRole = request.body.accountRole;
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
+  if (accountRole === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
+    return reply.code(403).send({ error: "Only a Server Administrator can grant Server Administrator access." });
+  }
+  if (accountRole === "user" && memberships.length === 0) {
+    return reply.code(400).send({ error: "Assign a local user to at least one site." });
+  }
   if (new Set(memberships.map((membership) => membership.departmentId)).size !== memberships.length) {
     return reply.code(400).send({ error: "Choose each location only once." });
   }
@@ -351,8 +358,8 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     await client.query("BEGIN");
     const user = await client.query(
       `INSERT INTO app_users (id, email, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, 'user') RETURNING id, email, display_name`,
-      [id, email, displayName, hashPassword(request.body.password)],
+       VALUES ($1, $2, $3, $4, $5) RETURNING id, email, display_name`,
+      [id, email, displayName, hashPassword(request.body.password), accountRole],
     );
     for (const membership of memberships) {
       await client.query(
@@ -361,7 +368,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       );
     }
     await client.query("COMMIT");
-    return reply.code(201).send({ id: user.rows[0].id, email: user.rows[0].email, displayName: user.rows[0].display_name, memberships });
+    return reply.code(201).send({ id: user.rows[0].id, email: user.rows[0].email, displayName: user.rows[0].display_name, accountRole, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
@@ -401,7 +408,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayN
   try {
     await client.query("BEGIN");
     const updated = await client.query(
-      "UPDATE app_users SET email = $2, display_name = $3 WHERE id = $1 AND role = 'user' RETURNING id, email, display_name",
+      "UPDATE app_users SET email = $2, display_name = $3 WHERE id = $1 RETURNING id, email, display_name, role",
       [request.params.id, email, displayName],
     );
     if (!updated.rowCount) {
@@ -416,7 +423,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayN
       );
     }
     await client.query("COMMIT");
-    return { id: updated.rows[0].id, email: updated.rows[0].email, displayName: updated.rows[0].display_name, memberships };
+    return { id: updated.rows[0].id, email: updated.rows[0].email, displayName: updated.rows[0].display_name, accountRole: updated.rows[0].role, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });

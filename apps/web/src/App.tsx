@@ -9,6 +9,7 @@ import {
   Church,
   CircleHelp,
   ContactRound,
+  Copy,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -36,6 +37,7 @@ const navigation = [
 
 const today = new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
 const defaultLogoUrl = "/gfc-logo.svg";
+const initialPasswordCharacters = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
 const defaultDepartment: DepartmentProfile = {
   id: "",
   location: "Location not configured",
@@ -51,6 +53,20 @@ function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, depar
 
 function initials(contact: Contact) {
   return `${contact.firstName[0] ?? ""}${contact.lastName[0] ?? ""}`.toUpperCase();
+}
+
+function generateInitialPassword() {
+  const limit = Math.floor(256 / initialPasswordCharacters.length) * initialPasswordCharacters.length;
+  const password: string[] = [];
+  while (password.length < 12) {
+    const values = new Uint8Array(16);
+    window.crypto.getRandomValues(values);
+    for (const value of values) {
+      if (value < limit) password.push(initialPasswordCharacters[value % initialPasswordCharacters.length]);
+      if (password.length === 12) break;
+    }
+  }
+  return password.join("");
 }
 
 function App() {
@@ -90,6 +106,9 @@ function App() {
   const [isUserSaving, setIsUserSaving] = useState(false);
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [userMemberships, setUserMemberships] = useState<Record<string, "site_admin" | "member">>({});
+  const [generatedPassword, setGeneratedPassword] = useState("");
+  const [isPasswordSaved, setIsPasswordSaved] = useState(false);
+  const [newAccountRole, setNewAccountRole] = useState<"server_admin" | "user">("user");
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthenticatedUser | null>(null);
   const [setupRequired, setSetupRequired] = useState(false);
@@ -346,19 +365,26 @@ function App() {
 
   function editSiteUser(user: SiteUser) {
     setEditingUserId(user.id);
+    setNewAccountRole(user.accountRole);
     setUserMemberships(Object.fromEntries(user.memberships.map(({ departmentId, role }) => [departmentId, role])));
+    setGeneratedPassword("");
+    setIsPasswordSaved(false);
   }
 
   function startNewSiteUser() {
     setEditingUserId(null);
+    setNewAccountRole("user");
     setUserMemberships(department.id ? { [department.id]: "member" } : {});
+    setGeneratedPassword(generateInitialPassword());
+    setIsPasswordSaved(false);
   }
 
   async function saveSiteUser(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const isCreatingUser = !editingUserId;
     const values = new FormData(event.currentTarget);
     const memberships = Object.entries(userMemberships).map(([departmentId, role]) => ({ departmentId, role }));
-    if (!memberships.length) {
+    if (!memberships.length && newAccountRole !== "server_admin") {
       setNotice("Assign this account to at least one site.");
       return;
     }
@@ -366,8 +392,12 @@ function App() {
       email: String(values.get("email")).trim(),
       displayName: String(values.get("displayName")).trim(),
       memberships,
-      ...(!editingUserId ? { password: String(values.get("password")) } : {}),
+      ...(!editingUserId ? { password: generatedPassword, accountRole: newAccountRole } : {}),
     } as CreateSiteUser;
+    if (!editingUserId && generatedPassword.length < 6) {
+      setNotice("Generate a password with at least six characters.");
+      return;
+    }
     setIsUserSaving(true);
     try {
       const response = await fetch(editingUserId ? `/api/users/${editingUserId}` : "/api/users", {
@@ -381,11 +411,21 @@ function App() {
         ? current.map((user) => user.id === result.id ? result : user)
         : [...current, result].sort((a, b) => a.displayName.localeCompare(b.displayName)));
       setEditingUserId(result.id);
+      setIsPasswordSaved(isCreatingUser);
       setNotice(editingUserId ? "User access updated." : "User account created.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not save user access.");
     } finally {
       setIsUserSaving(false);
+    }
+  }
+
+  async function copyGeneratedPassword() {
+    try {
+      await navigator.clipboard.writeText(generatedPassword);
+      setNotice("Generated password copied.");
+    } catch {
+      setNotice("Copy is unavailable in this browser. Select and copy the password manually.");
     }
   }
 
@@ -402,7 +442,10 @@ function App() {
       setDepartments([]);
       setSiteUsers([]);
       setEditingUserId(null);
+      setNewAccountRole("user");
       setUserMemberships({});
+      setGeneratedPassword("");
+      setIsPasswordSaved(false);
       setIsBrandingOpen(false);
       setIsDepartmentOpen(false);
       setIsUserAccessOpen(false);
@@ -510,7 +553,7 @@ function App() {
 
       {isServerSettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsServerSettingsOpen(false)}><section className="modal server-settings-modal" role="dialog" aria-modal="true" aria-labelledby="server-settings-title"><div className="modal-heading"><div><span className="eyebrow">SITE SWITCHER</span><h2 id="server-settings-title">Switch site</h2><p>Choose the GfC site you want to work in on this server.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsServerSettingsOpen(false)}><X size={19} /></button></div><div className="server-site-list" role="group" aria-label="Sites on this server">{departments.map((site) => <button className={`server-site-choice ${site.id === department.id ? "server-site-choice-active" : ""}`} type="button" aria-current={site.id === department.id ? "true" : undefined} key={site.id} onClick={() => { switchDepartment(site.id); setIsServerSettingsOpen(false); }}><span className="server-settings-icon"><Server size={18} /></span><span className="server-site-details"><strong>{site.location}</strong><small>{site.timeZone}</small></span><span className="server-site-state">{site.id === department.id ? "Current site" : "Switch"}</span></button>)}{departments.length === 0 && <p className="server-settings-empty">No sites are configured on this server yet.</p>}</div><p className="modal-demo-footnote">Signed in as Server Administrator</p></section></div>}
 
-      {isUserAccessOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsUserAccessOpen(false)}><section className="modal user-access-modal" role="dialog" aria-modal="true" aria-labelledby="user-access-title"><div className="modal-heading"><div><span className="eyebrow">SERVER ADMINISTRATION</span><h2 id="user-access-title">User access</h2><p>Create local accounts and choose the sites they can use.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsUserAccessOpen(false)}><X size={19} /></button></div><div className="user-access-layout"><aside className="user-access-list"><button className="button button-secondary user-add-button" type="button" onClick={startNewSiteUser}><Plus size={16} /> Add user</button>{isUsersLoading ? <p className="user-access-empty">Loading accounts…</p> : siteUsers.length === 0 ? <p className="user-access-empty">No local users yet.</p> : siteUsers.map((user) => <button className={`user-access-item ${editingUserId === user.id ? "user-access-item-active" : ""}`} type="button" key={user.id} onClick={() => editSiteUser(user)}><strong>{user.displayName}</strong><small>{user.email}</small><span>{user.memberships.length} {user.memberships.length === 1 ? "site" : "sites"}</span></button>)}</aside><form className="user-access-form" onSubmit={saveSiteUser}><div className="user-access-form-heading"><h3>{editingUserId ? "Edit user access" : "Create account"}</h3><p>Members can view basic people details. Site administrators can manage people, events and site settings.</p></div><label>Full name<input key={`name-${editingUserId ?? "new"}`} name="displayName" defaultValue={editingUser?.displayName ?? ""} required maxLength={100} /></label><label>Email address<input key={`email-${editingUserId ?? "new"}`} name="email" type="email" defaultValue={editingUser?.email ?? ""} required maxLength={254} /></label>{!editingUserId && <label>Initial password<input name="password" type="password" minLength={12} required autoComplete="new-password" /><small className="user-access-hint">At least 12 characters. Give it to the user directly; password reset is not available yet.</small></label>}<fieldset className="user-membership-fieldset"><legend>Site memberships</legend>{departments.map((site) => <div className="user-membership-row" key={site.id}><label className="user-membership-check"><input type="checkbox" checked={Boolean(userMemberships[site.id])} onChange={(event) => setUserMemberships((current) => { const next = { ...current }; if (event.target.checked) next[site.id] = "member"; else delete next[site.id]; return next; })} /><span><strong>{site.location}</strong><small>{site.timeZone}</small></span></label>{userMemberships[site.id] && <select aria-label={`${site.location} role`} value={userMemberships[site.id]} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: event.target.value as "site_admin" | "member" }))}><option value="member">Member</option><option value="site_admin">Site administrator</option></select>}</div>)}{departments.length === 0 && <p className="user-access-empty">Create a site before assigning access.</p>}</fieldset><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsUserAccessOpen(false)}>Close</button><button className="button button-primary" type="submit" disabled={isUserSaving || isUsersLoading || departments.length === 0}><Check size={16} />{isUserSaving ? "Saving…" : editingUserId ? "Save access" : "Create user"}</button></div><p className="modal-demo-footnote">Membership changes take effect on the next request.</p></form></div></section></div>}
+      {isUserAccessOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsUserAccessOpen(false)}><section className="modal user-access-modal" role="dialog" aria-modal="true" aria-labelledby="user-access-title"><div className="modal-heading"><div><span className="eyebrow">SERVER ADMINISTRATION</span><h2 id="user-access-title">User access</h2><p>Create local accounts and choose the sites they can use.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsUserAccessOpen(false)}><X size={19} /></button></div><div className="user-access-layout"><aside className="user-access-list"><button className="button button-secondary user-add-button" type="button" onClick={startNewSiteUser}><Plus size={16} /> Add user</button>{isUsersLoading ? <p className="user-access-empty">Loading accounts…</p> : siteUsers.length === 0 ? <p className="user-access-empty">No local users yet.</p> : siteUsers.map((user) => <button className={`user-access-item ${editingUserId === user.id ? "user-access-item-active" : ""}`} type="button" key={user.id} onClick={() => editSiteUser(user)}><strong>{user.displayName}</strong><small>{user.email}</small><span>{user.accountRole === "server_admin" ? "Server Administrator" : "Local user"} · {user.memberships.length} {user.memberships.length === 1 ? "site" : "sites"}</span></button>)}</aside><form className="user-access-form" onSubmit={saveSiteUser}><div className="user-access-form-heading"><h3>{editingUserId ? "Edit user access" : "Create account"}</h3><p>Members can view basic people details; site administrators can manage site data. The account role shown in the list stays unchanged here.</p></div><label>Full name<input key={`name-${editingUserId ?? "new"}`} name="displayName" defaultValue={editingUser?.displayName ?? ""} required maxLength={100} /></label><label>Email address<input key={`email-${editingUserId ?? "new"}`} name="email" type="email" defaultValue={editingUser?.email ?? ""} required maxLength={254} /></label>{(!editingUserId || (isPasswordSaved && generatedPassword)) && <label>{isPasswordSaved ? "Initial password (copy it now)" : "Generated password"}<div className="generated-password-row"><input value={generatedPassword} readOnly autoComplete="off" aria-label="Generated initial password" />{!isPasswordSaved && <button className="button button-secondary" type="button" onClick={() => setGeneratedPassword(generateInitialPassword())}>Generate</button>}<button className="button button-secondary generated-copy-button" type="button" onClick={() => void copyGeneratedPassword()} aria-label="Copy generated password"><Copy size={15} />Copy</button></div><small className="user-access-hint">{isPasswordSaved ? "It is stored as a hash and cannot be shown again after you close this screen." : "Generated securely for this account. Minimum policy: 6 characters. Give it to the user directly."}</small></label>}<fieldset className="user-membership-fieldset"><legend>Site memberships</legend>{departments.map((site) => <div className="user-membership-row" key={site.id}><label className="user-membership-check"><input type="checkbox" checked={Boolean(userMemberships[site.id])} onChange={(event) => setUserMemberships((current) => { const next = { ...current }; if (event.target.checked) next[site.id] = "member"; else delete next[site.id]; return next; })} /><span><strong>{site.location}</strong><small>{site.timeZone}</small></span></label>{userMemberships[site.id] && <select aria-label={`${site.location} role`} value={userMemberships[site.id]} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: event.target.value as "site_admin" | "member" }))}><option value="member">Member</option><option value="site_admin">Site administrator</option></select>}</div>)}{departments.length === 0 && <p className="user-access-empty">Create a site before assigning access.</p>}</fieldset>{!editingUserId && authUser.role === "server_admin" && <label className="global-admin-option"><input type="checkbox" checked={newAccountRole === "server_admin"} onChange={(event) => setNewAccountRole(event.target.checked ? "server_admin" : "user")} /><span><strong>Grant Server Administrator access</strong><small>Only server administrators can grant this role. Site data still needs separate memberships.</small></span></label>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsUserAccessOpen(false)}>Close</button><button className="button button-primary" type="submit" disabled={isUserSaving || isUsersLoading || (departments.length === 0 && newAccountRole !== "server_admin")}><Check size={16} />{isUserSaving ? "Saving…" : editingUserId ? "Save access" : "Create user"}</button></div><p className="modal-demo-footnote">Membership changes take effect on the next request.</p></form></div></section></div>}
 
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
 

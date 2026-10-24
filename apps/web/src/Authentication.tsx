@@ -77,7 +77,7 @@ export function Authentication({
             <label>Your name<input name="displayName" required autoComplete="name" maxLength={100} placeholder="Juri Stöckli" /></label>
           </>}
           <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
-          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} placeholder={setupRequired ? "At least 12 characters" : "Your password"} /></label>
+          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 6 : 1} maxLength={128} placeholder={setupRequired ? "At least 6 characters" : "Your password"} /></label>
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
             {isSubmitting ? "Please wait…" : setupRequired ? "Create server administrator" : "Sign in"}
             {!isSubmitting && <ArrowRight size={17} />}

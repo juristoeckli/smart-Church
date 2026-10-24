@@ -48,6 +48,7 @@ export interface SiteUser {
   id: string;
   email: string;
   displayName: string;
+  accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
 }
 
@@ -55,6 +56,7 @@ export interface CreateSiteUser {
   email: string;
   displayName: string;
   password: string;
+  accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
 }
 
