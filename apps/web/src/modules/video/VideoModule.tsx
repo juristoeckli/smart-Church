@@ -6,6 +6,9 @@ type Encoder = { id: string; name: string; ip?: string; model?: string; control?
 type Device = { id: string; name: string; type?: string; ip?: string; port?: number; ping?: string; power?: string; error?: string };
 type VideoSite = { id: string; name: string; router_ip?: string; router_model?: string; router_status?: string; encoders: Encoder[]; devices: Device[] };
 type RouteState = { connected?: boolean; error?: string; model?: string; inputs?: string[]; outputs?: string[]; routes?: number[]; locks?: string[] };
+type RouteHistoryChange = { output: number; before?: number | null; after?: number; user?: string; time?: number };
+type RouteHistoryDetail = { field: string; index: number; before?: unknown; after?: unknown; user?: string; time?: number };
+type RouteHistoryEvent = { id?: string; time?: number; started_at?: number; user?: string; kind?: string; changes?: RouteHistoryChange[]; details?: RouteHistoryDetail[]; state?: RouteState };
 type ApiSnapshot = { error?: string; message?: string; available?: boolean; worker?: { state: string; error?: string | null }; status?: { sites?: VideoSite[]; videohubs?: Record<string, RouteState>; vpn?: { state?: string; error?: string | null } } };
 type Preset = { id: string; name: string; revision?: string; routes?: number[] };
 type EncoderProfile = { profile: string; configs?: { bitrate?: number }[] };
@@ -26,7 +29,9 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [selectedHub, setSelectedHub] = useState("");
-  const [history, setHistory] = useState<Record<string, unknown>[]>([]);
+  const [history, setHistory] = useState<RouteHistoryEvent[]>([]);
+  const [historyLive, setHistoryLive] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedEncoder, setSelectedEncoder] = useState("");
   const [xml, setXml] = useState(starterXml);
@@ -122,6 +127,14 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   const bitrateMbit = selectedProfile?.configs?.[0]?.bitrate ? (selectedProfile.configs[0].bitrate / 1_000_000).toString() : "";
   const canApplySettings = Boolean(canManage && !busy && encoderSettings?.status === "Idle" && encoderSettings.platform === settingsForm.preset && encoderSettings.server === settingsForm.server);
   const ready = snapshot?.available === true && snapshot.worker?.state === "ready";
+
+  useEffect(() => {
+    if (tab !== "Routing" || !hub) return;
+    void loadHistory(hub.id, hub.site.id);
+    if (!historyLive) return;
+    const timer = window.setInterval(() => void loadHistory(hub.id, hub.site.id), 15_000);
+    return () => window.clearInterval(timer);
+  }, [tab, hub?.key, historyLive]);
 
   async function send(operation: string, data: Record<string, unknown>, successMessage?: string) {
     setBusy(true);
@@ -219,13 +232,14 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   }
 
   async function loadHistory(deviceId: string, siteId: string) {
+    setHistoryLoading(true);
     try {
-      const result = await api<unknown>(`/api/video/history?device=${encodeURIComponent(deviceId)}&site_id=${encodeURIComponent(siteId)}`);
-      if (Array.isArray(result)) setHistory(result as Record<string, unknown>[]);
-      else if (result && typeof result === "object" && "events" in result && Array.isArray((result as { events: unknown }).events)) setHistory((result as { events: Record<string, unknown>[] }).events);
-      else setHistory([]);
+      const result = await api<{ events?: RouteHistoryEvent[] }>(`/api/video/history?device=${encodeURIComponent(deviceId)}&site_id=${encodeURIComponent(siteId)}`);
+      setHistory([...(result.events ?? [])].reverse());
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not load routing history.");
+    } finally {
+      setHistoryLoading(false);
     }
   }
 
@@ -520,10 +534,52 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     {ready && tab === "Routing" && <div className="video-routing-layout video-routing-page"><section className="video-panel video-routing-matrix-panel"><div className="video-panel-heading"><div><h2>Routing matrix</h2><p>Inputs run across the top; outputs run down the left. Click a crosspoint to route an output to an input.</p></div><button className="video-small-button" type="button" disabled={!hub || busy} onClick={() => hub && void refresh()}><RefreshCw size={14} /> Refresh</button></div>
       {hubs.length ? <><div className="video-routing-device-row"><label className="video-field">Videohub<select value={hub?.key ?? ""} onChange={(event) => { setSelectedHub(event.target.value); setHistory([]); setPresets([]); }}><option value="">Select device</option>{hubs.map((device) => <option value={device.key} key={device.key}>{device.site.name} · {device.name}</option>)}</select></label>{hub && <div className="video-routing-device-info"><strong>{hub.name}</strong><code>{hub.ip || "Address not configured"}</code><span className={`video-state ${matrix?.connected ? "video-state-good" : ""}`}>{matrix?.connected ? "Connected" : "Disconnected"}</span>{matrix?.inputs && matrix.outputs && <small>{matrix.inputs.length} inputs · {matrix.outputs.length} outputs</small>}</div>}</div>
         {matrix?.connected && matrix.inputs && matrix.outputs && matrix.routes ? <div className="video-matrix-wrap" role="region" aria-label="Videohub crosspoint routing matrix" tabIndex={0}><table className="video-matrix"><thead><tr><th className="video-matrix-corner"><span>Inputs →</span><span>Outputs ↓</span></th>{matrix.inputs.map((label, inputIndex) => <th className="video-matrix-input" scope="col" key={`${inputIndex}-${label}`}><div title={label}><span>{label}</span></div><small>{inputIndex + 1}</small></th>)}</tr></thead><tbody>{matrix.outputs.map((label, outputIndex) => { const locked = matrix.locks?.[outputIndex] !== "U"; return <tr key={`${outputIndex}-${label}`}><th className="video-matrix-output" scope="row"><small>{outputIndex + 1}</small><span title={label}>{label}</span>{locked && <LockKeyhole className="video-matrix-lock" size={11} aria-label="Output locked" />}</th>{matrix.inputs?.map((inputLabel, inputIndex) => { const active = matrix.routes?.[outputIndex] === inputIndex; return <td className={active ? "video-matrix-crosspoint video-matrix-crosspoint-active" : "video-matrix-crosspoint"} key={`${outputIndex}-${inputIndex}`}><button type="button" className={active ? "video-crosspoint video-crosspoint-active" : "video-crosspoint"} aria-label={`Route output ${outputIndex + 1}, ${label}, to input ${inputIndex + 1}, ${inputLabel}${active ? "; current route" : ""}${locked ? "; locked" : ""}`} aria-pressed={active} title={`${label} ← ${inputLabel}${active ? " · current route" : ""}${locked ? " · locked" : ""}`} disabled={busy || locked || active} onClick={() => void changeRoute(outputIndex, inputIndex)}><span /></button></td>; })}</tr>; })}</tbody></table></div> : <Empty text={matrix?.error ?? "Waiting for a Videohub connection."} />}
-        {hub && <div className="video-routing-tools"><button className="video-small-button" type="button" disabled={busy} onClick={() => void loadPresets(hub.id, hub.site.id)}><ChevronDown size={14} /> Load presets</button><button className="video-small-button" type="button" disabled={busy || !matrix?.connected} onClick={() => { const name = window.prompt("Name this routing preset"); if (name?.trim() && hub) void send("videohub-presets", { operation: "save", device: hub.id, site_id: hub.site.id, name: name.trim() }, "Routing preset saved."); }}><Save size={14} /> Save current</button><button className="video-small-button" type="button" disabled={!hub} onClick={() => hub && void loadHistory(hub.id, hub.site.id)}><Clock3 size={14} /> History</button></div>}
+        {hub && <div className="video-routing-tools"><button className="video-small-button" type="button" disabled={busy} onClick={() => void loadPresets(hub.id, hub.site.id)}><ChevronDown size={14} /> Load presets</button><button className="video-small-button" type="button" disabled={busy || !matrix?.connected} onClick={() => { const name = window.prompt("Name this routing preset"); if (name?.trim() && hub) void send("videohub-presets", { operation: "save", device: hub.id, site_id: hub.site.id, name: name.trim() }, "Routing preset saved."); }}><Save size={14} /> Save current</button></div>}
         {presets.map((preset) => <div className="video-preset-row" key={preset.id}><span><strong>{preset.name}</strong><small>Saved routing preset</small></span><button type="button" className="video-small-button" disabled={busy || !hub || !matrix?.routes} onClick={() => { if (!hub || !matrix?.routes || !window.confirm(`Recall “${preset.name}” on ${hub.name}? The Videohub will change routes.`)) return; if (!window.confirm(`Confirm recall of “${preset.name}” using the current routes?`)) return; void send("videohub-presets", { operation: "recall", device: hub.id, site_id: hub.site.id, id: preset.id, revision: preset.revision, expected_routes: matrix.routes, confirmed: true }, "Routing preset recalled and verified."); }}>Recall</button></div>)}
       </> : <Empty text="No Videohub is configured for this location." />}</section>
-      <section className="video-panel video-history-panel"><div className="video-panel-heading"><div><h2>Routing history</h2><p>Observed route changes and verified actions</p></div></div>{history.length ? history.slice(0, 40).map((entry, index) => { const changeCount = Array.isArray(entry.changes) ? entry.changes.length : 0; return <div className="video-history-row" key={String(entry.id ?? index)}><Clock3 size={14} /><span><strong>{String(entry.kind ?? "Routing event")} · {changeCount} route changes</strong><small>{formatTimestamp(entry.time)} · {String(entry.user ?? "Observed")}</small></span></div>; }) : <Empty text="Load history to view changes observed by the worker." />}</section></div>}
+      <section className="video-panel video-history-panel" aria-label="Routing timeline">
+        <div className="video-panel-heading video-timeline-heading">
+          <div><h2>Timeline</h2><p>{history.length} events · {Intl.DateTimeFormat().resolvedOptions().timeZone || "Local time"}</p></div>
+          <div className="video-timeline-controls">
+            <button className={historyLive ? "video-timeline-live video-timeline-live-active" : "video-timeline-live"} type="button" aria-pressed={historyLive} onClick={() => setHistoryLive((live) => !live)}><span />{historyLive ? "LIVE" : "PAUSED"}</button>
+            <button className="video-small-button" type="button" disabled={!hub || historyLoading} title="Refresh timeline" aria-label="Refresh timeline" onClick={() => hub && void loadHistory(hub.id, hub.site.id)}><RefreshCw size={13} className={historyLoading ? "video-refresh-spinning" : ""} />{historyLoading ? "Updating" : "Update"}</button>
+          </div>
+        </div>
+        {history.length ? <div className="video-timeline-list">
+          {history.slice(0, 40).map((entry, index) => {
+            const changes = entry.changes ?? [];
+            const details = entry.details ?? [];
+            const sourceName = (source: number | null | undefined) => source == null ? "No input" : entry.state?.inputs?.[source] ?? `Input ${source + 1}`;
+            const eventTitle = entry.kind === "change" && changes.length
+              ? `Routing changes · ${changes.length}`
+              : entry.kind === "change" && details.length && details.every((detail) => detail.field === "locks")
+                ? `Output lock changes · ${details.length}`
+                : entry.kind === "change" && details.length
+                  ? `Router updates · ${details.length}`
+                  : entry.kind === "baseline" ? "Routing baseline" : String(entry.kind ?? "Routing event");
+            const detailLabel = (detail: RouteHistoryDetail) => detail.field === "locks"
+              ? `${entry.state?.outputs?.[detail.index] ?? `Output ${detail.index + 1}`} lock`
+              : `${detail.field === "inputs" ? "Input" : detail.field === "outputs" ? "Output" : detail.field} ${detail.index + 1}`;
+            const detailValue = (detail: RouteHistoryDetail, value: unknown) => detail.field === "locks"
+              ? value === "L" ? "Locked" : value === "U" ? "Unlocked" : String(value ?? "—")
+              : String(value ?? "—");
+            const timelineTime = (value: unknown) => typeof value === "number"
+              ? new Intl.DateTimeFormat("de-CH", { dateStyle: "short", timeStyle: "medium" }).format(new Date(value * 1000))
+              : formatTimestamp(value);
+            return <article className="video-timeline-event" key={String(entry.id ?? index)}>
+              <span className={`video-timeline-marker ${entry.kind === "change" ? "video-timeline-marker-change" : ""}`} aria-hidden="true" />
+              <time className="video-timeline-time" dateTime={entry.time ? new Date(entry.time * 1000).toISOString() : undefined}>{timelineTime(entry.started_at ?? entry.time)}{entry.started_at && entry.time && entry.started_at !== entry.time ? ` – ${timelineTime(entry.time)}` : ""}</time>
+              <h3>{eventTitle}</h3>
+              {changes.length ? <ul className="video-timeline-changes">{changes.slice(0, 3).map((change, changeIndex) => {
+                const outputName = entry.state?.outputs?.[change.output] ?? `Output ${change.output + 1}`;
+                return <li key={`${change.output}-${changeIndex}`}><strong>{outputName}</strong><span>{sourceName(change.before)} <span aria-hidden="true">→</span> {sourceName(change.after)}</span></li>;
+              })}{changes.length > 3 && <li className="video-timeline-more">+ {changes.length - 3} more route changes</li>}</ul> : details.length ? <ul className="video-timeline-changes">{details.slice(0, 3).map((detail, detailIndex) => <li key={`${detail.field}-${detail.index}-${detailIndex}`}><strong>{detailLabel(detail)}</strong><span>{detailValue(detail, detail.before)} <span aria-hidden="true">→</span> {detailValue(detail, detail.after)}</span></li>)}{details.length > 3 && <li className="video-timeline-more">+ {details.length - 3} more updates</li>}</ul> : <p className="video-timeline-summary">Initial router snapshot</p>}
+              <p className="video-timeline-actor">{String(changes[0]?.user ?? details[0]?.user ?? entry.user ?? "External change")}</p>
+            </article>;
+          })}
+          {history.length > 40 && <p className="video-timeline-more-count">Showing the latest 40 of {history.length} events.</p>}
+        </div> : <div className="video-timeline-empty"><Clock3 size={17} /><span>{historyLoading ? "Loading routing history…" : hub ? "No routing events recorded yet." : "Select a Videohub to view its timeline."}</span></div>}
+      </section></div>}
 
     {ready && tab === "XML tools" && <section className="video-panel video-settings-panel">
       <div className="video-panel-heading"><div><h2>Streaming profile XML tools</h2><p>Create, validate, import, export and distribute encoder profiles.</p></div><button type="button" className="video-small-button" disabled={busy || !xmlEncoder || !canManage} onClick={() => void exportXml(includeSecrets)}><Download size={14} /> Export active XML</button></div>
