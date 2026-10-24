@@ -252,6 +252,10 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
   const connected = encoder.control === "Connected";
   const ready = status === "BEREIT";
   const live = status === "LIVE";
+  const reportedStatus = stateValue(encoder.state, "Status");
+  const stateHasProblem = Object.entries(encoder.state ?? {}).some(([key, value]) => /error|fault|warning|problem/i.test(key) && value != null && !/^(?:\s*|none|false|0|ok|no)$/i.test(String(value).trim()));
+  const streamProblem = live && (Boolean(encoder.error) || stateHasProblem || /error|fail|warn|problem|lost|drop/i.test(reportedStatus));
+  const onAirFlash = streamProblem ? "video-onair-flash" : undefined;
   const statusColor = live ? "#f51d34" : ready ? "#edf1f4" : "#f0b64c";
   const telemetryLed = !connected ? "#e9a536" : live ? "#f51d34" : "#64db86";
   return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} illustrated front panel, ${status}`}>
@@ -264,10 +268,11 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <path d="M72 317h130m-100-29-29 29 29 29m70-58 29 29-29 29m-70-39h54l21 20" fill="none" stroke="#090b0d" strokeWidth="10" strokeLinecap="round" strokeLinejoin="round" />
     <path d="M72 317h130m-100-29-29 29 29 29m70-58 29 29-29 29m-70-39h54l21 20" fill="none" stroke="#24272a" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
     <g fontFamily="Arial, sans-serif" fontWeight="700" textAnchor="middle" fill="#f3f4f5">
-      {[{ x: 291, y: 55, text: live ? "ON AIR" : "ON AIR", active: live }, { x: 456, y: 55, text: "MENU" }, { x: 291, y: 185, text: "OFF" }, { x: 456, y: 185, text: "SET" }, { x: 291, y: 315, text: "CALL" }, { x: 456, y: 315, text: "LOCK" }].map((button) => <g key={button.text}>
+      {[{ x: 291, y: 55, text: "ON AIR", active: live }, { x: 456, y: 55, text: "MENU" }, { x: 291, y: 185, text: "OFF" }, { x: 456, y: 185, text: "SET" }, { x: 291, y: 315, text: "CALL" }, { x: 456, y: 315, text: "LOCK" }].map((button) => <g key={button.text}>
         <rect x={button.x - 2} y={button.y - 4} width="144" height="108" rx="17" fill="#090a0b" stroke="#050607" strokeWidth="5" />
         <rect x={button.x + 5} y={button.y + 3} width="130" height="94" rx="13" fill={button.active ? "#202124" : "#25272a"} stroke="#45474a" strokeWidth="3" />
-        <text x={button.x + 70} y={button.y + 59} fill={button.active ? "#ff1d35" : "#f2f3f4"} fontSize={button.text.length > 4 ? 28 : 30}>{button.text}</text>
+        {button.text === "ON AIR" && live && <rect className={onAirFlash} x={button.x + 10} y={button.y + 8} width="120" height="84" rx="10" fill="#ff1c35" opacity={streamProblem ? .52 : .32} />}
+        <text className={button.text === "ON AIR" ? onAirFlash : undefined} x={button.x + 70} y={button.y + 59} fill={button.active ? "#ff1d35" : "#f2f3f4"} fontSize={button.text.length > 4 ? 28 : 30}>{button.text}</text>
       </g>)}
     </g>
     <rect x="693" y="45" width="510" height="386" rx="17" fill="#090b0e" stroke="#0b0c0d" strokeWidth="8" />
@@ -277,7 +282,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <text x="858" y="96" fill="#eff3f6" fontFamily="Arial, sans-serif" fontSize="24">{stateMetric(encoder.state, "Duration")}</text>
     <circle cx="1115" cy="84" r="9" fill={telemetryLed} />
     <text x="1134" y="93" fill="#d8dee3" fontFamily="Arial, sans-serif" fontSize="20">{stateMetric(encoder.state, "Cache Used")}</text>
-    <text x="948" y="184" fill={statusColor} fontFamily="Arial, sans-serif" fontSize="72" fontWeight="700" textAnchor="middle">{status}</text>
+    <text className={onAirFlash} x="948" y="184" fill={statusColor} fontFamily="Arial, sans-serif" fontSize="72" fontWeight="700" textAnchor="middle">{live ? "ON AIR" : status}</text>
     <rect x="707" y="205" width="482" height="212" fill="#142533" />
     <path d="M725 223h25m-25 0v24m447-24h-25m25 0v24m-447 170h25m-25 0v-24m447 24h-25m25 0v-24" fill="none" stroke="#315269" strokeWidth="3" />
     <circle cx="948" cy="297" r="31" fill="#1e3e50" stroke="#426a80" strokeWidth="3" />
@@ -285,14 +290,6 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <text x="948" y="358" fill="#a8c5d4" fontFamily="Arial, sans-serif" fontSize="24" textAnchor="middle">{live ? "STREAMING" : ready ? "VIDEO PREVIEW" : "ENCODER STATUS"}</text>
     <text x="948" y="387" fill="#7693a2" fontFamily="Arial, sans-serif" fontSize="17" textAnchor="middle">{stringValue(encoder.ip) || "STATUS MONITOR"}</text>
     <text x="1241" y="105" fill="#d9dadd" fontFamily="Arial, sans-serif" fontSize="22">Blackmagicdesign</text>
-    <g>
-      <rect x="1439" y="49" width="21" height="23" rx="5" fill="#17191b" stroke="#111214" strokeWidth="3" />
-      <rect x="1442" y="52" width="15" height="17" rx="3" fill={connected ? "#72ed85" : "#46494d"} />
-      <rect x="1439" y="79" width="21" height="23" rx="5" fill="#17191b" stroke="#111214" strokeWidth="3" />
-      <rect x="1442" y="82" width="15" height="17" rx="3" fill={live ? "#ff2637" : "#46494d"} />
-      <rect x="1439" y="109" width="21" height="23" rx="5" fill="#17191b" stroke="#111214" strokeWidth="3" />
-      <rect x="1442" y="112" width="15" height="17" rx="3" fill={ready ? "#ffad24" : !connected ? "#ffad24" : "#46494d"} />
-    </g>
     <circle cx="1379" cy="272" r="99" fill="#0b0c0e" stroke="#181a1c" strokeWidth="7" />
     <circle cx="1379" cy="272" r="80" fill="#2d3034" stroke="#55585d" strokeWidth="5" />
     <circle cx="1379" cy="272" r="69" fill="#303337" stroke="#3b3e42" strokeWidth="2" />
