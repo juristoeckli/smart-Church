@@ -17,7 +17,6 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [songs, setSongs] = useState<SongSummary[]>([]);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
-  const [datasetSearch, setDatasetSearch] = useState("");
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
@@ -60,7 +59,6 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   }, [datasetId, search, requestHeaders]);
 
   const selectedDataset = datasets.find((item) => item.id === datasetId);
-  const visibleDatasets = datasets.filter((dataset) => dataset.name.toLocaleLowerCase().includes(datasetSearch.trim().toLocaleLowerCase()));
   async function openSong(song: SongSummary) {
     setNotice("");
     try {
@@ -107,13 +105,11 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
         <section className="video-presenter-section video-presenter-libraries">
           <button type="button" className="video-presenter-section-heading" aria-expanded={librariesOpen} onClick={() => setLibrariesOpen((open) => !open)}><strong>{librariesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Datasets</strong><small>{datasets.length}</small></button>
           {librariesOpen && <>
-            <label className="video-presenter-dataset-search"><Search size={13} /><input type="search" placeholder="Search datasets…" aria-label="Search datasets by name" value={datasetSearch} onChange={(event) => setDatasetSearch(event.target.value)} /></label>
             {defaultLibraries.map(({ id, icon: Icon }) => {
-              const dataset = visibleDatasets.find((item) => item.id === id);
+              const dataset = datasets.find((item) => item.id === id);
               return dataset ? <button type="button" key={id} className={`video-presenter-library${datasetId === id ? " is-selected" : ""}`} onClick={() => { setDatasetId(id); setSearch(""); }}><Icon size={14} /><span>{dataset.name}</span><small>{dataset.songCount}</small><ChevronRight size={12} /></button> : null;
             })}
-            {visibleDatasets.filter((item) => !defaultLibraries.some((builtin) => builtin.id === item.id)).map((dataset) => <button type="button" key={dataset.id} className={`video-presenter-library${datasetId === dataset.id ? " is-selected" : ""}`} onClick={() => { setDatasetId(dataset.id); setSearch(""); }}><ListMusic size={14} /><span>{dataset.name}</span><small>{dataset.songCount}</small><ChevronRight size={12} /></button>)}
-            {visibleDatasets.length === 0 && <p className="video-presenter-empty-note">No datasets match this name.</p>}
+            {datasets.filter((item) => !defaultLibraries.some((builtin) => builtin.id === item.id)).map((dataset) => <button type="button" key={dataset.id} className={`video-presenter-library${datasetId === dataset.id ? " is-selected" : ""}`} onClick={() => { setDatasetId(dataset.id); setSearch(""); }}><ListMusic size={14} /><span>{dataset.name}</span><small>{dataset.songCount}</small><ChevronRight size={12} /></button>)}
             {capabilities.canManageLayouts && <><input ref={importInput} type="file" accept=".gz,.scdataset.tar.gz,application/gzip" hidden onChange={(event) => void importDataset(event.target.files?.[0])} /><button type="button" className="video-presenter-import-dataset" onClick={() => importInput.current?.click()}><FileUp size={13} /> Import dataset package</button></>}
           </>}
         </section>
@@ -129,7 +125,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
           <button className="video-presenter-add-playlist" type="button" disabled={!capabilities.canEdit}><Plus size={13} /> Add to playlist</button>
         </div>
         <div className="video-presenter-slide-content">
-          <header className="video-presenter-song-heading"><div><span className="presenter-eyebrow">SONG DATASET · {selectedDataset?.songCount ?? 0} SONGS</span><h2>{selectedDataset?.name ?? "Presenter datasets"}</h2><p>{selectedDataset?.description ?? "The song datasets are not installed on this server yet."}</p></div><div className="video-presenter-dataset-actions"><label className="video-presenter-search"><Search size={14} /><input type="search" placeholder="Search songs…" aria-label="Search songs" value={search} onChange={(event) => setSearch(event.target.value)} /></label><button type="button" onClick={() => void exportDataset()} disabled={!selectedDataset}><Download size={13} /> Export dataset</button></div></header>
+          <header className="video-presenter-song-heading"><div><span className="presenter-eyebrow">SONG DATASET · {selectedDataset?.songCount ?? 0} SONGS</span><h2>{selectedDataset?.name ?? "Presenter datasets"}</h2><p>{selectedDataset?.description ?? "The song datasets are not installed on this server yet."}</p></div><div className="video-presenter-dataset-actions"><label className="video-presenter-search"><Search size={14} /><input type="search" placeholder="Search song names…" aria-label="Search songs by name" value={search} onChange={(event) => setSearch(event.target.value)} /></label><button type="button" onClick={() => void exportDataset()} disabled={!selectedDataset}><Download size={13} /> Export dataset</button></div></header>
           {notice && <p className="video-presenter-dataset-notice" role="status">{notice}</p>}
           <div className="video-presenter-dataset-browser">
             <div className="video-presenter-song-list" aria-label="Dataset songs">{loading ? <p className="video-presenter-empty-note">Loading songs…</p> : songs.map((song) => <button type="button" key={song.number} className={selectedSong?.number === song.number ? "is-selected" : ""} onClick={() => void openSong(song)}><span className="video-presenter-song-number">{String(song.sourceNumber).padStart(3, "0")}</span><span>{song.name}</span><small>{song.slideCount}</small></button>)}{!loading && songs.length === 0 && <p className="video-presenter-empty-note">No songs match this search.</p>}</div>

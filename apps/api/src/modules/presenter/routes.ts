@@ -60,7 +60,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       if (!dataset) return reply.code(404).send({ error: "Dataset not found." });
       const search = (request.query.search ?? "").trim().toLocaleLowerCase();
       return dataset.songs
-        .filter((song) => !search || song.name.toLocaleLowerCase().includes(search) || String(song.sourceNumber).includes(search))
+        .filter((song) => !search || song.name.toLocaleLowerCase().includes(search))
         .map((song) => ({ number: song.number, sourceNumber: song.sourceNumber, name: song.name, slideCount: song.slides.length }));
     });
   
