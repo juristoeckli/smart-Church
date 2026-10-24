@@ -16,15 +16,15 @@ Baseline:
 
 ## 2. Boundaries
 
-An installation is one server deployment. A department is an isolated logical area; one installation may host multiple departments. Department IDs remain stable when moving between installations. Companies normally have separate deployments; no shared cross-company hosting is required.
+An installation is one server deployment for the GfC organization. It may host multiple locations, each isolated as a logical area (stored as a department in the current database model). Location IDs remain stable when moving between installations. Companies normally have separate deployments; no shared cross-company hosting is required.
 
-Department data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated department context. Users can belong to multiple departments with different rights. Switching department must not mix caches, pending edits, records or permissions.
+Location data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated active-location context. Users can belong to multiple locations with different rights. Switching location must not mix caches, pending edits, records or permissions. The current local prototype supports location creation and switching for the installation administrator; individual membership and permission checks remain to be implemented.
 
 Modules are installed/enabled installation-wide, not separately per department. Enabled modules have separate department data/settings. Required modules cannot be disabled. Disabling an optional module preserves its data.
 
 ## 3. Core and modules
 
-Core stays small: authentication/identity, users and contacts, department context, permissions, module registration, worker supervision, REST/live routing and necessary shared storage primitives. User-facing management and larger workflows belong to modules.
+Core stays small: authentication/identity, users and contacts, location context, permissions, module registration, worker supervision, REST/live routing and necessary shared storage primitives. User-facing management and larger workflows belong to modules.
 
 Built-in modules are bundled with the app. Third-party modules may be installed separately, using a documented SDK/protocol and manifest with ID, version, compatibility, dependencies and permissions. Required dependencies block activation when unavailable; optional integrations add features when present. Third-party workers may use other languages if they implement the protocol. A separate process is fault isolation, not a security sandbox: installed extensions are trusted executable code unless additional sandboxing is implemented.
 

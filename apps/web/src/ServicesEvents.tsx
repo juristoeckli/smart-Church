@@ -54,7 +54,7 @@ function eventPayload(form: HTMLFormElement): CreateServiceEvent {
   };
 }
 
-export function ServicesEvents({ departmentLocation, departmentTimeZone, onNotice }: { departmentLocation: string; departmentTimeZone: string; onNotice: (message: string) => void }) {
+export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, onNotice }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; onNotice: (message: string) => void }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -64,24 +64,28 @@ export function ServicesEvents({ departmentLocation, departmentTimeZone, onNotic
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
-  async function loadEvents() {
+  async function loadEvents(signal?: AbortSignal) {
     setIsLoading(true);
     setLoadError("");
     try {
-      const response = await fetch("/api/events");
+      const response = await fetch("/api/events", { headers: { "x-department-id": departmentId }, signal });
       const result = await response.json() as ServiceEvent[] | { error?: string };
       if (!response.ok || !Array.isArray(result)) {
         throw new Error(!Array.isArray(result) ? result.error ?? "Could not load services and events." : "Could not load services and events.");
       }
       setEvents(result);
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Could not load services and events.");
+      if (!signal?.aborted) setLoadError(error instanceof Error ? error.message : "Could not load services and events.");
     } finally {
-      setIsLoading(false);
+      if (!signal?.aborted) setIsLoading(false);
     }
   }
 
-  useEffect(() => { void loadEvents(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadEvents(controller.signal);
+    return () => controller.abort();
+  }, [departmentId]);
 
   const today = departmentDateString(departmentTimeZone);
   const currentMonth = today.slice(0, 7);
@@ -116,7 +120,7 @@ export function ServicesEvents({ departmentLocation, departmentTimeZone, onNotic
     try {
       const response = await fetch(editingEvent ? `/api/events/${editingEvent.id}` : "/api/events", {
         method: editingEvent ? "PUT" : "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-department-id": departmentId },
         body: JSON.stringify(payload),
       });
       const result = await response.json() as ServiceEvent | { error?: string };
@@ -138,7 +142,7 @@ export function ServicesEvents({ departmentLocation, departmentTimeZone, onNotic
   async function deleteEvent(event: ServiceEvent) {
     if (!window.confirm(`Delete “${event.title}” from the schedule?`)) return;
     try {
-      const response = await fetch(`/api/events/${event.id}`, { method: "DELETE" });
+      const response = await fetch(`/api/events/${event.id}`, { method: "DELETE", headers: { "x-department-id": departmentId } });
       const result = await response.json() as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not delete this event.");
       setEvents((current) => current.filter((item) => item.id !== event.id));
@@ -173,7 +177,7 @@ export function ServicesEvents({ departmentLocation, departmentTimeZone, onNotic
       </section>
 
       <section className="directory-card">
-        <div className="directory-heading"><div><h2>Church schedule</h2><p>Services, meetings, and events for your department.</p></div></div>
+        <div className="directory-heading"><div><h2>Church schedule</h2><p>Services, meetings, and events for this location.</p></div></div>
         <div className="directory-toolbar event-toolbar">
           <div className="search-field"><Search size={17} /><input aria-label="Search services and events" placeholder="Search by title, type, or location..." value={query} onChange={(event) => setQuery(event.target.value)} /></div>
           <div className="filter-tabs" role="tablist" aria-label="Filter schedule">

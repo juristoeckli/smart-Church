@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateServiceEvent, DepartmentProfile, LoginCredentials, ServiceEvent, UpdateDepartmentProfile } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, DepartmentProfile, LoginCredentials, ServiceEvent, UpdateDepartmentProfile } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
@@ -61,6 +61,22 @@ function setupCodeMatches(candidate: string) {
   const expected = Buffer.from(firstRunSetupCode);
   const actual = Buffer.from(candidate);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+async function activeDepartmentId(request: { headers: Record<string, unknown> }, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
+  if (!pool) return null;
+  const header = request.headers["x-department-id"];
+  const selectedId = typeof header === "string" ? header : departmentId;
+  if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedId)) {
+    reply.code(400).send({ error: "Choose a valid location." });
+    return null;
+  }
+  const result = await pool.query("SELECT id FROM departments WHERE id = $1", [selectedId]);
+  if (!result.rowCount) {
+    reply.code(404).send({ error: "This location could not be found." });
+    return null;
+  }
+  return selectedId;
 }
 
 async function createSession(userId: string, reply: { header: (name: string, value: string) => unknown }) {
@@ -253,11 +269,49 @@ app.post("/api/auth/logout", async (request, reply) => {
   return { ok: true };
 });
 
-app.get("/api/department", async (_request, reply): Promise<DepartmentProfile | { error: string }> => {
+app.get("/api/departments", async (_request, reply): Promise<DepartmentProfile[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
+  const result = await pool.query("SELECT id, name, time_zone FROM departments ORDER BY name");
+  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone }));
+});
+
+app.post<{ Body: CreateDepartment }>("/api/departments", {
+  schema: {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      required: ["location", "timeZone"],
+      properties: {
+        location: { type: "string", minLength: 1, maxLength: 120 },
+        timeZone: { type: "string", minLength: 1, maxLength: 80 },
+      },
+    },
+  },
+}, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to create locations." });
+  const location = request.body.location.trim();
+  const timeZone = request.body.timeZone.trim();
+  if (!location || !timeZone) return reply.code(400).send({ error: "Location and time zone are required." });
+  try {
+    new Intl.DateTimeFormat("en", { timeZone });
+  } catch {
+    return reply.code(400).send({ error: "Choose a valid time zone, such as Europe/Zurich." });
+  }
+  const result = await pool.query(
+    "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone",
+    [randomUUID(), location, timeZone],
+  );
+  const row = result.rows[0];
+  return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone });
+});
+
+app.get("/api/department", async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
   const result = await pool.query(
     "SELECT id, name, time_zone FROM departments WHERE id = $1",
-    [departmentId],
+    [selectedDepartmentId],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
@@ -278,6 +332,8 @@ app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
   },
 }, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to save department settings." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
   const location = request.body.location.trim();
   const timeZone = request.body.timeZone.trim();
   if (!location || !timeZone) return reply.code(400).send({ error: "Location and time zone are required." });
@@ -289,7 +345,7 @@ app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
   const result = await pool.query(
     `UPDATE departments SET name = $2, time_zone = $3, updated_at = now()
       WHERE id = $1 RETURNING id, name, time_zone`,
-    [departmentId, location, timeZone],
+    [selectedDepartmentId, location, timeZone],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
@@ -354,17 +410,19 @@ app.put<{ Body: { logoDataUrl: string | null } }>("/api/branding", {
   return { logoDataUrl: useDefaultLogo ? null : request.body.logoDataUrl };
 });
 
-app.get("/api/contacts", async (_request, reply): Promise<Contact[] | { error: string }> => {
+app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: string }> => {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
   }
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
 
   const result = await pool.query(
     `SELECT id, first_name, last_name, email, phone, status
        FROM contacts
       WHERE department_id = $1
       ORDER BY created_at DESC, last_name, first_name`,
-    [departmentId],
+    [selectedDepartmentId],
   );
   return result.rows.map((row) => ({
     id: row.id,
@@ -395,6 +453,8 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
   }
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
 
   const firstName = request.body.firstName.trim();
   const lastName = request.body.lastName.trim();
@@ -406,7 +466,7 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
     `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id, first_name, last_name, email, phone, status`,
-    [randomUUID(), departmentId, firstName, lastName, email, phone, request.body.status],
+    [randomUUID(), selectedDepartmentId, firstName, lastName, email, phone, request.body.status],
   );
   const row = result.rows[0];
   return reply.code(201).send({
@@ -419,10 +479,12 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   });
 });
 
-app.get("/api/events", async (_request, reply): Promise<ServiceEvent[] | { error: string }> => {
+app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error: string }> => {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
   const result = await pool.query<ServiceEventRow>(
     `SELECT id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
@@ -430,7 +492,7 @@ app.get("/api/events", async (_request, reply): Promise<ServiceEvent[] | { error
        FROM service_events
       WHERE department_id = $1
       ORDER BY event_date, start_time, title`,
-    [departmentId],
+    [selectedDepartmentId],
   );
   return result.rows.map(mapServiceEvent);
 });
@@ -441,6 +503,8 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
   const event = {
     ...request.body,
     title: request.body.title.trim(),
@@ -457,7 +521,7 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
      RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
                CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                location, description`,
-    [randomUUID(), departmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
+    [randomUUID(), selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
   );
   return reply.code(201).send(mapServiceEvent(result.rows[0]));
 });
@@ -471,6 +535,8 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
   const event = {
     ...request.body,
     title: request.body.title.trim(),
@@ -489,7 +555,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
       RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                 location, description`,
-    [request.params.id, departmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
+    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
   return mapServiceEvent(result.rows[0]);
@@ -501,7 +567,9 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
   return { id: result.rows[0].id };
 });

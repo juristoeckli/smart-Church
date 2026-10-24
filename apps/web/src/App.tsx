@@ -4,7 +4,6 @@ import {
   BookOpen,
   CalendarDays,
   Check,
-  ChevronDown,
   Church,
   CircleHelp,
   ContactRound,
@@ -40,6 +39,12 @@ const defaultDepartment: DepartmentProfile = {
   timeZone: "Europe/Zurich",
 };
 
+function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, departmentId = "") {
+  const headers = new Headers(init.headers);
+  if (departmentId) headers.set("x-department-id", departmentId);
+  return fetch(input, { ...init, headers });
+}
+
 function initials(contact: Contact) {
   return `${contact.firstName[0] ?? ""}${contact.lastName[0] ?? ""}`.toUpperCase();
 }
@@ -68,8 +73,10 @@ function App() {
   const [brandingDraft, setBrandingDraft] = useState<string | null>(null);
   const [isBrandingSaving, setIsBrandingSaving] = useState(false);
   const [department, setDepartment] = useState<DepartmentProfile>(defaultDepartment);
+  const [departments, setDepartments] = useState<DepartmentProfile[]>([]);
   const [departmentDraft, setDepartmentDraft] = useState(defaultDepartment);
   const [isDepartmentOpen, setIsDepartmentOpen] = useState(false);
+  const [isAddingLocation, setIsAddingLocation] = useState(false);
   const [isDepartmentSaving, setIsDepartmentSaving] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthenticatedUser | null>(null);
@@ -101,15 +108,21 @@ function App() {
 
   useEffect(() => {
     if (!authUser) return;
-    fetch("/api/contacts")
+    if (!department.id) return;
+    const controller = new AbortController();
+    setIsLoading(true);
+    setContacts([]);
+    setLoadError("");
+    departmentFetch("/api/contacts", { signal: controller.signal }, department.id)
       .then(async (response) => {
         const result = await response.json();
         if (!response.ok) throw new Error(result.error ?? "Could not load contacts.");
         setContacts(result as Contact[]);
       })
-      .catch((error: unknown) => setLoadError(error instanceof Error ? error.message : "Could not load contacts."))
-      .finally(() => setIsLoading(false));
-  }, [authUser]);
+      .catch((error: unknown) => { if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : "Could not load contacts."); })
+      .finally(() => { if (!controller.signal.aborted) setIsLoading(false); });
+    return () => controller.abort();
+  }, [authUser, department.id]);
 
   useEffect(() => {
     if (!authUser) return;
@@ -126,15 +139,19 @@ function App() {
 
   useEffect(() => {
     if (!authUser) return;
-    fetch("/api/department")
+    fetch("/api/departments")
       .then(async (response) => {
         const result = await response.json();
-        if (!response.ok) throw new Error(result.error ?? "Could not load department settings.");
-        setDepartment(result as DepartmentProfile);
+        if (!response.ok || !Array.isArray(result)) throw new Error(result.error ?? "Could not load locations.");
+        const availableDepartments = result as DepartmentProfile[];
+        setDepartments(availableDepartments);
+        let selectedId = "";
+        try { selectedId = localStorage.getItem("smart-church-location") ?? ""; } catch { /* Use the first location when storage is unavailable. */ }
+        const selected = availableDepartments.find((item) => item.id === selectedId) ?? availableDepartments[0];
+        if (selected) setDepartment(selected);
+        else setDepartment(defaultDepartment);
       })
-      .catch(() => {
-        // The environment defaults remain visible when the local database is unavailable.
-      });
+      .catch((error: unknown) => setLoadError(error instanceof Error ? error.message : "Could not load locations."));
   }, [authUser]);
 
   useEffect(() => setLogoUnavailable(false), [logoSrc]);
@@ -164,11 +181,11 @@ function App() {
     };
     setIsSaving(true);
     try {
-      const response = await fetch("/api/contacts", {
+      const response = await departmentFetch("/api/contacts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
-      });
+      }, department.id);
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Could not save this person.");
       const contact = result as Contact;
@@ -232,29 +249,72 @@ function App() {
 
   function openDepartmentSettings() {
     setDepartmentDraft(department);
+    setIsAddingLocation(false);
     setIsDepartmentOpen(true);
+  }
+
+  function switchDepartment(id: string) {
+    const selected = departments.find((item) => item.id === id);
+    if (!selected) return;
+    setDepartment(selected);
+    setDepartmentDraft(selected);
+    setContacts([]);
+    setPage("People");
+    setQuery("");
+    setStatusFilter("all");
+    setIsAddOpen(false);
+    setIsDepartmentOpen(false);
+    try { localStorage.setItem("smart-church-location", selected.id); } catch { /* The selection remains active until the page reloads. */ }
   }
 
   async function saveDepartmentSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsDepartmentSaving(true);
     try {
-      const response = await fetch("/api/department", {
+      const response = await departmentFetch("/api/department", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ location: departmentDraft.location, timeZone: departmentDraft.timeZone }),
-      });
+      }, department.id);
       const result = await response.json() as DepartmentProfile | { error?: string };
-      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save department settings." : "Could not save department settings.");
+      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save location settings." : "Could not save location settings.");
       setDepartment(result);
+      setDepartments((current) => current.map((item) => item.id === result.id ? result : item));
       setIsDepartmentOpen(false);
-      setNotice("Department settings saved.");
+      setNotice("Location settings saved.");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Could not save department settings.");
+      setNotice(error instanceof Error ? error.message : "Could not save location settings.");
     } finally {
       setIsDepartmentSaving(false);
     }
     window.setTimeout(() => setNotice(""), 4000);
+  }
+
+  async function addLocation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    const payload = { location: String(values.get("location")).trim(), timeZone: String(values.get("timeZone")).trim() };
+    setIsDepartmentSaving(true);
+    try {
+      const response = await fetch("/api/departments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json() as DepartmentProfile | { error?: string };
+      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not add this location." : "Could not add this location.");
+      setDepartments((current) => [...current, result].sort((a, b) => a.location.localeCompare(b.location)));
+      setDepartment(result);
+      setDepartmentDraft(result);
+      try { localStorage.setItem("smart-church-location", result.id); } catch { /* Keep the new location selected for this session. */ }
+      setIsDepartmentOpen(false);
+      setIsAddingLocation(false);
+      setNotice(`${result.location} was added.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not add this location.");
+    } finally {
+      setIsDepartmentSaving(false);
+    }
   }
 
   async function signOut() {
@@ -267,6 +327,7 @@ function App() {
       setContacts([]);
       setLogoDataUrl(null);
       setDepartment(defaultDepartment);
+      setDepartments([]);
       setIsBrandingOpen(false);
       setIsDepartmentOpen(false);
     }
@@ -288,11 +349,11 @@ function App() {
           <span className="brand-location">{department.location}</span>
         </a>
 
-        <button className="church-switcher" type="button" aria-label="Location settings" onClick={openDepartmentSettings}>
+        <div className="church-switcher">
           <span className="church-avatar">G</span>
-          <span className="church-details"><strong>GfC</strong><small>{department.location}</small></span>
-          <ChevronDown size={16} />
-        </button>
+          <label className="church-details"><strong>GfC location</strong><select className="church-location-select" aria-label="Active location" value={department.id} onChange={(event) => switchDepartment(event.target.value)}>{departments.map((item) => <option value={item.id} key={item.id}>{item.location}</option>)}</select></label>
+          <button className="icon-button church-location-settings" type="button" aria-label="Manage locations" title="Manage locations" onClick={openDepartmentSettings}><Settings2 size={16} /></button>
+        </div>
 
         <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
@@ -332,8 +393,8 @@ function App() {
         </header>
 
         <div className="page-wrap">
-          {page === "Services & events" ? <ServicesEvents departmentLocation={department.location} departmentTimeZone={department.timeZone} onNotice={setNotice} /> : <>
-          <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Database unavailable · ${loadError}` : "Local workspace · People are saved to the configured department database"}</div>
+          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} onNotice={setNotice} /> : <>
+          <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Workspace unavailable · ${loadError}` : `People are saved for ${department.location}`}</div>
 
           <section className="page-heading">
             <div>
@@ -345,9 +406,9 @@ function App() {
           </section>
 
           <section className="stat-grid" aria-label="People summary">
-            <article className="stat-card"><div className="stat-icon stat-icon-green"><UsersRound size={19} /></div><div className="stat-content"><span>Total people</span><strong>{contacts.length}</strong><small>In this department</small></div></article>
-            <article className="stat-card"><div className="stat-icon stat-icon-blue"><Church size={18} /></div><div className="stat-content"><span>Members</span><strong>{memberCount}</strong><small>In this department</small></div></article>
-            <article className="stat-card"><div className="stat-icon stat-icon-amber"><ContactRound size={19} /></div><div className="stat-content"><span>Visitors</span><strong>{visitorCount}</strong><small>In this department</small></div></article>
+            <article className="stat-card"><div className="stat-icon stat-icon-green"><UsersRound size={19} /></div><div className="stat-content"><span>Total people</span><strong>{contacts.length}</strong><small>At this location</small></div></article>
+            <article className="stat-card"><div className="stat-icon stat-icon-blue"><Church size={18} /></div><div className="stat-content"><span>Members</span><strong>{memberCount}</strong><small>At this location</small></div></article>
+            <article className="stat-card"><div className="stat-icon stat-icon-amber"><ContactRound size={19} /></div><div className="stat-content"><span>Visitors</span><strong>{visitorCount}</strong><small>At this location</small></div></article>
             <article className="stat-card stat-card-action" onClick={() => setNotice("The people import guide will be added in a later step.")} role="button" tabIndex={0} onKeyDown={(event) => event.key === "Enter" && setNotice("The people import guide will be added in a later step.")}><div className="import-icon"><Plus size={19} /></div><div className="stat-content"><span>Growing together</span><strong className="stat-action-title">Bring your list</strong><small>Import people from a file</small></div><span className="card-arrow">↗</span></article>
           </section>
 
@@ -372,7 +433,10 @@ function App() {
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
 
       {isBrandingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsBrandingOpen(false)}><section className="modal branding-modal" role="dialog" aria-modal="true" aria-labelledby="branding-title"><div className="modal-heading"><div><span className="eyebrow">SITE ADMINISTRATION</span><h2 id="branding-title">Site logo</h2><p>Choose the logo shown at the top of the sidebar.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsBrandingOpen(false)}><X size={19} /></button></div><div className="branding-preview"><img src={brandingDraft || defaultLogoUrl} alt="Logo preview" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div><label className="branding-upload">Upload a logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectBrandingLogo(event.currentTarget.files?.[0])} /></label><p className="branding-help">PNG, JPEG, or WebP · up to 2 MB. The GfC logo is used by default.</p><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setBrandingDraft(null)}>Use GfC default</button><button className="button button-secondary" type="button" onClick={() => setIsBrandingOpen(false)}>Cancel</button><button className="button button-primary" type="button" disabled={isBrandingSaving} onClick={saveBranding}>{isBrandingSaving ? "Saving…" : "Save logo"}</button></div><p className="modal-demo-footnote">Your signed-in account can update the logo for this installation.</p></section></div>}
-      {isDepartmentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsDepartmentOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="department-title"><div className="modal-heading"><div><span className="eyebrow">GFC LOCATION</span><h2 id="department-title">Location settings</h2><p>Set the location shown across this workspace.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsDepartmentOpen(false)}><X size={19} /></button></div><form onSubmit={saveDepartmentSettings}><label>Location<input autoFocus required maxLength={120} value={departmentDraft.location} onChange={(event) => setDepartmentDraft((current) => ({ ...current, location: event.target.value }))} placeholder="Enter your location" /></label><label>Time zone<input required maxLength={80} value={departmentDraft.timeZone} onChange={(event) => setDepartmentDraft((current) => ({ ...current, timeZone: event.target.value }))} placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsDepartmentOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Saving…" : "Save details"}</button></div></form><p className="modal-demo-footnote">Your signed-in account can update this location and time zone.</p></section></div>}
+      {isDepartmentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsDepartmentOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="department-title"><div className="modal-heading"><div><span className="eyebrow">GFC LOCATIONS</span><h2 id="department-title">Manage locations</h2><p>This installation can serve multiple GfC locations. People and events stay with their selected location.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsDepartmentOpen(false)}><X size={19} /></button></div>
+        {isAddingLocation ? <form onSubmit={addLocation}><label>Location<input name="location" autoFocus required maxLength={120} placeholder="Enter the location name" /></label><label>Time zone<input name="timeZone" required maxLength={80} defaultValue="Europe/Zurich" placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddingLocation(false)}>Back</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Adding…" : "Add location"}</button></div></form>
+          : <><form onSubmit={saveDepartmentSettings}><label>Location<input autoFocus required maxLength={120} value={departmentDraft.location} onChange={(event) => setDepartmentDraft((current) => ({ ...current, location: event.target.value }))} placeholder="Enter your location" /></label><label>Time zone<input required maxLength={80} value={departmentDraft.timeZone} onChange={(event) => setDepartmentDraft((current) => ({ ...current, timeZone: event.target.value }))} placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsDepartmentOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Saving…" : "Save location"}</button></div></form><button className="button button-secondary location-add-button" type="button" onClick={() => setIsAddingLocation(true)}><Plus size={16} /> Add another location</button></>}
+        </section></div>}
     </div>
   );
 }

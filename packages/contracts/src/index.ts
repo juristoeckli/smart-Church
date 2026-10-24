@@ -34,6 +34,8 @@ export interface DepartmentProfile {
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
 
+export type CreateDepartment = Omit<DepartmentProfile, "id">;
+
 export interface AuthenticatedUser {
   id: string;
   email: string;

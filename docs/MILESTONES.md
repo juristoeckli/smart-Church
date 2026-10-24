@@ -7,7 +7,7 @@ Status: implementation started. The TypeScript workspace, shared contracts, Post
 Agreed scope: Core, departments, local login, permissions, worker management, required Notifications/System Management modules and one example module.
 
 - [x] [M1: Set up TypeScript workspace and shared contracts](https://github.com/juristoeckli/smart-Church/issues/1)
-- [ ] [M1: Implement installation setup and department isolation](https://github.com/juristoeckli/smart-Church/issues/2) — development contacts are scoped to a configured department; first-run setup and user-selected department context remain outstanding.
+- [ ] [M1: Implement installation setup and location isolation](https://github.com/juristoeckli/smart-Church/issues/2) — first administrator setup and location switching are in place; per-location memberships, permissions and worker-backed example records remain outstanding.
 - [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3)
 - [ ] [M1: Implement module SDK and worker supervision](https://github.com/juristoeckli/smart-Church/issues/4)
 - [ ] [M1: Build shared React shell and example module](https://github.com/juristoeckli/smart-Church/issues/5)

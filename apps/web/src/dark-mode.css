@@ -450,3 +450,7 @@
 :root[data-theme="dark"] .auth-background-mark {
   color: #282a36;
 }
+
+:root[data-theme="dark"] .church-location-select {
+  color: var(--ink);
+}
