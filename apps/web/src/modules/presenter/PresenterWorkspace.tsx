@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { AudioLines, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Eye, EyeOff, FileMusic, FileUp, ListMusic, Monitor, Music2, Plus, Search, SlidersHorizontal, Upload, WandSparkles, X } from "lucide-react";
+import { AudioLines, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Eye, EyeOff, FileMusic, FileUp, ListMusic, Monitor, Music2, Plus, Search, Settings2, SlidersHorizontal, Upload, WandSparkles, X } from "lucide-react";
 import "./presenter.css";
 
 type Dataset = { id: string; name: string; description: string; songCount: number; slideCount: number; builtIn: boolean };
@@ -24,6 +24,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   const [outputBackground, setOutputBackground] = useState("black");
   const [preloadKiosk, setPreloadKiosk] = useState(false);
   const [legacyBrowser, setLegacyBrowser] = useState(false);
+  const [outputSettingsOpen, setOutputSettingsOpen] = useState(false);
   const [sessionNameDraft, setSessionNameDraft] = useState("");
   const [showOutput, setShowOutput] = useState(false);
   const [outputBusy, setOutputBusy] = useState(false);
@@ -38,10 +39,25 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   const [playlistOpen, setPlaylistOpen] = useState(true);
   const [librariesOpen, setLibrariesOpen] = useState(true);
   const importInput = useRef<HTMLInputElement>(null);
+  const outputSettingsRef = useRef<HTMLDivElement>(null);
 
   const requestHeaders = useMemo(() => ({ "x-department-id": departmentId }), [departmentId]);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
   const activeOutputLinks = outputLinks[activeSessionId] ?? {};
+
+  useEffect(() => {
+    if (!outputSettingsOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !outputSettingsRef.current?.contains(event.target)) setOutputSettingsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setOutputSettingsOpen(false); };
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [outputSettingsOpen]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -221,6 +237,20 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
         <div className="video-presenter-tools">
           <button type="button" onClick={() => setOutputVisible((visible) => !visible)}><SlidersHorizontal size={13} /> {outputVisible ? "Hide output panel" : "Show output panel"}</button>
           <label className="video-presenter-session-picker">Session <select aria-label="Presenter output session" value={activeSessionId} onChange={(event) => { setActiveSessionId(event.target.value); setPresentedSlideIndex(null); }}>{sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}</select></label>
+          <div className="video-presenter-output-menu" ref={outputSettingsRef}>
+            <button type="button" aria-expanded={outputSettingsOpen} aria-controls="presenter-output-settings-menu" onClick={() => setOutputSettingsOpen((open) => !open)}><Settings2 size={13} /> Output settings</button>
+            {outputSettingsOpen && <section id="presenter-output-settings-menu" className="video-presenter-output-menu-panel" aria-label="Output link settings">
+              <h3>Output link settings · {activeSession?.name ?? "Main"}</h3>
+              <label className="presenter-output-option">Background<select value={outputBackground} onChange={(event) => setOutputBackground(event.target.value)}><option value="black">Black</option><option value="white">White</option><option value="transparent">Transparent</option></select></label>
+              <label className="presenter-output-check"><input type="checkbox" checked={preloadKiosk} onChange={(event) => setPreloadKiosk(event.target.checked)} /> Preload all slides for Kiosk</label>
+              <p className="presenter-output-help">Preloads the current song’s slides, then refreshes when the song changes.</p>
+              <label className="presenter-output-check"><input type="checkbox" checked={legacyBrowser} onChange={(event) => setLegacyBrowser(event.target.checked)} /> Legacy browser compatibility (Chromium 62)</label>
+              <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink("output")} disabled={!capabilities.canPresent || outputBusy}><ExternalLink size={14} />{outputBusy ? "Generating…" : "Generate Output link"}</button>
+              {activeOutputLinks.output && <div className="presenter-output-link-row"><a href={activeOutputLinks.output} target="_blank" rel="noreferrer">Open Output</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks.output!)}><Copy size={13} /> Copy</button></div>}
+              <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink("kiosk")} disabled={!capabilities.canPresent || outputBusy}><Monitor size={14} />{outputBusy ? "Generating…" : "Generate Kiosk link"}</button>
+              {activeOutputLinks.kiosk && <div className="presenter-output-link-row"><a href={activeOutputLinks.kiosk} target="_blank" rel="noreferrer">Open Kiosk</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks.kiosk!)}><Copy size={13} /> Copy</button></div>}
+            </section>}
+          </div>
           <button type="button" disabled={!capabilities.canEdit}><Upload size={13} /> Import slides…</button>
           <button type="button" disabled={!capabilities.canManageLayouts}><WandSparkles size={13} /> Layouts…</button>
           <label className="video-presenter-columns">Columns <input type="range" min="1" max="5" value={columns} onChange={(event) => setColumns(Number(event.target.value))} /><output>{columns}</output></label>
@@ -242,17 +272,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
         <header><strong><Monitor size={14} /> {activeSession?.name ?? "Main"} output</strong><span className="video-presenter-output-badge">{activeSession?.connected ? showOutput ? "LIVE" : "BLANK" : "OFFLINE"}</span></header>
         <div className={`video-presenter-monitor${showOutput ? "" : " is-hidden"}`}>{showOutput && activeSession?.songName ? <div><Eye size={22} /><span>{activeSession.songName}</span></div> : <div><EyeOff size={22} /><span>{activeSession?.connected ? "Output is blank" : "Display not connected"}</span></div>}</div>
         <p className="video-presenter-output-caption">{activeSession?.connected ? showOutput ? `Showing on ${activeSession.name}` : `${activeSession.name} is connected and blank` : "Connect a browser on the display or projector."}</p>
-        <section className="video-presenter-output-settings"><h3>Output link settings</h3>
-          <label className="presenter-output-option">Background<select value={outputBackground} onChange={(event) => setOutputBackground(event.target.value)}><option value="black">Black</option><option value="white">White</option><option value="transparent">Transparent</option></select></label>
-          <label className="presenter-output-check"><input type="checkbox" checked={preloadKiosk} onChange={(event) => setPreloadKiosk(event.target.checked)} /> Preload all slides for Kiosk</label>
-          <p className="presenter-output-help">Kiosk loads every slide from the song currently on air and preloads again when the song changes.</p>
-          <label className="presenter-output-check"><input type="checkbox" checked={legacyBrowser} onChange={(event) => setLegacyBrowser(event.target.checked)} /> Legacy browser compatibility (Chromium 62)</label>
-          <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink("output")} disabled={!capabilities.canPresent || outputBusy}><ExternalLink size={14} />{outputBusy ? "Generating…" : "Generate Output link"}</button>
-          {activeOutputLinks.output && <div className="presenter-output-link-row"><a href={activeOutputLinks.output} target="_blank" rel="noreferrer">Open Output</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks.output!)}><Copy size={13} /> Copy</button></div>}
-          <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink("kiosk")} disabled={!capabilities.canPresent || outputBusy}><Monitor size={14} />{outputBusy ? "Generating…" : "Generate Kiosk link"}</button>
-          {activeOutputLinks.kiosk && <div className="presenter-output-link-row"><a href={activeOutputLinks.kiosk} target="_blank" rel="noreferrer">Open Kiosk</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks.kiosk!)}><Copy size={13} /> Copy</button></div>}
-          {activeSession?.connected && <button type="button" className="presenter-output-action presenter-output-clear" onClick={() => { setPresentedSlideIndex(null); void sendOutputState({ visible: false, clear: true }); }} disabled={!capabilities.canPresent || outputBusy}><X size={14} /> Clear output</button>}
-        </section>
+        {activeSession?.connected && <section className="video-presenter-output-settings"><button type="button" className="presenter-output-action presenter-output-clear" onClick={() => { setPresentedSlideIndex(null); void sendOutputState({ visible: false, clear: true }); }} disabled={!capabilities.canPresent || outputBusy}><X size={14} /> Clear output</button></section>}
         {activeSession?.id !== "main" && capabilities.canManageLayouts && <section className="video-presenter-output-settings"><h3>Aux display name</h3><div className="presenter-session-name"><input aria-label="Aux session name" maxLength={32} value={sessionNameDraft} onChange={(event) => setSessionNameDraft(event.target.value)} /><button type="button" className="presenter-output-action" onClick={() => void saveSessionName()} disabled={outputBusy || !sessionNameDraft.trim()}>Save</button></div></section>}
       </aside>}
     </div>

@@ -36,9 +36,12 @@
 .video-presenter-library-note{display:flex;gap:7px;margin:14px 2px 0;padding:9px;border:1px dashed var(--line);border-radius:6px;color:var(--muted);font-size:9px;line-height:1.5}
 .video-presenter-library-note svg{flex:0 0 auto}
 .video-presenter-editor{display:flex;flex-direction:column;min-width:0;min-height:0}
-.video-presenter-tools{display:flex;align-items:center;gap:7px;min-height:43px;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--panel) 86%,var(--line))}
-.video-presenter-tools>button{display:inline-flex;align-items:center;gap:5px;min-height:27px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:9px;white-space:nowrap}
-.video-presenter-tools>button:hover:not(:disabled){border-color:#aa98c4}
+.video-presenter-tools{position:relative;z-index:5;display:flex;align-items:center;gap:7px;min-height:43px;flex-wrap:wrap;padding:6px 10px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--panel) 86%,var(--line))}
+.video-presenter-tools>button,.video-presenter-output-menu>button{display:inline-flex;align-items:center;gap:5px;min-height:27px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:9px;white-space:nowrap;cursor:pointer}
+.video-presenter-tools>button:hover:not(:disabled),.video-presenter-output-menu>button:hover{border-color:#aa98c4}
+.video-presenter-output-menu{position:relative}
+.video-presenter-output-menu-panel{position:absolute;top:calc(100% + 8px);left:0;z-index:20;width:min(340px,calc(100vw - 32px));max-height:min(72vh,640px);overflow:auto;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 12px 32px #0008;color:var(--ink)}
+.video-presenter-output-menu-panel h3{margin:2px 0 13px;font-size:12px}
 .video-presenter-columns,.video-presenter-show{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;white-space:nowrap}
 .video-presenter-session-picker{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;white-space:nowrap}
 .video-presenter-session-picker select{max-width:145px;height:27px;padding:0 7px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--ink);font-size:9px}
