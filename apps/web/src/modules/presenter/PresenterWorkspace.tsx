@@ -7,7 +7,6 @@ type SongSummary = { number: number; sourceNumber: number; name: string; slideCo
 type Slide = { type: "text"; text: string; label?: string; section?: string; layout?: "lower-third" } | { type: "image"; asset: string; label: string; section?: string; imageUrl: string };
 type Song = SongSummary & { slides: Slide[] };
 type PresenterSession = { id: string; name: string; connected: boolean; visible: boolean; songName: string | null };
-type PresenterLinks = { output?: string; kiosk?: string };
 const defaultLibraries = [
   { id: "singt-notation", name: "Singt with musical notes", icon: Music2 },
   { id: "singt-text", name: "Singt just text", icon: AudioLines },
@@ -20,9 +19,8 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   const [sessions, setSessions] = useState<PresenterSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("main");
   const [outputTokens, setOutputTokens] = useState<Record<string, string>>({});
-  const [outputLinks, setOutputLinks] = useState<Record<string, PresenterLinks>>({});
+  const [outputLinks, setOutputLinks] = useState<Record<string, string>>({});
   const [outputBackground, setOutputBackground] = useState("black");
-  const [preloadKiosk, setPreloadKiosk] = useState(false);
   const [legacyBrowser, setLegacyBrowser] = useState(false);
   const [outputSettingsOpen, setOutputSettingsOpen] = useState(false);
   const [sessionNameDraft, setSessionNameDraft] = useState("");
@@ -110,7 +108,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
     setSessionNameDraft(activeSession?.name ?? "");
   }, [activeSessionId, activeSession?.name, activeSession?.visible]);
 
-  async function generateOutputLink(mode: "output" | "kiosk") {
+  async function generateOutputLink() {
     setOutputBusy(true);
     setNotice("");
     try {
@@ -127,12 +125,10 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
       }
       const link = new URL("/presenter-output.html", window.location.origin);
       link.searchParams.set("token", token);
-      link.searchParams.set("mode", mode);
       link.searchParams.set("background", outputBackground);
-      link.searchParams.set("preload", mode === "kiosk" && preloadKiosk ? "1" : "0");
       link.searchParams.set("legacy", legacyBrowser ? "1" : "0");
-      setOutputLinks((current) => ({ ...current, [activeSessionId]: { ...current[activeSessionId], [mode]: link.toString() } }));
-      setNotice(`${mode === "kiosk" ? "Kiosk" : "Output"} link generated for ${activeSession?.name ?? "Main"}.`);
+      setOutputLinks((current) => ({ ...current, [activeSessionId]: link.toString() }));
+      setNotice(`Output link generated for ${activeSession?.name ?? "Main"}.`);
     } catch (error) { setNotice(error instanceof Error ? error.message : "Could not generate Presenter link."); }
     finally { setOutputBusy(false); }
   }
@@ -236,19 +232,17 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
       <main className="video-presenter-editor">
         <div className="video-presenter-tools">
           <button type="button" onClick={() => setOutputVisible((visible) => !visible)}><SlidersHorizontal size={13} /> {outputVisible ? "Hide output panel" : "Show output panel"}</button>
-          <label className="video-presenter-session-picker">Session <select aria-label="Presenter output session" value={activeSessionId} onChange={(event) => { setActiveSessionId(event.target.value); setPresentedSlideIndex(null); }}>{sessions.map((session) => <option key={session.id} value={session.id}>{session.name}</option>)}</select></label>
           <div className="video-presenter-output-menu" ref={outputSettingsRef}>
             <button type="button" aria-expanded={outputSettingsOpen} aria-controls="presenter-output-settings-menu" onClick={() => setOutputSettingsOpen((open) => !open)}><Settings2 size={13} /> Output settings</button>
             {outputSettingsOpen && <section id="presenter-output-settings-menu" className="video-presenter-output-menu-panel" aria-label="Output link settings">
               <h3>Output link settings · {activeSession?.name ?? "Main"}</h3>
+              <label className="video-presenter-session-picker">Control session<select aria-label="Presenter output session" value={activeSessionId} onChange={(event) => { setActiveSessionId(event.target.value); setPresentedSlideIndex(null); }}>
+                <option value="main">Main</option>{Array.from({ length: 10 }, (_, index) => { const id = `aux${index + 1}`; const session = sessions.find((item) => item.id === id); return <option key={id} value={id}>{session?.name ?? `Aux ${index + 1}`}</option>; })}
+              </select></label>
               <label className="presenter-output-option">Background<select value={outputBackground} onChange={(event) => setOutputBackground(event.target.value)}><option value="black">Black</option><option value="white">White</option><option value="transparent">Transparent</option></select></label>
-              <label className="presenter-output-check"><input type="checkbox" checked={preloadKiosk} onChange={(event) => setPreloadKiosk(event.target.checked)} /> Preload all slides for Kiosk</label>
-              <p className="presenter-output-help">Preloads the current song’s slides, then refreshes when the song changes.</p>
               <label className="presenter-output-check"><input type="checkbox" checked={legacyBrowser} onChange={(event) => setLegacyBrowser(event.target.checked)} /> Legacy browser compatibility (Chromium 62)</label>
-              <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink("output")} disabled={!capabilities.canPresent || outputBusy}><ExternalLink size={14} />{outputBusy ? "Generating…" : "Generate Output link"}</button>
-              {activeOutputLinks.output && <div className="presenter-output-link-row"><a href={activeOutputLinks.output} target="_blank" rel="noreferrer">Open Output</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks.output!)}><Copy size={13} /> Copy</button></div>}
-              <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink("kiosk")} disabled={!capabilities.canPresent || outputBusy}><Monitor size={14} />{outputBusy ? "Generating…" : "Generate Kiosk link"}</button>
-              {activeOutputLinks.kiosk && <div className="presenter-output-link-row"><a href={activeOutputLinks.kiosk} target="_blank" rel="noreferrer">Open Kiosk</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks.kiosk!)}><Copy size={13} /> Copy</button></div>}
+              <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink()} disabled={!capabilities.canPresent || outputBusy}><ExternalLink size={14} />{outputBusy ? "Generating…" : "Generate Output link"}</button>
+              {activeOutputLinks && <div className="presenter-output-link-row"><a href={activeOutputLinks} target="_blank" rel="noreferrer">Open Output</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks)}><Copy size={13} /> Copy</button></div>}
             </section>}
           </div>
           <button type="button" disabled={!capabilities.canEdit}><Upload size={13} /> Import slides…</button>

@@ -42,6 +42,8 @@
 .video-presenter-output-menu{position:relative}
 .video-presenter-output-menu-panel{position:absolute;top:calc(100% + 8px);left:0;z-index:20;width:min(340px,calc(100vw - 32px));max-height:min(72vh,640px);overflow:auto;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);box-shadow:0 12px 32px #0008;color:var(--ink)}
 .video-presenter-output-menu-panel h3{margin:2px 0 13px;font-size:12px}
+.video-presenter-output-menu-panel .video-presenter-session-picker{display:grid;gap:5px;margin-bottom:12px;color:var(--muted)}
+.video-presenter-output-menu-panel .video-presenter-session-picker select{width:100%;max-width:none;height:32px}
 .video-presenter-columns,.video-presenter-show{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;white-space:nowrap}
 .video-presenter-session-picker{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:9px;white-space:nowrap}
 .video-presenter-session-picker select{max-width:145px;height:27px;padding:0 7px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--ink);font-size:9px}
