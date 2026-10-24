@@ -33,3 +33,29 @@ export interface DepartmentProfile {
 }
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
+
+export interface AuthenticatedUser {
+  id: string;
+  email: string;
+  displayName: string;
+  role: "admin";
+}
+
+export interface AuthStatus {
+  setupRequired: boolean;
+  authenticated: boolean;
+  user?: AuthenticatedUser;
+}
+
+export interface CreateAdminAccount {
+  setupCode: string;
+  location: string;
+  email: string;
+  displayName: string;
+  password: string;
+}
+
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}

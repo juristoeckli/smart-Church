@@ -9,6 +9,7 @@ import {
   CircleHelp,
   ContactRound,
   LayoutDashboard,
+  LogOut,
   Menu,
   Moon,
   Plus,
@@ -19,7 +20,8 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import type { Contact, ContactStatus, DepartmentProfile } from "@smart-church/contracts";
+import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, DepartmentProfile } from "@smart-church/contracts";
+import { Authentication } from "./Authentication";
 import { ServicesEvents } from "./ServicesEvents";
 
 const navigation = [
@@ -34,7 +36,7 @@ const today = new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long",
 const defaultLogoUrl = "/gfc-logo.svg";
 const defaultDepartment: DepartmentProfile = {
   id: "",
-  location: "Steffisburg",
+  location: "Location not configured",
   timeZone: "Europe/Zurich",
 };
 
@@ -69,6 +71,10 @@ function App() {
   const [departmentDraft, setDepartmentDraft] = useState(defaultDepartment);
   const [isDepartmentOpen, setIsDepartmentOpen] = useState(false);
   const [isDepartmentSaving, setIsDepartmentSaving] = useState(false);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authUser, setAuthUser] = useState<AuthenticatedUser | null>(null);
+  const [setupRequired, setSetupRequired] = useState(false);
+  const [authUnavailableMessage, setAuthUnavailableMessage] = useState("");
 
   const logoSrc = logoDataUrl || defaultLogoUrl;
 
@@ -82,6 +88,19 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    fetch("/api/auth/status")
+      .then(async (response) => {
+        const result = await response.json() as AuthStatus | { error?: string };
+        if (!response.ok || !("authenticated" in result)) throw new Error("error" in result ? result.error ?? "Could not check sign-in status." : "Could not check sign-in status.");
+        setSetupRequired(result.setupRequired);
+        setAuthUser(result.user ?? null);
+      })
+      .catch((error: unknown) => setAuthUnavailableMessage(error instanceof Error ? error.message : "The account service is unavailable."))
+      .finally(() => setAuthLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) return;
     fetch("/api/contacts")
       .then(async (response) => {
         const result = await response.json();
@@ -90,9 +109,10 @@ function App() {
       })
       .catch((error: unknown) => setLoadError(error instanceof Error ? error.message : "Could not load contacts."))
       .finally(() => setIsLoading(false));
-  }, []);
+  }, [authUser]);
 
   useEffect(() => {
+    if (!authUser) return;
     fetch("/api/branding")
       .then(async (response) => {
         if (!response.ok) return;
@@ -102,9 +122,10 @@ function App() {
       .catch(() => {
         // The supplied GfC logo remains the default when local settings are unavailable.
       });
-  }, []);
+  }, [authUser]);
 
   useEffect(() => {
+    if (!authUser) return;
     fetch("/api/department")
       .then(async (response) => {
         const result = await response.json();
@@ -114,7 +135,7 @@ function App() {
       .catch(() => {
         // The environment defaults remain visible when the local database is unavailable.
       });
-  }, []);
+  }, [authUser]);
 
   useEffect(() => setLogoUnavailable(false), [logoSrc]);
 
@@ -236,8 +257,28 @@ function App() {
     window.setTimeout(() => setNotice(""), 4000);
   }
 
+  async function signOut() {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } catch {
+      // Clear the local view even if the API has gone offline; the server session expires on its own.
+    } finally {
+      setAuthUser(null);
+      setContacts([]);
+      setLogoDataUrl(null);
+      setDepartment(defaultDepartment);
+      setIsBrandingOpen(false);
+      setIsDepartmentOpen(false);
+    }
+  }
+
   const memberCount = contacts.filter((contact) => contact.status === "member").length;
   const visitorCount = contacts.filter((contact) => contact.status === "visitor").length;
+
+  if (authLoading) return <main className="auth-page"><section className="auth-card auth-loading" role="status"><span className="eyebrow">GFC WORKSPACE</span><p>Checking your sign-in…</p></section></main>;
+  if (!authUser) return <Authentication setupRequired={setupRequired} unavailableMessage={authUnavailableMessage} onAuthenticated={(user) => { setAuthUnavailableMessage(""); setSetupRequired(false); setAuthUser(user); }} />;
+
+  const userInitials = authUser.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || authUser.email[0]?.toUpperCase() || "U";
 
   return (
     <div className="app-frame">
@@ -274,9 +315,9 @@ function App() {
           <button className="nav-item" type="button" onClick={openBrandingSettings}><Settings2 size={18} strokeWidth={1.8} /><span>Settings</span></button>
           <button className="nav-item" type="button" onClick={() => setNotice("Help will be added in a later step.")}><CircleHelp size={18} strokeWidth={1.8} /><span>Help & support</span></button>
           <div className="profile-card">
-            <div className="profile-avatar">JM</div>
-            <div className="profile-details"><strong>Jordan Miller</strong><small>Administrator</small></div>
-            <button className="icon-button profile-menu" type="button" aria-label="Profile menu" onClick={() => setNotice("Account settings will be added in a later step.")}><ChevronDown size={16} /></button>
+            <div className="profile-avatar">{userInitials}</div>
+            <div className="profile-details"><strong>{authUser.displayName}</strong><small>Administrator</small></div>
+            <button className="icon-button profile-menu" type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()}><LogOut size={16} /></button>
           </div>
         </div>
       </aside>
@@ -287,7 +328,7 @@ function App() {
         <header className="topbar">
           <button className="icon-button mobile-menu-button" type="button" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
           <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{page}</strong></div>
-          <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button theme-toggle" type="button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} aria-pressed={theme === "dark"} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-avatar">JM</div></div>
+          <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button theme-toggle" type="button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} aria-pressed={theme === "dark"} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-avatar">{userInitials}</div></div>
         </header>
 
         <div className="page-wrap">
@@ -330,8 +371,8 @@ function App() {
 
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
 
-      {isBrandingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsBrandingOpen(false)}><section className="modal branding-modal" role="dialog" aria-modal="true" aria-labelledby="branding-title"><div className="modal-heading"><div><span className="eyebrow">SITE ADMINISTRATION</span><h2 id="branding-title">Site logo</h2><p>Choose the logo shown at the top of the sidebar.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsBrandingOpen(false)}><X size={19} /></button></div><div className="branding-preview"><img src={brandingDraft || defaultLogoUrl} alt="Logo preview" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div><label className="branding-upload">Upload a logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectBrandingLogo(event.currentTarget.files?.[0])} /></label><p className="branding-help">PNG, JPEG, or WebP · up to 2 MB. The GfC logo is used by default.</p><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setBrandingDraft(null)}>Use GfC default</button><button className="button button-secondary" type="button" onClick={() => setIsBrandingOpen(false)}>Cancel</button><button className="button button-primary" type="button" disabled={isBrandingSaving} onClick={saveBranding}>{isBrandingSaving ? "Saving…" : "Save logo"}</button></div><p className="modal-demo-footnote">Local development only. Admin sign-in will protect branding settings when authentication is added.</p></section></div>}
-      {isDepartmentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsDepartmentOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="department-title"><div className="modal-heading"><div><span className="eyebrow">GFC LOCATION</span><h2 id="department-title">Location settings</h2><p>Set the location shown across this workspace.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsDepartmentOpen(false)}><X size={19} /></button></div><form onSubmit={saveDepartmentSettings}><label>Location<input autoFocus required maxLength={120} value={departmentDraft.location} onChange={(event) => setDepartmentDraft((current) => ({ ...current, location: event.target.value }))} placeholder="Steffisburg" /></label><label>Time zone<input required maxLength={80} value={departmentDraft.timeZone} onChange={(event) => setDepartmentDraft((current) => ({ ...current, timeZone: event.target.value }))} placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsDepartmentOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Saving…" : "Save details"}</button></div></form><p className="modal-demo-footnote">Local development only. Authentication and admin permissions are not yet implemented.</p></section></div>}
+      {isBrandingOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsBrandingOpen(false)}><section className="modal branding-modal" role="dialog" aria-modal="true" aria-labelledby="branding-title"><div className="modal-heading"><div><span className="eyebrow">SITE ADMINISTRATION</span><h2 id="branding-title">Site logo</h2><p>Choose the logo shown at the top of the sidebar.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsBrandingOpen(false)}><X size={19} /></button></div><div className="branding-preview"><img src={brandingDraft || defaultLogoUrl} alt="Logo preview" onError={(event) => { event.currentTarget.style.display = "none"; }} /></div><label className="branding-upload">Upload a logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => selectBrandingLogo(event.currentTarget.files?.[0])} /></label><p className="branding-help">PNG, JPEG, or WebP · up to 2 MB. The GfC logo is used by default.</p><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setBrandingDraft(null)}>Use GfC default</button><button className="button button-secondary" type="button" onClick={() => setIsBrandingOpen(false)}>Cancel</button><button className="button button-primary" type="button" disabled={isBrandingSaving} onClick={saveBranding}>{isBrandingSaving ? "Saving…" : "Save logo"}</button></div><p className="modal-demo-footnote">Your signed-in account can update the logo for this installation.</p></section></div>}
+      {isDepartmentOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsDepartmentOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="department-title"><div className="modal-heading"><div><span className="eyebrow">GFC LOCATION</span><h2 id="department-title">Location settings</h2><p>Set the location shown across this workspace.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsDepartmentOpen(false)}><X size={19} /></button></div><form onSubmit={saveDepartmentSettings}><label>Location<input autoFocus required maxLength={120} value={departmentDraft.location} onChange={(event) => setDepartmentDraft((current) => ({ ...current, location: event.target.value }))} placeholder="Enter your location" /></label><label>Time zone<input required maxLength={80} value={departmentDraft.timeZone} onChange={(event) => setDepartmentDraft((current) => ({ ...current, timeZone: event.target.value }))} placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsDepartmentOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Saving…" : "Save details"}</button></div></form><p className="modal-demo-footnote">Your signed-in account can update this location and time zone.</p></section></div>}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 # Delivery plan
 
-Status: implementation started. The TypeScript workspace, shared contact types, Core API and PostgreSQL-backed local People directory are in place. Local authentication and permission checks remain outstanding.
+Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC location/logo, and first local administrator sign-in are in place. Department memberships, scoped permissions, worker management and remaining Milestone 1 modules are still outstanding.
 
 ## Milestone 1 — foundation
 

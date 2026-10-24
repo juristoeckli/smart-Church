@@ -1,10 +1,84 @@
 import Fastify from "fastify";
-import { randomUUID } from "node:crypto";
-import type { Contact, CreateContact, CreateServiceEvent, DepartmentProfile, ServiceEvent, UpdateDepartmentProfile } from "@smart-church/contracts";
+import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateServiceEvent, DepartmentProfile, LoginCredentials, ServiceEvent, UpdateDepartmentProfile } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
 let databaseReady = false;
+let firstRunSetupCode: string | null = null;
+const sessionCookieName = "smart_church_session";
+const sessionLifetimeSeconds = 24 * 60 * 60;
+const failedLogins = new Map<string, { count: number; resetAt: number }>();
+
+function cookieValue(cookieHeader: string | undefined, name: string) {
+  return cookieHeader?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function hashPassword(password: string) {
+  const salt = randomBytes(16);
+  const derived = scryptSync(password, salt, 64);
+  return `scrypt$${salt.toString("hex")}$${derived.toString("hex")}`;
+}
+
+const dummyPasswordHash = hashPassword(randomBytes(32).toString("hex"));
+
+function verifyPassword(password: string, encoded: string) {
+  const [algorithm, saltHex, hashHex] = encoded.split("$");
+  if (algorithm !== "scrypt" || !saltHex || !hashHex || !/^[\da-f]+$/i.test(saltHex) || !/^[\da-f]+$/i.test(hashHex)) return false;
+  const expected = Buffer.from(hashHex, "hex");
+  const actual = scryptSync(password, Buffer.from(saltHex, "hex"), expected.length);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function setSessionCookie(reply: { header: (name: string, value: string) => unknown }, token: string) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  reply.header("Set-Cookie", `${sessionCookieName}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${sessionLifetimeSeconds}${secure}`);
+}
+
+function clearSessionCookie(reply: { header: (name: string, value: string) => unknown }) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  reply.header("Set-Cookie", `${sessionCookieName}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secure}`);
+}
+
+async function currentUser(token: string | undefined): Promise<AuthenticatedUser | null> {
+  if (!pool || !token || !/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
+  const result = await pool.query(
+    `SELECT u.id, u.email, u.display_name, u.role
+       FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
+      WHERE s.token_hash = $1 AND s.expires_at > now()`,
+    [hashToken(token)],
+  );
+  const row = result.rows[0];
+  return row ? { id: row.id, email: row.email, displayName: row.display_name, role: row.role } : null;
+}
+
+function setupCodeMatches(candidate: string) {
+  if (!firstRunSetupCode) return false;
+  const expected = Buffer.from(firstRunSetupCode);
+  const actual = Buffer.from(candidate);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+async function createSession(userId: string, reply: { header: (name: string, value: string) => unknown }) {
+  const token = randomBytes(32).toString("base64url");
+  await pool!.query(
+    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'))`,
+    [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds],
+  );
+  setSessionCookie(reply, token);
+}
+
+app.addHook("preHandler", async (request, reply) => {
+  if (request.url === "/api/health" || request.url.startsWith("/api/auth/")) return;
+  if (!databaseReady) return;
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+});
 
 type ServiceEventRow = {
   id: string;
@@ -59,6 +133,125 @@ function validateServiceEvent(event: CreateServiceEvent) {
 }
 
 app.get("/api/health", async () => ({ status: databaseReady ? "ok" : "database_unavailable" }));
+
+app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error: string }> => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
+  const count = await pool.query("SELECT count(*)::int AS total FROM app_users");
+  return {
+    setupRequired: count.rows[0].total === 0,
+    authenticated: user !== null,
+    ...(user ? { user } : {}),
+  };
+});
+
+app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
+  schema: {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      required: ["setupCode", "location", "email", "displayName", "password"],
+      properties: {
+        setupCode: { type: "string", minLength: 8, maxLength: 80 },
+        location: { type: "string", minLength: 1, maxLength: 120 },
+        email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        displayName: { type: "string", minLength: 1, maxLength: 100 },
+        password: { type: "string", minLength: 12, maxLength: 128 },
+      },
+    },
+  },
+}, async (request, reply): Promise<{ user: AuthenticatedUser } | { error: string }> => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!setupCodeMatches(request.body.setupCode)) return reply.code(403).send({ error: "The one-time setup code is not valid. Check the local Core API terminal." });
+
+  const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const location = request.body.location.trim();
+  const displayName = request.body.displayName.trim();
+  if (!location) return reply.code(400).send({ error: "Enter the church location." });
+  if (!displayName) return reply.code(400).send({ error: "Enter your name." });
+  const passwordHash = hashPassword(request.body.password);
+  const client = await pool.connect();
+  let user: AuthenticatedUser;
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(1196571730, 1)");
+    const existing = await client.query("SELECT id FROM app_users LIMIT 1");
+    if (existing.rowCount) {
+      await client.query("ROLLBACK");
+      firstRunSetupCode = null;
+      return reply.code(409).send({ error: "The initial administrator has already been created." });
+    }
+    const department = await client.query(
+      "UPDATE departments SET name = $2, updated_at = now() WHERE id = $1",
+      [departmentId, location],
+    );
+    if (!department.rowCount) throw new Error("The configured department could not be found.");
+    const result = await client.query(
+      `INSERT INTO app_users (id, email, display_name, password_hash, role)
+       VALUES ($1, $2, $3, $4, 'admin') RETURNING id, email, display_name, role`,
+      [randomUUID(), email, displayName, passwordHash],
+    );
+    const row = result.rows[0];
+    user = { id: row.id, email: row.email, displayName: row.display_name, role: row.role };
+    await client.query("COMMIT");
+    firstRunSetupCode = null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
+    throw error;
+  } finally {
+    client.release();
+  }
+  await createSession(user.id, reply);
+  return reply.code(201).send({ user });
+});
+
+app.post<{ Body: LoginCredentials }>("/api/auth/login", {
+  schema: {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      required: ["email", "password"],
+      properties: {
+        email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        password: { type: "string", minLength: 1, maxLength: 128 },
+      },
+    },
+  },
+}, async (request, reply): Promise<{ user: AuthenticatedUser } | { error: string }> => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const now = Date.now();
+  const attempts = failedLogins.get(request.ip);
+  if (attempts && attempts.resetAt > now && attempts.count >= 5) {
+    return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
+  }
+  const result = await pool.query(
+    "SELECT id, email, display_name, password_hash, role FROM app_users WHERE lower(email) = $1",
+    [request.body.email.trim().toLocaleLowerCase("en-US")],
+  );
+  const row = result.rows[0];
+  const passwordMatches = verifyPassword(request.body.password, row?.password_hash ?? dummyPasswordHash);
+  if (!row || !passwordMatches) {
+    const current = attempts && attempts.resetAt > now ? attempts : { count: 0, resetAt: now + 15 * 60_000 };
+    failedLogins.set(request.ip, { count: current.count + 1, resetAt: current.resetAt });
+    return reply.code(401).send({ error: "Email or password is incorrect." });
+  }
+  failedLogins.delete(request.ip);
+  const user: AuthenticatedUser = { id: row.id, email: row.email, displayName: row.display_name, role: row.role };
+  await createSession(user.id, reply);
+  return { user };
+});
+
+app.post("/api/auth/logout", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  const token = cookieValue(request.headers.cookie, sessionCookieName);
+  if (pool && token) await pool.query("DELETE FROM auth_sessions WHERE token_hash = $1", [hashToken(token)]);
+  clearSessionCookie(reply);
+  return { ok: true };
+});
 
 app.get("/api/department", async (_request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
@@ -319,10 +512,18 @@ const port = Number(process.env.PORT ?? 3001);
 
 try {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("Department data endpoints are still in local development mode; authentication is required before production use.");
+    throw new Error("Department memberships and permission checks are still in local development; production mode is disabled until they are complete.");
   }
   try {
     databaseReady = await initializeDatabase();
+    if (databaseReady && pool) {
+      await pool.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
+      const accounts = await pool.query("SELECT count(*)::int AS total FROM app_users");
+      if (accounts.rows[0].total === 0) {
+        firstRunSetupCode = randomBytes(18).toString("base64url");
+        app.log.warn({ setupCode: firstRunSetupCode }, "Use this one-time code to create the first administrator account.");
+      }
+    }
   } catch (error) {
     app.log.error({ err: error }, "Database unavailable; department data will not be saved.");
   }

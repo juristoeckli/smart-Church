@@ -6,6 +6,9 @@
   --green-dark: #5d4b78;
   --green-soft: #383044;
   --line: #353845;
+  --panel: #20232d;
+  --ink: #f0eef6;
+  --muted: #aaa8bc;
 }
 
 :root[data-theme="dark"] body {
@@ -415,4 +418,35 @@
 
 :root[data-theme="dark"] .event-modal textarea::placeholder {
   color: #9998ad;
+}
+
+:root[data-theme="dark"] .auth-page {
+  background: radial-gradient(ellipse at 16% 10%, #302a3a 0, transparent 42%), #191b23;
+}
+
+:root[data-theme="dark"] .auth-card {
+  background: #20232d;
+  border-color: #353845;
+}
+
+:root[data-theme="dark"] .auth-heading h1,
+:root[data-theme="dark"] .auth-brand,
+:root[data-theme="dark"] .auth-form label {
+  color: #f0eef6;
+}
+
+:root[data-theme="dark"] .auth-form input {
+  color: #f0eef6;
+  background: #191b23;
+  border-color: #3b3e4c;
+}
+
+:root[data-theme="dark"] .auth-message-error {
+  color: #e3a9ad;
+  background: #3b2933;
+  border-color: #59404a;
+}
+
+:root[data-theme="dark"] .auth-background-mark {
+  color: #282a36;
 }

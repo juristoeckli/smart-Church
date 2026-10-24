@@ -2,7 +2,7 @@
 
 A modular, department-isolated application with one shared web/desktop interface, optional offline operation, trusted server-to-server sharing and extensible worker processes.
 
-**Status: local development foundation.** The People directory and Services & events schedule read and save department-scoped data through Core API into PostgreSQL. The GfC location and site logo are configurable. Authentication and permission checks are still in progress; keep this API bound to localhost and use fictional data only until those are implemented.
+**Status: local development foundation.** The People directory and Services & events schedule read and save department-scoped data through Core API into PostgreSQL. The GfC location and site logo are configurable. Initial local administrator sign-in is in place; department memberships and permission management are still in progress. Keep this API bound to localhost and use fictional data until access controls are complete.
 
 ## Start here
 
@@ -16,7 +16,7 @@ TypeScript • Node.js LTS / Fastify • React • Electron • PostgreSQL • S
 
 ## Local development
 
-Use Node.js 24.22.1, pnpm 11.25.0 and Docker Desktop. Copy `.env.example` to `.env`, then run `docker compose up -d db`. On startup, Core applies the checked-in SQL migration and creates/updates the configured development department. Run `pnpm install` and `pnpm dev`. The UI is available at `http://localhost:5173`; the API health endpoint is at `http://localhost:3001/api/health`. Stop the local database with `docker compose stop db`; its named volume keeps the development data.
+Use Node.js 24.22.1, pnpm 11.25.0 and Docker Desktop. Copy `.env.example` to `.env`, then run `docker compose up -d db`. On startup, Core applies the checked-in SQL migrations and ensures the configured development department exists. On a fresh database, Core prints a one-time setup code in the API terminal; enter it in the browser with the church location and first administrator details (passwords must be at least 12 characters). Run `pnpm install` and `pnpm dev`. The UI is available at `http://localhost:5173`; the API health endpoint is at `http://localhost:3001/api/health`. Stop the local database with `docker compose stop db`; its named volume keeps the development data.
 
 The directory starts empty. Contacts are stored in PostgreSQL and scoped to `SMART_CHURCH_DEPARTMENT_ID`. If `DATABASE_URL` is not set, the API starts but shows that database-backed contacts are unavailable. The development API has no login yet and refuses to run in production mode; use fictional data only until authentication and permissions are complete.
 
