@@ -9,6 +9,8 @@ coverage/
 runtime/
 backups/
 data/streaming/
+/data/presenter-datasets/
+/apps/api/data/presenter-datasets/
 config/streaming.json
 __pycache__/
 *.py[cod]

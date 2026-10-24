@@ -151,6 +151,8 @@ Department export/import preserves its ID, content, settings and memberships. Di
 
 Keep licensed datasets out of the source repository. Install/import separately per deployment with ID/version/compatibility metadata. Company-authorised users may download local copies; other companies install their own datasets. Updates preserve installed datasets. Dataset licence scope remains the operator's responsibility.
 
+The Presenter module stores datasets separately from playlists and other site data. A dataset package is a versioned `.scdataset.tar.gz` containing one manifest and only that dataset's media. Presenter administrators can import and export individual packages; the three built-in Singt datasets are read-only after installation. Package files are stored under `PRESENTER_DATASETS_DIR`, defaulting to `apps/api/data/presenter-datasets`, and must be included separately in private backups. The import validator rejects path traversal, unsupported formats, missing/extra media and packages above 256 MiB.
+
 ## 14. Proposed source layout
 
 ```text

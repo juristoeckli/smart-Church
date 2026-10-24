@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:datasets": "node --experimental-strip-types scripts/test-datasets.mjs"
   },
   "dependencies": {
     "@smart-church/contracts": "workspace:*",

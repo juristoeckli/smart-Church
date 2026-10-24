@@ -710,7 +710,7 @@ function App() {
         </header>
 
         <div className={`page-wrap${page === "Video & streaming" ? " page-wrap-video" : page === "Presenter" ? " page-wrap-video page-wrap-presenter" : ""}`}>
-          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} canManage={canManageSite} onNotice={setNotice} /> : page === "Video & streaming" ? <VideoModule departmentId={department.id} csrfToken={csrfToken} capabilities={videoCapabilities} /> : page === "Presenter" ? <PresenterWorkspace capabilities={presenterCapabilities} /> : <>
+          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} canManage={canManageSite} onNotice={setNotice} /> : page === "Video & streaming" ? <VideoModule departmentId={department.id} csrfToken={csrfToken} capabilities={videoCapabilities} /> : page === "Presenter" ? <PresenterWorkspace departmentId={department.id} csrfToken={csrfToken} capabilities={presenterCapabilities} /> : <>
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Workspace unavailable · ${loadError}` : `People are saved for ${department.location}`}</div>
 
           <section className="page-heading">
