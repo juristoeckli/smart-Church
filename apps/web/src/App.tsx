@@ -355,7 +355,6 @@ function App() {
           <button className="brand-location" type="button" aria-label={`Switch site. Current site: ${department.location}`} onClick={() => setIsServerSettingsOpen(true)}><span>{department.location}</span><ChevronDown size={15} aria-hidden="true" /></button>
         </div>
 
-        <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
           {navigation.map(({ label, icon: Icon }) => {
             const isAvailablePage = label === "People" || label === "Services & events";
