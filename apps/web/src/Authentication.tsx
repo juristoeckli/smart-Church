@@ -4,6 +4,34 @@ import type { AuthenticatedUser } from "@smart-church/contracts";
 
 const defaultLogoUrl = "/gfc-logo.svg";
 
+export function PasswordChangeRequired({ onChanged }: { onChanged: (user: AuthenticatedUser) => void }) {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    const password = String(values.get("password"));
+    const confirmation = String(values.get("confirmation"));
+    if (password.length < 6) { setError("Use at least 6 characters."); return; }
+    if (password !== confirmation) { setError("The passwords do not match."); return; }
+    setError("");
+    setIsSubmitting(true);
+    try {
+      const response = await fetch("/api/auth/change-password", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
+      const result = await response.json() as { user?: AuthenticatedUser; error?: string };
+      if (!response.ok || !result.user) throw new Error(result.error ?? "Could not change your password.");
+      onChanged(result.user);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Could not change your password.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return <main className="auth-page"><section className="auth-card" aria-labelledby="password-change-title"><a className="auth-brand" href="#home" aria-label="GfC"><img src={defaultLogoUrl} alt="GfC" onError={(event) => { event.currentTarget.style.display = "none"; }} /><span>GfC</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">ACCOUNT SECURITY</span><h1 id="password-change-title">Choose a new password</h1><p>Your administrator reset your password. Set a new one to continue.</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>New password<input name="password" type="password" required minLength={6} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">Use at least 6 characters.</p><label>Confirm new password<input name="confirmation" type="password" required minLength={6} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "Updating…" : "Set new password"}<ArrowRight size={16} /></button></form><p className="auth-footer">Your account is stored on this installation.</p></section></main>;
+}
+
 export function Authentication({
   setupRequired,
   unavailableMessage,

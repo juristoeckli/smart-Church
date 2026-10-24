@@ -43,6 +43,7 @@ export interface AuthenticatedUser {
   username: string;
   displayName: string;
   role: "server_admin" | "user";
+  mustChangePassword: boolean;
 }
 
 export interface SiteUser {

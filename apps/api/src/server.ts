@@ -57,13 +57,13 @@ function clearSessionCookie(reply: { header: (name: string, value: string) => un
 async function currentUser(token: string | undefined): Promise<AuthenticatedUser | null> {
   if (!pool || !token || !/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.username, u.display_name, u.role
+    `SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password
        FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
       WHERE s.token_hash = $1 AND s.expires_at > now()`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -123,6 +123,7 @@ app.addHook("preHandler", async (request, reply) => {
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   request.authenticatedUser = user;
   reply.header("Cache-Control", "no-store");
+  if (user.mustChangePassword) return reply.code(403).send({ error: "Change your password before continuing." });
 });
 
 type ServiceEventRow = {
@@ -241,7 +242,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
       [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
-    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role };
+    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false };
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [user.id, departmentId],
@@ -291,7 +292,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   failedLogins.delete(request.ip);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password };
   await createSession(user.id, reply);
   return { user };
 });
@@ -302,6 +303,24 @@ app.post("/api/auth/logout", async (request, reply) => {
   if (pool && token) await pool.query("DELETE FROM auth_sessions WHERE token_hash = $1", [hashToken(token)]);
   clearSessionCookie(reply);
   return { ok: true };
+});
+
+app.post<{ Body: { password: string } }>("/api/auth/change-password", {
+  schema: {
+    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 6, maxLength: 128 } } },
+  },
+}, async (request, reply): Promise<{ user: AuthenticatedUser } | { error: string }> => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  const result = await pool.query(
+    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role",
+    [user.id, hashPassword(request.body.password)],
+  );
+  const row = result.rows[0];
+  if (!row) return reply.code(401).send({ error: "This account could not be found." });
+  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false } };
 });
 
 app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: string }> => {
@@ -470,6 +489,35 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
     await client.query("DELETE FROM app_users WHERE id = $1", [request.params.id]);
     await client.query("COMMIT");
     return { id: request.params.id };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword: boolean } }>("/api/users/:id/reset-password", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["password", "mustChangePassword"], properties: { password: { type: "string", minLength: 6, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
+  },
+}, async (request, reply): Promise<{ id: string; mustChangePassword: boolean } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  if (request.params.id === request.authenticatedUser?.id) return reply.code(400).send({ error: "Choose another user to reset their password." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const target = await client.query("SELECT id FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    if (!target.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = $3 WHERE id = $1", [request.params.id, hashPassword(request.body.password), request.body.mustChangePassword]);
+    await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [request.params.id]);
+    await client.query("COMMIT");
+    return { id: request.params.id, mustChangePassword: request.body.mustChangePassword };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
