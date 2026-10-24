@@ -94,7 +94,11 @@
 .presenter-output-link-row a{color:var(--ink);text-decoration:none}
 .presenter-output-link-row a:hover{text-decoration:underline}
 .presenter-output-link-row button{display:inline-flex;align-items:center;gap:4px;padding:3px;border:0;background:transparent;color:var(--muted);font:inherit;cursor:pointer}
+.presenter-output-notice{margin:7px 0 0;padding:7px 8px;border:1px solid var(--line);border-radius:5px;color:var(--muted);font-size:9px;line-height:1.4}
 .presenter-session-name{display:flex;gap:6px}
+.presenter-output-session-name{display:grid;gap:5px;margin:0 0 12px;color:var(--muted);font-size:9px}
+.presenter-output-session-name>div{display:flex;gap:6px}
+.presenter-output-session-name>div input{flex:1}
 .presenter-session-name input{width:100%;min-width:0;height:32px;padding:0 8px;border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--ink);font-size:10px}
 .presenter-session-name .presenter-output-action{width:auto;min-width:55px;margin:0}
 .video-presenter-status{min-height:35px;border-top:1px solid var(--line);font-size:8px}

@@ -169,7 +169,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 32 } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
-      const department = await activePresenterDepartment(request, reply, "admin");
+      const department = await activePresenterDepartment(request, reply, "operator");
       if (!department) return reply;
       if (!sessionIds.has(request.params.id)) return reply.code(404).send({ error: "Presenter session not found." });
       if (request.params.id === "main") return reply.code(400).send({ error: "The Main session name cannot be changed." });
@@ -239,6 +239,20 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
         return { ...state, slide: { ...slide, imageUrl: `/api/modules/presenter/public/output/${encodeURIComponent(request.params.token)}/assets/${encodeURIComponent(state.datasetId)}/${encodeURIComponent(assetName)}` } };
       }
       return state;
+    });
+
+    app.get<{ Params: { token: string } }>("/api/modules/presenter/public/output/:token/preload", async (request, reply) => {
+      const state = await readPublicSession(request.params.token);
+      if (!state) return reply.code(404).send({ error: "This Presenter output link is no longer active." });
+      reply.header("Cache-Control", "no-store");
+      if (!state.datasetId || !Number.isSafeInteger(state.songNumber)) return { slides: [] };
+      const dataset = await readDataset(state.datasetId);
+      const song = dataset?.songs.find((item) => item.number === state.songNumber);
+      if (!song) return { slides: [] };
+      const slides = song.slides.map((slide) => slide.type === "image"
+        ? { ...slide, imageUrl: `/api/modules/presenter/public/output/${encodeURIComponent(request.params.token)}/assets/${encodeURIComponent(dataset!.id)}/${encodeURIComponent(slide.asset.slice("pages/".length))}` }
+        : slide);
+      return { datasetId: dataset!.id, songNumber: song.number, slides };
     });
 
     app.get<{ Params: { token: string; datasetId: string; asset: string } }>("/api/modules/presenter/public/output/:token/assets/:datasetId/:asset", async (request, reply) => {

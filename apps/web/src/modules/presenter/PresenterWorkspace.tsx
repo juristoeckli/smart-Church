@@ -21,7 +21,9 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   const [outputTokens, setOutputTokens] = useState<Record<string, string>>({});
   const [outputLinks, setOutputLinks] = useState<Record<string, string>>({});
   const [outputBackground, setOutputBackground] = useState("black");
+  const [preloadOutput, setPreloadOutput] = useState(false);
   const [legacyBrowser, setLegacyBrowser] = useState(false);
+  const [outputNotice, setOutputNotice] = useState("");
   const [outputSettingsOpen, setOutputSettingsOpen] = useState(false);
   const [sessionNameDraft, setSessionNameDraft] = useState("");
   const [showOutput, setShowOutput] = useState(false);
@@ -41,7 +43,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
 
   const requestHeaders = useMemo(() => ({ "x-department-id": departmentId }), [departmentId]);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
-  const activeOutputLinks = outputLinks[activeSessionId] ?? {};
+  const activeOutputLink = outputLinks[activeSessionId] ?? "";
 
   useEffect(() => {
     if (!outputSettingsOpen) return;
@@ -110,14 +112,16 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
 
   async function generateOutputLink() {
     setOutputBusy(true);
+    setOutputNotice("");
     setNotice("");
     try {
       let token = outputTokens[activeSessionId];
       if (!token) {
         const response = await fetch(`/api/presenter/sessions/${encodeURIComponent(activeSessionId)}/connect`, { method: "POST", headers: { ...requestHeaders, "x-csrf-token": csrfToken } });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error ?? "Could not generate Presenter links.");
-        token = result.token as string;
+        const result = await response.json().catch(() => ({})) as { error?: string; token?: string };
+        if (!response.ok) throw new Error(result.error ?? `Could not generate the Output link (server returned ${response.status}).`);
+        if (!result.token) throw new Error("The server did not return an Output link token.");
+        token = result.token;
         setOutputTokens((current) => ({ ...current, [activeSessionId]: token! }));
         setSessions((current) => current.map((session) => session.id === activeSessionId ? { ...session, connected: false, visible: false, songName: null } : session));
         setShowOutput(false);
@@ -126,10 +130,15 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
       const link = new URL("/presenter-output.html", window.location.origin);
       link.searchParams.set("token", token);
       link.searchParams.set("background", outputBackground);
+      link.searchParams.set("preload", preloadOutput ? "1" : "0");
       link.searchParams.set("legacy", legacyBrowser ? "1" : "0");
       setOutputLinks((current) => ({ ...current, [activeSessionId]: link.toString() }));
-      setNotice(`Output link generated for ${activeSession?.name ?? "Main"}.`);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "Could not generate Presenter link."); }
+      setOutputNotice(`Output link generated for ${activeSession?.name ?? "Main"}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not generate Presenter link.";
+      setOutputNotice(message);
+      setNotice(message);
+    }
     finally { setOutputBusy(false); }
   }
 
@@ -236,13 +245,17 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
             <button type="button" aria-expanded={outputSettingsOpen} aria-controls="presenter-output-settings-menu" onClick={() => setOutputSettingsOpen((open) => !open)}><Settings2 size={13} /> Output settings</button>
             {outputSettingsOpen && <section id="presenter-output-settings-menu" className="video-presenter-output-menu-panel" aria-label="Output link settings">
               <h3>Output link settings · {activeSession?.name ?? "Main"}</h3>
-              <label className="video-presenter-session-picker">Control session<select aria-label="Presenter output session" value={activeSessionId} onChange={(event) => { setActiveSessionId(event.target.value); setPresentedSlideIndex(null); }}>
+              <label className="video-presenter-session-picker">Control session<select aria-label="Presenter output session" value={activeSessionId} onChange={(event) => { setActiveSessionId(event.target.value); setPresentedSlideIndex(null); setOutputNotice(""); }}>
                 <option value="main">Main</option>{Array.from({ length: 10 }, (_, index) => { const id = `aux${index + 1}`; const session = sessions.find((item) => item.id === id); return <option key={id} value={id}>{session?.name ?? `Aux ${index + 1}`}</option>; })}
               </select></label>
+              {activeSessionId !== "main" && <div className="presenter-session-name presenter-output-session-name"><label htmlFor="presenter-aux-name">Aux session name</label><div><input id="presenter-aux-name" aria-label="Aux session name" maxLength={32} value={sessionNameDraft} onChange={(event) => setSessionNameDraft(event.target.value)} /><button type="button" className="presenter-output-action" onClick={() => void saveSessionName()} disabled={!capabilities.canPresent || outputBusy || !sessionNameDraft.trim()}>Save</button></div></div>}
               <label className="presenter-output-option">Background<select value={outputBackground} onChange={(event) => setOutputBackground(event.target.value)}><option value="black">Black</option><option value="white">White</option><option value="transparent">Transparent</option></select></label>
+              <label className="presenter-output-check"><input type="checkbox" checked={preloadOutput} onChange={(event) => setPreloadOutput(event.target.checked)} /> Preload all slides from the current song</label>
+              <p className="presenter-output-help">When enabled, the output loads the current song’s slides in advance and refreshes them when the song changes.</p>
               <label className="presenter-output-check"><input type="checkbox" checked={legacyBrowser} onChange={(event) => setLegacyBrowser(event.target.checked)} /> Legacy browser compatibility (Chromium 62)</label>
               <button type="button" className="presenter-output-action" onClick={() => void generateOutputLink()} disabled={!capabilities.canPresent || outputBusy}><ExternalLink size={14} />{outputBusy ? "Generating…" : "Generate Output link"}</button>
-              {activeOutputLinks && <div className="presenter-output-link-row"><a href={activeOutputLinks} target="_blank" rel="noreferrer">Open Output</a><button type="button" onClick={() => void copyOutputLink(activeOutputLinks)}><Copy size={13} /> Copy</button></div>}
+              {activeOutputLink && <div className="presenter-output-link-row"><a href={activeOutputLink} target="_blank" rel="noreferrer">Open Output</a><button type="button" onClick={() => void copyOutputLink(activeOutputLink)}><Copy size={13} /> Copy</button></div>}
+              {outputNotice && <p className="presenter-output-notice" role="status">{outputNotice}</p>}
             </section>}
           </div>
           <button type="button" disabled={!capabilities.canEdit}><Upload size={13} /> Import slides…</button>
@@ -267,7 +280,6 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
         <div className={`video-presenter-monitor${showOutput ? "" : " is-hidden"}`}>{showOutput && activeSession?.songName ? <div><Eye size={22} /><span>{activeSession.songName}</span></div> : <div><EyeOff size={22} /><span>{activeSession?.connected ? "Output is blank" : "Display not connected"}</span></div>}</div>
         <p className="video-presenter-output-caption">{activeSession?.connected ? showOutput ? `Showing on ${activeSession.name}` : `${activeSession.name} is connected and blank` : "Connect a browser on the display or projector."}</p>
         {activeSession?.connected && <section className="video-presenter-output-settings"><button type="button" className="presenter-output-action presenter-output-clear" onClick={() => { setPresentedSlideIndex(null); void sendOutputState({ visible: false, clear: true }); }} disabled={!capabilities.canPresent || outputBusy}><X size={14} /> Clear output</button></section>}
-        {activeSession?.id !== "main" && capabilities.canManageLayouts && <section className="video-presenter-output-settings"><h3>Aux display name</h3><div className="presenter-session-name"><input aria-label="Aux session name" maxLength={32} value={sessionNameDraft} onChange={(event) => setSessionNameDraft(event.target.value)} /><button type="button" className="presenter-output-action" onClick={() => void saveSessionName()} disabled={outputBusy || !sessionNameDraft.trim()}>Save</button></div></section>}
       </aside>}
     </div>
     <footer className="video-presenter-status"><span><Monitor size={13} /> {activeSession?.name ?? "Main"}</span><span><i /> {activeSession?.connected ? "Display connected" : "No display connected"}</span><span><EyeOff size={13} /> Browser output</span></footer>

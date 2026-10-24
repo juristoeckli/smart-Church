@@ -36,11 +36,14 @@
       }
       var token = params.token || '';
       var background = params.background || 'black';
+      var shouldPreload = params.preload === '1';
       document.body.className = 'background-' + (background === 'white' || background === 'transparent' ? background : 'black') + (params.legacy === '1' ? ' legacy' : '');
       var content = document.getElementById('content');
       var status = document.getElementById('status');
       var fullscreen = document.getElementById('fullscreen');
       var lastKey = '';
+      var preloadedKey = '';
+      var preloadedImages = [];
 
       function requestJson(path, callback) {
         var request = new XMLHttpRequest();
@@ -56,8 +59,26 @@
         request.send(null);
       }
 
+      function preloadSong(key) {
+        if (!shouldPreload || !key || key === 'undefined:undefined' || key === preloadedKey) return;
+        preloadedKey = key;
+        preloadedImages = [];
+        requestJson('/api/modules/presenter/public/output/' + encodeURIComponent(token) + '/preload', function (error, response) {
+          if (error || !response || !response.slides) return;
+          for (var slideIndex = 0; slideIndex < response.slides.length; slideIndex += 1) {
+            var slide = response.slides[slideIndex];
+            if (slide.type === 'image' && slide.imageUrl) {
+              var image = new Image();
+              image.src = slide.imageUrl;
+              preloadedImages.push(image);
+            }
+          }
+        });
+      }
+
       function render(state) {
         var key = state.datasetId + ':' + state.songNumber;
+        preloadSong(key);
         var slide = state.slide;
         var renderKey = state.visible && slide ? key + ':' + state.slideIndex + ':' + slide.type + ':' + (slide.text || slide.imageUrl || '') : 'blank';
         if (renderKey === lastKey) return;
