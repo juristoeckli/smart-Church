@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000000">
+  <title>Presenter Output</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #000; color: #fff; font-family: Arial, Helvetica, sans-serif; }
+    body.background-white { background: #fff; color: #111; }
+    body.background-transparent { background: transparent; }
+    #stage { display: table; width: 100%; height: 100%; }
+    #content { display: table-cell; width: 100%; height: 100%; padding: 4vw; box-sizing: border-box; vertical-align: middle; text-align: center; }
+    #content img { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; margin: 0 auto; object-fit: contain; }
+    #content .text { display: inline-block; max-width: 100%; font-size: 5vw; font-weight: bold; line-height: 1.35; white-space: pre-line; }
+    #content.lower-third { vertical-align: bottom; text-align: left; }
+    #content.lower-third .text { display: block; padding: 1.5em; background: rgba(0,0,0,.78); color: #fff; font-size: 3.2vw; }
+    #status { position: fixed; top: 16px; left: 16px; padding: 8px 12px; border-radius: 4px; background: rgba(0,0,0,.75); color: #fff; font-size: 14px; }
+    #fullscreen { position: fixed; right: 14px; bottom: 14px; padding: 9px 13px; border: 1px solid rgba(255,255,255,.35); border-radius: 5px; background: rgba(0,0,0,.65); color: #fff; cursor: pointer; }
+    body.kiosk #fullscreen { display: none; }
+    body.legacy #content img { max-width: 92%; max-height: 92%; }
+  </style>
+</head>
+<body>
+  <div id="stage"><div id="content"></div></div>
+  <div id="status">Waiting for Presenter…</div>
+  <button id="fullscreen" type="button">Full screen</button>
+  <script>
+    (function () {
+      var query = window.location.search.replace(/^\?/, '').split('&');
+      var params = {};
+      var i;
+      for (i = 0; i < query.length; i += 1) {
+        var pair = query[i].split('=');
+        params[decodeURIComponent(pair[0] || '')] = decodeURIComponent((pair[1] || '').replace(/\+/g, ' '));
+      }
+      var token = params.token || '';
+      var mode = params.mode === 'kiosk' ? 'kiosk' : 'output';
+      var background = params.background || 'black';
+      var shouldPreload = params.preload === '1' && mode === 'kiosk';
+      document.body.className = 'background-' + (background === 'white' || background === 'transparent' ? background : 'black') + (mode === 'kiosk' ? ' kiosk' : '') + (params.legacy === '1' ? ' legacy' : '');
+      var content = document.getElementById('content');
+      var status = document.getElementById('status');
+      var fullscreen = document.getElementById('fullscreen');
+      var lastKey = '';
+      var preloadedKey = '';
+      var preloadedImages = [];
+
+      function requestJson(path, callback) {
+        var request = new XMLHttpRequest();
+        request.open('GET', path, true);
+        request.setRequestHeader('Accept', 'application/json');
+        request.onreadystatechange = function () {
+          if (request.readyState !== 4) return;
+          if (request.status >= 200 && request.status < 300) {
+            try { callback(null, JSON.parse(request.responseText)); }
+            catch (error) { callback(error || new Error('Invalid Presenter response.')); }
+          } else callback(new Error(request.status === 404 ? 'This output link is no longer active.' : 'Waiting for Presenter…'));
+        };
+        request.send(null);
+      }
+
+      function preloadSong(key) {
+        if (!shouldPreload || !key || key === preloadedKey) return;
+        preloadedKey = key;
+        preloadedImages = [];
+        requestJson('/api/modules/presenter/public/output/' + encodeURIComponent(token) + '/preload', function (error, response) {
+          if (error || !response || !response.slides) return;
+          for (var slideIndex = 0; slideIndex < response.slides.length; slideIndex += 1) {
+            var slide = response.slides[slideIndex];
+            if (slide.type === 'image' && slide.imageUrl) {
+              var image = new Image();
+              image.src = slide.imageUrl;
+              preloadedImages.push(image);
+            }
+          }
+        });
+      }
+
+      function render(state) {
+        var key = state.datasetId + ':' + state.songNumber;
+        preloadSong(key);
+        var slide = state.slide;
+        var renderKey = state.visible && slide ? key + ':' + state.slideIndex + ':' + slide.type + ':' + (slide.text || slide.imageUrl || '') : 'blank';
+        if (renderKey === lastKey) return;
+        lastKey = renderKey;
+        content.innerHTML = '';
+        content.className = '';
+        if (!state.visible || !slide) { status.style.display = 'none'; return; }
+        status.style.display = 'none';
+        if (slide.type === 'image') {
+          var image = document.createElement('img');
+          image.src = slide.imageUrl;
+          image.alt = slide.label || state.songName || 'Presenter slide';
+          content.appendChild(image);
+        } else {
+          var text = document.createElement('div');
+          text.className = 'text';
+          text.textContent = slide.text || '';
+          content.appendChild(text);
+          if (slide.layout === 'lower-third') content.className = 'lower-third';
+        }
+      }
+
+      function refresh() {
+        if (!token) { status.textContent = 'This output link is missing its token.'; return; }
+        requestJson('/api/modules/presenter/public/output/' + encodeURIComponent(token), function (error, state) {
+          if (error) { status.textContent = error.message; status.style.display = 'block'; return; }
+          render(state);
+        });
+      }
+
+      fullscreen.onclick = function () {
+        var doc = document;
+        var root = document.documentElement;
+        if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+          if (doc.exitFullscreen) doc.exitFullscreen();
+          else if (doc.webkitExitFullscreen) doc.webkitExitFullscreen();
+        } else if (root.requestFullscreen) root.requestFullscreen();
+        else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+      };
+      refresh();
+      window.setInterval(refresh, 700);
+    }());
+  </script>
+</body>
+</html>

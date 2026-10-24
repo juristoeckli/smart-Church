@@ -211,6 +211,7 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
 
 app.addHook("preHandler", async (request, reply) => {
   if (request.url === "/api/health" || request.url.startsWith("/api/auth/")) return;
+  if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
