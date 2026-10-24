@@ -17,6 +17,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [songs, setSongs] = useState<SongSummary[]>([]);
   const [selectedSong, setSelectedSong] = useState<Song | null>(null);
+  const [datasetSearch, setDatasetSearch] = useState("");
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
   const [loading, setLoading] = useState(false);
@@ -59,6 +60,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
   }, [datasetId, search, requestHeaders]);
 
   const selectedDataset = datasets.find((item) => item.id === datasetId);
+  const visibleDatasets = datasets.filter((dataset) => dataset.name.toLocaleLowerCase().includes(datasetSearch.trim().toLocaleLowerCase()));
   async function openSong(song: SongSummary) {
     setNotice("");
     try {
@@ -105,11 +107,13 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
         <section className="video-presenter-section video-presenter-libraries">
           <button type="button" className="video-presenter-section-heading" aria-expanded={librariesOpen} onClick={() => setLibrariesOpen((open) => !open)}><strong>{librariesOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Datasets</strong><small>{datasets.length}</small></button>
           {librariesOpen && <>
+            <label className="video-presenter-dataset-search"><Search size={13} /><input type="search" placeholder="Search datasets…" aria-label="Search datasets by name" value={datasetSearch} onChange={(event) => setDatasetSearch(event.target.value)} /></label>
             {defaultLibraries.map(({ id, icon: Icon }) => {
-              const dataset = datasets.find((item) => item.id === id);
+              const dataset = visibleDatasets.find((item) => item.id === id);
               return dataset ? <button type="button" key={id} className={`video-presenter-library${datasetId === id ? " is-selected" : ""}`} onClick={() => { setDatasetId(id); setSearch(""); }}><Icon size={14} /><span>{dataset.name}</span><small>{dataset.songCount}</small><ChevronRight size={12} /></button> : null;
             })}
-            {datasets.filter((item) => !defaultLibraries.some((builtin) => builtin.id === item.id)).map((dataset) => <button type="button" key={dataset.id} className={`video-presenter-library${datasetId === dataset.id ? " is-selected" : ""}`} onClick={() => { setDatasetId(dataset.id); setSearch(""); }}><ListMusic size={14} /><span>{dataset.name}</span><small>{dataset.songCount}</small><ChevronRight size={12} /></button>)}
+            {visibleDatasets.filter((item) => !defaultLibraries.some((builtin) => builtin.id === item.id)).map((dataset) => <button type="button" key={dataset.id} className={`video-presenter-library${datasetId === dataset.id ? " is-selected" : ""}`} onClick={() => { setDatasetId(dataset.id); setSearch(""); }}><ListMusic size={14} /><span>{dataset.name}</span><small>{dataset.songCount}</small><ChevronRight size={12} /></button>)}
+            {visibleDatasets.length === 0 && <p className="video-presenter-empty-note">No datasets match this name.</p>}
             {capabilities.canManageLayouts && <><input ref={importInput} type="file" accept=".gz,.scdataset.tar.gz,application/gzip" hidden onChange={(event) => void importDataset(event.target.files?.[0])} /><button type="button" className="video-presenter-import-dataset" onClick={() => importInput.current?.click()}><FileUp size={13} /> Import dataset package</button></>}
           </>}
         </section>
