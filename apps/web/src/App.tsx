@@ -13,6 +13,7 @@ import {
   Moon,
   Plus,
   Search,
+  Server,
   Settings2,
   SlidersHorizontal,
   Sun,
@@ -72,6 +73,7 @@ function App() {
   const [isBrandingOpen, setIsBrandingOpen] = useState(false);
   const [brandingDraft, setBrandingDraft] = useState<string | null>(null);
   const [isBrandingSaving, setIsBrandingSaving] = useState(false);
+  const [isServerSettingsOpen, setIsServerSettingsOpen] = useState(false);
   const [department, setDepartment] = useState<DepartmentProfile>(defaultDepartment);
   const [departments, setDepartments] = useState<DepartmentProfile[]>([]);
   const [departmentDraft, setDepartmentDraft] = useState(defaultDepartment);
@@ -374,6 +376,7 @@ function App() {
         <div className="sidebar-bottom">
           <button className="nav-item" type="button" onClick={() => setNotice("Notifications will be added in a later step.")}><Bell size={18} strokeWidth={1.8} /><span>Notifications</span><span className="notification-dot" /></button>
           <button className="nav-item" type="button" onClick={openBrandingSettings}><Settings2 size={18} strokeWidth={1.8} /><span>Settings</span></button>
+          <button className="nav-item" type="button" onClick={() => setIsServerSettingsOpen(true)}><Server size={18} strokeWidth={1.8} /><span>Server settings</span></button>
           <button className="nav-item" type="button" onClick={() => setNotice("Help will be added in a later step.")}><CircleHelp size={18} strokeWidth={1.8} /><span>Help & support</span></button>
           <div className="profile-card">
             <div className="profile-avatar">{userInitials}</div>
@@ -429,6 +432,8 @@ function App() {
       </main>
 
       {notice && <div className="toast" role="status"><Check size={17} />{notice}<button className="toast-close" type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
+
+      {isServerSettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsServerSettingsOpen(false)}><section className="modal server-settings-modal" role="dialog" aria-modal="true" aria-labelledby="server-settings-title"><div className="modal-heading"><div><span className="eyebrow">SERVER ADMINISTRATION</span><h2 id="server-settings-title">Server settings</h2><p>Manage this installation and the GfC locations hosted on it.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsServerSettingsOpen(false)}><X size={19} /></button></div><div className="server-settings-list"><article><span className="server-settings-icon"><Server size={18} /></span><div><strong>Sites on this server</strong><p>{departments.length} {departments.length === 1 ? "location" : "locations"} currently configured</p></div><button className="button button-secondary" type="button" onClick={() => { setIsServerSettingsOpen(false); openDepartmentSettings(); }}>Manage locations</button></article><article><span className="server-settings-icon"><Church size={18} /></span><div><strong>Site branding</strong><p>Logo shared across this installation</p></div><button className="button button-secondary" type="button" onClick={() => { setIsServerSettingsOpen(false); openBrandingSettings(); }}>Manage logo</button></article></div><p className="modal-demo-footnote">Signed in as Server Administrator · {window.location.host}</p></section></div>}
 
       {isAddOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsAddOpen(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-person-title"><div className="modal-heading"><div><span className="eyebrow">PEOPLE DIRECTORY</span><h2 id="add-person-title">Add a person</h2><p>Start with the details you have. You can add more later.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsAddOpen(false)}><X size={19} /></button></div><form onSubmit={addContact}><div className="form-row"><label>First name<input name="firstName" autoFocus autoComplete="given-name" required /></label><label>Last name<input name="lastName" autoComplete="family-name" required /></label></div><label>Email address <span className="optional-label">Optional</span><input type="email" name="email" autoComplete="email" placeholder="name@example.com" /></label><label>Phone number <span className="optional-label">Optional</span><input type="tel" name="phone" autoComplete="tel" placeholder="+41 00 000 00 00" /></label><label>Relationship<select name="status" defaultValue="member"><option value="member">Member</option><option value="visitor">Visitor</option></select></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Plus size={17} /> {isSaving ? "Saving…" : "Add person"}</button></div></form></section></div>}
 

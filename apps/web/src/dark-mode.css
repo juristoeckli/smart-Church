@@ -454,3 +454,8 @@
 :root[data-theme="dark"] .church-location-select {
   color: var(--ink);
 }
+
+:root[data-theme="dark"] .server-settings-icon {
+  background: #30313c;
+  color: #b9a7dc;
+}
