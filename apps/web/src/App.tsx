@@ -352,12 +352,6 @@ function App() {
           <span className="brand-location">{department.location}</span>
         </a>
 
-        <div className="church-switcher">
-          <span className="church-avatar">G</span>
-          <label className="church-details"><strong>GfC location</strong><select className="church-location-select" aria-label="Active location" value={department.id} onChange={(event) => switchDepartment(event.target.value)}>{departments.map((item) => <option value={item.id} key={item.id}>{item.location}</option>)}</select></label>
-          <button className="icon-button church-location-settings" type="button" aria-label="Manage locations" title="Manage locations" onClick={openDepartmentSettings}><Settings2 size={16} /></button>
-        </div>
-
         <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
           {navigation.map(({ label, icon: Icon }) => {
