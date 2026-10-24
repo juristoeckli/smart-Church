@@ -15,7 +15,7 @@ type EncoderSettingsForm = { preset: string; server: string; quality: string; pr
 type XmlService = { platform: string; customizable_url: boolean; servers: { server: string; url: string }[]; profiles: { profile: string }[] };
 type XmlPreflight = { filename?: string; services?: string[]; replaces_existing?: boolean };
 
-const tabs = ["Overview", "Routing", "Streaming", "Encoder settings"] as const;
+const tabs = ["Overview", "Routing", "Streaming", "XML tools"] as const;
 type Tab = typeof tabs[number];
 
 export function VideoModule({ departmentId, csrfToken, canManage }: { departmentId: string; csrfToken: string; canManage: boolean }) {
@@ -42,6 +42,7 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   const [presetDetails, setPresetDetails] = useState<EncoderPresetDetails | null>(null);
   const [settingsForm, setSettingsForm] = useState<EncoderSettingsForm>({ preset: "", server: "", quality: "", protocol: "srt", url: "", key: "", passphrase: "" });
   const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [includeSecrets, setIncludeSecrets] = useState(false);
   const xmlFileInput = useRef<HTMLInputElement>(null);
 
@@ -85,6 +86,18 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSettingsForm((current) => ({ ...current, key: "", passphrase: "" }));
+        setSettingsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [settingsOpen]);
+
   const sites = snapshot?.status?.sites ?? [];
   const encoders = useMemo(() => sites.flatMap((site) => site.encoders.map((encoder) => ({ ...encoder, site, key: `${site.id}|${encoder.id}` }))), [sites]);
   const hubs = useMemo(() => sites.flatMap((site) => site.devices.filter((device) => device.type === "videohub").map((device) => ({ ...device, site, key: `${site.id}|${device.id}` }))), [sites]);
@@ -123,7 +136,6 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     setNotice("");
     setEncoderSettings(null);
     setPresetDetails(null);
-    setIncludeSecrets(false);
     setSettingsForm((current) => ({ ...current, key: "", passphrase: "" }));
     try {
       const current = await encoderSettingsRequest<EncoderSettings>(encoder, "read");
@@ -132,9 +144,6 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
       setPresetDetails(details);
       const activeServer = current.server === "Custom" ? { server: "Custom", url: current.url } : details.servers.find((item) => item.server === current.server) ?? details.servers[0];
       setSettingsForm({ preset: current.platform, server: activeServer?.server ?? "", quality: current.quality, protocol: current.protocol || "srt", url: current.url, key: "", passphrase: "" });
-      setXmlPreview(null);
-      setXmlPlan(null);
-      setReviewedXml("");
     } catch (error) {
       setEncoderSettings(null);
       setPresetDetails(null);
@@ -296,7 +305,7 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
             <div className="video-encoder-info"><strong>Streaming profile</strong><small>Profile: {stringValue(settings.platform) || "Not reported"}</small><small>Server name: {stringValue(settings.server_name) || "Not reported"}</small><code>Server address: {stringValue(settings.server) || "Not reported"}</code><small>Key: {stringValue(settings.key_masked) || "Not reported"}</small><small>Quality: {stringValue(settings.quality) || "Not reported"}</small></div>
           </div>
           {!origin && <div className="video-remote-restriction"><Shield size={14} /> Nur für Übertragungen zwischen den Pflegeheimen</div>}
-          {canManage && origin && <div className="video-site-actions"><button type="button" className="video-small-button video-button-primary" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Start" }, `${encoder.name}: start accepted; waiting for device status.`)}><Play size={13} /> Start</button><button type="button" className="video-small-button" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop accepted; waiting for device status.`)}><Square size={12} /> Stop</button><button type="button" className="video-small-button" disabled={busy} onClick={() => { const key = `${site.id}|${encoder.id}`; setSelectedEncoder(key); setTab("Encoder settings"); void loadEncoderSettings({ ...encoder, site, key }); }}><Settings2 size={13} /> Settings</button></div>}
+          {canManage && origin && <div className="video-site-actions"><button type="button" className="video-small-button video-button-primary" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Start" }, `${encoder.name}: start accepted; waiting for device status.`)}><Play size={13} /> Start</button><button type="button" className="video-small-button" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop accepted; waiting for device status.`)}><Square size={12} /> Stop</button><button type="button" className="video-small-button" disabled={busy} onClick={() => { const key = `${site.id}|${encoder.id}`; const target = { ...encoder, site, key }; setSelectedEncoder(key); setSettingsOpen(true); void loadEncoderSettings(target); }}><Settings2 size={13} /> Settings</button></div>}
           {encoder.error && <small className="video-error-text">{encoder.error}</small>}
         </article>;
       })}
@@ -315,7 +324,7 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     {notice && <div className="video-notice" role="status">{notice}<button type="button" onClick={() => setNotice("")}>Dismiss</button></div>}
 
     <div className="video-tabs" role="tablist" aria-label="Video module">
-      {tabs.map((name) => <button type="button" role="tab" aria-selected={tab === name} className={tab === name ? "video-tab video-tab-active" : "video-tab"} key={name} onClick={() => { setTab(name); if (name === "Encoder settings") void loadEncoderSettings(); }}>{name === "Overview" ? <Activity size={16} /> : name === "Routing" ? <Route size={16} /> : name === "Streaming" ? <Radio size={16} /> : <Settings2 size={16} />}{name}</button>)}
+      {tabs.map((name) => <button type="button" role="tab" aria-selected={tab === name} className={tab === name ? "video-tab video-tab-active" : "video-tab"} key={name} onClick={() => setTab(name)}>{name === "Overview" ? <Activity size={16} /> : name === "Routing" ? <Route size={16} /> : name === "Streaming" ? <Radio size={16} /> : <Settings2 size={16} />}{name}</button>)}
     </div>
 
     {!ready && !snapshot?.message && <div className="video-empty"><Video size={28} /><strong>{loading ? "Connecting to the video worker…" : "Video worker is unavailable"}</strong><p>{snapshot?.worker?.error ?? "The Core API starts this module in its own worker process."}</p></div>}
@@ -339,15 +348,18 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
       </> : <Empty text="No Videohub is configured for this location." />}</section>
       <section className="video-panel video-history-panel"><div className="video-panel-heading"><div><h2>Routing history</h2><p>Observed route changes and verified actions</p></div></div>{history.length ? history.slice(0, 40).map((entry, index) => { const changeCount = Array.isArray(entry.changes) ? entry.changes.length : 0; return <div className="video-history-row" key={String(entry.id ?? index)}><Clock3 size={14} /><span><strong>{String(entry.kind ?? "Routing event")} · {changeCount} route changes</strong><small>{formatTimestamp(entry.time)} · {String(entry.user ?? "Observed")}</small></span></div>; }) : <Empty text="Load history to view changes observed by the worker." />}</section></div>}
 
-    {ready && tab === "Encoder settings" && <section className="video-panel video-settings-panel">
-      <div className="video-panel-heading"><div><h2>Encoder streaming settings</h2><p>Import or export streaming profiles and configure this encoder.</p></div><button type="button" className="video-small-button" disabled={settingsLoading || !xmlEncoder} onClick={() => void loadEncoderSettings()}><RefreshCw size={14} /> Reload</button></div>
-      {settingsLoading && !encoderSettings ? <Empty text="Loading settings from the encoder…" /> : !xmlEncoder ? <Empty text="No streaming encoder is configured for this location." /> : encoderSettings ? <>
-        <div className="video-settings-identity"><strong>{xmlEncoder.site.name} · {xmlEncoder.name}</strong><code>{xmlEncoder.ip || "Address not configured"}</code><span className={`video-state ${encoderSettings.status === "Idle" ? "video-state-good" : ""}`}>Stream: {encoderSettings.status}</span></div>
+    {ready && tab === "XML tools" && <section className="video-panel video-settings-panel">
+      <div className="video-panel-heading"><div><h2>Streaming profile XML tools</h2><p>Create, validate, import, export and distribute encoder profiles.</p></div><button type="button" className="video-small-button" disabled={busy || !xmlEncoder || !canManage} onClick={() => void exportXml(includeSecrets)}><Download size={14} /> Export active XML</button></div>
+      {!xmlEncoder ? <Empty text="No streaming encoder is configured for this location." /> : <>
+        <label className="video-field">Encoder<select value={xmlEncoder.key} onChange={(event) => { setSelectedEncoder(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}><option value="">Select encoder</option>{encoders.map((encoder) => <option value={encoder.key} key={encoder.key}>{encoder.site.name} · {encoder.name} · {encoder.ip || "No address"}</option>)}</select></label>
+        <div className="video-settings-identity"><strong>{xmlEncoder.site.name} · {xmlEncoder.name}</strong><code>{xmlEncoder.ip || "Address not configured"}</code></div>
         <fieldset className="video-settings-box"><legend>Import / Export</legend>
           <input ref={xmlFileInput} className="video-hidden-file" type="file" accept=".xml,text/xml,application/xml" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (!file) return; if (file.size > 262144) return setNotice("Choose an XML file smaller than 256 KB."); void file.text().then((source) => void previewXml(source)).catch(() => setNotice("Could not read that XML file.")); }} />
           <div className="video-settings-toolbar"><button type="button" className="video-small-button" disabled={busy || !canManage} onClick={() => xmlFileInput.current?.click()}>Import XML…</button><button type="button" className="video-small-button" disabled={busy || !canManage} onClick={() => void exportXml(includeSecrets)}>Export XML…</button></div>
           <label className="video-settings-check"><input type="checkbox" checked={includeSecrets} onChange={(event) => setIncludeSecrets(event.target.checked)} /> Include stream key and access credentials in export</label>
-          <p className="video-settings-help">XML exports include active services and quality profiles. SRT passphrases are never exported. Imported XML is validated before it can be applied.</p>
+          <p className="video-settings-help">Edit or create an XML profile below, or import an existing file. Validate it, choose a service/server/quality and upload it to the selected encoder. SRT passphrases are never exported.</p>
+          <label className="video-field video-xml-editor-label">Streaming profiles XML<textarea className="video-xml-editor" value={xml} onChange={(event) => { setXml(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }} placeholder="Paste or create a Blackmagic Streaming XML profile…" spellCheck={false} /></label>
+          <div className="video-settings-toolbar"><button type="button" className="video-small-button video-button-primary" disabled={busy || !canManage || !xml.trim()} onClick={() => void previewXml()}>Validate and review XML</button><button type="button" className="video-small-button" disabled={!xml} onClick={() => { setXml(""); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}>Clear editor</button></div>
           {xmlPreview && <div className="video-settings-xml-review"><strong><Check size={15} /> XML valid · {xmlPlan?.filename}{xmlPlan?.replaces_existing ? " will be replaced" : " will be created"}</strong>
             <div className="video-settings-fields video-settings-xml-fields">
               <label className="video-field">Service<select value={xmlPlatform} onChange={(event) => { const name = event.target.value; const service = xmlPreview.services?.find((item) => item.platform === name); setXmlPlatform(name); setXmlServer(service?.servers[0]?.server ?? (service?.customizable_url ? "Custom" : "")); setXmlQuality(service?.profiles[0]?.profile ?? ""); setXmlCustomUrl(service?.servers[0]?.url ?? ""); }}><option value="">Select service</option>{xmlPreview.services?.map((service) => <option value={service.platform} key={service.platform}>{service.platform}</option>)}</select></label>
@@ -358,27 +370,37 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
             {canManage && <button type="button" className="video-small-button video-button-primary" disabled={busy || reviewedXml !== xml || !xmlPlatform || !xmlQuality || !xmlServer} onClick={() => void applyXml()}>Review and apply XML</button>}
           </div>}
         </fieldset>
-        <fieldset className="video-settings-box"><legend>Encoder presets</legend>
-          <label className="video-field">Preset<select value={settingsForm.preset} disabled={settingsLoading} onChange={(event) => { const value = event.target.value; setSettingsForm((current) => ({ ...current, preset: value })); void loadEncoderPreset(value); }}><option value="">Select a preset…</option>{encoderPresetNames.map((name) => <option value={name} key={name}>{name}</option>)}</select></label>
-          <label className="video-field">Server<select value={settingsForm.server} disabled={settingsLoading || (!presetDetails?.servers.length && settingsForm.server !== "Custom")} onChange={(event) => { const server = presetDetails?.servers.find((item) => item.server === event.target.value); setSettingsForm((current) => ({ ...current, server: event.target.value, url: server?.url ?? current.url, protocol: schemeOf(server?.url) || current.protocol })); }}><option value="">Select server…</option>{presetDetails?.servers.map((server) => <option value={server.server} key={server.server}>{server.server}</option>)}{encoderSettings.customizable_url && settingsForm.server === "Custom" && <option value="Custom">Custom server URL</option>}</select></label>
-          <label className="video-field">Preset quality<select value={settingsForm.quality} disabled={settingsLoading || !presetDetails?.profiles.length} onChange={(event) => setSettingsForm((current) => ({ ...current, quality: event.target.value }))}><option value="">Select quality…</option>{presetDetails?.profiles.map((profile) => <option value={profile.profile} key={profile.profile}>{profile.profile}</option>)}</select></label>
-          {presetDetails?.deletion?.reason && <p className="video-settings-help">{presetDetails.deletion.reason}</p>}
-          <div className="video-settings-toolbar"><button type="button" className="video-small-button video-button-primary" disabled={!canManage || busy || settingsLoading || encoderSettings.status !== "Idle" || !settingsForm.preset || !settingsForm.server || settingsForm.server === "Custom" || !settingsForm.quality} onClick={() => void applyEncoderPreset()}>Apply preset</button><button type="button" className="video-small-button video-button-danger" disabled={!canManage || busy || settingsLoading || encoderSettings.status !== "Idle" || !presetDetails?.deletion?.allowed} onClick={() => void deleteEncoderPreset()}>Delete preset…</button></div>
-          <p className="video-settings-help">Uses the selected preset’s configured key when one is saved. The stream must be stopped.</p>
-        </fieldset>
-        <div className="video-settings-fields">
-          <label className="video-field">Protocol<select value={settingsForm.protocol.toLowerCase()} disabled={!encoderSettings.customizable_url} onChange={(event) => setSettingsForm((current) => ({ ...current, protocol: event.target.value }))}><option value="srt">SRT</option><option value="rtmp">RTMP</option><option value="rtmps">RTMPS</option></select></label>
-          <label className="video-field">Destination URL<input value={settingsForm.url} readOnly={!encoderSettings.customizable_url} onChange={(event) => setSettingsForm((current) => ({ ...current, url: event.target.value }))} placeholder="srt://host:port/live" /></label>
-          <label className="video-field">Stream key<input type="password" autoComplete="new-password" value={settingsForm.key} onChange={(event) => setSettingsForm((current) => ({ ...current, key: event.target.value }))} placeholder={encoderSettings.has_key ? "Leave blank to keep the current key" : "No stream key configured"} /></label>
-          <label className="video-field">SRT passphrase<input type="password" autoComplete="new-password" value={settingsForm.passphrase} onChange={(event) => setSettingsForm((current) => ({ ...current, passphrase: event.target.value }))} placeholder="Leave blank to keep the current passphrase" /></label>
-          <label className="video-field">Quality profile<select value={settingsForm.quality} onChange={(event) => setSettingsForm((current) => ({ ...current, quality: event.target.value }))}><option value="">Select quality…</option>{presetDetails?.profiles.map((profile) => <option value={profile.profile} key={profile.profile}>{profile.profile}</option>)}</select></label>
-          <label className="video-field">Video bitrate (Mbit/s)<input type="number" value={bitrateMbit} readOnly placeholder="Defined by the selected quality profile" /></label>
-        </div>
-        <p className="video-settings-help">Choose another quality profile to change its bitrate. Profile bitrates are edited in the BMD Streaming XML Tool. The stream must be stopped before applying settings.</p>
-        {!canManage && <p className="video-settings-help">You have view access only. Ask a site administrator to change encoder settings.</p>}
-        <div className="video-settings-actions"><button type="button" className="video-small-button" onClick={() => { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setTab("Streaming"); }}>Cancel</button><button type="button" className="video-small-button video-button-primary" disabled={!canApplySettings || !settingsForm.quality} onClick={() => void applyEncoderSettings()}>Apply settings</button></div>
-      </> : <Empty text="Could not load settings from this encoder." />}
+      </>}
     </section>}
+
+    {settingsOpen && <div className="video-settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setSettingsOpen(false); } }}>
+      <section className="video-settings-modal" role="dialog" aria-modal="true" aria-labelledby="video-settings-title">
+        <header className="video-settings-modal-heading"><div><span className="video-eyebrow">ENCODER STREAMING</span><h2 id="video-settings-title">Encoder settings</h2><p>{xmlEncoder ? `${xmlEncoder.site.name} · ${xmlEncoder.name} · ${xmlEncoder.ip || "Address not configured"}` : "Loading encoder…"}</p></div><button type="button" className="video-settings-close" aria-label="Close settings" onClick={() => { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setSettingsOpen(false); }}>×</button></header>
+        {notice && <p className="video-settings-modal-notice" role="status">{notice}</p>}
+        {settingsLoading && !encoderSettings ? <Empty text="Loading presets and settings from the encoder…" /> : !encoderSettings ? <Empty text="Could not load settings from this encoder." /> : <div className="video-settings-panel">
+          <div className="video-settings-identity"><span className={`video-state ${encoderSettings.status === "Idle" ? "video-state-good" : ""}`}>Stream: {encoderSettings.status}</span></div>
+          <fieldset className="video-settings-box"><legend>Encoder presets</legend>
+            <label className="video-field">Preset<select value={settingsForm.preset} disabled={settingsLoading} onChange={(event) => { const value = event.target.value; setSettingsForm((current) => ({ ...current, preset: value })); void loadEncoderPreset(value); }}><option value="">Select a preset…</option>{encoderPresetNames.map((name) => <option value={name} key={name}>{name}</option>)}</select></label>
+            <label className="video-field">Server<select value={settingsForm.server} disabled={settingsLoading || (!presetDetails?.servers.length && settingsForm.server !== "Custom")} onChange={(event) => { const server = presetDetails?.servers.find((item) => item.server === event.target.value); setSettingsForm((current) => ({ ...current, server: event.target.value, url: server?.url ?? current.url, protocol: schemeOf(server?.url) || current.protocol })); }}><option value="">Select server…</option>{presetDetails?.servers.map((server) => <option value={server.server} key={server.server}>{server.server}</option>)}{encoderSettings.customizable_url && settingsForm.server === "Custom" && <option value="Custom">Custom server URL</option>}</select></label>
+            <label className="video-field">Preset quality<select value={settingsForm.quality} disabled={settingsLoading || !presetDetails?.profiles.length} onChange={(event) => setSettingsForm((current) => ({ ...current, quality: event.target.value }))}><option value="">Select quality…</option>{presetDetails?.profiles.map((profile) => <option value={profile.profile} key={profile.profile}>{profile.profile}</option>)}</select></label>
+            {presetDetails?.deletion?.reason && <p className="video-settings-help">{presetDetails.deletion.reason}</p>}
+            <div className="video-settings-toolbar"><button type="button" className="video-small-button video-button-primary" disabled={!canManage || busy || settingsLoading || encoderSettings.status !== "Idle" || !settingsForm.preset || !settingsForm.server || settingsForm.server === "Custom" || !settingsForm.quality} onClick={() => void applyEncoderPreset()}>Apply preset</button><button type="button" className="video-small-button video-button-danger" disabled={!canManage || busy || settingsLoading || encoderSettings.status !== "Idle" || !presetDetails?.deletion?.allowed} onClick={() => void deleteEncoderPreset()}>Delete preset…</button></div>
+            <p className="video-settings-help">A selected preset can be applied while the stream is stopped.</p>
+          </fieldset>
+          <div className="video-settings-fields">
+            <label className="video-field">Protocol<select value={settingsForm.protocol.toLowerCase()} disabled={!encoderSettings.customizable_url} onChange={(event) => setSettingsForm((current) => ({ ...current, protocol: event.target.value }))}><option value="srt">SRT</option><option value="rtmp">RTMP</option><option value="rtmps">RTMPS</option></select></label>
+            <label className="video-field">Destination URL<input value={settingsForm.url} readOnly={!encoderSettings.customizable_url} onChange={(event) => setSettingsForm((current) => ({ ...current, url: event.target.value }))} placeholder="srt://host:port/live" /></label>
+            <label className="video-field">Stream key<input type="password" autoComplete="new-password" value={settingsForm.key} onChange={(event) => setSettingsForm((current) => ({ ...current, key: event.target.value }))} placeholder={encoderSettings.has_key ? "Leave blank to keep the current key" : "No stream key configured"} /></label>
+            <label className="video-field">SRT passphrase<input type="password" autoComplete="new-password" value={settingsForm.passphrase} onChange={(event) => setSettingsForm((current) => ({ ...current, passphrase: event.target.value }))} placeholder="Leave blank to keep the current passphrase" /></label>
+            <label className="video-field">Quality profile<select value={settingsForm.quality} onChange={(event) => setSettingsForm((current) => ({ ...current, quality: event.target.value }))}><option value="">Select quality…</option>{presetDetails?.profiles.map((profile) => <option value={profile.profile} key={profile.profile}>{profile.profile}</option>)}</select></label>
+            <label className="video-field">Video bitrate (Mbit/s)<input type="number" value={bitrateMbit} readOnly placeholder="Defined by the selected quality profile" /></label>
+          </div>
+          <p className="video-settings-help">Profile bitrates are edited in XML tools. The stream must be stopped before applying settings.</p>
+          {!canManage && <p className="video-settings-help">You have view access only. Ask a site administrator to change encoder settings.</p>}
+          <div className="video-settings-actions"><button type="button" className="video-small-button" onClick={() => { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setSettingsOpen(false); }}>Cancel</button><button type="button" className="video-small-button video-button-primary" disabled={!canApplySettings || !settingsForm.quality} onClick={() => void applyEncoderSettings()}>Apply settings</button></div>
+        </div>}
+      </section>
+    </div>}
 
     <footer className="video-footer"><span><Shield size={13} /> Equipment access is scoped to the selected location</span><span>Last refresh: {snapshot?.status ? new Date().toLocaleTimeString() : "—"}</span></footer>
   </section>;

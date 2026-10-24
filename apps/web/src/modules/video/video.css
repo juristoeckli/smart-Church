@@ -103,6 +103,20 @@
 .video-settings-xml-fields{grid-template-columns:repeat(3,minmax(0,1fr))}
 .video-settings-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:11px;border-top:1px solid var(--line)}
 .video-hidden-file{display:none}
+.video-xml-editor-label{max-width:none;margin:10px 0}
+.video-xml-editor{min-height:280px;font-size:11px!important;line-height:1.5;tab-size:2}
+.video-settings-backdrop{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:18px;background:#101116b8;backdrop-filter:blur(3px)}
+.video-settings-modal{display:grid;gap:15px;width:min(620px,100%);max-height:min(92vh,900px);overflow:auto;padding:22px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--ink);box-shadow:0 24px 80px #0008}
+.video-settings-modal-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:12px;border-bottom:1px solid var(--line)}
+.video-settings-modal-heading h2{margin:5px 0;font-size:21px;letter-spacing:-.5px}
+.video-settings-modal-heading p{margin:0;color:var(--muted);font-size:10px}
+.video-settings-close{display:grid;place-items:center;width:31px;height:31px;flex:0 0 auto;border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--muted);font-size:22px;line-height:1}
+.video-settings-close:hover{background:var(--green-soft);color:var(--ink)}
+.video-settings-modal-notice{margin:0;padding:9px 11px;border:1px solid var(--line);border-radius:7px;background:color-mix(in srgb,var(--panel) 80%,var(--green-soft));font-size:10px;line-height:1.5}
+.video-settings-modal .video-settings-panel{gap:12px}
+.video-settings-modal .video-settings-box>.video-field{max-width:none}
+.video-settings-modal .video-field{max-width:none}
+.video-settings-modal .video-settings-actions{position:sticky;bottom:-22px;padding:12px 0 0;background:var(--panel)}
 .video-button-danger{border-color:#bd726e;color:#bd625c}
 .video-button-danger:hover:not(:disabled){border-color:#d65b53;color:#c54840}
 .video-overview-banner{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;padding:3px 0 1px}
