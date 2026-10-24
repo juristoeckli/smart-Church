@@ -10,10 +10,12 @@ import {
   ContactRound,
   LayoutDashboard,
   Menu,
+  Moon,
   Plus,
   Search,
   Settings2,
   SlidersHorizontal,
+  Sun,
   UsersRound,
   X,
 } from "lucide-react";
@@ -34,6 +36,13 @@ function initials(contact: Contact) {
 }
 
 function App() {
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      return localStorage.getItem("smart-church-theme") === "dark" ? "dark" : "light";
+    } catch {
+      return "light";
+    }
+  });
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -43,6 +52,15 @@ function App() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("smart-church-theme", theme);
+    } catch {
+      // The theme remains usable when storage is disabled.
+    }
+  }, [theme]);
 
   useEffect(() => {
     fetch("/api/contacts")
@@ -145,7 +163,7 @@ function App() {
         <header className="topbar">
           <button className="icon-button mobile-menu-button" type="button" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
           <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>People</strong></div>
-          <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-avatar">JM</div></div>
+          <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button theme-toggle" type="button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} aria-pressed={theme === "dark"} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-avatar">JM</div></div>
         </header>
 
         <div className="page-wrap">

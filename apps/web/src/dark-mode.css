@@ -1,0 +1,304 @@
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  background: #111713;
+  color: #e5ebe5;
+}
+
+:root[data-theme="dark"] body {
+  background: #111713;
+  color: #e5ebe5;
+}
+
+:root[data-theme="dark"] .sidebar,
+:root[data-theme="dark"] .topbar {
+  background: #171f1a;
+  border-color: #2b372f;
+}
+
+:root[data-theme="dark"] .brand,
+:root[data-theme="dark"] .church-switcher,
+:root[data-theme="dark"] .profile-details strong,
+:root[data-theme="dark"] .breadcrumbs strong,
+:root[data-theme="dark"] h1,
+:root[data-theme="dark"] .directory-heading h2 {
+  color: #e5ebe5;
+}
+
+:root[data-theme="dark"] .brand-name span {
+  color: #8db99a;
+}
+
+:root[data-theme="dark"] .church-switcher {
+  background: #1d2821;
+  border-color: #344239;
+}
+
+:root[data-theme="dark"] .church-avatar {
+  background: #393b2d;
+  color: #d6c987;
+}
+
+:root[data-theme="dark"] .nav-label,
+:root[data-theme="dark"] .church-details small,
+:root[data-theme="dark"] .profile-details small,
+:root[data-theme="dark"] .breadcrumbs,
+:root[data-theme="dark"] .date-label,
+:root[data-theme="dark"] .page-subtitle,
+:root[data-theme="dark"] .directory-heading p,
+:root[data-theme="dark"] .page-footer {
+  color: #96a39a;
+}
+
+:root[data-theme="dark"] .nav-item {
+  color: #b2beb5;
+}
+
+:root[data-theme="dark"] .nav-item:hover {
+  background: #202d24;
+  color: #d7e7da;
+}
+
+:root[data-theme="dark"] .nav-item-active,
+:root[data-theme="dark"] .nav-item-active:hover {
+  background: #26392c;
+  color: #a8d5b4;
+}
+
+:root[data-theme="dark"] .profile-card {
+  border-color: #2b372f;
+}
+
+:root[data-theme="dark"] .profile-avatar,
+:root[data-theme="dark"] .topbar-avatar {
+  background: #383347;
+  color: #d0c5ed;
+}
+
+:root[data-theme="dark"] .icon-button {
+  color: #b4c0b7;
+}
+
+:root[data-theme="dark"] .icon-button:hover {
+  background: #243128;
+  color: #e5ebe5;
+}
+
+:root[data-theme="dark"] .demo-notice {
+  color: #aeb9b0;
+}
+
+:root[data-theme="dark"] .demo-notice-error {
+  color: #f0ad91;
+  background: #35251f;
+  border-color: #51352a;
+}
+
+:root[data-theme="dark"] .button-secondary {
+  color: #d3ddd5;
+  background: #202a23;
+  border-color: #39463d;
+}
+
+:root[data-theme="dark"] .button-secondary:hover {
+  background: #29372e;
+}
+
+:root[data-theme="dark"] .stat-card,
+:root[data-theme="dark"] .directory-card {
+  background: #171f1a;
+  border-color: #2b372f;
+}
+
+:root[data-theme="dark"] .stat-content > span,
+:root[data-theme="dark"] .stat-content small {
+  color: #9eaaa1;
+}
+
+:root[data-theme="dark"] .stat-content > strong {
+  color: #e2e9e2;
+}
+
+:root[data-theme="dark"] .stat-icon-green {
+  color: #98cda6;
+  background: #24382a;
+}
+
+:root[data-theme="dark"] .stat-icon-blue {
+  color: #9cb9d8;
+  background: #243141;
+}
+
+:root[data-theme="dark"] .stat-icon-amber {
+  color: #ddbd8b;
+  background: #3b3224;
+}
+
+:root[data-theme="dark"] .stat-card-action,
+:root[data-theme="dark"] .stat-card-action:hover {
+  background: #1b261f;
+}
+
+:root[data-theme="dark"] .import-icon {
+  color: #9ac4a4;
+  border-color: #516a57;
+}
+
+:root[data-theme="dark"] .card-arrow {
+  color: #91a197;
+}
+
+:root[data-theme="dark"] .directory-toolbar,
+:root[data-theme="dark"] .people-table td,
+:root[data-theme="dark"] .table-footer {
+  border-color: #2a352e;
+}
+
+:root[data-theme="dark"] .search-field,
+:root[data-theme="dark"] .sort-button,
+:root[data-theme="dark"] .page-button,
+:root[data-theme="dark"] .page-number {
+  background: #131a16;
+  border-color: #354239;
+}
+
+:root[data-theme="dark"] .search-field,
+:root[data-theme="dark"] .search-field input,
+:root[data-theme="dark"] .page-button,
+:root[data-theme="dark"] .page-number {
+  color: #c8d2ca;
+}
+
+:root[data-theme="dark"] .search-field input::placeholder {
+  color: #859188;
+}
+
+:root[data-theme="dark"] .search-field kbd {
+  color: #9ca99f;
+  border-color: #354239;
+}
+
+:root[data-theme="dark"] .filter-tab {
+  color: #9ba79e;
+}
+
+:root[data-theme="dark"] .filter-tab-active {
+  color: #a8d5b4;
+}
+
+:root[data-theme="dark"] .filter-tab-active:after {
+  background: #72ad81;
+}
+
+:root[data-theme="dark"] .people-table th {
+  color: #9aa69e;
+  background: #1b241e;
+}
+
+:root[data-theme="dark"] .people-table td {
+  background: #171f1a;
+}
+
+:root[data-theme="dark"] .person-cell strong {
+  color: #d9e2da;
+}
+
+:root[data-theme="dark"] .person-cell small,
+:root[data-theme="dark"] .muted-cell,
+:root[data-theme="dark"] .table-footer {
+  color: #9ba79e;
+}
+
+:root[data-theme="dark"] .avatar-0 {
+  color: #e1ad8f;
+  background: #3d2d25;
+}
+
+:root[data-theme="dark"] .avatar-1 {
+  color: #a5c7dd;
+  background: #263541;
+}
+
+:root[data-theme="dark"] .avatar-2 {
+  color: #dda4bd;
+  background: #3b2933;
+}
+
+:root[data-theme="dark"] .avatar-3 {
+  color: #bfd39e;
+  background: #303927;
+}
+
+:root[data-theme="dark"] .avatar-4 {
+  color: #c6b2de;
+  background: #352e40;
+}
+
+:root[data-theme="dark"] .avatar-5 {
+  color: #dec28a;
+  background: #3a3425;
+}
+
+:root[data-theme="dark"] .status-member {
+  color: #a8d5b4;
+  background: #26392c;
+}
+
+:root[data-theme="dark"] .status-visitor {
+  color: #e0c18e;
+  background: #3a3224;
+}
+
+:root[data-theme="dark"] .row-more {
+  color: #a0aca3;
+}
+
+:root[data-theme="dark"] .empty-state {
+  color: #9ba79e !important;
+}
+
+:root[data-theme="dark"] .table-footer strong {
+  color: #d0dbd2;
+}
+
+:root[data-theme="dark"] .page-button:disabled {
+  color: #69756c;
+}
+
+:root[data-theme="dark"] .page-number {
+  background: #26392c;
+  border-color: #35483a;
+  color: #a8d5b4;
+}
+
+:root[data-theme="dark"] .modal {
+  background: #1a231d;
+}
+
+:root[data-theme="dark"] .modal-heading h2 {
+  color: #e3eae4;
+}
+
+:root[data-theme="dark"] .modal-heading p,
+:root[data-theme="dark"] .optional-label {
+  color: #9ca99f;
+}
+
+:root[data-theme="dark"] .modal label {
+  color: #c7d1c9;
+}
+
+:root[data-theme="dark"] .modal input,
+:root[data-theme="dark"] .modal select {
+  color: #e0e8e1;
+  background: #121914;
+  border-color: #38473c;
+}
+
+:root[data-theme="dark"] .modal input::placeholder {
+  color: #849188;
+}
+
+:root[data-theme="dark"] .modal-demo-footnote {
+  border-color: #2d3931;
+  color: #9ca99f;
+}
