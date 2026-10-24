@@ -440,6 +440,44 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   }
 });
 
+app.delete<{ Params: { id: string } }>("/api/users/:id", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  },
+}, async (request, reply): Promise<{ id: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  if (request.params.id === request.authenticatedUser?.id) {
+    return reply.code(400).send({ error: "You cannot delete your own account." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
+    const target = await client.query("SELECT id, role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    if (!target.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    if (target.rows[0].role === "server_admin") {
+      const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
+      if (admins.rows[0].total <= 1) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The last Server Administrator account cannot be deleted." });
+      }
+    }
+    await client.query("DELETE FROM app_users WHERE id = $1", [request.params.id]);
+    await client.query("COMMIT");
+    return { id: request.params.id };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
 app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
   const result = await pool.query(
