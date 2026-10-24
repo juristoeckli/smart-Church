@@ -31,6 +31,7 @@ const navigation = [
 
 const today = new Intl.DateTimeFormat("en-GB", { weekday: "long", month: "long", day: "numeric" }).format(new Date());
 const defaultLogoUrl = "/gfc-logo.svg";
+const departmentLocation = "Steffisburg";
 
 function initials(contact: Contact) {
   return `${contact.firstName[0] ?? ""}${contact.lastName[0] ?? ""}`.toUpperCase();
@@ -192,8 +193,9 @@ function App() {
   return (
     <div className="app-frame">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
-        <a className="brand" href="#home" aria-label="Church home">
+        <a className="brand" href="#home" aria-label={`Church home · ${departmentLocation}`}>
           {logoUnavailable ? <><span className="brand-mark"><Church size={21} strokeWidth={1.8} /></span><span className="brand-name">smart<span>church</span></span></> : <img className="brand-custom-logo" src={logoSrc} alt="GfC logo" onError={() => setLogoUnavailable(true)} />}
+          <span className="brand-location">{departmentLocation}</span>
         </a>
 
         <button className="church-switcher" type="button" aria-label="Select church">
