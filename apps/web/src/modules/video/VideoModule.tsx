@@ -261,8 +261,8 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
   const telemetryLed = !connected ? "#e9a536" : live ? "#f51d34" : "#64db86";
   return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} illustrated front panel, ${status}`}>
     <rect x="3" y="5" width="1494" height="490" rx="20" fill="#111214" stroke="#08090a" strokeWidth="5" />
-    <rect x="8" y="10" width="1484" height="480" rx="16" fill="#36383b" stroke="#707175" strokeWidth="3" />
-    <path d="M20 24h1460M20 476h1460" stroke="#4c4e51" strokeWidth="2" opacity=".65" />
+    <rect x="8" y="10" width="1484" height="480" rx="16" fill="#1c1e21" stroke="#45484d" strokeWidth="3" />
+    <path d="M20 24h1460M20 476h1460" stroke="#292c30" strokeWidth="2" opacity=".8" />
     <text x="37" y="107" fill="#f4f4f5" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">ULTRA</text>
     <text x="163" y="107" fill="#ff9e14" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">HD</text>
     <path d="M40 220h190a18 18 0 0 1 18 18v187a18 18 0 0 1-18 18H40a18 18 0 0 1-18-18V238a18 18 0 0 1 18-18Z" fill="#17191b" stroke="#0c0d0e" strokeWidth="5" />
@@ -289,7 +289,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <path d="M937 280v34l27-17z" fill="#8ab8ce" />
     <text x="948" y="358" fill="#a8c5d4" fontFamily="Arial, sans-serif" fontSize="24" textAnchor="middle">{live ? "STREAMING" : ready ? "VIDEO PREVIEW" : "ENCODER STATUS"}</text>
     <text x="948" y="387" fill="#7693a2" fontFamily="Arial, sans-serif" fontSize="17" textAnchor="middle">{stringValue(encoder.ip) || "STATUS MONITOR"}</text>
-    <text x="1241" y="105" fill="#d9dadd" fontFamily="Arial, sans-serif" fontSize="22">Blackmagicdesign</text>
+    <text x="1237" y="105" fill="#e0e2e5" fontFamily="Arial, sans-serif" fontSize="23" fontWeight="700" letterSpacing="-.6">Blackmagic<tspan fill="#c5c8cc" fontWeight="400">design</tspan></text>
     <circle cx="1379" cy="272" r="99" fill="#0b0c0e" stroke="#181a1c" strokeWidth="7" />
     <circle cx="1379" cy="272" r="80" fill="#2d3034" stroke="#55585d" strokeWidth="5" />
     <circle cx="1379" cy="272" r="69" fill="#303337" stroke="#3b3e42" strokeWidth="2" />
