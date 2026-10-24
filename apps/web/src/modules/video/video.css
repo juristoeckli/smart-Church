@@ -102,6 +102,7 @@
 .video-crosspoint-active:disabled{opacity:1}
 .video-routing-tools{display:flex;gap:7px;flex-wrap:wrap;margin:13px 0}
 .video-preset-row,.video-history-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
+.video-preset-row{justify-content:flex-start}
 .video-preset-row>span,.video-history-row>span{display:grid;gap:4px;min-width:0}
 .video-preset-row strong,.video-history-row strong{font-size:11px}
 .video-preset-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
