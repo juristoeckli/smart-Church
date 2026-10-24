@@ -94,6 +94,7 @@ app.addHook("preHandler", async (request, reply) => {
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (user.role !== "server_admin") return reply.code(403).send({ error: "Server administrator access is required." });
 });
 
 type ServiceEventRow = {
@@ -197,7 +198,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     if (existing.rowCount) {
       await client.query("ROLLBACK");
       firstRunSetupCode = null;
-      return reply.code(409).send({ error: "The initial administrator has already been created." });
+      return reply.code(409).send({ error: "The initial server administrator has already been created." });
     }
     const department = await client.query(
       "UPDATE departments SET name = $2, updated_at = now() WHERE id = $1",
@@ -206,7 +207,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     if (!department.rowCount) throw new Error("The configured department could not be found.");
     const result = await client.query(
       `INSERT INTO app_users (id, email, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, 'admin') RETURNING id, email, display_name, role`,
+       VALUES ($1, $2, $3, $4, 'server_admin') RETURNING id, email, display_name, role`,
       [randomUUID(), email, displayName, passwordHash],
     );
     const row = result.rows[0];
@@ -589,7 +590,7 @@ try {
       const accounts = await pool.query("SELECT count(*)::int AS total FROM app_users");
       if (accounts.rows[0].total === 0) {
         firstRunSetupCode = randomBytes(18).toString("base64url");
-        app.log.warn({ setupCode: firstRunSetupCode }, "Use this one-time code to create the first administrator account.");
+        app.log.warn({ setupCode: firstRunSetupCode }, "Use this one-time code to create the first server administrator account.");
       }
     }
   } catch (error) {

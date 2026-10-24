@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS app_users (
   email TEXT NOT NULL,
   display_name TEXT NOT NULL CHECK (length(trim(display_name)) BETWEEN 1 AND 100),
   password_hash TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin')),
+  role TEXT NOT NULL CHECK (role IN ('server_admin')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

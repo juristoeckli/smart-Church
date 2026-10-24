@@ -62,7 +62,7 @@ export function Authentication({
         <div className="auth-heading">
           <span className="eyebrow">GFC WORKSPACE</span>
           <h1 id="auth-title">{setupRequired ? "Set up your workspace" : "Welcome back"}</h1>
-          <p>{setupRequired ? "Create the first administrator account to secure this workspace." : "Sign in to continue to your church workspace."}</p>
+          <p>{setupRequired ? "Create the first server administrator account to manage this installation." : "Sign in to continue to your church workspace."}</p>
         </div>
 
         {unavailableMessage && <div className="auth-message auth-message-error" role="alert">{unavailableMessage}</div>}
@@ -79,7 +79,7 @@ export function Authentication({
           <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
           <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} placeholder={setupRequired ? "At least 12 characters" : "Your password"} /></label>
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
-            {isSubmitting ? "Please wait…" : setupRequired ? "Create administrator" : "Sign in"}
+            {isSubmitting ? "Please wait…" : setupRequired ? "Create server administrator" : "Sign in"}
             {!isSubmitting && <ArrowRight size={17} />}
           </button>
         </form>

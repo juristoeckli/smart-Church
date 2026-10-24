@@ -2,7 +2,7 @@
 
 A modular application for GfC locations, with one shared web/desktop interface, optional offline operation, trusted server-to-server sharing and extensible worker processes.
 
-**Status: local development foundation.** One installation can manage multiple GfC locations. People, services, events and time zones are scoped to the selected location; the site logo is installation-wide. Initial local administrator sign-in is in place; per-location memberships and permission management are still in progress. Keep this API bound to localhost and use fictional data until access controls are complete.
+**Status: local development foundation.** One installation can manage multiple GfC locations. People, services, events and time zones are scoped to the selected location; the site logo is installation-wide. The first account is a Server Administrator who can manage locations; per-location memberships and permissions are still in progress. Keep this API bound to localhost and use fictional data until access controls are complete.
 
 ## Start here
 
@@ -16,7 +16,7 @@ TypeScript • Node.js LTS / Fastify • React • Electron • PostgreSQL • S
 
 ## Local development
 
-Use Node.js 24.22.1, pnpm 11.25.0 and Docker Desktop. Copy `.env.example` to `.env`, then run `docker compose up -d db`. On startup, Core applies the checked-in SQL migrations and ensures the configured initial location exists. On a fresh database, Core prints a one-time setup code in the API terminal; enter it in the browser with an initial location and first administrator details (passwords must be at least 12 characters). Add more locations from the location switcher after sign-in. Run `pnpm install` and `pnpm dev`. The UI is available at `http://localhost:5173`; the API health endpoint is at `http://localhost:3001/api/health`. Stop the local database with `docker compose stop db`; its named volume keeps the development data.
+Use Node.js 24.22.1, pnpm 11.25.0 and Docker Desktop. Copy `.env.example` to `.env`, then run `docker compose up -d db`. On startup, Core applies the checked-in SQL migrations and ensures the configured initial location exists. On a fresh database, Core prints a one-time setup code in the API terminal; enter it in the browser with an initial location and first Server Administrator details (passwords must be at least 12 characters). Add more locations from the location switcher after sign-in. Run `pnpm install` and `pnpm dev`. The UI is available at `http://localhost:5173`; the API health endpoint is at `http://localhost:3001/api/health`. Stop the local database with `docker compose stop db`; its named volume keeps the development data.
 
 The directory starts empty. Contacts are stored in PostgreSQL and scoped to `SMART_CHURCH_DEPARTMENT_ID`. If `DATABASE_URL` is not set, the API starts but shows that database-backed contacts are unavailable. The development API has no login yet and refuses to run in production mode; use fictional data only until authentication and permissions are complete.
 

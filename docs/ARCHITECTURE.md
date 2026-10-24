@@ -18,7 +18,7 @@ Baseline:
 
 An installation is one server deployment for the GfC organization. It may host multiple locations, each isolated as a logical area (stored as a department in the current database model). Location IDs remain stable when moving between installations. Companies normally have separate deployments; no shared cross-company hosting is required.
 
-Location data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated active-location context. Users can belong to multiple locations with different rights. Switching location must not mix caches, pending edits, records or permissions. The current local prototype supports location creation and switching for the installation administrator; individual membership and permission checks remain to be implemented.
+Location data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated active-location context. Users can belong to multiple locations with different rights. Switching location must not mix caches, pending edits, records or permissions. The current local prototype supports location creation and switching for the Server Administrator; individual membership and permission checks remain to be implemented.
 
 Modules are installed/enabled installation-wide, not separately per department. Enabled modules have separate department data/settings. Required modules cannot be disabled. Disabling an optional module preserves its data.
 

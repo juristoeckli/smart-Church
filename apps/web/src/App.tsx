@@ -377,7 +377,7 @@ function App() {
           <button className="nav-item" type="button" onClick={() => setNotice("Help will be added in a later step.")}><CircleHelp size={18} strokeWidth={1.8} /><span>Help & support</span></button>
           <div className="profile-card">
             <div className="profile-avatar">{userInitials}</div>
-            <div className="profile-details"><strong>{authUser.displayName}</strong><small>Administrator</small></div>
+            <div className="profile-details"><strong>{authUser.displayName}</strong><small>Server Administrator</small></div>
             <button className="icon-button profile-menu" type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()}><LogOut size={16} /></button>
           </div>
         </div>
