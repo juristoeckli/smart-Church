@@ -1,6 +1,7 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
@@ -347,15 +348,106 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
   const result = await pool.query(
     `SELECT u.id, u.email, u.username, u.display_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
             u.street, u.street_number, u.postal_code, u.city, u.role AS account_role,
-            COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role))
-              FILTER (WHERE m.department_id IS NOT NULL), '[]'::json) AS memberships
+            memberships.memberships,
+            phones.phone_numbers, relations.relationships
        FROM app_users u
-       LEFT JOIN department_memberships m ON m.user_id = u.id
-      GROUP BY u.id
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role)), '[]'::json) AS memberships
+           FROM department_memberships m WHERE m.user_id = u.id
+       ) memberships ON true
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(json_agg(json_build_object('label', p.label, 'number', p.number) ORDER BY p.position), '[]'::json) AS phone_numbers
+           FROM user_phone_numbers p WHERE p.user_id = u.id
+       ) phones ON true
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(json_agg(json_build_object('relatedUserId', r.related_user_id, 'relatedUserName', related.display_name, 'relationship', r.relationship) ORDER BY related.display_name), '[]'::json) AS relationships
+           FROM user_relationships r JOIN app_users related ON related.id = r.related_user_id
+          WHERE r.user_id = u.id
+       ) relations ON true
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), accountRole: row.account_role, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, memberships: row.memberships }));
 });
+
+const phoneNumbersSchema = {
+  type: "array",
+  maxItems: 10,
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["label", "number"],
+    properties: {
+      label: { type: "string", enum: ["home", "mobile", "work", "work_mobile"] },
+      number: { type: "string", minLength: 1, maxLength: 32 },
+    },
+  },
+};
+
+const relationshipsSchema = {
+  type: "array",
+  maxItems: 100,
+  items: {
+    type: "object",
+    additionalProperties: false,
+    required: ["relatedUserId", "relationship"],
+    properties: {
+      relatedUserId: { type: "string", format: "uuid" },
+      relationship: { type: "string", enum: ["spouse", "parent", "child", "sibling", "guardian", "ward", "other"] },
+    },
+  },
+};
+
+function cleanPhoneNumbers(numbers: UserPhoneNumber[] | undefined) {
+  return (numbers ?? []).map((phone) => ({ label: phone.label, number: phone.number.trim() }));
+}
+
+async function insertUserPhoneNumbers(client: { query: (text: string, values?: unknown[]) => Promise<unknown> }, userId: string, numbers: UserPhoneNumber[]) {
+  for (const [position, phone] of numbers.entries()) {
+    if (!phone.number) continue;
+    await client.query(
+      "INSERT INTO user_phone_numbers (user_id, position, label, number) VALUES ($1, $2, $3, $4)",
+      [userId, position, phone.label, phone.number],
+    );
+  }
+}
+
+const inverseRelationship: Record<UserRelationshipKind, UserRelationshipKind> = {
+  spouse: "spouse",
+  parent: "child",
+  child: "parent",
+  sibling: "sibling",
+  guardian: "ward",
+  ward: "guardian",
+  other: "other",
+};
+
+async function replaceUserRelationships(client: PoolClient, userId: string, relationships: UserRelationshipInput[]) {
+  await client.query("SELECT pg_advisory_xact_lock(1196571730, 3)");
+  const relatedIds = relationships.map((relationship) => relationship.relatedUserId);
+  if (new Set(relatedIds).size !== relatedIds.length || relatedIds.includes(userId)) return "Choose each related user once and do not select this account.";
+  if (relatedIds.length) {
+    const found = await client.query("SELECT id FROM app_users WHERE id = ANY($1::uuid[])", [relatedIds]);
+    if (found.rowCount !== relatedIds.length) return "One of the selected users could not be found.";
+  }
+  await client.query("DELETE FROM user_relationships WHERE user_id = $1 OR related_user_id = $1", [userId]);
+  for (const relationship of relationships) {
+    await client.query(
+      "INSERT INTO user_relationships (user_id, related_user_id, relationship) VALUES ($1, $2, $3), ($2, $1, $4)",
+      [userId, relationship.relatedUserId, relationship.relationship, inverseRelationship[relationship.relationship]],
+    );
+  }
+  return null;
+}
+
+async function readUserRelationships(client: PoolClient, userId: string) {
+  const result = await client.query(
+    `SELECT r.related_user_id, u.display_name, r.relationship
+       FROM user_relationships r JOIN app_users u ON u.id = r.related_user_id
+      WHERE r.user_id = $1 ORDER BY u.display_name`,
+    [userId],
+  );
+  return result.rows.map((row) => ({ relatedUserId: row.related_user_id, relatedUserName: row.display_name, relationship: row.relationship as UserRelationshipKind }));
+}
 
 app.post<{ Body: CreateSiteUser }>("/api/users", {
   schema: {
@@ -372,6 +464,8 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         streetNumber: { type: "string", maxLength: 24 },
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
+        phoneNumbers: phoneNumbersSchema,
+        relationships: relationshipsSchema,
         password: { type: "string", minLength: 6, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
@@ -392,6 +486,8 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const streetNumber = request.body.streetNumber?.trim() || null;
   const postalCode = request.body.postalCode?.trim() || null;
   const city = request.body.city?.trim() || null;
+  const phoneNumbers = cleanPhoneNumbers(request.body.phoneNumbers);
+  const relationships = request.body.relationships ?? [];
   const accountRole = request.body.accountRole;
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
@@ -421,9 +517,15 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         [id, membership.departmentId, membership.role],
       );
     }
+    await insertUserPhoneNumbers(client, id, phoneNumbers);
+    const relationshipError = await replaceUserRelationships(client, id, relationships);
+    if (relationshipError) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: relationshipError });
+    }
     await client.query("COMMIT");
     const row = user.rows[0];
-    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), accountRole, memberships });
+    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
@@ -434,7 +536,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "memberships"> }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -448,6 +550,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         streetNumber: { type: "string", maxLength: 24 },
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
+        phoneNumbers: phoneNumbersSchema,
+        relationships: relationshipsSchema,
         memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } } },
       },
     },
@@ -463,6 +567,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   const streetNumber = request.body.streetNumber?.trim() || null;
   const postalCode = request.body.postalCode?.trim() || null;
   const city = request.body.city?.trim() || null;
+  const phoneNumbers = cleanPhoneNumbers(request.body.phoneNumbers);
+  const relationships = request.body.relationships ?? [];
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
   if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
@@ -488,6 +594,13 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       return reply.code(404).send({ error: "This local user could not be found." });
     }
     await client.query("DELETE FROM department_memberships WHERE user_id = $1", [request.params.id]);
+    await client.query("DELETE FROM user_phone_numbers WHERE user_id = $1", [request.params.id]);
+    await insertUserPhoneNumbers(client, request.params.id, phoneNumbers);
+    const relationshipError = await replaceUserRelationships(client, request.params.id, relationships);
+    if (relationshipError) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: relationshipError });
+    }
     for (const membership of memberships) {
       await client.query(
         "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, $3)",
@@ -496,7 +609,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     }
     await client.query("COMMIT");
     const row = updated.rows[0];
-    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), accountRole: row.role, memberships };
+    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });

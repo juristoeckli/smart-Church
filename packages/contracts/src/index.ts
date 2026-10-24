@@ -56,6 +56,8 @@ export interface SiteUser {
   streetNumber?: string;
   postalCode?: string;
   city?: string;
+  phoneNumbers: UserPhoneNumber[];
+  relationships: UserRelationship[];
   accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
 }
@@ -69,9 +71,31 @@ export interface CreateSiteUser {
   streetNumber?: string;
   postalCode?: string;
   city?: string;
+  phoneNumbers?: UserPhoneNumber[];
+  relationships?: UserRelationshipInput[];
   password: string;
   accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
+}
+
+export type UserPhoneLabel = "home" | "mobile" | "work" | "work_mobile";
+
+export interface UserPhoneNumber {
+  label: UserPhoneLabel;
+  number: string;
+}
+
+export type UserRelationshipKind = "spouse" | "parent" | "child" | "sibling" | "guardian" | "ward" | "other";
+
+export interface UserRelationship {
+  relatedUserId: string;
+  relatedUserName: string;
+  relationship: UserRelationshipKind;
+}
+
+export interface UserRelationshipInput {
+  relatedUserId: string;
+  relationship: UserRelationshipKind;
 }
 
 export interface AuthStatus {
