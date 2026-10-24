@@ -57,6 +57,15 @@ function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, depar
 }
 
 type WorkspacePage = "People" | "Services & events" | "Video & streaming";
+const workspacePageHashes: Record<WorkspacePage, string> = {
+  People: "#people",
+  "Services & events": "#services-events",
+  "Video & streaming": "#video-streaming",
+};
+function workspacePageFromHash(hash: string): WorkspacePage | null {
+  const entry = Object.entries(workspacePageHashes).find(([, route]) => route === hash);
+  return (entry?.[0] as WorkspacePage | undefined) ?? null;
+}
 function savedWorkspacePage(): WorkspacePage {
   try {
     const saved = localStorage.getItem("smart-church-page");
@@ -97,7 +106,7 @@ function App() {
   const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | ContactStatus>("all");
-  const [page, setPage] = useState<WorkspacePage>(savedWorkspacePage);
+  const [page, setPage] = useState<WorkspacePage>(() => workspacePageFromHash(window.location.hash) ?? savedWorkspacePage());
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -152,6 +161,20 @@ function App() {
   useEffect(() => {
     try { localStorage.setItem("smart-church-page", page); } catch { /* Keep the current page for this session. */ }
   }, [page]);
+
+  useEffect(() => {
+    const hash = workspacePageHashes[page];
+    if (window.location.hash !== hash) window.location.hash = hash;
+  }, [page]);
+
+  useEffect(() => {
+    const restorePageFromUrl = () => {
+      const routePage = workspacePageFromHash(window.location.hash);
+      if (routePage) setPage(routePage);
+    };
+    window.addEventListener("hashchange", restorePageFromUrl);
+    return () => window.removeEventListener("hashchange", restorePageFromUrl);
+  }, []);
 
   useEffect(() => {
     if (authUser && department.id) {
@@ -601,7 +624,7 @@ function App() {
     <div className="app-frame">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand-header">
-          <a className="brand" href="#home" aria-label="Church home">
+          <a className="brand" href="#people" aria-label="Church home">
             {logoUnavailable ? <><span className="brand-mark"><Church size={21} strokeWidth={1.8} /></span><span className="brand-name">smart<span>church</span></span></> : <img className="brand-custom-logo" src={logoSrc} alt="GfC logo" onError={() => setLogoUnavailable(true)} />}
           </a>
           <button className="brand-location" type="button" aria-label={`Switch site. Current site: ${department.location}`} onClick={() => setIsServerSettingsOpen(true)}><span>{department.location}</span><ChevronDown size={15} aria-hidden="true" /></button>
