@@ -1089,15 +1089,15 @@ app.get("/api/video/status", async (request, reply) => {
   }
 });
 
-app.get<{ Querystring: { device?: string } }>("/api/video/history", {
-  schema: { querystring: { type: "object", additionalProperties: false, required: ["device"], properties: { device: { type: "string", minLength: 1, maxLength: 80 } } } },
+app.get<{ Querystring: { device?: string; site_id?: string } }>("/api/video/history", {
+  schema: { querystring: { type: "object", additionalProperties: false, required: ["device"], properties: { device: { type: "string", minLength: 1, maxLength: 80 }, site_id: { type: "string", minLength: 1, maxLength: 80 } } } },
 }, async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
   if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
   try {
-    const events = await videoWorker.request("videohub-history", { device: request.query.device }, selectedDepartmentId, request.authenticatedUser!.username, 8_000);
+    const events = await videoWorker.request("videohub-history", { device: request.query.device, ...(request.query.site_id ? { site_id: request.query.site_id } : {}) }, selectedDepartmentId, request.authenticatedUser!.username, 8_000);
     return events;
   } catch (error) {
     const failure = error as Error & { code?: string };

@@ -38,7 +38,6 @@ def load_config():
     if isinstance(preset_limit, bool) or not isinstance(preset_limit, int) or preset_limit < 1:
         raise ValueError('routing_presets.max_presets must be a positive integer')
     ids = set()
-    department_ids = set()
     for site in config['sites']:
         if not site.get('id') or site['id'] in ids:
             raise ValueError('Site IDs must be unique and nonempty')
@@ -47,9 +46,6 @@ def load_config():
         if department_id is not None:
             if not isinstance(department_id, str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', department_id, re.I):
                 raise ValueError('Each department_id must be a valid location UUID')
-            if department_id in department_ids:
-                raise ValueError('Each location can be mapped to only one video site')
-            department_ids.add(department_id)
         site.setdefault('router_ip', '')
         enc_ids = set()
         for encoder in site['encoders']:

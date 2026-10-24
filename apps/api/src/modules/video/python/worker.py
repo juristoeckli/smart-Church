@@ -37,16 +37,42 @@ def public_status(department_id):
         for site in result.get('sites', []) if site.get('department_id') == department_id]
     return result
 
+def resolve_site(config, department_id, data, target_key=None):
+    allowed = [site for site in config['sites'] if site.get('department_id') == department_id]
+    requested = data.get('site_id')
+    if requested:
+        site = next((site for site in allowed if site['id'] == requested), None)
+        if not site:
+            raise ValueError('Video equipment is not configured for this location')
+        if target_key:
+            target_id = data.get(target_key)
+            collection = 'encoders' if target_key == 'encoder' else 'devices'
+            if not any(item['id'] == target_id for item in site.get(collection, [])):
+                raise ValueError('Selected equipment does not belong to this site')
+        return site
+    if target_key:
+        target_id = data.get(target_key)
+        collection = 'encoders' if target_key == 'encoder' else 'devices'
+        matches = [site for site in allowed if any(item['id'] == target_id for item in site.get(collection, []))]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError('Select the site for this equipment')
+    if len(allowed) == 1:
+        return allowed[0]
+    if not allowed:
+        raise ValueError('Video equipment is not configured for this location')
+    raise ValueError('Select a site for this video operation')
+
 def dispatch(method, data):
     department_id = data.get('department_id')
     if not isinstance(department_id, str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', department_id, re.I):
         raise ValueError('Choose a configured location')
     config = load_config()
-    site = next((site for site in config['sites'] if site.get('department_id') == department_id), None)
-    if not site:
-        raise ValueError('Video equipment is not configured for this location')
     if method == 'status':
         return public_status(department_id)
+    target_key = 'encoder' if method in ('command', 'encoder-settings') else 'device' if method in ('videohub-route', 'videohub-presets', 'videohub-history') else None
+    site = resolve_site(config, department_id, data, target_key)
     data['site'] = site['id']
     if method == 'command':
         if data.get('action') not in ('Start', 'Stop'):

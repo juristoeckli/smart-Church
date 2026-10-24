@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Download, Play, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Video, WandSparkles } from "lucide-react";
+import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, Play, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Video, WandSparkles } from "lucide-react";
 import "./video.css";
 
 type Encoder = { id: string; name: string; ip?: string; model?: string; control?: string; state?: Record<string, unknown>; error?: string; streaming_settings?: Record<string, unknown> };
-type Device = { id: string; name: string; type?: string; ip?: string; port?: number; ping?: string; error?: string };
-type VideoSite = { id: string; name: string; router_status?: string; encoders: Encoder[]; devices: Device[] };
+type Device = { id: string; name: string; type?: string; ip?: string; port?: number; ping?: string; power?: string; error?: string };
+type VideoSite = { id: string; name: string; router_ip?: string; router_model?: string; router_status?: string; encoders: Encoder[]; devices: Device[] };
 type RouteState = { connected?: boolean; error?: string; model?: string; inputs?: string[]; outputs?: string[]; routes?: number[]; locks?: string[] };
 type ApiSnapshot = { error?: string; message?: string; available?: boolean; worker?: { state: string; error?: string | null }; status?: { sites?: VideoSite[]; videohubs?: Record<string, RouteState>; vpn?: { state?: string; error?: string | null } } };
 type Preset = { id: string; name: string; revision?: string; routes?: number[] };
@@ -98,9 +98,9 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     }
   }
 
-  async function loadHistory(deviceId: string) {
+  async function loadHistory(deviceId: string, siteId: string) {
     try {
-      const result = await api<unknown>(`/api/video/history?device=${encodeURIComponent(deviceId)}`);
+      const result = await api<unknown>(`/api/video/history?device=${encodeURIComponent(deviceId)}&site_id=${encodeURIComponent(siteId)}`);
       if (Array.isArray(result)) setHistory(result as Record<string, unknown>[]);
       else if (result && typeof result === "object" && "events" in result && Array.isArray((result as { events: unknown }).events)) setHistory((result as { events: Record<string, unknown>[] }).events);
       else setHistory([]);
@@ -109,8 +109,8 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     }
   }
 
-  async function loadPresets(deviceId: string) {
-    const result = await send("videohub-presets", { operation: "list", device: deviceId });
+  async function loadPresets(deviceId: string, siteId: string) {
+    const result = await send("videohub-presets", { operation: "list", device: deviceId, site_id: siteId });
     if (Array.isArray(result)) setPresets(result as Preset[]);
     else if (result && typeof result === "object" && "presets" in result && Array.isArray((result as { presets: unknown }).presets)) setPresets((result as { presets: Preset[] }).presets);
   }
@@ -119,12 +119,12 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     if (!hub || !matrix?.routes) return;
     const oldInput = matrix.routes[selectedOutput];
     if (!Number.isInteger(oldInput)) return setNotice("Refresh the routing matrix before changing a route.");
-    await send("videohub-route", { device: hub.id, output: selectedOutput, input: selectedInput, expected_input: oldInput }, "Route changed and verified by the Videohub.");
+    await send("videohub-route", { device: hub.id, site_id: hub.site.id, output: selectedOutput, input: selectedInput, expected_input: oldInput }, "Route changed and verified by the Videohub.");
   }
 
   async function exportXml(includeSecrets = false) {
     if (!xmlEncoder) return;
-    const result = await send("encoder-settings", { encoder: xmlEncoder.id, operation: "export", settings: { include_secrets: includeSecrets } });
+    const result = await send("encoder-settings", { encoder: xmlEncoder.id, site_id: xmlEncoder.site.id, operation: "export", settings: { include_secrets: includeSecrets } });
     if (result && typeof result === "object" && "xml" in result && typeof result.xml === "string") {
       setXml(result.xml);
       setXmlPreview(null);
@@ -137,8 +137,8 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     setBusy(true);
     try {
       const [preview, plan] = await Promise.all([
-        api<{ services?: XmlService[] }>("/api/video/encoder-settings", { method: "POST", body: JSON.stringify({ encoder: xmlEncoder.id, operation: "xml-preview", settings: { xml } }) }),
-        api<XmlPreflight>("/api/video/encoder-settings", { method: "POST", body: JSON.stringify({ encoder: xmlEncoder.id, operation: "xml-target", settings: { xml } }) }),
+        api<{ services?: XmlService[] }>("/api/video/encoder-settings", { method: "POST", body: JSON.stringify({ encoder: xmlEncoder.id, site_id: xmlEncoder.site.id, operation: "xml-preview", settings: { xml } }) }),
+        api<XmlPreflight>("/api/video/encoder-settings", { method: "POST", body: JSON.stringify({ encoder: xmlEncoder.id, site_id: xmlEncoder.site.id, operation: "xml-target", settings: { xml } }) }),
       ]);
       setXmlPreview(preview);
       setXmlPlan(plan);
@@ -163,7 +163,7 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     if (!window.confirm(`Upload these streaming settings to ${xmlEncoder.site.name} · ${xmlEncoder.name}? This changes encoder configuration.`)) return;
     if (!xmlPlatform || !xmlQuality || !xmlServer || !xmlPlan?.filename) return setNotice("Select a service, streaming server and quality profile first.");
     if (!window.confirm(`Upload ${xmlPlan.filename}${xmlPlan.replaces_existing ? " (replacing an existing file)" : ""} to ${xmlEncoder.site.name} · ${xmlEncoder.name}, then activate ${xmlPlatform} · ${xmlServer} · ${xmlQuality}? The stream must remain stopped.`)) return;
-    const result = await send("encoder-settings", { encoder: xmlEncoder.id, operation: "apply-xml", settings: { xml, filename: xmlPlan.filename, platform: xmlPlatform, server: xmlServer, quality: xmlQuality, ...(xmlCustomUrl ? { url: xmlCustomUrl } : {}) } }, "Streaming XML uploaded and selected. Check encoder status before starting a stream.");
+    const result = await send("encoder-settings", { encoder: xmlEncoder.id, site_id: xmlEncoder.site.id, operation: "apply-xml", settings: { xml, filename: xmlPlan.filename, platform: xmlPlatform, server: xmlServer, quality: xmlQuality, ...(xmlCustomUrl ? { url: xmlCustomUrl } : {}) } }, "Streaming XML uploaded and selected. Check encoder status before starting a stream.");
     if (!result) return;
     setXmlPreview(null);
     setXmlPlan(null);
@@ -171,10 +171,32 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   }
 
   const workerState = snapshot?.worker?.state ?? (loading ? "starting" : "unavailable");
+  const primarySite = sites.find((site) => site.id === "gfc-steffisburg") ?? sites[0];
+  const remoteSites = sites.filter((site) => site.id !== primarySite?.id);
+
+  function renderSite(site: VideoSite, origin: boolean) {
+    const gatewayStatus = site.router_status ?? "Status pending";
+    return <section className={`video-site-card${origin ? " video-site-origin" : ""}`} key={site.id}>
+      <header className="video-site-heading"><div><h2>{site.name}</h2><p>{origin ? "Streaming source" : "Remote location"} · {site.encoders.length + site.devices.length} connected assets</p></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus}</span></header>
+      <article className="video-gateway"><div className="video-equipment-icon"><Activity size={20} /></div><div className="video-equipment-copy"><strong>{site.router_model || "Network gateway"}</strong><small>{site.router_ip || "Gateway address not configured"}</small></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus === "Reachable" ? "Reachable" : gatewayStatus}</span></article>
+      {site.encoders.map((encoder) => {
+        const settings = encoder.streaming_settings ?? {};
+        const control = encoder.control ?? "Unknown";
+        return <article className="video-encoder-card" key={`${site.id}|${encoder.id}`}>
+          <div className="video-encoder-preview"><div className="video-encoder-display"><span>{stringValue(settings.platform) || encoder.model || "LIVE VIDEO"}</span><strong>{readState(encoder.state)}</strong><small>{encoder.ip || "Address not configured"} · {encoder.control ?? "Unknown"}</small></div><span className={`video-state ${control === "Connected" ? "video-state-good" : ""}`}>{control}</span></div>
+          <div className="video-encoder-details"><div className="video-encoder-info"><strong>{encoder.name}</strong><small>{encoder.model || "Streaming encoder"} · {encoder.ip || "No address"}</small><span className={`video-state ${control === "Connected" ? "video-state-good" : ""}`}>{control}</span><span className={`video-state ${readState(encoder.state).toLowerCase().includes("ready") ? "video-state-good" : ""}`}>{readState(encoder.state)}</span><small>Stream target: {stringValue(settings.destination_name) || stringValue(settings.platform) || "Not reported"}</small></div><div className="video-encoder-info"><strong>Streaming profile</strong><small>{stringValue(settings.profile) || stringValue(settings.quality) || "Profile not reported"}</small><small>{stringValue(settings.server) || "Server not reported"}</small><small>{stringValue(settings.error) || `Quality: ${stringValue(settings.quality) || "Not reported"}`}</small></div></div>
+          {!origin && <div className="video-remote-restriction"><Shield size={14} /> Nur für Übertragungen zwischen den Pflegeheimen</div>}
+          {canManage && origin && <div className="video-site-actions"><button type="button" className="video-small-button video-button-primary" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Start" }, `${encoder.name}: start accepted; waiting for device status.`)}><Play size={13} /> Start</button><button type="button" className="video-small-button" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop accepted; waiting for device status.`)}><Square size={12} /> Stop</button><button type="button" className="video-small-button" disabled={busy} onClick={() => { setSelectedEncoder(`${site.id}|${encoder.id}`); setTab("XML tools"); }}><Settings2 size={13} /> Settings</button></div>}
+          {encoder.error && <small className="video-error-text">{encoder.error}</small>}
+        </article>;
+      })}
+      {site.devices.map((device) => <article className="video-device-card" key={`${site.id}|${device.id}`}><div className="video-equipment-icon"><Settings2 size={19} /></div><div className="video-equipment-copy"><strong>{device.name}</strong><small>{device.type || "Equipment"} · {device.ip || "Address not configured"}</small>{device.power && <small>Power: {String(device.power)}</small>}</div><span className={`video-state ${device.ping === "Reachable" ? "video-state-good" : ""}`}>{device.ping ?? "Status pending"}</span>{device.error && <small className="video-error-text">{device.error}</small>}</article>)}
+    </section>;
+  }
 
   return <section className="video-module">
     <div className="video-heading">
-      <div><span className="video-eyebrow">TECHNIK · {snapshot?.status?.sites?.[0]?.name ?? "VIDEO"}</span><h1>Video &amp; streaming</h1><p>Monitor encoders, inspect routing, and manage streaming equipment for this location.</p></div>
+      <div><span className="video-eyebrow">TECHNIK · VIDEO</span><h1>Video &amp; streaming</h1><p>Monitor encoders, inspect routing, and manage streaming equipment for this location.</p></div>
       <div className={`video-worker video-worker-${ready ? "ready" : "off"}`}><span />{workerLabel(workerState)}<button type="button" title="Refresh video status" onClick={() => { setLoading(true); void refresh(); }}><RefreshCw size={15} /></button></div>
     </div>
 
@@ -189,11 +211,8 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     {!ready && !snapshot?.message && <div className="video-empty"><Video size={28} /><strong>{loading ? "Connecting to the video worker…" : "Video worker is unavailable"}</strong><p>{snapshot?.worker?.error ?? "The Core API starts this module in its own worker process."}</p></div>}
 
     {ready && tab === "Overview" && <>
-      <div className="video-summary-grid"><Summary label="Encoders" value={encoders.length} note="Configured for this location" icon={<Radio size={17} />} /><Summary label="Videohubs" value={hubs.length} note="Routing matrices" icon={<Route size={17} />} /><Summary label="Connected" value={encoders.filter((encoder) => encoder.control === "Connected").length} note="Encoder control links" icon={<Activity size={17} />} /></div>
-      <section className="video-panel"><div className="video-panel-heading"><div><h2>Streaming encoders</h2><p>Current connection and stream status</p></div></div>
-        {encoders.length ? <div className="video-device-list">{encoders.map((encoder) => <div className="video-device" key={encoder.key}><div className="video-device-icon"><Radio size={18} /></div><div className="video-device-name"><strong>{encoder.name}</strong><small>{encoder.site.name} · {encoder.ip || "Address not configured"}</small></div><span className={`video-state ${encoder.control === "Connected" ? "video-state-good" : ""}`}>{encoder.control ?? "Unknown"}</span><span className="video-stream-state">{readState(encoder.state)}</span>{canManage && <div className="video-actions"><button type="button" className="video-small-button" disabled={busy || encoder.control !== "Connected"} onClick={() => void send("command", { encoder: encoder.id, action: "Start" }, `${encoder.name}: start accepted; waiting for device status.`)}><Play size={14} /> Start</button><button type="button" className="video-small-button" disabled={busy || encoder.control !== "Connected"} onClick={() => void send("command", { encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop accepted; waiting for device status.`)}><Square size={13} /> Stop</button></div>}{encoder.error && <small className="video-error-text">{encoder.error}</small>}</div>)}</div> : <Empty text="No encoder is configured for this location." />}
-      </section>
-      <section className="video-panel"><div className="video-panel-heading"><div><h2>Equipment</h2><p>Video and network devices configured for this location</p></div></div>{sites.flatMap((site) => site.devices.map((device) => ({ site, device }))).length ? <div className="video-device-list">{sites.flatMap((site) => site.devices.map((device) => ({ site, device }))).map(({ site, device }) => <div className="video-device" key={`${site.id}|${device.id}`}><div className="video-device-icon"><Settings2 size={18} /></div><div className="video-device-name"><strong>{device.name}</strong><small>{site.name} · {device.type ?? "Device"} · {device.ip || "Address not configured"}</small></div><span className={`video-state ${device.ping === "Reachable" ? "video-state-good" : ""}`}>{device.ping ?? "Status pending"}</span>{device.error && <small className="video-error-text">{device.error}</small>}</div>)}</div> : <Empty text="No devices are configured for this location." />}</section>
+      <div className="video-overview-banner"><div><span className="video-eyebrow">LIVE EQUIPMENT MAP</span><h2>Streaming locations</h2><p>Encoder and network status across the sites assigned to this location.</p></div><div className="video-overview-count"><strong>{encoders.filter((encoder) => encoder.control === "Connected").length}</strong><span>of {encoders.length} encoders connected</span></div></div>
+      {sites.length ? <div className="video-network-board"><div className="video-board-origin">{primarySite && renderSite(primarySite, true)}</div><div className="video-board-internet"><span className="video-network-line" /><div className="video-internet-node"><Cloud size={40} strokeWidth={1.5} /><strong>Internet</strong><small>Network connection</small><span>Availability not monitored</span></div><span className="video-network-line" /></div><div className="video-board-remote">{remoteSites.map((site) => renderSite(site, false))}</div></div> : <Empty text="No equipment is configured for this location." />}
     </>}
 
     {ready && tab === "Streaming" && <section className="video-panel"><div className="video-panel-heading"><div><h2>Streaming status</h2><p>Read-only encoder telemetry. Start or stop a stream from the overview.</p></div></div>{encoders.length ? <div className="video-stream-grid">{encoders.map((encoder) => { const settings = encoder.streaming_settings ?? {}; return <article className="video-stream-card" key={encoder.key}><div className="video-device-icon"><Radio size={18} /></div><h3>{encoder.name}</h3><p>{encoder.site.name} · {encoder.model ?? "Blackmagic Web Presenter"}</p><dl><div><dt>Stream</dt><dd>{readState(encoder.state)}</dd></div><div><dt>Control</dt><dd>{encoder.control ?? "Unknown"}</dd></div><div><dt>Platform</dt><dd>{stringValue(settings.platform) || "—"}</dd></div><div><dt>Quality</dt><dd>{stringValue(settings.quality) || "—"}</dd></div><div><dt>Last checked</dt><dd>{formatTimestamp(settings.checked_at)}</dd></div></dl>{typeof settings.error === "string" && <p className="video-error-text">{settings.error}</p>}</article>; })}</div> : <Empty text="No streaming encoders are configured." />}</section>}
@@ -201,8 +220,8 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     {ready && tab === "Routing" && <div className="video-routing-layout"><section className="video-panel"><div className="video-panel-heading"><div><h2>Videohub routing</h2><p>Change a route only when the current source still matches the displayed matrix.</p></div><button className="video-small-button" type="button" disabled={!hub || busy} onClick={() => hub && void refresh()}><RefreshCw size={14} /> Refresh</button></div>
       {hubs.length ? <><label className="video-field">Videohub<select value={hub?.key ?? ""} onChange={(event) => { setSelectedHub(event.target.value); setHistory([]); setPresets([]); }}><option value="">Select device</option>{hubs.map((device) => <option value={device.key} key={device.key}>{device.site.name} · {device.name}</option>)}</select></label>
         {matrix?.connected && matrix.inputs && matrix.outputs && matrix.routes ? <div className="video-matrix-wrap"><table className="video-matrix"><thead><tr><th>Output</th><th>Current input</th><th>Locked</th><th>Change to input</th><th></th></tr></thead><tbody>{matrix.outputs.map((label, index) => <tr key={index}><td><strong>{label}</strong><small>Output {index + 1}</small></td><td>{matrix.inputs?.[matrix.routes?.[index] ?? -1] ?? "Unknown"}</td><td>{matrix.locks?.[index] === "U" ? "Unlocked" : "Locked"}</td><td><select aria-label={`New input for ${label}`} value={index === output ? input : matrix.routes?.[index] ?? 0} onChange={(event) => { setOutput(index); setInput(Number(event.target.value)); }} disabled={matrix.locks?.[index] !== "U"}><option value={matrix.routes?.[index] ?? -1}>Keep current</option>{matrix.inputs?.map((name, i) => <option value={i} key={i}>{name}</option>)}</select></td><td><button type="button" className="video-small-button" disabled={busy || matrix.locks?.[index] !== "U" || (index === output && input === matrix.routes?.[index])} onClick={() => { const nextInput = index === output ? input : (matrix.routes?.[index] ?? 0); setOutput(index); setInput(nextInput); void changeRoute(index, nextInput); }}>Apply</button></td></tr>)}</tbody></table></div> : <Empty text={matrix?.error ?? "Waiting for a Videohub connection."} />}
-        {hub && <div className="video-routing-tools"><button className="video-small-button" type="button" disabled={busy} onClick={() => void loadPresets(hub.id)}><ChevronDown size={14} /> Load presets</button><button className="video-small-button" type="button" disabled={busy || !matrix?.connected} onClick={() => { const name = window.prompt("Name this routing preset"); if (name?.trim() && hub) void send("videohub-presets", { operation: "save", device: hub.id, name: name.trim() }, "Routing preset saved."); }}><Save size={14} /> Save current</button><button className="video-small-button" type="button" disabled={!hub} onClick={() => hub && void loadHistory(hub.id)}><Clock3 size={14} /> History</button></div>}
-        {presets.map((preset) => <div className="video-preset-row" key={preset.id}><span><strong>{preset.name}</strong><small>Saved routing preset</small></span><button type="button" className="video-small-button" disabled={busy || !hub || !matrix?.routes} onClick={() => { if (!hub || !matrix?.routes || !window.confirm(`Recall “${preset.name}” on ${hub.name}? The Videohub will change routes.`)) return; if (!window.confirm(`Confirm recall of “${preset.name}” using the current routes?`)) return; void send("videohub-presets", { operation: "recall", device: hub.id, id: preset.id, revision: preset.revision, expected_routes: matrix.routes, confirmed: true }, "Routing preset recalled and verified."); }}>Recall</button></div>)}
+        {hub && <div className="video-routing-tools"><button className="video-small-button" type="button" disabled={busy} onClick={() => void loadPresets(hub.id, hub.site.id)}><ChevronDown size={14} /> Load presets</button><button className="video-small-button" type="button" disabled={busy || !matrix?.connected} onClick={() => { const name = window.prompt("Name this routing preset"); if (name?.trim() && hub) void send("videohub-presets", { operation: "save", device: hub.id, site_id: hub.site.id, name: name.trim() }, "Routing preset saved."); }}><Save size={14} /> Save current</button><button className="video-small-button" type="button" disabled={!hub} onClick={() => hub && void loadHistory(hub.id, hub.site.id)}><Clock3 size={14} /> History</button></div>}
+        {presets.map((preset) => <div className="video-preset-row" key={preset.id}><span><strong>{preset.name}</strong><small>Saved routing preset</small></span><button type="button" className="video-small-button" disabled={busy || !hub || !matrix?.routes} onClick={() => { if (!hub || !matrix?.routes || !window.confirm(`Recall “${preset.name}” on ${hub.name}? The Videohub will change routes.`)) return; if (!window.confirm(`Confirm recall of “${preset.name}” using the current routes?`)) return; void send("videohub-presets", { operation: "recall", device: hub.id, site_id: hub.site.id, id: preset.id, revision: preset.revision, expected_routes: matrix.routes, confirmed: true }, "Routing preset recalled and verified."); }}>Recall</button></div>)}
       </> : <Empty text="No Videohub is configured for this location." />}</section>
       <section className="video-panel video-history-panel"><div className="video-panel-heading"><div><h2>Routing history</h2><p>Observed route changes and verified actions</p></div></div>{history.length ? history.slice(0, 40).map((entry, index) => { const changeCount = Array.isArray(entry.changes) ? entry.changes.length : 0; return <div className="video-history-row" key={String(entry.id ?? index)}><Clock3 size={14} /><span><strong>{String(entry.kind ?? "Routing event")} · {changeCount} route changes</strong><small>{formatTimestamp(entry.time)} · {String(entry.user ?? "Observed")}</small></span></div>; }) : <Empty text="Load history to view changes observed by the worker." />}</section></div>}
 
@@ -213,7 +232,7 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
       <p className="video-security-note"><Shield size={14} /> Stream keys and encoder credentials are omitted unless you explicitly load settings with secrets.</p>
     </> : <Empty text="No streaming encoders are configured for this location." />}</section>}
 
-    <footer className="video-footer"><span><Shield size={13} /> Equipment access is scoped to {sites[0]?.name ?? "the selected location"}</span><span>Last refresh: {snapshot?.status ? new Date().toLocaleTimeString() : "—"}</span></footer>
+    <footer className="video-footer"><span><Shield size={13} /> Equipment access is scoped to the selected location</span><span>Last refresh: {snapshot?.status ? new Date().toLocaleTimeString() : "—"}</span></footer>
   </section>;
 }
 

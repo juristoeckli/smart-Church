@@ -40,20 +40,39 @@ class WorkerLocationScopeTests(unittest.TestCase):
         self.assertEqual(list(result['videohubs']), ['site-a|hub'])
         self.assertEqual(list(result['restart_cycles']), ['site-a'])
 
-    def test_unmapped_location_cannot_read_or_operate_configured_equipment(self):
+    def test_unmapped_location_receives_empty_status(self):
+        result = video_worker.dispatch('status', {'department_id': '00000000-0000-4000-8000-000000000003'})
+        self.assertEqual(result['sites'], [])
         with self.assertRaisesRegex(ValueError, 'not configured for this location'):
-            video_worker.dispatch('status', {'department_id': '00000000-0000-4000-8000-000000000003'})
+            video_worker.dispatch('restart-site', {'department_id': '00000000-0000-4000-8000-000000000003', 'site_id': 'site-a'})
 
     def test_non_uuid_location_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Choose a configured location'):
             video_worker.dispatch('status', {'department_id': 'site-a'})
 
-    def test_each_location_maps_to_only_one_video_site(self):
+    def test_location_can_map_to_multiple_video_sites(self):
         duplicate = dict(CONFIG)
         duplicate['sites'] = [*CONFIG['sites'], dict(CONFIG['sites'][0], id='site-a-copy')]
         with patch.object(Path, 'read_text', return_value=json.dumps(duplicate)):
-            with self.assertRaisesRegex(ValueError, 'only one video site'):
-                video_worker.load_config()
+            loaded = video_worker.load_config()
+        self.assertEqual([site['id'] for site in loaded['sites'] if site['department_id'] == LOCATION_A], ['site-a', 'site-a-copy'])
+
+    def test_status_includes_all_sites_for_selected_location(self):
+        video_worker.controller.snapshot['sites'].append(
+            {'id': 'site-a-copy', 'department_id': LOCATION_A, 'name': 'Location A Extra', 'router_ip': '', 'encoders': [], 'devices': []})
+        result = video_worker.dispatch('status', {'department_id': LOCATION_A})
+        self.assertEqual([site['id'] for site in result['sites']], ['site-a', 'site-a-copy'])
+
+    def test_operations_require_site_when_location_has_multiple_sites(self):
+        duplicate = dict(CONFIG)
+        duplicate['sites'] = [*CONFIG['sites'], dict(CONFIG['sites'][0], id='site-a-copy')]
+        with patch.object(Path, 'read_text', return_value=json.dumps(duplicate)):
+            with self.assertRaisesRegex(ValueError, 'Select a site'):
+                video_worker.dispatch('restart-site', {'department_id': LOCATION_A})
+
+    def test_requested_site_must_be_mapped_to_location(self):
+        with self.assertRaisesRegex(ValueError, 'not configured for this location'):
+            video_worker.dispatch('restart-site', {'department_id': LOCATION_A, 'site_id': 'site-b'})
 
 
 if __name__ == '__main__':
