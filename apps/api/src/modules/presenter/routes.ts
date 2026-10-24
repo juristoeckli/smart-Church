@@ -76,7 +76,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       const touched = await pool?.query(
         `UPDATE presenter_output_sessions s SET last_seen_at = now()
           FROM departments d
-         WHERE d.id = s.department_id AND s.token_hash = $1 AND d.enabled_modules @> ARRAY['presenter']::text[]
+         WHERE d.id = s.department_id AND (s.token_hash = $1 OR s.previous_token_hash = $1) AND d.enabled_modules @> ARRAY['presenter']::text[]
            AND (s.last_seen_at IS NULL OR s.last_seen_at < now() - interval '5 seconds')
          RETURNING s.state`,
         [hash],
@@ -84,7 +84,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       if (touched?.rows[0]) return touched.rows[0].state;
       const current = await pool?.query(
         `SELECT s.state FROM presenter_output_sessions s JOIN departments d ON d.id = s.department_id
-         WHERE s.token_hash = $1 AND d.enabled_modules @> ARRAY['presenter']::text[]`,
+         WHERE (s.token_hash = $1 OR s.previous_token_hash = $1) AND d.enabled_modules @> ARRAY['presenter']::text[]`,
         [hash],
       );
       return current?.rows[0]?.state;
@@ -162,7 +162,22 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
         "SELECT session_id, display_name, COALESCE(last_seen_at > now() - interval '10 seconds', false) AS connected, state FROM presenter_output_sessions WHERE department_id = $1 ORDER BY CASE WHEN session_id = 'main' THEN 0 ELSE substring(session_id FROM 4)::int END",
         [department],
       );
-      return sessions.rows.map((session) => ({ id: session.session_id, name: session.display_name, connected: session.connected, visible: Boolean(session.state?.visible), songName: session.state?.songName ?? null }));
+      return sessions.rows.map((session) => ({
+        id: session.session_id,
+        name: session.display_name,
+        connected: session.connected,
+        visible: Boolean(session.state?.visible),
+        songName: session.state?.songName ?? null,
+        datasetId: session.state?.datasetId ?? null,
+        songNumber: session.state?.songNumber ?? null,
+        slideIndex: session.state?.slideIndex ?? null,
+        slide: session.state?.slide?.type === "image"
+          ? {
+              ...session.state.slide,
+              imageUrl: `/api/presenter/datasets/${encodeURIComponent(session.state.datasetId)}/assets/${encodeURIComponent(session.state.slide.asset.slice("pages/".length))}?departmentId=${encodeURIComponent(department)}`,
+            }
+          : session.state?.slide ?? null,
+      }));
     });
 
     app.patch<{ Params: { id: string }; Body: { name: string } }>("/api/presenter/sessions/:id", { schema: {
@@ -186,13 +201,18 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       if (!department) return reply;
       if (!sessionIds.has(request.params.id)) return reply.code(404).send({ error: "Presenter session not found." });
       await ensurePresenterSessions(department);
-      const token = randomBytes(32).toString("base64url");
-      await pool!.query(
-        `UPDATE presenter_output_sessions SET token_hash = $3, last_seen_at = NULL, state = '{"visible": false}'::jsonb, updated_at = now()
-          WHERE department_id = $1 AND session_id = $2`,
-        [department, request.params.id, outputTokenHash(token)],
+      const candidate = randomBytes(32).toString("base64url");
+      const connected = await pool!.query(
+        `UPDATE presenter_output_sessions
+            SET previous_token_hash = CASE WHEN output_token IS NULL THEN COALESCE(previous_token_hash, token_hash) ELSE previous_token_hash END,
+                output_token = COALESCE(output_token, $3),
+                token_hash = CASE WHEN output_token IS NULL THEN $4 ELSE token_hash END,
+                updated_at = now()
+          WHERE department_id = $1 AND session_id = $2
+          RETURNING output_token`,
+        [department, request.params.id, candidate, outputTokenHash(candidate)],
       );
-      return { token };
+      return { token: connected.rows[0].output_token as string };
     });
 
     app.post<{ Params: { id: string }; Body: { visible: boolean; clear?: boolean; datasetId?: string; songNumber?: number; slideIndex?: number } }>("/api/presenter/sessions/:id/output", {
@@ -259,7 +279,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       const found = await pool?.query(
         `SELECT 1 FROM presenter_output_sessions s
           JOIN departments d ON d.id = s.department_id
-         WHERE s.token_hash = $1 AND d.enabled_modules @> ARRAY['presenter']::text[]`,
+         WHERE (s.token_hash = $1 OR s.previous_token_hash = $1) AND d.enabled_modules @> ARRAY['presenter']::text[]`,
         [outputTokenHash(request.params.token)],
       );
       if (!found?.rowCount) return reply.code(404).send({ error: "This Presenter output link is no longer active." });

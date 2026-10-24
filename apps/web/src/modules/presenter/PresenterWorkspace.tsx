@@ -6,7 +6,7 @@ type Dataset = { id: string; name: string; description: string; songCount: numbe
 type SongSummary = { number: number; sourceNumber: number; name: string; slideCount: number };
 type Slide = { type: "text"; text: string; label?: string; section?: string; layout?: "lower-third" } | { type: "image"; asset: string; label: string; section?: string; imageUrl: string };
 type Song = SongSummary & { slides: Slide[] };
-type PresenterSession = { id: string; name: string; connected: boolean; visible: boolean; songName: string | null };
+type PresenterSession = { id: string; name: string; connected: boolean; visible: boolean; songName: string | null; datasetId?: string | null; songNumber?: number | null; slideIndex?: number | null; slide?: Slide | null };
 const defaultLibraries = [
   { id: "singt-notation", name: "Singt with musical notes", icon: Music2 },
   { id: "singt-text", name: "Singt just text", icon: AudioLines },
@@ -43,6 +43,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
 
   const requestHeaders = useMemo(() => ({ "x-department-id": departmentId }), [departmentId]);
   const activeSession = sessions.find((session) => session.id === activeSessionId);
+  const outputPreview = activeSession?.slide ?? null;
   const activeOutputLink = outputLinks[activeSessionId] ?? "";
 
   useEffect(() => {
@@ -110,6 +111,10 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
     setSessionNameDraft(activeSession?.name ?? "");
   }, [activeSessionId, activeSession?.name, activeSession?.visible]);
 
+  useEffect(() => {
+    if (activeSession?.connected) setNotice("");
+  }, [activeSession?.connected]);
+
   async function generateOutputLink() {
     setOutputBusy(true);
     setOutputNotice("");
@@ -149,7 +154,15 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
       const response = await fetch(`/api/presenter/sessions/${encodeURIComponent(activeSessionId)}/output`, { method: "POST", headers: { ...requestHeaders, "content-type": "application/json", "x-csrf-token": csrfToken }, body: JSON.stringify(body) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error ?? "Could not update Presenter output.");
-      setSessions((current) => current.map((session) => session.id === activeSessionId ? { ...session, visible: result.visible, songName: body.clear ? null : body.songNumber !== undefined ? selectedSong?.name ?? null : session.songName } : session));
+      setSessions((current) => current.map((session) => session.id === activeSessionId ? {
+        ...session,
+        visible: result.visible,
+        songName: body.clear ? null : body.songNumber !== undefined ? selectedSong?.name ?? null : session.songName,
+        datasetId: body.clear ? null : body.datasetId ?? session.datasetId ?? null,
+        songNumber: body.clear ? null : body.songNumber ?? session.songNumber ?? null,
+        slideIndex: body.clear ? null : body.slideIndex ?? session.slideIndex ?? null,
+        slide: body.clear ? null : body.slideIndex !== undefined ? selectedSong?.slides[body.slideIndex] ?? session.slide ?? null : session.slide ?? null,
+      } : session));
       setShowOutput(result.visible);
       setNotice("");
       return true;
@@ -162,6 +175,33 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
     const sent = await sendOutputState({ visible: true, datasetId, songNumber: selectedSong.number, slideIndex: index });
     if (sent) setPresentedSlideIndex(index);
   }
+
+  useEffect(() => {
+    const handlePresenterKeys = (event: KeyboardEvent) => {
+      if (!capabilities.canPresent || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+
+      if (event.key === "Delete") {
+        if (!activeSession?.connected) return;
+        event.preventDefault();
+        setPresentedSlideIndex(null);
+        void sendOutputState({ visible: false, clear: true });
+        return;
+      }
+
+      if ((event.key !== "ArrowLeft" && event.key !== "ArrowRight") || !selectedSong || !activeSession?.connected) return;
+      const isCurrentSong = activeSession.songName === selectedSong.name;
+      const currentIndex = isCurrentSong ? presentedSlideIndex : null;
+      if (event.key === "ArrowLeft" && currentIndex === null) return;
+      const nextIndex = Math.max(0, Math.min(selectedSong.slides.length - 1, (currentIndex ?? -1) + (event.key === "ArrowRight" ? 1 : -1)));
+      if (nextIndex === currentIndex) return;
+      event.preventDefault();
+      void presentSlide(nextIndex);
+    };
+    window.addEventListener("keydown", handlePresenterKeys);
+    return () => window.removeEventListener("keydown", handlePresenterKeys);
+  }, [activeSession?.connected, activeSession?.songName, capabilities.canPresent, presentedSlideIndex, selectedSong, sendOutputState, presentSlide]);
 
   async function saveSessionName() {
     if (activeSessionId === "main" || !sessionNameDraft.trim()) return;
@@ -271,13 +311,13 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
             <div className="video-presenter-song-preview">{selectedSong ? <><header><div><span className="presenter-eyebrow">{selectedSong.sourceNumber} · {selectedSong.slides.length} SLIDES</span><h3>{selectedSong.name}</h3></div><span>{capabilities.canPresent ? `Click a slide to send to ${activeSession?.name ?? "Main"}` : "Built-in · Read only"}</span></header><div className="video-presenter-slide-grid" style={{ "--presenter-columns": columns } as CSSProperties}>{selectedSong.slides.map((slide, index) => <article key={`${selectedSong.number}-${index}`} className={`${slide.type === "text" && slide.layout === "lower-third" ? "is-lower-third " : ""}${presentedSlideIndex === index && activeSession?.songName === selectedSong.name ? "is-on-output" : ""}${capabilities.canPresent ? " is-presentable" : ""}`} role={capabilities.canPresent ? "button" : undefined} tabIndex={capabilities.canPresent ? 0 : undefined} onClick={() => void presentSlide(index)} onKeyDown={(event) => { if (capabilities.canPresent && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); void presentSlide(index); } }}>{slide.type === "image" ? <img src={slide.imageUrl} alt={`${selectedSong.name}, page ${slide.label}`} loading="lazy" /> : <div className="video-presenter-text-slide"><span>{slide.section || slide.label || "Slide"}</span><p>{slide.text}</p></div>}<small>{slide.label || `Slide ${index + 1}`}</small></article>)}</div></> : <div className="video-presenter-empty-state"><div className="video-presenter-empty-icon"><ListMusic size={24} /></div><h3>Choose a song</h3><p>Select a song to preview its notation or slides.</p></div>}</div>
           </div>
         </div>
-        <div className="video-presenter-key-help">{capabilities.canPresent ? "Click a slide to present" : "Slide presentation requires Operator rights"} · <kbd>←</kbd> <kbd>→</kbd> move through slides · <kbd>Esc</kbd> clear output</div>
+        <div className="video-presenter-key-help">{capabilities.canPresent ? "Click a slide to present" : "Slide presentation requires Operator rights"} · <kbd>←</kbd> <kbd>→</kbd> move through slides · <kbd>Del</kbd> clear output</div>
         <section className="video-presenter-rundown"><header><strong>Playlist</strong><span>PREVIEW ONLY</span></header><div><span><Plus size={15} /> Add songs to build a service rundown.</span></div></section>
       </main>
 
       {outputVisible && <aside className="video-presenter-inspector" aria-label="Presenter session output">
         <header><strong><Monitor size={14} /> {activeSession?.name ?? "Main"} output</strong><span className="video-presenter-output-badge">{activeSession?.connected ? showOutput ? "LIVE" : "BLANK" : "OFFLINE"}</span></header>
-        <div className={`video-presenter-monitor${showOutput ? "" : " is-hidden"}`}>{showOutput && activeSession?.songName ? <div><Eye size={22} /><span>{activeSession.songName}</span></div> : <div><EyeOff size={22} /><span>{activeSession?.connected ? "Output is blank" : "Display not connected"}</span></div>}</div>
+        <div className={`video-presenter-monitor${showOutput ? "" : " is-hidden"}`}>{showOutput && outputPreview ? outputPreview.type === "image" ? <img src={outputPreview.imageUrl} alt={outputPreview.label || activeSession?.songName || "Current output slide"} /> : <div className={`video-presenter-monitor-slide${outputPreview.layout === "lower-third" ? " is-lower-third" : ""}`}><p>{outputPreview.text}</p></div> : showOutput && activeSession?.songName ? <div><Eye size={22} /><span>{activeSession.songName}</span></div> : <div><EyeOff size={22} /><span>{activeSession?.connected ? "Output is blank" : "Display not connected"}</span></div>}</div>
         <p className="video-presenter-output-caption">{activeSession?.connected ? showOutput ? `Showing on ${activeSession.name}` : `${activeSession.name} is connected and blank` : "Connect a browser on the display or projector."}</p>
         {activeSession?.connected && <section className="video-presenter-output-settings"><button type="button" className="presenter-output-action presenter-output-clear" onClick={() => { setPresentedSlideIndex(null); void sendOutputState({ visible: false, clear: true }); }} disabled={!capabilities.canPresent || outputBusy}><X size={14} /> Clear output</button></section>}
       </aside>}

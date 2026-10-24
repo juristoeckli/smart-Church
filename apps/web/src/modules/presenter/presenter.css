@@ -75,6 +75,11 @@
 .video-presenter-monitor{display:grid;place-items:center;aspect-ratio:16/9;min-height:110px;overflow:hidden;border:1px solid var(--line);border-radius:7px;background:repeating-conic-gradient(color-mix(in srgb,var(--panel) 65%,var(--line)) 0 25%,var(--panel) 0 50%) 0/16px 16px}
 .video-presenter-monitor.is-hidden{background:#08090c}
 .video-presenter-monitor>div{display:grid;justify-items:center;gap:5px;color:var(--muted);font-size:9px}
+.video-presenter-monitor>img{display:block;width:100%;height:100%;object-fit:contain}
+.video-presenter-monitor>.video-presenter-monitor-slide{box-sizing:border-box;display:grid;width:100%;height:100%;place-items:center;padding:8%;color:var(--ink);text-align:center}
+.video-presenter-monitor-slide p{margin:0;font-size:clamp(8px,1.2vw,15px);font-weight:700;line-height:1.35;white-space:pre-line}
+.video-presenter-monitor>.video-presenter-monitor-slide.is-lower-third{align-content:end;justify-items:stretch;padding:0;text-align:left}
+.video-presenter-monitor-slide.is-lower-third p{padding:7px;background:#111c;color:#fff;font-size:clamp(8px,1vw,12px)}
 .video-presenter-output-caption{min-height:40px;margin:0;padding:9px 0;color:var(--muted);font-size:9px;line-height:1.5}
 .video-presenter-output-settings{padding-top:10px;border-top:1px solid var(--line)}
 .video-presenter-output-settings h3{margin:3px 0 8px;font-size:10px}
