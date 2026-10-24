@@ -249,42 +249,11 @@ function Summary({ label, value, note, icon }: { label: string; value: number; n
 }
 
 function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string }) {
-  const connected = encoder.control === "Connected";
-  const bitrate = stateBitrate(encoder.state);
-  const duration = stateMetric(encoder.state, "Duration");
-  const ready = status === "BEREIT";
-  const live = status === "LIVE";
-  return <svg className="video-encoder-hardware" viewBox="0 0 470 150" role="img" aria-label={`${encoder.model || "Streaming encoder"} front panel, ${status}`}>
-    <rect x="3" y="5" width="464" height="140" rx="11" fill="#17191d" stroke="#494d54" strokeWidth="3" />
-    <rect x="8" y="10" width="454" height="130" rx="8" fill="#24272b" stroke="#090a0c" strokeWidth="2" />
-    <rect x="17" y="70" width="59" height="58" rx="7" fill="#111316" stroke="#090a0b" strokeWidth="2" />
-    <path d="M34 99h25m-18-7-7 7 7 7m11-14 7 7-7 7" fill="none" stroke="#343941" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
-    <g fontFamily="Arial, sans-serif" fontWeight="700" textAnchor="middle" fill="#e7e9ec">
-      {[{ x: 96, y: 18, w: 42, h: 29, text: "1" }, { x: 145, y: 18, w: 40, h: 29, text: "MENU" }, { x: 96, y: 55, w: 42, h: 29, text: "2" }, { x: 145, y: 55, w: 40, h: 29, text: "SET" }, { x: 96, y: 92, w: 42, h: 29, text: "3" }, { x: 145, y: 92, w: 40, h: 29, text: "LOCK" }].map((button) => <g key={button.text}>
-        <rect x={button.x} y={button.y} width={button.w} height={button.h} rx="4" fill="#090a0c" stroke="#050607" strokeWidth="2" />
-        <rect x={button.x + 3} y={button.y + 3} width={button.w - 6} height={button.h - 6} rx="3" fill="#292d32" stroke="#454a51" />
-        <text x={button.x + button.w / 2} y={button.y + 19} fontSize={button.text.length > 2 ? 6 : 11}>{button.text}</text>
-      </g>)}
-    </g>
-    <rect x="203" y="16" width="149" height="112" rx="6" fill="#050a0f" stroke="#0a0c0f" strokeWidth="3" />
-    <rect x="209" y="22" width="137" height="100" rx="3" fill="#142938" stroke="#315066" />
-    <rect x="209" y="22" width="137" height="18" fill="#0c1720" />
-    <text x="216" y="34" fill="#c1e7fb" fontFamily="Arial, sans-serif" fontSize="6">{bitrate} · {duration}</text>
-    <circle cx="326" cy="31" r="2.5" fill={connected ? "#64db86" : "#e8aa50"} />
-    <text x="336" y="34" fill={connected ? "#a7f5b9" : "#f3d090"} fontFamily="Arial, sans-serif" fontSize="6">{connected ? "OK" : "--"}</text>
-    <text x="277.5" y="70" fill="#edf6fb" fontFamily="Arial, sans-serif" fontWeight="700" fontSize="17" textAnchor="middle">{status}</text>
-    <path d="M218 84h119v31H218z" fill="#102233" stroke="#263f51" />
-    <path d="M222 88h8m-8 0v7m107-7h8m0 0v7m-115 16h8m-8 0v-7m107 7h8m0 0v-7" fill="none" stroke="#41647c" strokeWidth="1" />
-    <text x="277.5" y="99" fill="#95c6e0" fontFamily="Arial, sans-serif" fontSize="6" textAnchor="middle">{live ? "STREAMING" : ready ? "VIDEO PREVIEW" : "ENCODER STATUS"}</text>
-    <text x="277.5" y="109" fill="#6f9bb7" fontFamily="Arial, sans-serif" fontSize="5" textAnchor="middle">{stringValue(encoder.ip) || "STATUS MONITOR"}</text>
-    <g fill="#e5a326"><rect x="421" y="21" width="6" height="7" rx="1"/><rect x="421" y="31" width="6" height="7" rx="1"/><rect x="421" y="41" width="6" height="7" rx="1"/></g>
-    <circle cx="390" cy="82" r="30" fill="#0b0d10" stroke="#050607" strokeWidth="3" />
-    <circle cx="390" cy="82" r="24" fill="#353a41" stroke="#555b63" strokeWidth="2" />
-    <circle cx="390" cy="82" r="19" fill="#2c3036" />
-    <text x="389" y="128" fill="#8a8e94" fontFamily="Arial, sans-serif" fontSize="4.5" textAnchor="middle">STREAMING ENCODER</text>
-    <text x="435" y="28" fill="#c7c9cc" fontFamily="Arial, sans-serif" fontSize="4.5">VIDEO</text>
-  </svg>;
+  return <div className="video-encoder-photo" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} product photo; current status ${status}`}>
+    <img src="/video/blackmagic-web-presenter-ultra-hd.png" alt="" />
+  </div>;
 }
+
 
 function Empty({ text }: { text: string }) { return <div className="video-empty video-empty-small"><Video size={20} /><p>{text}</p></div>; }
 function workerLabel(value: string) { return value === "ready" ? "Worker ready" : value === "unconfigured" ? "Not configured" : value === "failed" ? "Worker failed" : value === "backoff" ? "Worker restarting" : value === "starting" ? "Worker starting" : "Worker unavailable"; }
