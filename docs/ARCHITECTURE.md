@@ -1,6 +1,6 @@
 # smart-Church architecture
 
-Status: agreed planning baseline, 24 October 2026. This document describes intended behaviour, not implemented features. Examples such as Inventory and Machine Control illustrate module boundaries; their full product requirements remain to be defined.
+Status: agreed design baseline, 24 October 2026. This document describes intended behaviour; the implementation note at the end records the current slice. Examples such as Inventory and Machine Control illustrate module boundaries; their full product requirements remain to be defined.
 
 ## 1. Goals and platform
 
@@ -190,4 +190,4 @@ Only create code directories as implemented. Module UI is colocated with its mod
 
 Milestone 1: Core, departments, login, permissions, worker management, required System Management and Notifications, and one small example module. Build a working browser slice first. Later milestones add Electron/offline, sharing/trust, files/history, deployment/backup/update flows and optional device modules. See [milestones](MILESTONES.md).
 
-Implementation has started with the TypeScript workspace, shared contracts, a localhost Core API and PostgreSQL-backed People and Services & events data scoped to a selected location. Initial local administrator setup, username-or-email sign-in, user-selected location context and membership-scoped permissions are implemented. Module workers and full deployment hardening remain to be implemented.
+Implementation includes the TypeScript workspace, shared contracts, a localhost Core API, PostgreSQL-backed People and Services & events data, and a Video & streaming module. Video uses a Core-supervised worker that connects over an authenticated loopback WebSocket and bridges to the existing Python device controller; video status and operations require site administrator membership and are mapped to one configured location UUID. The worker supervision and browser integration currently serve this module; a generic module registry/SDK and full deployment hardening remain future work.

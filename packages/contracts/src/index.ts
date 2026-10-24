@@ -102,6 +102,7 @@ export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
   user?: AuthenticatedUser;
+  csrfToken?: string;
 }
 
 export interface CreateAdminAccount {

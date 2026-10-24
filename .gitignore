@@ -8,6 +8,11 @@ coverage/
 *.log
 runtime/
 backups/
+data/streaming/
+config/streaming.json
+__pycache__/
+*.py[cod]
+/apps/api/src/modules/video/python/tmp*/
 *.sqlite
 *.sqlite-*
 *.db

@@ -1,0 +1,22 @@
+{
+  "poll_interval_seconds": 5,
+  "timeout_seconds": 2,
+  "routing_presets": { "max_presets": 20 },
+  "routing_history": { "merge_window_minutes": 5 },
+  "unifi": { "api_key": "", "sdwan_config_ids": [], "poll_interval_seconds": 60 },
+  "sites": [
+    {
+      "id": "example-video-site",
+      "department_id": "REPLACE_WITH_LOCATION_UUID",
+      "name": "Example location",
+      "router_ip": "",
+      "encoders": [
+        { "id": "encoder-1", "name": "Encoder 1", "ip": "", "port": 9977, "destination_name": "Streaming platform" }
+      ],
+      "devices": [
+        { "id": "videohub", "name": "Videohub", "type": "videohub", "ip": "", "port": 9990 },
+        { "id": "shelly", "name": "Power relay", "type": "shelly", "ip": "" }
+      ]
+    }
+  ]
+}

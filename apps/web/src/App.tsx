@@ -24,15 +24,18 @@ import {
   Trash2,
   UsersRound,
   X,
+  Video,
 } from "lucide-react";
 import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, SiteUser, UserPhoneLabel, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
 import { Authentication, PasswordChangeRequired } from "./Authentication";
 import { ServicesEvents } from "./ServicesEvents";
+import { VideoModule } from "./modules/video/VideoModule";
 
 const navigation = [
   { label: "Overview", icon: LayoutDashboard },
   { label: "People", icon: UsersRound },
   { label: "Services & events", icon: CalendarDays },
+  { label: "Video & streaming", icon: Video },
   { label: "Groups", icon: ContactRound },
   { label: "Resources", icon: BookOpen },
 ];
@@ -85,7 +88,7 @@ function App() {
   const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | ContactStatus>("all");
-  const [page, setPage] = useState<"People" | "Services & events">("People");
+  const [page, setPage] = useState<"People" | "Services & events" | "Video & streaming">("People");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -122,6 +125,7 @@ function App() {
   const [newAccountRole, setNewAccountRole] = useState<"server_admin" | "user">("user");
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthenticatedUser | null>(null);
+  const [csrfToken, setCsrfToken] = useState("");
   const [setupRequired, setSetupRequired] = useState(false);
   const [authUnavailableMessage, setAuthUnavailableMessage] = useState("");
 
@@ -143,6 +147,7 @@ function App() {
         if (!response.ok || !("authenticated" in result)) throw new Error("error" in result ? result.error ?? "Could not check sign-in status." : "Could not check sign-in status.");
         setSetupRequired(result.setupRequired);
         setAuthUser(result.user ?? null);
+        setCsrfToken(result.csrfToken ?? "");
       })
       .catch((error: unknown) => setAuthUnavailableMessage(error instanceof Error ? error.message : "The account service is unavailable."))
       .finally(() => setAuthLoading(false));
@@ -531,6 +536,7 @@ function App() {
       // Clear the local view even if the API has gone offline; the server session expires on its own.
     } finally {
       setAuthUser(null);
+      setCsrfToken("");
       setContacts([]);
       setLogoDataUrl(null);
       setDepartment(defaultDepartment);
@@ -551,7 +557,7 @@ function App() {
   const visitorCount = contacts.filter((contact) => contact.status === "visitor").length;
 
   if (authLoading) return <main className="auth-page"><section className="auth-card auth-loading" role="status"><span className="eyebrow">GFC WORKSPACE</span><p>Checking your sign-in…</p></section></main>;
-  if (!authUser) return <Authentication setupRequired={setupRequired} unavailableMessage={authUnavailableMessage} onAuthenticated={(user) => { setAuthUnavailableMessage(""); setSetupRequired(false); setAuthUser(user); }} />;
+  if (!authUser) return <Authentication setupRequired={setupRequired} unavailableMessage={authUnavailableMessage} onAuthenticated={(user) => { setAuthUnavailableMessage(""); setSetupRequired(false); setAuthUser(user); void fetch("/api/auth/status").then((response) => response.json()).then((result: AuthStatus) => setCsrfToken(result.csrfToken ?? "")).catch(() => setCsrfToken("")); }} />;
   if (authUser.mustChangePassword) return <PasswordChangeRequired onChanged={setAuthUser} />;
 
   const userInitials = authUser.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || authUser.username[0]?.toUpperCase() || "U";
@@ -569,8 +575,8 @@ function App() {
         </div>
 
         <nav className="main-nav" aria-label="Main navigation">
-          {navigation.map(({ label, icon: Icon }) => {
-            const isAvailablePage = label === "People" || label === "Services & events";
+          {navigation.filter(({ label }) => label !== "Video & streaming" || canManageSite).map(({ label, icon: Icon }) => {
+            const isAvailablePage = label === "People" || label === "Services & events" || label === "Video & streaming";
             const active = page === label;
             return <button className={`nav-item ${active ? "nav-item-active" : ""}`} type="button" key={label} onClick={() => {
               if (isAvailablePage) {
@@ -608,7 +614,7 @@ function App() {
         </header>
 
         <div className="page-wrap">
-          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} canManage={canManageSite} onNotice={setNotice} /> : <>
+          {page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} canManage={canManageSite} onNotice={setNotice} /> : page === "Video & streaming" ? <VideoModule departmentId={department.id} csrfToken={csrfToken} canManage={canManageSite} /> : <>
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Workspace unavailable · ${loadError}` : `People are saved for ${department.location}`}</div>
 
           <section className="page-heading">

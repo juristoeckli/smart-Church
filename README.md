@@ -20,6 +20,8 @@ Use Node.js 24.22.1, pnpm 11.25.0 and Docker Desktop. Copy `.env.example` to `.e
 
 The people directory starts empty. Contacts are stored in PostgreSQL and scoped to the selected location. If `DATABASE_URL` is not set, the API starts but shows that database-backed data is unavailable. The development API refuses to run in production mode; use fictional data only while access controls and deployment hardening remain incomplete.
 
+The Video & streaming module runs in a supervised Core worker and is optional. To enable it, install Python 3.10 or later and set `STREAMING_CONFIG_FILE` to a private copy of [config/streaming.example.json](config/streaming.example.json). For each configured video site, replace `department_id` with the matching location UUID and add the device addresses; keep API keys and the private config out of Git. Without the variable the module stays inactive, and the rest of the app runs normally. See [video integration setup](docs/video-integration.md).
+
 ## Principles
 
 - Small Core with separately supervised module workers.
