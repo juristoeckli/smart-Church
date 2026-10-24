@@ -57,13 +57,13 @@ function clearSessionCookie(reply: { header: (name: string, value: string) => un
 async function currentUser(token: string | undefined): Promise<AuthenticatedUser | null> {
   if (!pool || !token || !/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.display_name, u.role
+    `SELECT u.id, u.email, u.username, u.display_name, u.role
        FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
       WHERE s.token_hash = $1 AND s.expires_at > now()`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, email: row.email, displayName: row.display_name, role: row.role } : null;
+  return row ? { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -196,11 +196,12 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     body: {
       type: "object",
       additionalProperties: false,
-      required: ["setupCode", "location", "email", "displayName", "password"],
+      required: ["setupCode", "location", "email", "username", "displayName", "password"],
       properties: {
         setupCode: { type: "string", minLength: 8, maxLength: 80 },
         location: { type: "string", minLength: 1, maxLength: 120 },
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
         password: { type: "string", minLength: 6, maxLength: 128 },
       },
@@ -212,6 +213,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
   if (!setupCodeMatches(request.body.setupCode)) return reply.code(403).send({ error: "The one-time setup code is not valid. Check the local Core API terminal." });
 
   const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const location = request.body.location.trim();
   const displayName = request.body.displayName.trim();
   if (!location) return reply.code(400).send({ error: "Enter the church location." });
@@ -234,12 +236,12 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     );
     if (!department.rowCount) throw new Error("The configured department could not be found.");
     const result = await client.query(
-      `INSERT INTO app_users (id, email, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, 'server_admin') RETURNING id, email, display_name, role`,
-      [randomUUID(), email, displayName, passwordHash],
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5, 'server_admin') RETURNING id, email, username, display_name, role`,
+      [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
-    user = { id: row.id, email: row.email, displayName: row.display_name, role: row.role };
+    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role };
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [user.id, departmentId],
@@ -248,7 +250,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     firstRunSetupCode = null;
   } catch (error) {
     await client.query("ROLLBACK");
-    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
     throw error;
   } finally {
     client.release();
@@ -262,9 +264,9 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     body: {
       type: "object",
       additionalProperties: false,
-      required: ["email", "password"],
+      required: ["identifier", "password"],
       properties: {
-        email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        identifier: { type: "string", minLength: 3, maxLength: 254 },
         password: { type: "string", minLength: 1, maxLength: 128 },
       },
     },
@@ -278,18 +280,18 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, display_name, password_hash, role FROM app_users WHERE lower(email) = $1",
-    [request.body.email.trim().toLocaleLowerCase("en-US")],
+    "SELECT id, email, username, display_name, password_hash, role FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    [request.body.identifier.trim().toLocaleLowerCase("en-US")],
   );
   const row = result.rows[0];
   const passwordMatches = verifyPassword(request.body.password, row?.password_hash ?? dummyPasswordHash);
   if (!row || !passwordMatches) {
     const current = attempts && attempts.resetAt > now ? attempts : { count: 0, resetAt: now + 15 * 60_000 };
     failedLogins.set(request.ip, { count: current.count + 1, resetAt: current.resetAt });
-    return reply.code(401).send({ error: "Email or password is incorrect." });
+    return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   failedLogins.delete(request.ip);
-  const user: AuthenticatedUser = { id: row.id, email: row.email, displayName: row.display_name, role: row.role };
+  const user: AuthenticatedUser = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role };
   await createSession(user.id, reply);
   return { user };
 });
@@ -306,7 +308,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.display_name, u.role AS account_role,
+    `SELECT u.id, u.email, u.username, u.display_name, u.role AS account_role,
             COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role))
               FILTER (WHERE m.department_id IS NOT NULL), '[]'::json) AS memberships
        FROM app_users u
@@ -314,7 +316,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
       GROUP BY u.id
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, email: row.email, displayName: row.display_name, accountRole: row.account_role, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, email: row.email, username: row.username, displayName: row.display_name, accountRole: row.account_role, memberships: row.memberships }));
 });
 
 app.post<{ Body: CreateSiteUser }>("/api/users", {
@@ -322,9 +324,10 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     body: {
       type: "object",
       additionalProperties: false,
-      required: ["email", "displayName", "password", "accountRole", "memberships"],
+      required: ["email", "username", "displayName", "password", "accountRole", "memberships"],
       properties: {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
         password: { type: "string", minLength: 6, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
@@ -339,6 +342,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
   const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
   const accountRole = request.body.accountRole;
   const memberships = request.body.memberships;
@@ -357,9 +361,9 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   try {
     await client.query("BEGIN");
     const user = await client.query(
-      `INSERT INTO app_users (id, email, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, email, display_name`,
-      [id, email, displayName, hashPassword(request.body.password), accountRole],
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, username, display_name`,
+      [id, email, username, displayName, hashPassword(request.body.password), accountRole],
     );
     for (const membership of memberships) {
       await client.query(
@@ -368,10 +372,10 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       );
     }
     await client.query("COMMIT");
-    return reply.code(201).send({ id: user.rows[0].id, email: user.rows[0].email, displayName: user.rows[0].display_name, accountRole, memberships });
+    return reply.code(201).send({ id: user.rows[0].id, email: user.rows[0].email, username: user.rows[0].username, displayName: user.rows[0].display_name, accountRole, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
-    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
     if ((error as { code?: string }).code === "23503") return reply.code(400).send({ error: "One of the selected locations no longer exists." });
     throw error;
   } finally {
@@ -379,13 +383,14 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayName" | "memberships"> }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "memberships"> }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
-      type: "object", additionalProperties: false, required: ["email", "displayName", "memberships"],
+      type: "object", additionalProperties: false, required: ["email", "username", "displayName", "memberships"],
       properties: {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+        username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
         memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] } } } },
       },
@@ -395,6 +400,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayN
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
   const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
@@ -408,8 +414,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayN
   try {
     await client.query("BEGIN");
     const updated = await client.query(
-      "UPDATE app_users SET email = $2, display_name = $3 WHERE id = $1 RETURNING id, email, display_name, role",
-      [request.params.id, email, displayName],
+      "UPDATE app_users SET email = $2, username = $3, display_name = $4 WHERE id = $1 RETURNING id, email, username, display_name, role",
+      [request.params.id, email, username, displayName],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -423,10 +429,10 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "displayN
       );
     }
     await client.query("COMMIT");
-    return { id: updated.rows[0].id, email: updated.rows[0].email, displayName: updated.rows[0].display_name, accountRole: updated.rows[0].role, memberships };
+    return { id: updated.rows[0].id, email: updated.rows[0].email, username: updated.rows[0].username, displayName: updated.rows[0].display_name, accountRole: updated.rows[0].role, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
-    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this email already exists." });
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
     if ((error as { code?: string }).code === "23503") return reply.code(400).send({ error: "One of the selected locations no longer exists." });
     throw error;
   } finally {

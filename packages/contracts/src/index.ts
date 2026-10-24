@@ -40,6 +40,7 @@ export type CreateDepartment = Omit<DepartmentProfile, "id">;
 export interface AuthenticatedUser {
   id: string;
   email: string;
+  username: string;
   displayName: string;
   role: "server_admin" | "user";
 }
@@ -47,6 +48,7 @@ export interface AuthenticatedUser {
 export interface SiteUser {
   id: string;
   email: string;
+  username: string;
   displayName: string;
   accountRole: "server_admin" | "user";
   memberships: Array<{ departmentId: string; role: "site_admin" | "member" }>;
@@ -54,6 +56,7 @@ export interface SiteUser {
 
 export interface CreateSiteUser {
   email: string;
+  username: string;
   displayName: string;
   password: string;
   accountRole: "server_admin" | "user";
@@ -70,11 +73,12 @@ export interface CreateAdminAccount {
   setupCode: string;
   location: string;
   email: string;
+  username: string;
   displayName: string;
   password: string;
 }
 
 export interface LoginCredentials {
-  email: string;
+  identifier: string;
   password: string;
 }

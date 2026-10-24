@@ -26,10 +26,11 @@ export function Authentication({
         location: String(values.get("location")).trim(),
         displayName: String(values.get("displayName")).trim(),
         email: String(values.get("email")).trim(),
+        username: String(values.get("username")).trim(),
         password: String(values.get("password")),
       }
       : {
-        email: String(values.get("email")).trim(),
+        identifier: String(values.get("identifier")).trim(),
         password: String(values.get("password")),
       };
 
@@ -75,8 +76,11 @@ export function Authentication({
             <label>Church location<input name="location" required autoComplete="address-level2" maxLength={120} placeholder="Enter your location" /></label>
             <p className="auth-hint">You can change this later in location settings.</p>
             <label>Your name<input name="displayName" required autoComplete="name" maxLength={100} placeholder="Juri Stöckli" /></label>
+            <label>Username<input name="username" required autoComplete="username" minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}" placeholder="juri.stoeckli" /></label>
           </>}
-          <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
+          {setupRequired
+            ? <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
+            : <label>Username or email address<input name="identifier" required autoComplete="username" maxLength={254} placeholder="username or you@example.com" /></label>}
           <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 6 : 1} maxLength={128} placeholder={setupRequired ? "At least 6 characters" : "Your password"} /></label>
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
             {isSubmitting ? "Please wait…" : setupRequired ? "Create server administrator" : "Sign in"}
