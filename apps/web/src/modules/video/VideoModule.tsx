@@ -23,8 +23,18 @@ const tabs = ["Overview", "Presenter", "Routing", "Streaming", "XML tools"] as c
 const starterXml = `<?xml version="1.0" encoding="UTF-8"?>\n<streaming>\n  <service customizable-url="false">\n    <name>Service 1</name>\n    <servers>\n      <server>\n        <name>Primary</name>\n        <url>rtmp://example.com/live</url>\n      </server>\n    </servers>\n    <profiles default="Streaming High">\n      <profile>\n        <name>Streaming High</name>\n        <config resolution="1080p" fps="30" codec="H264">\n          <bitrate>6000000</bitrate>\n          <audio-bitrate>128000</audio-bitrate>\n        </config>\n      </profile>\n    </profiles>\n  </service>\n</streaming>`;
 type Tab = typeof tabs[number];
 
+function savedVideoTab(departmentId: string): Tab {
+  if (!departmentId) return "Overview";
+  try {
+    const saved = localStorage.getItem(`smart-church-video-tab:${departmentId}`);
+    if (tabs.includes(saved as Tab)) return saved as Tab;
+  } catch { /* Use the default tab when local storage is unavailable. */ }
+  return "Overview";
+}
+
 export function VideoModule({ departmentId, csrfToken, canManage }: { departmentId: string; csrfToken: string; canManage: boolean }) {
-  const [tab, setTab] = useState<Tab>("Overview");
+  const [tab, setTab] = useState<Tab>(() => savedVideoTab(departmentId));
+  const tabDepartmentId = useRef(departmentId);
   const [snapshot, setSnapshot] = useState<ApiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -95,6 +105,16 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!departmentId) return;
+    if (tabDepartmentId.current !== departmentId) {
+      tabDepartmentId.current = departmentId;
+      setTab(savedVideoTab(departmentId));
+      return;
+    }
+    try { localStorage.setItem(`smart-church-video-tab:${departmentId}`, tab); } catch { /* Keep the current tab for this session. */ }
+  }, [departmentId, tab]);
 
   useEffect(() => {
     if (!settingsOpen) return;

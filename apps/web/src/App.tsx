@@ -56,6 +56,15 @@ function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, depar
   return fetch(input, { ...init, headers });
 }
 
+type WorkspacePage = "People" | "Services & events" | "Video & streaming";
+function savedWorkspacePage(): WorkspacePage {
+  try {
+    const saved = localStorage.getItem("smart-church-page");
+    if (saved === "Services & events" || saved === "Video & streaming") return saved;
+  } catch { /* Use the default page when local storage is unavailable. */ }
+  return "People";
+}
+
 function initials(contact: Contact) {
   return `${contact.firstName[0] ?? ""}${contact.lastName[0] ?? ""}`.toUpperCase();
 }
@@ -88,7 +97,7 @@ function App() {
   const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | ContactStatus>("all");
-  const [page, setPage] = useState<"People" | "Services & events" | "Video & streaming">("People");
+  const [page, setPage] = useState<WorkspacePage>(savedWorkspacePage);
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -139,6 +148,20 @@ function App() {
       // The theme remains usable when storage is disabled.
     }
   }, [theme]);
+
+  useEffect(() => {
+    try { localStorage.setItem("smart-church-page", page); } catch { /* Keep the current page for this session. */ }
+  }, [page]);
+
+  useEffect(() => {
+    if (authUser && department.id) {
+      try { localStorage.setItem("smart-church-location", department.id); } catch { /* Keep the current site for this session. */ }
+    }
+  }, [authUser, department.id]);
+
+  useEffect(() => {
+    if (authUser && department.id && page === "Video & streaming" && department.role !== "site_admin") setPage("People");
+  }, [authUser, department.id, department.role, page]);
 
   useEffect(() => {
     fetch("/api/auth/status")
