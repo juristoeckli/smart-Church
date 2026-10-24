@@ -249,9 +249,47 @@ function Summary({ label, value, note, icon }: { label: string; value: number; n
 }
 
 function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string }) {
-  return <div className="video-encoder-photo" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} product photo; current status ${status}`}>
-    <img src="/video/blackmagic-web-presenter-ultra-hd.png" alt="" />
-  </div>;
+  const connected = encoder.control === "Connected";
+  const ready = status === "BEREIT";
+  const live = status === "LIVE";
+  const statusColor = live ? "#f51d34" : ready ? "#edf1f4" : "#f0b64c";
+  return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} illustrated front panel, ${status}`}>
+    <rect x="3" y="5" width="1494" height="490" rx="20" fill="#111214" stroke="#08090a" strokeWidth="5" />
+    <rect x="8" y="10" width="1484" height="480" rx="16" fill="#36383b" stroke="#707175" strokeWidth="3" />
+    <path d="M20 24h1460M20 476h1460" stroke="#4c4e51" strokeWidth="2" opacity=".65" />
+    <text x="37" y="107" fill="#f4f4f5" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">ULTRA</text>
+    <text x="163" y="107" fill="#ff9e14" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">HD</text>
+    <path d="M40 220h190a18 18 0 0 1 18 18v187a18 18 0 0 1-18 18H40a18 18 0 0 1-18-18V238a18 18 0 0 1 18-18Z" fill="#17191b" stroke="#0c0d0e" strokeWidth="5" />
+    <path d="M72 317h130m-100-29-29 29 29 29m70-58 29 29-29 29m-70-39h54l21 20" fill="none" stroke="#090b0d" strokeWidth="10" strokeLinecap="round" strokeLinejoin="round" />
+    <path d="M72 317h130m-100-29-29 29 29 29m70-58 29 29-29 29m-70-39h54l21 20" fill="none" stroke="#24272a" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+    <g fontFamily="Arial, sans-serif" fontWeight="700" textAnchor="middle" fill="#f3f4f5">
+      {[{ x: 291, y: 55, text: live ? "ON AIR" : "ON AIR", active: live }, { x: 456, y: 55, text: "MENU" }, { x: 291, y: 185, text: "OFF" }, { x: 456, y: 185, text: "SET" }, { x: 291, y: 315, text: "CALL" }, { x: 456, y: 315, text: "LOCK" }].map((button) => <g key={button.text}>
+        <rect x={button.x - 2} y={button.y - 4} width="144" height="108" rx="17" fill="#090a0b" stroke="#050607" strokeWidth="5" />
+        <rect x={button.x + 5} y={button.y + 3} width="130" height="94" rx="13" fill={button.active ? "#202124" : "#25272a"} stroke="#45474a" strokeWidth="3" />
+        <text x={button.x + 70} y={button.y + 59} fill={button.active ? "#ff1d35" : "#f2f3f4"} fontSize={button.text.length > 4 ? 28 : 30}>{button.text}</text>
+      </g>)}
+    </g>
+    <rect x="693" y="45" width="510" height="386" rx="17" fill="#090b0e" stroke="#0b0c0d" strokeWidth="8" />
+    <rect x="706" y="57" width="484" height="361" rx="9" fill="#08131e" stroke="#30363c" strokeWidth="3" />
+    <path d="M707 117h482M707 203h482" stroke="#26313d" strokeWidth="4" />
+    <text x="728" y="96" fill="#eff3f6" fontFamily="Arial, sans-serif" fontSize="24">{stateBitrate(encoder.state)}</text>
+    <text x="858" y="96" fill="#eff3f6" fontFamily="Arial, sans-serif" fontSize="24">{stateMetric(encoder.state, "Duration")}</text>
+    <circle cx="1115" cy="84" r="9" fill={connected ? "#ff2637" : "#e9a536"} />
+    <text x="1134" y="93" fill="#d8dee3" fontFamily="Arial, sans-serif" fontSize="20">{stateMetric(encoder.state, "Cache Used")}</text>
+    <text x="948" y="184" fill={statusColor} fontFamily="Arial, sans-serif" fontSize="72" fontWeight="700" textAnchor="middle">{status}</text>
+    <rect x="707" y="205" width="482" height="212" fill="#142533" />
+    <path d="M725 223h25m-25 0v24m447-24h-25m25 0v24m-447 170h25m-25 0v-24m447 24h-25m25 0v-24" fill="none" stroke="#315269" strokeWidth="3" />
+    <circle cx="948" cy="297" r="31" fill="#1e3e50" stroke="#426a80" strokeWidth="3" />
+    <path d="M937 280v34l27-17z" fill="#8ab8ce" />
+    <text x="948" y="358" fill="#a8c5d4" fontFamily="Arial, sans-serif" fontSize="24" textAnchor="middle">{live ? "STREAMING" : ready ? "VIDEO PREVIEW" : "ENCODER STATUS"}</text>
+    <text x="948" y="387" fill="#7693a2" fontFamily="Arial, sans-serif" fontSize="17" textAnchor="middle">{stringValue(encoder.ip) || "STATUS MONITOR"}</text>
+    <text x="1241" y="105" fill="#d9dadd" fontFamily="Arial, sans-serif" fontSize="22">Blackmagicdesign</text>
+    <g fill="#ff9f12"><rect x="1439" y="49" width="21" height="23" rx="5"/><rect x="1439" y="79" width="21" height="23" rx="5"/><rect x="1439" y="109" width="21" height="23" rx="5"/></g>
+    <circle cx="1379" cy="272" r="99" fill="#0b0c0e" stroke="#181a1c" strokeWidth="7" />
+    <circle cx="1379" cy="272" r="80" fill="#2d3034" stroke="#55585d" strokeWidth="5" />
+    <circle cx="1379" cy="272" r="69" fill="#303337" stroke="#3b3e42" strokeWidth="2" />
+    <text x="1378" y="408" fill="#999da2" fontFamily="Arial, sans-serif" fontSize="13" textAnchor="middle">STREAMING ENCODER</text>
+  </svg>;
 }
 
 
