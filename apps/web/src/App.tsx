@@ -20,10 +20,11 @@ import {
   X,
 } from "lucide-react";
 import type { Contact, ContactStatus } from "@smart-church/contracts";
+import { ServicesEvents } from "./ServicesEvents";
 
 const navigation = [
   { label: "Overview", icon: LayoutDashboard },
-  { label: "People", icon: UsersRound, active: true },
+  { label: "People", icon: UsersRound },
   { label: "Services & events", icon: CalendarDays },
   { label: "Groups", icon: ContactRound },
   { label: "Resources", icon: BookOpen },
@@ -51,6 +52,7 @@ function App() {
   const [loadError, setLoadError] = useState("");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | ContactStatus>("all");
+  const [page, setPage] = useState<"People" | "Services & events">("People");
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -206,11 +208,18 @@ function App() {
 
         <div className="nav-label">WORKSPACE</div>
         <nav className="main-nav" aria-label="Main navigation">
-          {navigation.map(({ label, icon: Icon, active }) => (
-            <button className={`nav-item ${active ? "nav-item-active" : ""}`} type="button" key={label} onClick={() => label !== "People" && setNotice(`${label} will be added in a later step.`)}>
+          {navigation.map(({ label, icon: Icon }) => {
+            const isAvailablePage = label === "People" || label === "Services & events";
+            const active = page === label;
+            return <button className={`nav-item ${active ? "nav-item-active" : ""}`} type="button" key={label} onClick={() => {
+              if (isAvailablePage) {
+                setPage(label);
+                setMenuOpen(false);
+              } else setNotice(`${label} will be added in a later step.`);
+            }}>
               <Icon size={18} strokeWidth={1.8} /><span>{label}</span>{active && <span className="nav-indicator" />}
             </button>
-          ))}
+          })}
         </nav>
 
         <div className="sidebar-bottom">
@@ -230,11 +239,12 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <button className="icon-button mobile-menu-button" type="button" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
-          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>People</strong></div>
+          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{page}</strong></div>
           <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button theme-toggle" type="button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} aria-pressed={theme === "dark"} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-avatar">JM</div></div>
         </header>
 
         <div className="page-wrap">
+          {page === "Services & events" ? <ServicesEvents onNotice={setNotice} /> : <>
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Database unavailable · ${loadError}` : "Local workspace · People are saved to the configured department database"}</div>
 
           <section className="page-heading">
@@ -265,6 +275,7 @@ function App() {
           </section>
 
           <footer className="page-footer"><span>Made for the moments that matter.</span><span>© 2026 Smart Church</span></footer>
+          </>}
         </div>
       </main>
 

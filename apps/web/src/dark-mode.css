@@ -343,3 +343,76 @@
 :root[data-theme="dark"] .branding-help {
   color: #a6a5bb;
 }
+
+:root[data-theme="dark"] .event-create-card {
+  background: #20232d;
+  border-color: #353845;
+}
+
+:root[data-theme="dark"] .event-create-card:hover {
+  background: #242631;
+}
+
+:root[data-theme="dark"] .event-date-badge,
+:root[data-theme="dark"] .event-kind-service {
+  color: #c6b7e5;
+  background: #393447;
+}
+
+:root[data-theme="dark"] .event-kind-meeting {
+  color: #b5c5e2;
+  background: #2d3341;
+}
+
+:root[data-theme="dark"] .event-kind-community {
+  color: #ddbd8b;
+  background: #3a3425;
+}
+
+:root[data-theme="dark"] .event-kind-other {
+  color: #b5b4c9;
+  background: #30313b;
+}
+
+:root[data-theme="dark"] .event-name-cell strong {
+  color: #ded9eb;
+}
+
+:root[data-theme="dark"] .event-name-cell small,
+:root[data-theme="dark"] .event-time-cell,
+:root[data-theme="dark"] .event-location-cell,
+:root[data-theme="dark"] .event-footer-note {
+  color: #a4a4b8;
+}
+
+:root[data-theme="dark"] .event-location-cell svg {
+  color: #b7a7d4;
+}
+
+:root[data-theme="dark"] .event-action {
+  color: #a9a8bc;
+}
+
+:root[data-theme="dark"] .event-action:hover {
+  background: #393447;
+  color: #c6b7e5;
+}
+
+:root[data-theme="dark"] .event-delete-action:hover {
+  background: #3b2933;
+  color: #dda4bd;
+}
+
+:root[data-theme="dark"] .event-retry {
+  color: #c6b7e5;
+}
+
+:root[data-theme="dark"] .event-modal textarea {
+  color: #e9e5f0;
+  background: #191b23;
+  border-color: #3b3e4c;
+}
+
+:root[data-theme="dark"] .event-modal textarea::placeholder {
+  color: #9998ad;
+}

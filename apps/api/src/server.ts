@@ -1,10 +1,62 @@
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
-import type { Contact, CreateContact } from "@smart-church/contracts";
+import type { Contact, CreateContact, CreateServiceEvent, ServiceEvent } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
 let databaseReady = false;
+
+type ServiceEventRow = {
+  id: string;
+  title: string;
+  kind: ServiceEvent["kind"];
+  event_date: string;
+  start_time: string;
+  end_time: string | null;
+  location: string;
+  description: string | null;
+};
+
+const serviceEventProperties = {
+  title: { type: "string", minLength: 1, maxLength: 160 },
+  kind: { type: "string", enum: ["service", "meeting", "community", "other"] },
+  eventDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+  startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
+  endTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
+  location: { type: "string", minLength: 1, maxLength: 160 },
+  description: { type: "string", maxLength: 2000 },
+};
+const serviceEventBodySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["title", "kind", "eventDate", "startTime", "location"],
+  properties: serviceEventProperties,
+};
+
+function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
+  return {
+    id: row.id,
+    title: row.title,
+    kind: row.kind,
+    eventDate: row.event_date,
+    startTime: row.start_time.slice(0, 5),
+    ...(row.end_time ? { endTime: row.end_time.slice(0, 5) } : {}),
+    location: row.location,
+    ...(row.description ? { description: row.description } : {}),
+  };
+}
+
+function validateServiceEvent(event: CreateServiceEvent) {
+  const [year, month, day] = event.eventDate.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+    return "Choose a valid event date.";
+  }
+  if (event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
+  if (!event.title.trim()) return "Enter an event title.";
+  if (!event.location.trim()) return "Enter a location.";
+  return null;
+}
 
 app.get("/api/health", async () => ({ status: databaseReady ? "ok" : "database_unavailable" }));
 
@@ -131,20 +183,107 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   });
 });
 
+app.get("/api/events", async (_request, reply): Promise<ServiceEvent[] | { error: string }> => {
+  if (!databaseReady || !pool) {
+    return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
+  }
+  const result = await pool.query<ServiceEventRow>(
+    `SELECT id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+            CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
+            location, description
+       FROM service_events
+      WHERE department_id = $1
+      ORDER BY event_date, start_time, title`,
+    [departmentId],
+  );
+  return result.rows.map(mapServiceEvent);
+});
+
+app.post<{ Body: CreateServiceEvent }>("/api/events", {
+  schema: { body: serviceEventBodySchema },
+}, async (request, reply): Promise<ServiceEvent | { error: string }> => {
+  if (!databaseReady || !pool) {
+    return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
+  }
+  const event = {
+    ...request.body,
+    title: request.body.title.trim(),
+    location: request.body.location.trim(),
+    endTime: request.body.endTime?.trim() || undefined,
+    description: request.body.description?.trim() || undefined,
+  };
+  const validationError = validateServiceEvent(event);
+  if (validationError) return reply.code(400).send({ error: validationError });
+
+  const result = await pool.query<ServiceEventRow>(
+    `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+     RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+               CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
+               location, description`,
+    [randomUUID(), departmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
+  );
+  return reply.code(201).send(mapServiceEvent(result.rows[0]));
+});
+
+app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: serviceEventBodySchema,
+  },
+}, async (request, reply): Promise<ServiceEvent | { error: string }> => {
+  if (!databaseReady || !pool) {
+    return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
+  }
+  const event = {
+    ...request.body,
+    title: request.body.title.trim(),
+    location: request.body.location.trim(),
+    endTime: request.body.endTime?.trim() || undefined,
+    description: request.body.description?.trim() || undefined,
+  };
+  const validationError = validateServiceEvent(event);
+  if (validationError) return reply.code(400).send({ error: validationError });
+
+  const result = await pool.query<ServiceEventRow>(
+    `UPDATE service_events
+        SET title = $3, kind = $4, event_date = $5, start_time = $6, end_time = $7,
+            location = $8, description = $9, updated_at = now()
+      WHERE id = $1 AND department_id = $2
+      RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+                CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
+                location, description`,
+    [request.params.id, departmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
+  return mapServiceEvent(result.rows[0]);
+});
+
+app.delete<{ Params: { id: string } }>("/api/events/:id", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<{ id: string } | { error: string }> => {
+  if (!databaseReady || !pool) {
+    return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
+  }
+  const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
+  if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
+  return { id: result.rows[0].id };
+});
+
 app.addHook("onClose", closeDatabase);
 
 const port = Number(process.env.PORT ?? 3001);
 
 try {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("Contact endpoints are still in local development mode; authentication is required before production use.");
+    throw new Error("Department data endpoints are still in local development mode; authentication is required before production use.");
   }
   try {
     databaseReady = await initializeDatabase();
   } catch (error) {
-    app.log.error({ err: error }, "Database unavailable; contacts will not be saved.");
+    app.log.error({ err: error }, "Database unavailable; department data will not be saved.");
   }
-  if (!databaseReady) app.log.warn("Database is unavailable; contacts will not be saved.");
+  if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
   await app.listen({ host: "127.0.0.1", port });
 } catch (error) {
   app.log.error(error);
