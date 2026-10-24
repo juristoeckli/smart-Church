@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, Play, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Video, WandSparkles } from "lucide-react";
+import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, Play, Plus, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Trash2, Video } from "lucide-react";
 import "./video.css";
 
 type Encoder = { id: string; name: string; ip?: string; model?: string; control?: string; state?: Record<string, unknown>; error?: string; streaming_settings?: Record<string, unknown> };
@@ -16,6 +16,7 @@ type XmlService = { platform: string; customizable_url: boolean; servers: { serv
 type XmlPreflight = { filename?: string; services?: string[]; replaces_existing?: boolean };
 
 const tabs = ["Overview", "Routing", "Streaming", "XML tools"] as const;
+const starterXml = `<?xml version="1.0" encoding="UTF-8"?>\n<streaming>\n  <service customizable-url="false">\n    <name>Service 1</name>\n    <servers>\n      <server>\n        <name>Primary</name>\n        <url>rtmp://example.com/live</url>\n      </server>\n    </servers>\n    <profiles default="Streaming High">\n      <profile>\n        <name>Streaming High</name>\n        <config resolution="1080p" fps="30" codec="H264">\n          <bitrate>6000000</bitrate>\n          <audio-bitrate>128000</audio-bitrate>\n        </config>\n      </profile>\n    </profiles>\n  </service>\n</streaming>`;
 type Tab = typeof tabs[number];
 
 export function VideoModule({ departmentId, csrfToken, canManage }: { departmentId: string; csrfToken: string; canManage: boolean }) {
@@ -30,7 +31,7 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   const [history, setHistory] = useState<Record<string, unknown>[]>([]);
   const [presets, setPresets] = useState<Preset[]>([]);
   const [selectedEncoder, setSelectedEncoder] = useState("");
-  const [xml, setXml] = useState("");
+  const [xml, setXml] = useState(starterXml);
   const [xmlPreview, setXmlPreview] = useState<{ services?: XmlService[] } | null>(null);
   const [xmlPlan, setXmlPlan] = useState<XmlPreflight | null>(null);
   const [xmlPlatform, setXmlPlatform] = useState("");
@@ -38,6 +39,10 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   const [xmlQuality, setXmlQuality] = useState("");
   const [xmlCustomUrl, setXmlCustomUrl] = useState("");
   const [reviewedXml, setReviewedXml] = useState("");
+  const [xmlServiceIndex, setXmlServiceIndex] = useState(0);
+  const [xmlServerIndex, setXmlServerIndex] = useState(0);
+  const [xmlProfileIndex, setXmlProfileIndex] = useState(0);
+  const [xmlModeIndex, setXmlModeIndex] = useState(0);
   const [encoderSettings, setEncoderSettings] = useState<EncoderSettings | null>(null);
   const [presetDetails, setPresetDetails] = useState<EncoderPresetDetails | null>(null);
   const [settingsForm, setSettingsForm] = useState<EncoderSettingsForm>({ preset: "", server: "", quality: "", protocol: "srt", url: "", key: "", passphrase: "" });
@@ -104,6 +109,16 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
   const hub = hubs.find((device) => device.key === selectedHub) ?? hubs[0];
   const matrix = snapshot?.status?.videohubs?.[hub?.key ?? ""];
   const xmlEncoder = encoders.find((encoder) => encoder.key === selectedEncoder) ?? encoders[0];
+  const visualDocument = useMemo(() => parseStreamingXml(xml), [xml]);
+  const visualServices = visualDocument ? xmlChildren(visualDocument.documentElement, "service") : [];
+  const visualService = visualServices[xmlServiceIndex] ?? visualServices[0];
+  const visualServers = visualService ? xmlChildren(xmlChild(visualService, "servers"), "server") : [];
+  const visualServer = visualServers[xmlServerIndex];
+  const visualProfilesNode = visualService ? xmlChild(visualService, "profiles") : null;
+  const visualProfiles = visualProfilesNode ? xmlChildren(visualProfilesNode, "profile") : [];
+  const visualProfile = visualProfiles[xmlProfileIndex];
+  const visualModes = visualProfile ? xmlChildren(visualProfile, "config") : [];
+  const visualMode = visualModes[xmlModeIndex];
   const encoderPresetNames = [...new Set([...presetNames(encoderSettings?.presets), ...(encoderSettings?.platform ? [encoderSettings.platform] : [])])];
   const selectedProfile = presetDetails?.profiles.find((profile) => profile.profile === settingsForm.quality);
   const bitrateMbit = selectedProfile?.configs?.[0]?.bitrate ? (selectedProfile.configs[0].bitrate / 1_000_000).toString() : "";
@@ -262,6 +277,10 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
       setXmlServer(service?.servers[0]?.server ?? (service?.customizable_url ? "Custom" : ""));
       setXmlQuality(service?.profiles[0]?.profile ?? "");
       setXmlCustomUrl(service?.servers[0]?.url ?? "");
+      setXmlServiceIndex(0);
+      setXmlServerIndex(0);
+      setXmlProfileIndex(0);
+      setXmlModeIndex(0);
       setReviewedXml(source);
       setNotice("XML validated. Review the service, server and quality before applying.");
     } catch (error) {
@@ -271,6 +290,166 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
     } finally {
       setBusy(false);
     }
+  }
+
+  function updateVisualXml(change: (document: Document) => void) {
+    const document = parseStreamingXml(xml);
+    if (!document) return setNotice("The XML must be valid and use a <streaming> root before the visual editor can change it.");
+    change(document);
+    setXml(formatStreamingXml(document));
+    setXmlPreview(null);
+    setXmlPlan(null);
+    setReviewedXml("");
+    setNotice("Visual changes updated the XML. Validate it before applying it to an encoder.");
+  }
+
+  function newXmlFile() {
+    setXml(starterXml.replace("Service 1", "New Service"));
+    setXmlPreview(null);
+    setXmlPlan(null);
+    setReviewedXml("");
+    setXmlServiceIndex(0);
+    setXmlServerIndex(0);
+    setXmlProfileIndex(0);
+    setXmlModeIndex(0);
+  }
+
+  function editXmlText(target: "service" | "server" | "profile" | "mode" | "credentials", tag: string, value: string) {
+    updateVisualXml((document) => {
+      const service = xmlChildren(document.documentElement, "service")[xmlServiceIndex];
+      const element = target === "service" ? service
+        : target === "server" ? xmlChildren(xmlChild(service, "servers"), "server")[xmlServerIndex]
+        : target === "profile" ? xmlChildren(xmlChild(service, "profiles"), "profile")[xmlProfileIndex]
+        : target === "credentials" ? ensureXmlChild(document, service, "credentials")
+        : xmlChildren(xmlChildren(xmlChild(service, "profiles"), "profile")[xmlProfileIndex], "config")[xmlModeIndex];
+      if (element) {
+        const oldName = target === "profile" && tag === "name" ? xmlChild(element, "name")?.textContent : null;
+        const profiles = target === "profile" ? xmlChild(service, "profiles") : null;
+        const isDefault = Boolean(oldName && profiles?.getAttribute("default") === oldName);
+        setXmlChildText(document, element, tag, value);
+        if (isDefault && profiles) profiles.setAttribute("default", value);
+      }
+    });
+  }
+
+  function editXmlAttribute(target: "service" | "profiles" | "mode", name: string, value: string) {
+    updateVisualXml((document) => {
+      const service = xmlChildren(document.documentElement, "service")[xmlServiceIndex];
+      const element = target === "service" ? service
+        : target === "profiles" ? xmlChild(service, "profiles")
+        : xmlChildren(xmlChildren(xmlChild(service, "profiles"), "profile")[xmlProfileIndex], "config")[xmlModeIndex];
+      if (element) value ? element.setAttribute(name, value) : element.removeAttribute(name);
+    });
+  }
+
+  function removeXmlNode(target: "service" | "server" | "profile" | "mode") {
+    updateVisualXml((document) => {
+      const service = xmlChildren(document.documentElement, "service")[xmlServiceIndex];
+      const element = target === "service" ? service
+        : target === "server" ? xmlChildren(xmlChild(service, "servers"), "server")[xmlServerIndex]
+        : target === "profile" ? xmlChildren(xmlChild(service, "profiles"), "profile")[xmlProfileIndex]
+        : xmlChildren(xmlChildren(xmlChild(service, "profiles"), "profile")[xmlProfileIndex], "config")[xmlModeIndex];
+      if (!element || !element.parentElement) return;
+      if ((target === "service" && xmlChildren(document.documentElement, "service").length < 2)
+        || (target === "server" && xmlChildren(element.parentElement, "server").length < 2)
+        || (target === "profile" && xmlChildren(element.parentElement, "profile").length < 2)
+        || (target === "mode" && xmlChildren(element.parentElement, "config").length < 2)) return;
+      const removedName = target === "profile" ? xmlChild(element, "name")?.textContent : null;
+      const profiles = target === "profile" ? element.parentElement : null;
+      const defaultProfile = profiles?.getAttribute("default");
+      element.parentElement.removeChild(element);
+      if (target === "profile" && removedName && defaultProfile === removedName && profiles) {
+        const remaining = xmlChildren(profiles, "profile");
+        profiles.setAttribute("default", xmlChild(remaining[0], "name")?.textContent ?? "");
+      }
+    });
+    if (target === "service") setXmlServiceIndex(0);
+    if (target === "server") setXmlServerIndex(0);
+    if (target === "profile") setXmlProfileIndex(0);
+    if (target === "mode") setXmlModeIndex(0);
+  }
+
+  function addXmlServer() {
+    if (!visualService) return;
+    updateVisualXml((document) => {
+      const service = xmlChildren(document.documentElement, "service")[xmlServiceIndex];
+      const servers = ensureXmlChild(document, service, "servers");
+      const server = document.createElement("server");
+      appendXmlText(document, server, "name", `Server ${xmlChildren(servers, "server").length + 1}`);
+      appendXmlText(document, server, "url", "rtmp://example.com/live");
+      servers.append(server);
+    });
+    setXmlServerIndex(visualServers.length);
+  }
+
+  function addXmlProfile() {
+    if (!visualService) return;
+    updateVisualXml((document) => {
+      const service = xmlChildren(document.documentElement, "service")[xmlServiceIndex];
+      const profiles = ensureXmlChild(document, service, "profiles");
+      const profile = document.createElement("profile");
+      const name = `Profile ${xmlChildren(profiles, "profile").length + 1}`;
+      appendXmlText(document, profile, "name", name);
+      const config = document.createElement("config");
+      config.setAttribute("resolution", "1080p");
+      config.setAttribute("fps", "30");
+      config.setAttribute("codec", "H264");
+      appendXmlText(document, config, "bitrate", "6000000");
+      appendXmlText(document, config, "audio-bitrate", "128000");
+      profile.append(config);
+      profiles.append(profile);
+      if (!profiles.getAttribute("default")) profiles.setAttribute("default", name);
+    });
+    setXmlProfileIndex(visualProfiles.length);
+    setXmlModeIndex(0);
+  }
+
+  function addXmlMode() {
+    if (!visualProfile) return;
+    updateVisualXml((document) => {
+      const service = xmlChildren(document.documentElement, "service")[xmlServiceIndex];
+      const profile = xmlChildren(xmlChild(service, "profiles"), "profile")[xmlProfileIndex];
+      const config = document.createElement("config");
+      config.setAttribute("resolution", "1080p");
+      config.setAttribute("fps", "30");
+      config.setAttribute("codec", "H264");
+      appendXmlText(document, config, "bitrate", "6000000");
+      appendXmlText(document, config, "audio-bitrate", "128000");
+      profile.append(config);
+    });
+    setXmlModeIndex(visualModes.length);
+  }
+
+  function addXmlService() {
+    updateVisualXml((document) => {
+      const service = document.createElement("service");
+      service.setAttribute("customizable-url", "false");
+      appendXmlText(document, service, "name", `Service ${xmlChildren(document.documentElement, "service").length + 1}`);
+      const servers = document.createElement("servers");
+      const server = document.createElement("server");
+      appendXmlText(document, server, "name", "Primary");
+      appendXmlText(document, server, "url", "rtmp://example.com/live");
+      servers.append(server);
+      service.append(servers);
+      const profiles = document.createElement("profiles");
+      profiles.setAttribute("default", "Streaming High");
+      const profile = document.createElement("profile");
+      appendXmlText(document, profile, "name", "Streaming High");
+      const config = document.createElement("config");
+      config.setAttribute("resolution", "1080p");
+      config.setAttribute("fps", "30");
+      config.setAttribute("codec", "H264");
+      appendXmlText(document, config, "bitrate", "6000000");
+      appendXmlText(document, config, "audio-bitrate", "128000");
+      profile.append(config);
+      profiles.append(profile);
+      service.append(profiles);
+      document.documentElement.append(service);
+    });
+    setXmlServiceIndex(visualServices.length);
+    setXmlServerIndex(0);
+    setXmlProfileIndex(0);
+    setXmlModeIndex(0);
   }
 
   async function applyXml() {
@@ -352,14 +531,43 @@ export function VideoModule({ departmentId, csrfToken, canManage }: { department
       <div className="video-panel-heading"><div><h2>Streaming profile XML tools</h2><p>Create, validate, import, export and distribute encoder profiles.</p></div><button type="button" className="video-small-button" disabled={busy || !xmlEncoder || !canManage} onClick={() => void exportXml(includeSecrets)}><Download size={14} /> Export active XML</button></div>
       {!xmlEncoder ? <Empty text="No streaming encoder is configured for this location." /> : <>
         <label className="video-field">Encoder<select value={xmlEncoder.key} onChange={(event) => { setSelectedEncoder(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}><option value="">Select encoder</option>{encoders.map((encoder) => <option value={encoder.key} key={encoder.key}>{encoder.site.name} · {encoder.name} · {encoder.ip || "No address"}</option>)}</select></label>
-        <div className="video-settings-identity"><strong>{xmlEncoder.site.name} · {xmlEncoder.name}</strong><code>{xmlEncoder.ip || "Address not configured"}</code></div>
+        <div className="video-settings-identity"><strong>{xmlEncoder.site.name} · {xmlEncoder.name}</strong><code>{xmlEncoder.ip || "Address not configured"}</code><button type="button" className="video-small-button" disabled={!canManage} onClick={newXmlFile}><Plus size={13} /> New XML</button></div>
         <fieldset className="video-settings-box"><legend>Import / Export</legend>
           <input ref={xmlFileInput} className="video-hidden-file" type="file" accept=".xml,text/xml,application/xml" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (!file) return; if (file.size > 262144) return setNotice("Choose an XML file smaller than 256 KB."); void file.text().then((source) => void previewXml(source)).catch(() => setNotice("Could not read that XML file.")); }} />
           <div className="video-settings-toolbar"><button type="button" className="video-small-button" disabled={busy || !canManage} onClick={() => xmlFileInput.current?.click()}>Import XML…</button><button type="button" className="video-small-button" disabled={busy || !canManage} onClick={() => void exportXml(includeSecrets)}>Export XML…</button></div>
           <label className="video-settings-check"><input type="checkbox" checked={includeSecrets} onChange={(event) => setIncludeSecrets(event.target.checked)} /> Include stream key and access credentials in export</label>
-          <p className="video-settings-help">Edit or create an XML profile below, or import an existing file. Validate it, choose a service/server/quality and upload it to the selected encoder. SRT passphrases are never exported.</p>
-          <label className="video-field video-xml-editor-label">Streaming profiles XML<textarea className="video-xml-editor" value={xml} onChange={(event) => { setXml(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }} placeholder="Paste or create a Blackmagic Streaming XML profile…" spellCheck={false} /></label>
-          <div className="video-settings-toolbar"><button type="button" className="video-small-button video-button-primary" disabled={busy || !canManage || !xml.trim()} onClick={() => void previewXml()}>Validate and review XML</button><button type="button" className="video-small-button" disabled={!xml} onClick={() => { setXml(""); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}>Clear editor</button></div>
+          <p className="video-settings-help">Edit the XML directly or use the visual editor. Changes sync between both sides. Validate before applying a profile to the selected encoder. SRT passphrases are never exported.</p>
+          <div className="video-xml-workspace">
+            <section className="video-xml-pane" aria-label="Plain XML editor"><header><div><h3>Plain XML</h3><p>Raw Blackmagic Streaming XML</p></div><button type="button" className="video-small-button" disabled={!xml.trim()} onClick={() => { const document = parseStreamingXml(xml); if (!document) return setNotice("Fix XML syntax before formatting."); setXml(formatStreamingXml(document)); setXmlPreview(null); setReviewedXml(""); }}>Format</button></header><textarea className="video-xml-editor" aria-label="Streaming XML source" value={xml} onChange={(event) => { setXml(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }} spellCheck={false} /></section>
+            <section className="video-xml-pane video-xml-visual" aria-label="Visual XML editor"><header><div><h3>Visual editor</h3><p>{visualDocument ? `${visualServices.length} service${visualServices.length === 1 ? "" : "s"}` : "Valid <streaming> XML is required"}</p></div><button type="button" className="video-small-button" disabled={!canManage || !visualDocument} onClick={addXmlService}><Plus size={13} /> Add service</button></header>
+              {!visualDocument ? <Empty text="The XML is malformed or does not use a <streaming> root. Fix it in the left editor to continue." /> : !visualService ? <Empty text="Add a service to begin building a streaming profile." /> : <div className="video-xml-form">
+                <div className="video-xml-form-toolbar"><label className="video-field">Service<select value={Math.max(0, visualServices.indexOf(visualService))} onChange={(event) => { setXmlServiceIndex(Number(event.target.value)); setXmlServerIndex(0); setXmlProfileIndex(0); setXmlModeIndex(0); }} aria-label="Select service">{visualServices.map((service, index) => <option key={index} value={index}>{xmlChild(service, "name")?.textContent || `Service ${index + 1}`}</option>)}</select></label><button type="button" className="video-small-button video-button-danger" disabled={!canManage || visualServices.length < 2} aria-label="Delete selected service" onClick={() => removeXmlNode("service")}><Trash2 size={13} /> Remove</button></div>
+                <label className="video-field">Service name<input value={xmlChild(visualService, "name")?.textContent ?? ""} onChange={(event) => editXmlText("service", "name", event.target.value)} /></label>
+                <label className="video-field">Stream key (optional)<input type="password" autoComplete="new-password" value={xmlChild(visualService, "key")?.textContent ?? ""} onChange={(event) => editXmlText("service", "key", event.target.value)} placeholder="Only include when required" /></label>
+                <label className="video-settings-check"><input type="checkbox" checked={visualService.getAttribute("customizable-url") === "true"} onChange={(event) => editXmlAttribute("service", "customizable-url", String(event.target.checked))} /> Allow a custom streaming URL</label>
+
+                <section className="video-xml-group"><header><h4>Servers</h4><button type="button" className="video-small-button" disabled={!canManage} onClick={addXmlServer}><Plus size={13} /> Add server</button></header>
+                  {visualServers.length > 0 && visualServer && <><div className="video-xml-form-toolbar"><label className="video-field">Server<select value={Math.max(0, visualServers.indexOf(visualServer))} onChange={(event) => setXmlServerIndex(Number(event.target.value))}>{visualServers.map((server, index) => <option key={index} value={index}>{xmlChild(server, "name")?.textContent || `Server ${index + 1}`}</option>)}</select></label><button type="button" className="video-small-button video-button-danger" disabled={!canManage || visualServers.length < 2} aria-label="Delete selected server" onClick={() => removeXmlNode("server")}><Trash2 size={13} /> Remove</button></div>
+                    <label className="video-field">Server name<input value={xmlChild(visualServer, "name")?.textContent ?? ""} onChange={(event) => editXmlText("server", "name", event.target.value)} /></label>
+                    <label className="video-field">Protocol<select value={schemeOf(xmlChild(visualServer, "url")?.textContent || "rtmp") || "rtmp"} onChange={(event) => { const previous = xmlChild(visualServer, "url")?.textContent ?? ""; const rest = previous.replace(/^[a-z][a-z\d+.-]*:\/\//i, ""); editXmlText("server", "url", `${event.target.value}://${rest}`); }}><option value="rtmp">RTMP</option><option value="rtmps">RTMPS</option><option value="srt">SRT</option></select></label>
+                    <label className="video-field">URL<input value={xmlChild(visualServer, "url")?.textContent ?? ""} onChange={(event) => editXmlText("server", "url", event.target.value)} placeholder="rtmp://host/live" /></label>
+                    <label className="video-field">Group (optional)<input value={xmlChild(visualServer, "group")?.textContent ?? ""} onChange={(event) => editXmlText("server", "group", event.target.value)} /></label></>}
+                </section>
+
+                <section className="video-xml-group"><header><h4>Streaming profiles</h4><button type="button" className="video-small-button" disabled={!canManage} onClick={addXmlProfile}><Plus size={13} /> Add profile</button></header>
+                  {visualProfilesNode && visualProfiles.length > 0 && visualProfile && <><label className="video-field">Default profile<select value={xmlChild(visualProfiles.find((profile) => xmlChild(profile, "name")?.textContent === visualProfilesNode.getAttribute("default")) ?? visualProfile, "name")?.textContent ?? ""} onChange={(event) => editXmlAttribute("profiles", "default", event.target.value)}>{visualProfiles.map((profile, index) => <option key={index}>{xmlChild(profile, "name")?.textContent || `Profile ${index + 1}`}</option>)}</select></label>
+                    <div className="video-xml-form-toolbar"><label className="video-field">Profile<select value={Math.max(0, visualProfiles.indexOf(visualProfile))} onChange={(event) => { setXmlProfileIndex(Number(event.target.value)); setXmlModeIndex(0); }}>{visualProfiles.map((profile, index) => <option key={index} value={index}>{xmlChild(profile, "name")?.textContent || `Profile ${index + 1}`}</option>)}</select></label><button type="button" className="video-small-button video-button-danger" disabled={!canManage || visualProfiles.length < 2} onClick={() => removeXmlNode("profile")}><Trash2 size={13} /> Remove</button></div>
+                    <label className="video-field">Profile name<input value={xmlChild(visualProfile, "name")?.textContent ?? ""} onChange={(event) => editXmlText("profile", "name", event.target.value)} /></label>
+                    <div className="video-xml-form-toolbar"><label className="video-field">Video mode<select value={Math.max(0, visualModes.indexOf(visualMode))} onChange={(event) => setXmlModeIndex(Number(event.target.value))}>{visualModes.map((mode, index) => <option value={index} key={index}>{mode.getAttribute("resolution") || "1080p"} / {mode.getAttribute("fps") || "30"} fps</option>)}</select></label><button type="button" className="video-small-button" disabled={!canManage} onClick={addXmlMode}><Plus size={13} /> Add mode</button>{visualModes.length > 1 && <button type="button" className="video-small-button video-button-danger" disabled={!canManage} onClick={() => removeXmlNode("mode")}><Trash2 size={13} /> Remove mode</button>}</div>
+                    {visualMode && <div className="video-xml-mode-grid"><label className="video-field">Resolution<input value={visualMode.getAttribute("resolution") ?? ""} onChange={(event) => editXmlAttribute("mode", "resolution", event.target.value)} placeholder="1080p" /></label><label className="video-field">Frame rate<input type="number" min="1" max="240" value={visualMode.getAttribute("fps") ?? "30"} onChange={(event) => editXmlAttribute("mode", "fps", event.target.value)} /></label><label className="video-field">Codec<select value={visualMode.getAttribute("codec") ?? "H264"} onChange={(event) => editXmlAttribute("mode", "codec", event.target.value)}><option value="H264">H.264</option><option value="H265">H.265</option></select></label><label className="video-field">Video bitrate (bit/s)<input type="number" min="1" value={xmlChild(visualMode, "bitrate")?.textContent ?? "6000000"} onChange={(event) => editXmlText("mode", "bitrate", event.target.value)} /></label><label className="video-field">Audio bitrate (bit/s)<input type="number" min="1" value={xmlChild(visualMode, "audio-bitrate")?.textContent ?? "128000"} onChange={(event) => editXmlText("mode", "audio-bitrate", event.target.value)} /></label></div>}
+                  </>}
+                </section>
+
+                <section className="video-xml-group"><header><h4>Credentials (optional)</h4></header><label className="video-field">Username<input autoComplete="off" value={xmlChild(xmlChild(visualService, "credentials"), "username")?.textContent ?? ""} onChange={(event) => editXmlText("credentials", "username", event.target.value)} /></label><label className="video-field">Password<input type="password" autoComplete="new-password" value={xmlChild(xmlChild(visualService, "credentials"), "password")?.textContent ?? ""} onChange={(event) => editXmlText("credentials", "password", event.target.value)} /></label></section>
+              </div>}
+            </section>
+          </div>
+          <div className="video-settings-toolbar"><button type="button" className="video-small-button video-button-primary" disabled={busy || !canManage || !xml.trim()} onClick={() => void previewXml()}><Check size={14} /> Validate and review XML</button><button type="button" className="video-small-button" disabled={!xml} onClick={() => { setXml(""); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}>Clear editor</button></div>
           {xmlPreview && <div className="video-settings-xml-review"><strong><Check size={15} /> XML valid · {xmlPlan?.filename}{xmlPlan?.replaces_existing ? " will be replaced" : " will be created"}</strong>
             <div className="video-settings-fields video-settings-xml-fields">
               <label className="video-field">Service<select value={xmlPlatform} onChange={(event) => { const name = event.target.value; const service = xmlPreview.services?.find((item) => item.platform === name); setXmlPlatform(name); setXmlServer(service?.servers[0]?.server ?? (service?.customizable_url ? "Custom" : "")); setXmlQuality(service?.profiles[0]?.profile ?? ""); setXmlCustomUrl(service?.servers[0]?.url ?? ""); }}><option value="">Select service</option>{xmlPreview.services?.map((service) => <option value={service.platform} key={service.platform}>{service.platform}</option>)}</select></label>
@@ -461,6 +669,43 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
 
 
 function Empty({ text }: { text: string }) { return <div className="video-empty video-empty-small"><Video size={20} /><p>{text}</p></div>; }
+function parseStreamingXml(source: string): Document | null {
+  if (!source.trim() || typeof DOMParser === "undefined") return null;
+  const document = new DOMParser().parseFromString(source, "application/xml");
+  return document.getElementsByTagName("parsererror").length || document.documentElement?.tagName !== "streaming" ? null : document;
+}
+function xmlChildren(parent: ParentNode | null, name: string): Element[] {
+  return parent ? Array.from(parent.childNodes).filter((node): node is Element => node.nodeType === 1 && (node as Element).tagName === name) : [];
+}
+function xmlChild(parent: ParentNode | null, name: string): Element | null { return xmlChildren(parent, name)[0] ?? null; }
+function ensureXmlChild(document: Document, parent: Element, name: string): Element {
+  return xmlChild(parent, name) ?? parent.appendChild(document.createElement(name));
+}
+function appendXmlText(document: Document, parent: Element, name: string, value: string) {
+  const element = document.createElement(name);
+  element.textContent = value;
+  parent.append(element);
+}
+function setXmlChildText(document: Document, parent: Element, name: string, value: string) { ensureXmlChild(document, parent, name).textContent = value; }
+function escapeXml(value: string) { return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;"); }
+function formatStreamingXml(document: Document): string {
+  const render = (node: Node, depth: number): string => {
+    const indent = "  ".repeat(depth);
+    if (node.nodeType === 1) {
+      const element = node as Element;
+      const attrs = Array.from(element.attributes).map((attr) => ` ${attr.name}="${escapeXml(attr.value)}"`).join("");
+      const children = Array.from(element.childNodes).filter((child) => !(child.nodeType === 3 && !child.textContent?.trim()));
+      if (!children.length) return `${indent}<${element.tagName}${attrs}/>`;
+      if (children.every((child) => child.nodeType === 3 || child.nodeType === 4)) return `${indent}<${element.tagName}${attrs}>${children.map((child) => escapeXml(child.textContent ?? "")).join("")}</${element.tagName}>`;
+      return `${indent}<${element.tagName}${attrs}>\n${children.map((child) => render(child, depth + 1)).join("\n")}\n${indent}</${element.tagName}>`;
+    }
+    if (node.nodeType === 8) return `${indent}<!--${node.textContent ?? ""}-->`;
+    if (node.nodeType === 4) return `${indent}<![CDATA[${node.textContent ?? ""}]]>`;
+    if (node.nodeType === 7) return `${indent}<?${node.nodeName} ${node.nodeValue ?? ""}?>`;
+    return `${indent}${escapeXml(node.textContent ?? "")}`;
+  };
+  return `<?xml version="1.0" encoding="UTF-8"?>\n${render(document.documentElement, 0)}\n`;
+}
 function workerLabel(value: string) { return value === "ready" ? "Worker ready" : value === "unconfigured" ? "Not configured" : value === "failed" ? "Worker failed" : value === "backoff" ? "Worker restarting" : value === "starting" ? "Worker starting" : "Worker unavailable"; }
 function messageOf(value: unknown) { return value && typeof value === "object" && "message" in value && typeof value.message === "string" ? value.message : null; }
 function stringValue(value: unknown) { return typeof value === "string" ? value : ""; }
