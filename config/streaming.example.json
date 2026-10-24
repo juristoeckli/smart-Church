@@ -6,9 +6,9 @@
   "unifi": { "api_key": "", "sdwan_config_ids": [], "poll_interval_seconds": 60 },
   "sites": [
     {
-      "id": "example-video-site",
-      "department_id": "REPLACE_WITH_LOCATION_UUID",
-      "name": "Example location",
+      "id": "testlocation01-video",
+      "department_id": "00000000-0000-4000-8000-000000000001",
+      "name": "Testlocation01",
       "router_ip": "",
       "encoders": [
         { "id": "encoder-1", "name": "Encoder 1", "ip": "", "port": 9977, "destination_name": "Streaming platform" }
