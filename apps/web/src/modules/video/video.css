@@ -91,11 +91,13 @@
 .video-crosspoint>span{width:3px;height:3px;border-radius:50%;background:currentColor;transition:transform .12s,background .12s}
 .video-crosspoint:hover:not(:disabled){background:color-mix(in srgb,var(--green-soft) 75%,transparent)}
 .video-crosspoint:hover:not(:disabled)>span{transform:scale(2.1);background:var(--green)}
-.video-matrix-hover-row,.video-matrix-hover-column{background:color-mix(in srgb,var(--green-soft) 48%,var(--panel))}
-.video-matrix .video-matrix-axis-highlight{background:color-mix(in srgb,var(--green-soft) 72%,var(--panel));color:var(--green)}
-.video-crosspoint-highlighted:not(.video-crosspoint-active)>span{background:color-mix(in srgb,var(--green) 65%,#9d8cba);transform:scale(1.7)}
-.video-crosspoint-active{background:color-mix(in srgb,var(--green-soft) 65%,var(--panel))}
-.video-crosspoint-active>span{width:7px;height:7px;background:#69c799;box-shadow:0 0 0 3px #69c79920}
+.video-matrix-hover-row,.video-matrix-hover-column{background:color-mix(in srgb,#00a69c 34%,var(--panel))}
+.video-matrix .video-matrix-axis-highlight{background:color-mix(in srgb,#00a69c 48%,var(--panel));color:var(--ink)}
+.video-crosspoint-highlighted:not(.video-crosspoint-active)>span{background:#37cfc2;transform:scale(1.7)}
+.video-crosspoint-active{background:#49dc59}
+.video-crosspoint-active>span{display:none}
+.video-crosspoint-active::after{content:"";width:9px;height:5px;border-left:1.5px solid #17351b;border-bottom:1.5px solid #17351b;transform:rotate(-45deg);margin-top:-2px}
+.video-matrix-crosspoint:has(.video-crosspoint-active){background:#49dc59}
 .video-crosspoint:disabled{cursor:default}
 .video-crosspoint-active:disabled{opacity:1}
 .video-routing-tools{display:flex;gap:7px;flex-wrap:wrap;margin:13px 0}
