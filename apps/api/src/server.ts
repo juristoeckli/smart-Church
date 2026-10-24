@@ -63,7 +63,7 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -291,7 +291,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   failedLogins.delete(request.ip);
-  const user: AuthenticatedUser = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role };
   await createSession(user.id, reply);
   return { user };
 });
@@ -316,7 +316,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
       GROUP BY u.id
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, email: row.email, username: row.username, displayName: row.display_name, accountRole: row.account_role, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, accountRole: row.account_role, memberships: row.memberships }));
 });
 
 app.post<{ Body: CreateSiteUser }>("/api/users", {
@@ -324,7 +324,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     body: {
       type: "object",
       additionalProperties: false,
-      required: ["email", "username", "displayName", "password", "accountRole", "memberships"],
+      required: ["username", "displayName", "password", "accountRole", "memberships"],
       properties: {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
@@ -341,7 +341,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
 }, async (request, reply): Promise<SiteUser | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
-  const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
   const accountRole = request.body.accountRole;
@@ -372,7 +372,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       );
     }
     await client.query("COMMIT");
-    return reply.code(201).send({ id: user.rows[0].id, email: user.rows[0].email, username: user.rows[0].username, displayName: user.rows[0].display_name, accountRole, memberships });
+    return reply.code(201).send({ id: user.rows[0].id, ...(user.rows[0].email ? { email: user.rows[0].email } : {}), username: user.rows[0].username, displayName: user.rows[0].display_name, accountRole, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
@@ -387,7 +387,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
-      type: "object", additionalProperties: false, required: ["email", "username", "displayName", "memberships"],
+      type: "object", additionalProperties: false, required: ["username", "displayName", "memberships"],
       properties: {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
@@ -399,7 +399,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
 }, async (request, reply): Promise<SiteUser | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
-  const email = request.body.email.trim().toLocaleLowerCase("en-US");
+  const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
   const memberships = request.body.memberships;
@@ -429,7 +429,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       );
     }
     await client.query("COMMIT");
-    return { id: updated.rows[0].id, email: updated.rows[0].email, username: updated.rows[0].username, displayName: updated.rows[0].display_name, accountRole: updated.rows[0].role, memberships };
+    return { id: updated.rows[0].id, ...(updated.rows[0].email ? { email: updated.rows[0].email } : {}), username: updated.rows[0].username, displayName: updated.rows[0].display_name, accountRole: updated.rows[0].role, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });

@@ -39,7 +39,7 @@ export type CreateDepartment = Omit<DepartmentProfile, "id">;
 
 export interface AuthenticatedUser {
   id: string;
-  email: string;
+  email?: string;
   username: string;
   displayName: string;
   role: "server_admin" | "user";
@@ -47,7 +47,7 @@ export interface AuthenticatedUser {
 
 export interface SiteUser {
   id: string;
-  email: string;
+  email?: string;
   username: string;
   displayName: string;
   accountRole: "server_admin" | "user";
@@ -55,7 +55,7 @@ export interface SiteUser {
 }
 
 export interface CreateSiteUser {
-  email: string;
+  email?: string;
   username: string;
   displayName: string;
   password: string;
