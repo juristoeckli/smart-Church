@@ -30,7 +30,7 @@ export interface DepartmentProfile {
   id: string;
   location: string;
   timeZone: string;
-  role: "site_admin" | "member";
+  role: "site_admin" | "member" | "unassigned";
 }
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;

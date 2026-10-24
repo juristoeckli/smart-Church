@@ -726,6 +726,17 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword:
 
 app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
+  if (request.authenticatedUser?.role === "server_admin") {
+    const result = await pool.query(
+      `SELECT d.id, d.name, d.time_zone, m.role
+         FROM departments d
+         LEFT JOIN department_memberships m
+           ON m.department_id = d.id AND m.user_id = $1
+        ORDER BY d.name`,
+      [request.authenticatedUser.id],
+    );
+    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned" }));
+  }
   const result = await pool.query(
     `SELECT d.id, d.name, d.time_zone, m.role
        FROM department_memberships m
