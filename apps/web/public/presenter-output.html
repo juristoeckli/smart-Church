@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#000000">
+  <title>Presenter Output</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body { background: #000; color: #fff; font-family: Arial, Helvetica, sans-serif; }
+    body.background-white { background: #fff; color: #111; }
+    body.background-transparent { background: transparent; }
+    #stage { position: fixed; inset: 0; }
+    #content { position: absolute; inset: 0; width: auto; height: auto; padding: 0; box-sizing: border-box; text-align: center; }
+    .output-layer { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; text-align: center; }
+    .output-layer img { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; margin: 0 auto; object-fit: contain; }
+    .output-layer video { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+    .output-layer iframe { display: block; width: 100%; height: 100%; border: 0; background: transparent; }
+    .output-layer .text { display: inline-block; max-width: 100%; font-size: 5vw; font-weight: bold; line-height: 1.35; white-space: pre-line; }
+    .output-layer.lower-third { align-items: flex-end; justify-content: flex-start; text-align: left; }
+    .output-layer.lower-third .text { display: block; color: #fff; font-size: 3.2vw; }
+    #status { position: fixed; top: 16px; left: 16px; padding: 8px 12px; border-radius: 4px; background: rgba(0,0,0,.75); color: #fff; font-size: 14px; }
+    body.legacy .output-layer img { max-width: 92%; max-height: 92%; }
+  </style>
+</head>
+<body>
+  <div id="stage"><div id="content"></div></div>
+  <div id="status">Waiting for Presenter…</div>
+  <script>
+    (function () {
+      var query = window.location.search.replace(/^\?/, '').split('&');
+      var params = {};
+      var i;
+      for (i = 0; i < query.length; i += 1) {
+        var pair = query[i].split('=');
+        params[decodeURIComponent(pair[0] || '')] = decodeURIComponent((pair[1] || '').replace(/\+/g, ' '));
+      }
+      var token = params.token || '';
+      var background = params.background || 'black';
+      document.body.className = 'background-' + (background === 'white' || background === 'transparent' ? background : 'black') + (params.legacy === '1' ? ' legacy' : '');
+      var content = document.getElementById('content');
+      var status = document.getElementById('status');
+      var lastKey = '';
+      var currentLayer = null;
+      var preloadedKey = '';
+      var preloadingKey = '';
+      var preloadGeneration = 0;
+      var preloadedImages = Object.create(null);
+      var preloadedFrames = Object.create(null);
+      var renderedMedia = Object.create(null);
+      var renderGeneration = 0;
+      var latestOutputState = null;
+      var lastMediaPlaybackRevision = 0;
+      var latencySamples = [];
+      var latencyReportAt = 0;
+
+      function reportLatency(startedAt) {
+        var finishedAt = performance.now();
+        latencySamples.push(finishedAt - startedAt);
+        if (!latencyReportAt || finishedAt - latencyReportAt >= 5000) {
+          var total = 0;
+          for (var sampleIndex = 0; sampleIndex < latencySamples.length; sampleIndex += 1) total += latencySamples[sampleIndex];
+          console.info('[Presenter output] API round-trip: ' + Math.round(total / latencySamples.length) + ' ms average over ' + latencySamples.length + ' request' + (latencySamples.length === 1 ? '' : 's') + '; latest ' + Math.round(latencySamples[latencySamples.length - 1]) + ' ms');
+          latencySamples = [];
+          latencyReportAt = finishedAt;
+        }
+      }
+
+      function requestJson(path, callback) {
+        var request = new XMLHttpRequest();
+        var startedAt = performance.now();
+        request.open('GET', path, true);
+        request.setRequestHeader('Accept', 'application/json');
+        request.onreadystatechange = function () {
+          if (request.readyState !== 4) return;
+          if (path.indexOf('/preload') === -1) reportLatency(startedAt);
+          if (request.status >= 200 && request.status < 300) {
+            try { callback(null, JSON.parse(request.responseText)); }
+            catch (error) { callback(error || new Error('Invalid Presenter response.')); }
+          } else callback(new Error(request.status === 404 ? 'This output link is no longer active.' : 'Waiting for Presenter…'));
+        };
+        request.send(null);
+      }
+
+      function preloadSong(key) {
+        if (!key || key === ':' || key === 'undefined:undefined' || key === preloadedKey || key === preloadingKey) return;
+        preloadingKey = key;
+        var generation = ++preloadGeneration;
+        var startedAt = performance.now();
+        preloadedImages = Object.create(null);
+        preloadedFrames = Object.create(null);
+        var existingLayers = content.querySelectorAll('.output-layer');
+        for (var existingIndex = 0; existingIndex < existingLayers.length; existingIndex += 1) {
+          if (existingLayers[existingIndex] !== currentLayer && existingLayers[existingIndex].__presenterGeneration !== renderGeneration) content.removeChild(existingLayers[existingIndex]);
+        }
+        requestJson('/api/modules/presenter/public/output/' + encodeURIComponent(token) + '/preload', function (error, response) {
+          if (generation !== preloadGeneration) return;
+          preloadingKey = '';
+          if (error || !response || !response.slides) {
+            console.warn('[Presenter output] Could not preload slides for ' + key + '.', error || 'No slide data returned.');
+            return;
+          }
+          preloadedKey = key;
+          var slides = response.slides;
+          var remaining = slides.length;
+          console.info('[Presenter output] Prerendering ' + remaining + ' slides for ' + key + '.');
+          function finishSlide(label, failure) {
+            if (generation !== preloadGeneration) return;
+            if (failure) console.warn('[Presenter output] Could not prerender slide ' + label + '.', failure);
+            remaining -= 1;
+            if (remaining <= 0) console.info('[Presenter output] Prerendered ' + slides.length + ' slides in ' + Math.round(performance.now() - startedAt) + ' ms.');
+          }
+          if (!remaining) {
+            console.info('[Presenter output] No slides to prerender for ' + key + '.');
+            return;
+          }
+          for (var slideIndex = 0; slideIndex < slides.length; slideIndex += 1) {
+            var slide = slides[slideIndex];
+            if (slide.type === 'image' && slide.imageUrl) {
+              var imageLayer = makeLayer(true);
+              var image = document.createElement('img');
+              imageLayer.appendChild(image);
+              content.appendChild(imageLayer);
+              image.alt = slide.label || 'image';
+              image.__presenterLayer = imageLayer;
+              image.onload = function (event) {
+                var loadedImage = event.currentTarget;
+                loadedImage.__presenterReady = true;
+                finishSlide(loadedImage.alt);
+                if (loadedImage.__presenterAfterLoad) {
+                  var imageAfterLoad = loadedImage.__presenterAfterLoad;
+                  loadedImage.__presenterAfterLoad = null;
+                  imageAfterLoad(loadedImage.__presenterLayer);
+                }
+              };
+              image.onerror = function (event) { finishSlide(event.currentTarget.alt, 'Image request failed.'); };
+              preloadedImages[slide.imageUrl] = image;
+              image.src = slide.imageUrl;
+            } else if (slide.type === 'html' && slide.htmlUrl) {
+              var frameLayer = makeLayer(true);
+              var frame = document.createElement('iframe');
+              frame.setAttribute('sandbox', 'allow-same-origin');
+              frame.setAttribute('loading', 'eager');
+              frame.title = slide.label || 'Preloaded PowerPoint slide';
+              frameLayer.appendChild(frame);
+              content.appendChild(frameLayer);
+              frame.__presenterLayer = frameLayer;
+              frame.onload = function (event) {
+                var loadedFrame = event.currentTarget;
+                loadedFrame.__presenterReady = true;
+                fitFrameWhenReady(loadedFrame, function (fit) {
+                  if (!fit) finishSlide(loadedFrame.title, 'Rendered slide dimensions were unavailable.');
+                  else finishSlide(loadedFrame.title);
+                  if (loadedFrame.__presenterAfterLoad) {
+                    var afterLoad = loadedFrame.__presenterAfterLoad;
+                    loadedFrame.__presenterAfterLoad = null;
+                    afterLoad(loadedFrame.__presenterLayer, fit);
+                  }
+                }, 0);
+              };
+              preloadedFrames[slide.htmlUrl] = frame;
+              frame.src = slide.htmlUrl;
+            } else finishSlide(slide.label || 'text');
+          }
+        });
+      }
+
+      function fitRenderedFrame(frame) {
+        try {
+          var frameDocument = frame.contentDocument;
+          if (frameDocument && !frameDocument.__presenterClickReloadBound) {
+            frameDocument.__presenterClickReloadBound = true;
+            frameDocument.addEventListener('click', function (event) {
+              event.preventDefault();
+              window.location.reload();
+            }, true);
+          }
+          var deck = frameDocument && frameDocument.querySelector('.pp-deck');
+          var slideWidth = deck && Number(deck.getAttribute('data-width'));
+          var slideHeight = deck && Number(deck.getAttribute('data-height'));
+          if (!deck || !slideWidth || !slideHeight || !frame.clientWidth || !frame.clientHeight) return false;
+          var scale = Math.min(frame.clientWidth / slideWidth, frame.clientHeight / slideHeight);
+          deck.style.transformOrigin = 'center center';
+          deck.style.transform = 'scale(' + scale + ')';
+          return true;
+        } catch (error) { return false; }
+      }
+
+      function fitFrameWhenReady(frame, callback, attempts) {
+        if (fitRenderedFrame(frame)) { callback(true); return; }
+        if (attempts >= 60) { callback(false); return; }
+        window.requestAnimationFrame(function () { fitFrameWhenReady(frame, callback, attempts + 1); });
+      }
+      document.addEventListener('click', function () { window.location.reload(); }, true);
+      window.addEventListener('resize', function () {
+        var frame = content.querySelector('iframe');
+        if (frame) fitRenderedFrame(frame);
+      });
+
+      function commitLayer(layer, generation) {
+        if (generation !== renderGeneration) return;
+        layer.style.visibility = 'visible';
+        if (currentLayer && currentLayer !== layer) {
+          currentLayer.style.visibility = 'hidden';
+          var previousVideo = currentLayer.querySelector('video');
+          if (previousVideo) previousVideo.pause();
+          if (!currentLayer.__presenterCached && currentLayer.parentNode === content) content.removeChild(currentLayer);
+        }
+        currentLayer = layer;
+        var nextVideo = currentLayer.querySelector('video');
+        if (nextVideo && nextVideo.autoplay && nextVideo.paused) nextVideo.play().catch(function () {});
+        applyMediaPlayback(latestOutputState);
+      }
+
+      function applyMediaPlayback(state) {
+        var playback = state && state.mediaPlayback;
+        var video = currentLayer && currentLayer.querySelector('video');
+        if (!playback || !video) return;
+        var revision = Number(playback.revision) || 0;
+        if (!revision || revision <= lastMediaPlaybackRevision) return;
+        if (video.readyState < 1) return;
+        try {
+          var targetTime = Number(playback.currentTime);
+          if (isFinite(targetTime) && Math.abs(video.currentTime - targetTime) > 0.35) video.currentTime = targetTime;
+          if (playback.action === 'play') video.play().catch(function () {});
+          else if (playback.action === 'pause') video.pause();
+          lastMediaPlaybackRevision = revision;
+        } catch (error) { console.warn('[Presenter output] Could not apply media playback command.', error); }
+      }
+
+      function makeLayer(cached) {
+        var layer = document.createElement('div');
+        layer.className = 'output-layer';
+        layer.style.visibility = 'hidden';
+        layer.__presenterCached = !!cached;
+        layer.__presenterGeneration = renderGeneration;
+        return layer;
+      }
+
+      function render(state) {
+        latestOutputState = state;
+        var preloadKey = (state.preloadDatasetId || '') + ':' + (state.preloadSetNumber || state.preloadSongNumber || '');
+        var slideKey = state.datasetId + ':' + (state.setNumber || state.songNumber || '');
+        preloadSong(preloadKey);
+        var slide = state.slide;
+        var renderKey = state.visible && slide ? slideKey + ':' + state.slideIndex + ':' + slide.type + ':' + (slide.text || slide.imageUrl || slide.htmlUrl || slide.mediaId || slide.mediaUrl || '') : 'blank';
+        if (renderKey === lastKey) { applyMediaPlayback(state); return; }
+        lastKey = renderKey;
+        var generation = ++renderGeneration;
+        if (!state.visible || !slide) {
+          if (currentLayer) {
+            currentLayer.style.visibility = 'hidden';
+            var hiddenVideo = currentLayer.querySelector('video');
+            if (hiddenVideo) hiddenVideo.pause();
+            if (!currentLayer.__presenterCached && currentLayer.parentNode === content) content.removeChild(currentLayer);
+          }
+          currentLayer = null;
+          status.style.display = 'none';
+          return;
+        }
+        status.style.display = 'none';
+        if (slide.type === 'image') {
+          var image = preloadedImages[slide.imageUrl];
+          if (!image) {
+            var imageLayer = makeLayer(true);
+            image = document.createElement('img');
+            image.alt = slide.label || state.songName || 'Presenter slide';
+            image.__presenterLayer = imageLayer;
+            image.onload = function (event) {
+              var loadedImage = event.currentTarget;
+              loadedImage.__presenterReady = true;
+              if (loadedImage.__presenterAfterLoad) {
+                var imageAfterLoad = loadedImage.__presenterAfterLoad;
+                loadedImage.__presenterAfterLoad = null;
+                imageAfterLoad(loadedImage.__presenterLayer);
+              }
+            };
+            imageLayer.appendChild(image);
+            content.appendChild(imageLayer);
+            preloadedImages[slide.imageUrl] = image;
+            image.src = slide.imageUrl;
+          }
+          if (image.__presenterReady || (image.complete && image.naturalWidth)) commitLayer(image.__presenterLayer, generation);
+          else image.__presenterAfterLoad = function (imageLayer) { commitLayer(imageLayer, generation); };
+        } else if (slide.type === 'media') {
+          var mediaEntry = renderedMedia[slide.mediaId];
+          if (!mediaEntry) {
+            var mediaLayer = makeLayer(true);
+            var mediaElement = document.createElement(slide.kind === 'video' ? 'video' : 'img');
+            mediaElement.setAttribute('playsinline', '');
+            if (slide.kind === 'video') {
+              mediaElement.autoplay = !(state.mediaPlayback && state.mediaPlayback.action === 'pause');
+              mediaElement.muted = true;
+              mediaElement.onloadeddata = function () {
+                commitLayer(mediaLayer, generation);
+                applyMediaPlayback(latestOutputState);
+              };
+            } else {
+              mediaElement.alt = slide.label || 'Presenter media';
+              mediaElement.onload = function () { commitLayer(mediaLayer, generation); };
+            }
+            mediaElement.onerror = function () { console.error('[Presenter output] Could not load media ' + (slide.label || slide.mediaId) + '.'); };
+            mediaLayer.appendChild(mediaElement);
+            content.appendChild(mediaLayer);
+            mediaEntry = { layer: mediaLayer, element: mediaElement };
+            renderedMedia[slide.mediaId] = mediaEntry;
+            mediaElement.src = slide.mediaUrl;
+          }
+          var cachedMediaReady = slide.kind === 'video' ? mediaEntry.element.readyState >= 2 : mediaEntry.element.complete && mediaEntry.element.naturalWidth;
+          if (cachedMediaReady) {
+            commitLayer(mediaEntry.layer, generation);
+            applyMediaPlayback(state);
+          }
+        } else if (slide.type === 'html') {
+          var frame = preloadedFrames[slide.htmlUrl];
+          if (!frame) {
+            var frameLayer = makeLayer(true);
+            frame = document.createElement('iframe');
+            frame.setAttribute('sandbox', 'allow-same-origin');
+            frame.title = slide.label || state.songName || 'PowerPoint slide';
+            frame.__presenterLayer = frameLayer;
+            frame.onload = function (event) {
+              var loadedFrame = event.currentTarget;
+              loadedFrame.__presenterReady = true;
+              fitFrameWhenReady(loadedFrame, function (fit) {
+                if (loadedFrame.__presenterAfterLoad) {
+                  var afterLoad = loadedFrame.__presenterAfterLoad;
+                  loadedFrame.__presenterAfterLoad = null;
+                  afterLoad(loadedFrame.__presenterLayer, fit);
+                }
+              }, 0);
+            };
+            frameLayer.appendChild(frame);
+            content.appendChild(frameLayer);
+            preloadedFrames[slide.htmlUrl] = frame;
+            frame.src = slide.htmlUrl;
+          }
+          if (frame.__presenterReady) {
+            fitFrameWhenReady(frame, function (fit) {
+              if (fit) commitLayer(frame.__presenterLayer, generation);
+            }, 0);
+          } else frame.__presenterAfterLoad = function (frameLayer, fit) {
+            if (fit) commitLayer(frameLayer, generation);
+          };
+        } else {
+          var textLayer = makeLayer(false);
+          var text = document.createElement('div');
+          text.className = 'text';
+          text.textContent = slide.text || '';
+          textLayer.appendChild(text);
+          if (slide.layout === 'lower-third') textLayer.className += ' lower-third';
+          content.appendChild(textLayer);
+          commitLayer(textLayer, generation);
+        }
+      }
+
+      function refresh() {
+        if (!token) { status.textContent = 'This output link is missing its token.'; return; }
+        requestJson('/api/modules/presenter/public/output/' + encodeURIComponent(token), function (error, state) {
+          if (error) { status.textContent = error.message; status.style.display = 'block'; return; }
+          render(state);
+        });
+      }
+
+      if (!token) {
+        status.textContent = 'This output link is missing its token.';
+      } else if (window.EventSource) {
+        var events = new EventSource('/api/modules/presenter/public/output/' + encodeURIComponent(token) + '/events');
+        events.onmessage = function (event) {
+          try {
+            var message = JSON.parse(event.data);
+            console.info('[Presenter output] server push delivery: ' + Math.max(0, Date.now() - message.sentAt) + ' ms');
+            render(message.state);
+          } catch (error) { console.error('[Presenter output] Could not read a live update.', error); }
+        };
+      } else {
+        refresh();
+        window.setInterval(refresh, 700);
+      }
+    }());
+  </script>
+</body>
+</html>

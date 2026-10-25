@@ -1,0 +1,11 @@
+{
+  "poll_interval_seconds": 5,
+  "timeout_seconds": 2,
+  "routing_presets": { "max_presets": 20 },
+  "routing_history": { "merge_window_minutes": 5 },
+  "unifi": { "api_key": "", "sdwan_config_ids": [] },
+  "sites": [
+    { "id": "site-a", "department_id": "00000000-0000-4000-8000-000000000001", "name": "Location A", "router_ip": "", "encoders": [], "devices": [] },
+    { "id": "site-b", "department_id": "00000000-0000-4000-8000-000000000002", "name": "Location B", "router_ip": "", "encoders": [], "devices": [] }
+  ]
+}

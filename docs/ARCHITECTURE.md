@@ -1,6 +1,6 @@
 # smart-Church architecture
 
-Status: agreed planning baseline, 24 October 2026. This document describes intended behaviour, not implemented features. Examples such as Inventory and Machine Control illustrate module boundaries; their full product requirements remain to be defined.
+Status: agreed design baseline, 24 October 2026. This document describes intended behaviour; the implementation note at the end records the current slice. Examples such as Inventory and Machine Control illustrate module boundaries; their full product requirements remain to be defined.
 
 ## 1. Goals and platform
 
@@ -16,15 +16,15 @@ Baseline:
 
 ## 2. Boundaries
 
-An installation is one server deployment. A department is an isolated logical area; one installation may host multiple departments. Department IDs remain stable when moving between installations. Companies normally have separate deployments; no shared cross-company hosting is required.
+An installation is one server deployment for the GfC organization. It may host multiple locations, each isolated as a logical area (stored as a department in the current database model). Location IDs remain stable when moving between installations. Companies normally have separate deployments; no shared cross-company hosting is required.
 
-Department data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated department context. Users can belong to multiple departments with different rights. Switching department must not mix caches, pending edits, records or permissions.
+Location data, libraries, roles, memberships, module configuration and permissions remain isolated. All requests carry validated active-location context. Users can belong to multiple locations with different rights. Switching location must not mix caches, pending edits, records or permissions. The current prototype stores explicit `site_admin` and `member` memberships and checks them for location-scoped API requests. Members can read the schedule and basic people details; site administrators can change site data and see contact email/phone fields. This is an initial coarse permission model; granular and field-level permission administration remains future work.
 
 Modules are installed/enabled installation-wide, not separately per department. Enabled modules have separate department data/settings. Required modules cannot be disabled. Disabling an optional module preserves its data.
 
 ## 3. Core and modules
 
-Core stays small: authentication/identity, users and contacts, department context, permissions, module registration, worker supervision, REST/live routing and necessary shared storage primitives. User-facing management and larger workflows belong to modules.
+Core stays small: authentication/identity, users and contacts, location context, permissions, module registration, worker supervision, REST/live routing and necessary shared storage primitives. User-facing management and larger workflows belong to modules.
 
 Built-in modules are bundled with the app. Third-party modules may be installed separately, using a documented SDK/protocol and manifest with ID, version, compatibility, dependencies and permissions. Required dependencies block activation when unavailable; optional integrations add features when present. Third-party workers may use other languages if they implement the protocol. A separate process is fault isolation, not a security sandbox: installed extensions are trusted executable code unless additional sandboxing is implemented.
 
@@ -100,7 +100,7 @@ Separate contacts, local access accounts and authentication identities:
 - Local passwords remain at the home installation; later LDAP/external providers are possible.
 - Link identities with origin installation/user IDs, never merge automatically by email.
 
-Department roles and installation roles are separate. Department administrators manage their own access; installation administration is not automatic permission to read department records through the app. Underlying host administrators still have technical power over local data.
+Department roles and installation roles are separate. The target is for department administrators to manage access within their own location; in this prototype, the account-access screen is restricted to Server Administrators. Installation administration is not automatic permission to read department records through the app. The prototype keeps Server Administrator separate from local user accounts and requires an explicit location membership for scoped data access. Underlying host administrators still have technical power over local data.
 
 Cross-installation system administration and cross-department user management are independent extra privileges for selected central staff, not inherited by every server administrator. Destination installations explicitly authorise scope. Initial setup can connect to an existing installation and explicitly grant selected central IT users immediate management access. Keep an independent/local setup path and a local recovery administrator.
 
@@ -151,6 +151,8 @@ Department export/import preserves its ID, content, settings and memberships. Di
 
 Keep licensed datasets out of the source repository. Install/import separately per deployment with ID/version/compatibility metadata. Company-authorised users may download local copies; other companies install their own datasets. Updates preserve installed datasets. Dataset licence scope remains the operator's responsibility.
 
+The Presenter module stores datasets separately from playlists and other site data. A dataset package is a versioned `.scdataset.tar.gz` containing one manifest and only that dataset's media. Presenter administrators can import and export individual packages; the three built-in Singt datasets are read-only after installation. Package files are stored under `PRESENTER_DATASETS_DIR`, defaulting to `apps/api/data/presenter-datasets`, and must be included separately in private backups. The import validator rejects path traversal, unsupported formats, missing/extra media and packages above 256 MiB.
+
 ## 14. Proposed source layout
 
 ```text
@@ -190,4 +192,4 @@ Only create code directories as implemented. Module UI is colocated with its mod
 
 Milestone 1: Core, departments, login, permissions, worker management, required System Management and Notifications, and one small example module. Build a working browser slice first. Later milestones add Electron/offline, sharing/trust, files/history, deployment/backup/update flows and optional device modules. See [milestones](MILESTONES.md).
 
-No code or features are implemented by this planning commit.
+Implementation includes the TypeScript workspace, shared contracts, a localhost Core API, PostgreSQL-backed People and Services & events data, and separate Video & streaming and Presenter modules. Presenter owns its UI, styles, dataset storage, and API routes under `apps/{web,api}/src/modules/presenter`; Core registers the route plugin and supplies shared authentication/location services. Video uses a Core-supervised worker that connects over an authenticated loopback WebSocket and bridges to the existing Python device controller; video status and operations are scoped to the selected location UUID. A location can contain several configured equipment groups, and each operation resolves to a group within that location. The worker supervision and browser integration currently serve Video; a generic third-party module SDK and full deployment hardening remain future work.

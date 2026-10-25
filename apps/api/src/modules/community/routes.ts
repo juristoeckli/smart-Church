@@ -1,0 +1,393 @@
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { Pool } from "pg";
+import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
+import type { BookableResource, ChurchGroup, ResourceBooking, StoredFile } from "@smart-church/contracts";
+
+const resourceLimit = 25 * 1024 * 1024;
+const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
+
+interface CommunityRouteDependencies {
+  pool: Pool | null;
+  isDatabaseReady: () => boolean;
+  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean) => Promise<string | null>;
+}
+
+type ResourceRow = {
+  id: string;
+  title: string;
+  category: string;
+  file_name: string;
+  content_type: string;
+  file_size: number;
+  created_at: Date | string;
+};
+
+type BookableResourceRow = {
+  id: string; name: string; category: BookableResource["category"]; description: string; location: string;
+  capacity: number | null; requires_approval: boolean; active: boolean; source_system?: string | null;
+};
+
+type BookingRow = {
+  id: string; resource_id: string; resource_name: string; requested_by: string; requester_name: string;
+  purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
+};
+
+function mapResource(row: ResourceRow): StoredFile {
+  return { id: row.id, title: row.title, category: row.category, fileName: row.file_name, contentType: row.content_type, fileSize: row.file_size, createdAt: new Date(row.created_at).toISOString() };
+}
+
+function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; created_at: Date | string; source_system?: string | null }): ChurchGroup {
+  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], createdAt: new Date(row.created_at).toISOString(), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+}
+
+function mapBookableResource(row: BookableResourceRow): BookableResource {
+  return { id: row.id, name: row.name, category: row.category, description: row.description, location: row.location, ...(row.capacity ? { capacity: row.capacity } : {}), requiresApproval: row.requires_approval, active: row.active, ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+}
+
+function mapBooking(row: BookingRow): ResourceBooking {
+  return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, createdAt: new Date(row.created_at).toISOString() };
+}
+
+export function registerCommunityRoutes(app: FastifyInstance, dependencies: CommunityRouteDependencies) {
+  const { pool, isDatabaseReady, resolveDepartmentId } = dependencies;
+  app.register(async (routes) => {
+    routes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: resourceLimit }, (_request, body, done) => done(null, body));
+
+    async function department(request: FastifyRequest, reply: FastifyReply, manage = false) {
+      if (!isDatabaseReady() || !pool) {
+        reply.code(503).send({ error: "The community database is unavailable." });
+        return null;
+      }
+      return resolveDepartmentId(request, reply, manage);
+    }
+
+    routes.get("/api/groups", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query(
+        `SELECT g.id, g.name, g.description, g.created_at, g.source_system,
+                count(gm.contact_id)::int AS member_count,
+                COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids
+           FROM church_groups g LEFT JOIN group_members gm ON gm.group_id = g.id
+          WHERE g.department_id = $1 GROUP BY g.id ORDER BY lower(g.name), g.created_at`,
+        [departmentId],
+      );
+      return result.rows.map(mapGroup);
+    });
+
+    routes.post<{ Body: { name: string; description?: string } }>("/api/groups", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const name = request.body.name.trim();
+      const description = request.body.description?.trim() ?? "";
+      if (!name) return reply.code(400).send({ error: "Enter a group name." });
+      try {
+        const result = await pool!.query(
+          `INSERT INTO church_groups (id, department_id, name, description) VALUES ($1, $2, $3, $4)
+           RETURNING id, name, description, created_at`,
+          [randomUUID(), departmentId, name, description],
+        );
+        return reply.code(201).send(mapGroup({ ...result.rows[0], member_count: 0, member_ids: [] }));
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A group with that name already exists." });
+        throw error;
+      }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { name: string; description?: string } }>("/api/groups/:id", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
+      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This group is managed by ChurchTools. Edit it there and sync again." });
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Enter a group name." });
+      try {
+        const result = await pool!.query(
+          `UPDATE church_groups SET name = $3, description = $4, updated_at = now()
+            WHERE id = $1 AND department_id = $2 RETURNING id, name, description, created_at, source_system,
+              (SELECT count(*)::int FROM group_members WHERE group_id = church_groups.id) AS member_count,
+              (SELECT COALESCE(array_agg(contact_id), ARRAY[]::uuid[]) FROM group_members WHERE group_id = church_groups.id) AS member_ids`,
+          [request.params.id, departmentId, name, request.body.description?.trim() ?? ""],
+        );
+        if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
+        return mapGroup(result.rows[0]);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A group with that name already exists." });
+        throw error;
+      }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { contactIds: string[] } }>("/api/groups/:id/members", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["contactIds"], properties: { contactIds: { type: "array", maxItems: 2000, uniqueItems: true, items: { type: "string", format: "uuid" } } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const group = await client.query("SELECT id,source_system FROM church_groups WHERE id = $1 AND department_id = $2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+        if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by ChurchTools." }); }
+        if (request.body.contactIds.length) {
+          const people = await client.query("SELECT id FROM contacts WHERE department_id = $1 AND id = ANY($2::uuid[])", [departmentId, request.body.contactIds]);
+          if (people.rowCount !== request.body.contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "One or more selected people do not belong to this site." }); }
+        }
+        await client.query("DELETE FROM group_members WHERE group_id = $1", [request.params.id]);
+        if (request.body.contactIds.length) await client.query("INSERT INTO group_members (group_id, contact_id) SELECT $1, unnest($2::uuid[])", [request.params.id, request.body.contactIds]);
+        await client.query("COMMIT");
+        return { memberIds: request.body.contactIds };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/groups/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
+      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This group is managed by ChurchTools. Remove it there and sync again." });
+      const result = await pool!.query("DELETE FROM church_groups WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
+      return { deleted: true };
+    });
+
+    const bookableResourceBodySchema = { type: "object", additionalProperties: false, required: ["name", "category", "requiresApproval", "active"], properties: {
+      name: { type: "string", minLength: 1, maxLength: 120 }, category: { type: "string", enum: ["room", "vehicle", "equipment", "other"] },
+      description: { type: "string", maxLength: 1000 }, location: { type: "string", maxLength: 160 }, capacity: { type: "integer", minimum: 1, maximum: 10000 },
+      requiresApproval: { type: "boolean" }, active: { type: "boolean" },
+    } };
+
+    routes.get("/api/resources", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query<BookableResourceRow>(
+        `SELECT id, name, category, description, location, capacity, requires_approval, active, source_system
+           FROM bookable_resources WHERE department_id = $1 ${request.activeDepartmentRole === "site_admin" ? "" : "AND active = true"}
+          ORDER BY active DESC, category, lower(name)`,
+        [departmentId],
+      );
+      return result.rows.map(mapBookableResource);
+    });
+
+    routes.post<{ Body: { name: string; category: BookableResource["category"]; description?: string; location?: string; capacity?: number; requiresApproval: boolean; active: boolean } }>("/api/resources", { schema: { body: bookableResourceBodySchema } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Enter a resource name." });
+      try {
+        const result = await pool!.query<BookableResourceRow>(
+          `INSERT INTO bookable_resources (id, department_id, name, category, description, location, capacity, requires_approval, active)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           RETURNING id, name, category, description, location, capacity, requires_approval, active`,
+          [randomUUID(), departmentId, name, request.body.category, request.body.description?.trim() ?? "", request.body.location?.trim() ?? "", request.body.capacity ?? null, request.body.requiresApproval, request.body.active],
+        );
+        return reply.code(201).send(mapBookableResource(result.rows[0]));
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A resource with that name already exists." });
+        throw error;
+      }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { name: string; category: BookableResource["category"]; description?: string; location?: string; capacity?: number; requiresApproval: boolean; active: boolean } }>("/api/resources/:id", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: bookableResourceBodySchema,
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const existing = await pool!.query("SELECT source_system FROM bookable_resources WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      if (!existing.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This resource is managed by ChurchTools. Edit it there and sync again." });
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Enter a resource name." });
+      try {
+        const result = await pool!.query<BookableResourceRow>(
+          `UPDATE bookable_resources SET name=$3, category=$4, description=$5, location=$6, capacity=$7, requires_approval=$8, active=$9, updated_at=now()
+            WHERE id=$1 AND department_id=$2 RETURNING id, name, category, description, location, capacity, requires_approval, active, source_system`,
+          [request.params.id, departmentId, name, request.body.category, request.body.description?.trim() ?? "", request.body.location?.trim() ?? "", request.body.capacity ?? null, request.body.requiresApproval, request.body.active],
+        );
+        if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+        return mapBookableResource(result.rows[0]);
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A resource with that name already exists." });
+        throw error;
+      }
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/resources/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const existing = await pool!.query("SELECT source_system FROM bookable_resources WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      if (!existing.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This resource is managed by ChurchTools. Remove it there and sync again." });
+      const result = await pool!.query("UPDATE bookable_resources SET active=false, updated_at=now() WHERE id=$1 AND department_id=$2 AND active=true RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return { archived: true };
+    });
+
+    routes.get("/api/resource-bookings", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query<BookingRow>(
+        `SELECT b.id, b.resource_id, r.name AS resource_name, b.requested_by, u.display_name AS requester_name,
+                b.purpose, b.starts_at, b.ends_at, b.status, b.created_at
+           FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id JOIN app_users u ON u.id=b.requested_by
+          WHERE b.department_id=$1 AND b.ends_at > now() - interval '30 days' AND b.starts_at < now() + interval '6 months'
+          ORDER BY b.starts_at, r.name`, [departmentId]);
+      return result.rows.map(mapBooking);
+    });
+
+    routes.post<{ Body: { resourceId: string; purpose: string; startsAt: string; endsAt: string } }>("/api/resource-bookings", { schema: { body: {
+      type: "object", additionalProperties: false, required: ["resourceId", "purpose", "startsAt", "endsAt"], properties: {
+        resourceId: { type: "string", format: "uuid" }, purpose: { type: "string", minLength: 1, maxLength: 240 },
+        startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
+      },
+    } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const startsAt = new Date(request.body.startsAt);
+      const endsAt = new Date(request.body.endsAt);
+      if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || startsAt <= new Date() || endsAt <= startsAt) return reply.code(400).send({ error: "Choose a future start and an end time after it." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [departmentId, request.body.resourceId]);
+        const resourceResult = await client.query("SELECT id, name, requires_approval FROM bookable_resources WHERE id=$1 AND department_id=$2 AND active=true", [request.body.resourceId, departmentId]);
+        const resource = resourceResult.rows[0];
+        if (!resource) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This resource is not available for booking." }); }
+        const conflicts = await client.query(
+          `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND status IN ('requested','approved')
+             AND starts_at < $4 AND ends_at > $3 LIMIT 1`,
+          [departmentId, request.body.resourceId, startsAt.toISOString(), endsAt.toISOString()],
+        );
+        if (conflicts.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This resource is already requested or booked during that time." }); }
+        const result = await client.query<BookingRow>(
+          `INSERT INTO resource_bookings (id, department_id, resource_id, requested_by, purpose, starts_at, ends_at, status)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           RETURNING id, resource_id, $9::text AS resource_name, requested_by, $10::text AS requester_name, purpose, starts_at, ends_at, status, created_at`,
+          [randomUUID(), departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt.toISOString(), endsAt.toISOString(), resource.requires_approval ? "requested" : "approved", resource.name, request.authenticatedUser!.displayName],
+        );
+        await client.query("COMMIT");
+        return reply.code(201).send(mapBooking(result.rows[0]));
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { status: "approved" | "declined" | "cancelled" } }>("/api/resource-bookings/:id/status", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["approved", "declined", "cancelled"] } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const isAdmin = request.activeDepartmentRole === "site_admin";
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const existing = await client.query("SELECT resource_id, requested_by, status FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        const booking = existing.rows[0];
+        if (!booking) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking not found." }); }
+        if (request.body.status === "cancelled") {
+          if (!isAdmin && booking.requested_by !== request.authenticatedUser!.id) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You can only cancel your own booking." }); }
+          if (booking.status === "cancelled" || booking.status === "declined") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This booking is already closed." }); }
+        } else if (!isAdmin || booking.status !== "requested") {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "Only a site administrator can approve or decline a pending request." });
+        }
+        if (request.body.status === "approved") {
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [departmentId, booking.resource_id]);
+          const conflict = await client.query(
+            `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND id<>$3 AND status='approved'
+               AND starts_at < (SELECT ends_at FROM resource_bookings WHERE id=$3) AND ends_at > (SELECT starts_at FROM resource_bookings WHERE id=$3) LIMIT 1`,
+            [departmentId, booking.resource_id, request.params.id],
+          );
+          if (conflict.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Another booking has already been approved for this time." }); }
+        }
+        await client.query("UPDATE resource_bookings SET status=$3, updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, request.body.status]);
+        await client.query("COMMIT");
+        return { updated: true, status: request.body.status };
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally { client.release(); }
+    });
+
+    routes.get("/api/files", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query<ResourceRow>(
+        `SELECT id, title, category, file_name, content_type, file_size, created_at FROM stored_files
+          WHERE department_id = $1 ORDER BY lower(category), lower(title), created_at DESC`,
+        [departmentId],
+      );
+      return result.rows.map(mapResource);
+    });
+
+    routes.post<{ Body: Buffer; Querystring: { title?: string; category?: string; filename?: string } }>("/api/files", { bodyLimit: resourceLimit, schema: {
+      querystring: { type: "object", properties: { title: { type: "string", maxLength: 160 }, category: { type: "string", maxLength: 80 }, filename: { type: "string", maxLength: 255 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      if (!Buffer.isBuffer(request.body) || request.body.length < 1) return reply.code(400).send({ error: "Choose a file to upload." });
+      if (request.body.length > resourceLimit) return reply.code(413).send({ error: "Resources must be 25 MiB or smaller." });
+      const fileName = basename(request.query.filename || "resource").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 255) || "resource";
+      const title = (request.query.title?.trim() || fileName).slice(0, 160);
+      const category = (request.query.category?.trim() || "General").slice(0, 80);
+      const requestedType = request.headers["x-resource-content-type"];
+      const contentType = typeof requestedType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(requestedType) ? requestedType.slice(0, 120) : "application/octet-stream";
+      const result = await pool!.query<ResourceRow>(
+        `INSERT INTO stored_files (id, department_id, title, category, file_name, content_type, file_size, file_data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING id, title, category, file_name, content_type, file_size, created_at`,
+        [randomUUID(), departmentId, title, category, fileName, contentType, request.body.length, request.body],
+      );
+      return reply.code(201).send(mapResource(result.rows[0]));
+    });
+
+    routes.put<{ Params: { id: string }; Body: { title: string; category: string } }>("/api/files/:id", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["title", "category"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", minLength: 1, maxLength: 80 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const title = request.body.title.trim();
+      const category = request.body.category.trim();
+      if (!title || !category) return reply.code(400).send({ error: "Title and category are required." });
+      const result = await pool!.query<ResourceRow>(
+        `UPDATE stored_files SET title = $3, category = $4, updated_at = now()
+          WHERE id = $1 AND department_id = $2
+          RETURNING id, title, category, file_name, content_type, file_size, created_at`,
+        [request.params.id, departmentId, title, category],
+      );
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return mapResource(result.rows[0]);
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/files/:id/download", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2", [request.params.id, departmentId]);
+      const resource = result.rows[0];
+      if (!resource) return reply.code(404).send({ error: "Resource not found." });
+      reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
+      return resource.file_data as Buffer;
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/files/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const result = await pool!.query("DELETE FROM stored_files WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return { deleted: true };
+    });
+  });
+}
