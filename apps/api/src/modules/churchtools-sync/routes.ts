@@ -1,12 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
+import type { ModuleServerContext } from "../module-sdk.js";
 
-interface Dependencies {
-  pool: Pool | null;
-  isDatabaseReady: () => boolean;
-  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean) => Promise<string | null>;
-}
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
 const running = new Set<string>();
@@ -135,7 +131,7 @@ function mapEvents(events: JsonObject[]) {
   });
 }
 
-export function registerChurchToolsSyncRoutes(app: FastifyInstance, deps: Dependencies) {
+export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = deps;
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, manage = false) {

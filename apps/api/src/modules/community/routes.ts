@@ -3,15 +3,10 @@ import type { Pool } from "pg";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { BookableResource, ChurchGroup, ResourceBooking, StoredFile } from "@smart-church/contracts";
+import type { ModuleServerContext } from "../module-sdk.js";
 
 const resourceLimit = 25 * 1024 * 1024;
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
-
-interface CommunityRouteDependencies {
-  pool: Pool | null;
-  isDatabaseReady: () => boolean;
-  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean) => Promise<string | null>;
-}
 
 type ResourceRow = {
   id: string;
@@ -49,7 +44,7 @@ function mapBooking(row: BookingRow): ResourceBooking {
   return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, createdAt: new Date(row.created_at).toISOString() };
 }
 
-export function registerCommunityRoutes(app: FastifyInstance, dependencies: CommunityRouteDependencies) {
+export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = dependencies;
   app.register(async (routes) => {
     routes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: resourceLimit }, (_request, body, done) => done(null, body));

@@ -15,11 +15,9 @@ import {
   Link2,
   LogOut,
   Menu,
-  MonitorPlay,
   Moon,
   Plus,
   Pencil,
-  RefreshCw,
   Search,
   Server,
   Settings2,
@@ -28,7 +26,6 @@ import {
   Trash2,
   UsersRound,
   X,
-  Video,
 } from "lucide-react";
 import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, PresenterPermission, SiteUser, UserPhoneLabel, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VideoPermission } from "@smart-church/contracts";
 import { Authentication, PasswordChangeRequired } from "./Authentication";
@@ -37,18 +34,13 @@ import { Overview } from "./Overview";
 import { Groups } from "./Groups";
 import { FileStorage } from "./Resources";
 import { BookableResources } from "./BookableResources";
-import { VideoModule } from "./modules/video/VideoModule";
-import { PresenterWorkspace } from "./modules/presenter/PresenterWorkspace";
-import { SyncModule } from "./modules/sync/SyncModule";
-import { hasPresenterAccess, PresenterRightsFieldset, presenterCapabilities as getPresenterCapabilities } from "./modules/presenter/PresenterRightsFieldset";
+import { ModuleHost, registeredModules } from "./module-registry";
+import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 
 const navigation = [
   { label: "Overview", icon: LayoutDashboard },
   { label: "People", icon: UsersRound },
   { label: "Services & events", icon: CalendarDays },
-  { label: "Video & streaming", icon: Video },
-  { label: "Presenter", icon: MonitorPlay },
-  { label: "Sync", icon: RefreshCw },
   { label: "Groups", icon: ContactRound },
   { label: "Resources", icon: Building2 },
   { label: "File storage", icon: FolderOpen },
@@ -76,7 +68,22 @@ function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, depar
   return fetch(input, { ...init, headers });
 }
 
-type WorkspacePage = "Overview" | "People" | "Services & events" | "Groups" | "Resources" | "File storage" | "Video & streaming" | "Presenter" | "Sync";
+type WorkspacePage = "Overview" | "People" | "Services & events" | "Groups" | "Resources" | "File storage" | `module:${string}`;
+const modulePage = (id: string) => `module:${id}` as WorkspacePage;
+const moduleForPage = (page: WorkspacePage) => page.startsWith("module:") ? registeredModules.find((module) => module.id === page.slice("module:".length)) : undefined;
+function moduleAvailable(module: (typeof registeredModules)[number], department: DepartmentProfile, canManageSite: boolean) {
+  const enabled = module.enabledByDefault || (department.enabledModules ?? []).includes(module.id);
+  return enabled && (!module.adminOnly || canManageSite) && (module.isAvailable?.({ department, canManageSite }) ?? true);
+}
+function savedModuleState(moduleId: string, departmentId: string, fallback: string) {
+  if (!departmentId) return fallback;
+  try {
+    const saved = localStorage.getItem(`smart-church-module-state:${moduleId}:${departmentId}`);
+    if (saved !== null) return saved;
+    if (moduleId === "video") return localStorage.getItem(`smart-church-video-tab:${departmentId}`) ?? fallback;
+  } catch { /* Use the module default when storage is unavailable. */ }
+  return fallback;
+}
 type PersonLinkOption = Pick<Contact, "id" | "firstName" | "lastName" | "email" | "importedFrom"> & { departmentId: string };
 const workspacePageHashes: Record<WorkspacePage, string> = {
   Overview: "#overview",
@@ -85,18 +92,25 @@ const workspacePageHashes: Record<WorkspacePage, string> = {
   Groups: "#groups",
   Resources: "#resources",
   "File storage": "#file-storage",
-  "Video & streaming": "#video-streaming",
-  Presenter: "#presenter",
-  Sync: "#sync",
 };
 function workspacePageFromHash(hash: string): WorkspacePage | null {
   const entry = Object.entries(workspacePageHashes).find(([, route]) => route === hash);
-  return (entry?.[0] as WorkspacePage | undefined) ?? null;
+  if (entry) return entry[0] as WorkspacePage;
+  const oldModuleHash = { "#video-streaming": "video", "#presenter": "presenter", "#sync": "sync", "#system-laptop": "system-laptop" }[hash as "#video-streaming" | "#presenter" | "#sync" | "#system-laptop"];
+  const moduleId = hash.match(/^#module-([a-z0-9][a-z0-9-]*)$/)?.[1] ?? oldModuleHash;
+  return moduleId && registeredModules.some((module) => module.id === moduleId) ? modulePage(moduleId) : null;
+}
+function workspacePageHash(page: WorkspacePage) {
+  const module = moduleForPage(page);
+  return module ? `#module-${module.id}` : workspacePageHashes[page as Exclude<WorkspacePage, `module:${string}`>];
 }
 function savedWorkspacePage(): WorkspacePage {
   try {
     const saved = localStorage.getItem("smart-church-page");
-    if (saved === "Overview" || saved === "Services & events" || saved === "Groups" || saved === "Resources" || saved === "File storage" || saved === "Video & streaming" || saved === "Presenter" || saved === "Sync") return saved;
+    if (saved === "Overview" || saved === "Services & events" || saved === "Groups" || saved === "Resources" || saved === "File storage") return saved;
+    if (saved?.startsWith("module:") && registeredModules.some((module) => module.id === saved.slice("module:".length))) return saved as WorkspacePage;
+    const legacyModuleIds = { "Video & streaming": "video", Presenter: "presenter", Sync: "sync", "System Laptop": "system-laptop" } as Record<string, string>;
+    if (saved && registeredModules.some((module) => module.id === legacyModuleIds[saved])) return modulePage(legacyModuleIds[saved]);
   } catch { /* Use the default page when local storage is unavailable. */ }
   return "People";
 }
@@ -174,6 +188,9 @@ function App() {
   const [statusFilter, setStatusFilter] = useState<"all" | ContactStatus>("all");
   const [contactSort, setContactSort] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState<WorkspacePage>(() => workspacePageFromHash(window.location.hash) ?? savedWorkspacePage());
+  const [moduleState, setModuleState] = useState<{ moduleId: string; departmentId: string; value: string }>({ moduleId: "", departmentId: "", value: "" });
+  const [compactNavigation, setCompactNavigation] = useState(() => window.innerHeight < 900);
+  const [collapsedNavSections, setCollapsedNavSections] = useState({ core: false, modules: false });
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [editingContact, setEditingContact] = useState<Contact | null>(null);
   const contactImportInput = useRef<HTMLInputElement>(null);
@@ -218,6 +235,18 @@ function App() {
   const [authUnavailableMessage, setAuthUnavailableMessage] = useState("");
 
   const logoSrc = logoDataUrl || defaultLogoUrl;
+  const activeNavSection = page.startsWith("module:") ? "modules" : "core";
+
+  useEffect(() => {
+    const updateNavigationDensity = () => setCompactNavigation(window.innerHeight < 900);
+    window.addEventListener("resize", updateNavigationDensity);
+    return () => window.removeEventListener("resize", updateNavigationDensity);
+  }, []);
+
+  useEffect(() => {
+    if (compactNavigation) setCollapsedNavSections({ core: activeNavSection !== "core", modules: activeNavSection !== "modules" });
+    else setCollapsedNavSections({ core: false, modules: false });
+  }, [activeNavSection, compactNavigation]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -232,8 +261,19 @@ function App() {
     try { localStorage.setItem("smart-church-page", page); } catch { /* Keep the current page for this session. */ }
   }, [page]);
 
+  const activeModuleForState = moduleForPage(page);
+  const activeModuleState = activeModuleForState
+    ? moduleState.moduleId === activeModuleForState.id && moduleState.departmentId === department.id
+      ? moduleState.value
+      : savedModuleState(activeModuleForState.id, department.id, activeModuleForState.initialState ?? "")
+    : "";
   useEffect(() => {
-    const hash = workspacePageHashes[page];
+    if (!activeModuleForState || !department.id || moduleState.moduleId !== activeModuleForState.id || moduleState.departmentId !== department.id) return;
+    try { localStorage.setItem(`smart-church-module-state:${activeModuleForState.id}:${department.id}`, moduleState.value); } catch { /* Keep module navigation usable for this session. */ }
+  }, [activeModuleForState, department.id, moduleState]);
+
+  useEffect(() => {
+    const hash = workspacePageHash(page);
     if (window.location.hash !== hash) window.location.hash = hash;
   }, [page]);
 
@@ -253,11 +293,8 @@ function App() {
   }, [authUser, department.id]);
 
   useEffect(() => {
-    const moduleAccess = department.role === "site_admin";
-    const videoAvailable = (department.enabledModules ?? []).includes("video") && (moduleAccess || (department.videoPermissions ?? []).length > 0);
-    const presenterAvailable = hasPresenterAccess((department.enabledModules ?? []).includes("presenter"), moduleAccess, department.presenterPermissions ?? []);
-    if (authUser && department.id && departments.length > 0 && page === "Video & streaming" && !videoAvailable) setPage("People");
-    if (authUser && department.id && departments.length > 0 && page === "Presenter" && !presenterAvailable) setPage("People");
+    const module = moduleForPage(page);
+    if (authUser && department.id && departments.length > 0 && page.startsWith("module:") && (!module || !moduleAvailable(module, department, department.role === "site_admin"))) setPage("People");
   }, [authUser, department.id, department.role, department.videoPermissions, department.presenterPermissions, department.enabledModules, departments.length, page]);
 
   useEffect(() => {
@@ -726,24 +763,23 @@ function App() {
 
   const userInitials = authUser.displayName.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase() ?? "").join("") || authUser.username[0]?.toUpperCase() || "U";
   const canManageSite = department.role === "site_admin";
-  const videoModuleEnabled = (department.enabledModules ?? []).includes("video");
-  const videoPermissions = new Set(department.videoPermissions ?? []);
-  const canViewVideo = videoModuleEnabled && (canManageSite || videoPermissions.size > 0);
-  const presenterModuleEnabled = (department.enabledModules ?? []).includes("presenter");
-  const canViewPresenter = hasPresenterAccess(presenterModuleEnabled, canManageSite, department.presenterPermissions ?? []);
-  const presenterCapabilities = getPresenterCapabilities(canManageSite, department.presenterPermissions ?? []);
-  const videoCapabilities = {
-    canOperateStreaming: canManageSite || videoPermissions.has("streaming_operator") || videoPermissions.has("stream_admin"),
-    canManageEncoders: canManageSite || videoPermissions.has("stream_admin"),
-    canManageRouting: canManageSite || videoPermissions.has("routing_user") || videoPermissions.has("routing_admin"),
-    canAdminRouting: canManageSite || videoPermissions.has("routing_admin"),
+  const enabledDynamicModules = registeredModules.filter((module) => moduleAvailable(module, department, canManageSite));
+  const moduleContext = {
+    department,
+    departmentId: department.id,
+    csrfToken,
+    canManageSite,
+    state: activeModuleState,
+    onStateChange: (value: string) => activeModuleForState && setModuleState({ moduleId: activeModuleForState.id, departmentId: department.id, value }),
   };
   const renderNavigationItem = ({ label, icon: Icon }: typeof navigation[number]) => {
-    const isAvailablePage = label === "Overview" || label === "People" || label === "Services & events" || label === "Groups" || label === "Resources" || label === "File storage" || label === "Video & streaming" || label === "Presenter" || label === "Sync";
-    const active = page === label;
+    const registered = registeredModules.find((module) => module.name === label);
+    const targetPage = registered ? modulePage(registered.id) : label as WorkspacePage;
+    const isAvailablePage = registered ? enabledDynamicModules.some((module) => module.id === registered.id) : label === "Overview" || label === "People" || label === "Services & events" || label === "Groups" || label === "Resources" || label === "File storage";
+    const active = page === targetPage;
     return <button className={`nav-item ${active ? "nav-item-active" : ""}`} type="button" key={label} onClick={() => {
       if (isAvailablePage) {
-        setPage(label as WorkspacePage);
+        setPage(targetPage);
         setMenuOpen(false);
       } else setNotice(`${label} will be added in a later step.`);
     }}>
@@ -763,9 +799,16 @@ function App() {
         </div>
 
         <nav className="main-nav" aria-label="Main navigation">
-          <div className="nav-label nav-section-label">Core</div>
-          {navigation.filter(({ label }) => label !== "Video & streaming" && label !== "Presenter").map(renderNavigationItem)}
-          {(canViewVideo || canViewPresenter || canManageSite) && <><div className="nav-label nav-section-label nav-module-label">Modules</div>{canViewVideo && navigation.filter(({ label }) => label === "Video & streaming").map(renderNavigationItem)}{canViewPresenter && navigation.filter(({ label }) => label === "Presenter").map(renderNavigationItem)}{canManageSite && navigation.filter(({ label }) => label === "Sync").map(renderNavigationItem)}</>}
+          <section className="nav-category">
+            <button className="nav-label nav-section-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections.core} onClick={() => setCollapsedNavSections((current) => ({ ...current, core: !current.core }))}><span>Core</span><ChevronDown size={13} aria-hidden="true" /></button>
+            {!collapsedNavSections.core && <div className="nav-category-items">{navigation.map(renderNavigationItem)}</div>}
+          </section>
+          {enabledDynamicModules.length > 0 && <section className="nav-category">
+            <button className="nav-label nav-section-label nav-module-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections.modules} onClick={() => setCollapsedNavSections((current) => ({ ...current, modules: !current.modules }))}><span>Modules</span><ChevronDown size={13} aria-hidden="true" /></button>
+            {!collapsedNavSections.modules && <div className="nav-category-items">
+              {enabledDynamicModules.map(({ id, name, icon, navigation: ModuleNavigation }) => <div key={id}>{renderNavigationItem({ label: name, icon })}{page === modulePage(id) && ModuleNavigation && <ModuleNavigation context={moduleContext} />}</div>)}
+            </div>}
+          </section>}
         </nav>
 
         <div className="sidebar-bottom">
@@ -775,11 +818,6 @@ function App() {
           {authUser.role === "server_admin" && <button className="nav-item" type="button" onClick={openDepartmentSettings}><Building2 size={18} strokeWidth={1.8} /><span>Manage sites</span></button>}
           {authUser.role === "server_admin" && <button className="nav-item" type="button" onClick={() => { setMenuOpen(false); startNewSiteUser(); void openUserAccess(); }}><UsersRound size={18} strokeWidth={1.8} /><span>User access</span></button>}
           <button className="nav-item" type="button" onClick={() => setNotice("Help will be added in a later step.")}><CircleHelp size={18} strokeWidth={1.8} /><span>Help & support</span></button>
-          <div className="profile-card">
-            <div className="profile-avatar">{userInitials}</div>
-            <div className="profile-details"><strong>{authUser.displayName}</strong><small>{authUser.role === "server_admin" ? "Server Administrator" : canManageSite ? "Site Administrator" : "Site Member"}</small></div>
-            <button className="icon-button profile-menu" type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()}><LogOut size={16} /></button>
-          </div>
         </div>
       </aside>
 
@@ -788,12 +826,12 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <button className="icon-button mobile-menu-button" type="button" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
-          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{page}</strong></div>
-          <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button theme-toggle" type="button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} aria-pressed={theme === "dark"} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-avatar">{userInitials}</div></div>
+          <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{moduleForPage(page)?.name ?? page}</strong></div>
+          <div className="topbar-actions"><span className="date-label">{today}</span><button className="icon-button theme-toggle" type="button" aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} aria-pressed={theme === "dark"} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}>{theme === "dark" ? <Sun size={19} /> : <Moon size={19} />}</button><button className="icon-button topbar-bell" aria-label="Notifications" type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-account"><div className="topbar-avatar" aria-hidden="true">{userInitials}</div><div className="topbar-account-copy"><strong title={authUser.displayName}>{authUser.displayName}</strong><small title={authUser.username}>{authUser.username}</small></div></div><button className="icon-button topbar-sign-out" type="button" aria-label="Sign out" title="Sign out" onClick={() => void signOut()}><LogOut size={16} /></button></div>
         </header>
 
-        <div className={`page-wrap${page === "Video & streaming" ? " page-wrap-video" : page === "Presenter" ? " page-wrap-presenter" : ""}`}>
-          {page === "Overview" ? <Overview departmentId={department.id} departmentLocation={department.location} timeZone={department.timeZone} contacts={contacts} onNavigate={setPage} /> : page === "Groups" ? <Groups departmentId={department.id} contacts={contacts} canManage={canManageSite} /> : page === "Resources" ? <BookableResources departmentId={department.id} userId={authUser.id} canManage={canManageSite} /> : page === "File storage" ? <FileStorage departmentId={department.id} csrfToken={csrfToken} canManage={canManageSite} /> : page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} contacts={contacts} canManage={canManageSite} onNotice={setNotice} /> : page === "Video & streaming" ? <VideoModule departmentId={department.id} csrfToken={csrfToken} capabilities={videoCapabilities} /> : page === "Presenter" ? <PresenterWorkspace departmentId={department.id} csrfToken={csrfToken} capabilities={presenterCapabilities} /> : page === "Sync" ? <SyncModule departmentId={department.id} /> : <>
+        <div className={`page-wrap${moduleForPage(page)?.pageClassName ? ` ${moduleForPage(page)?.pageClassName}` : ""}${moduleForPage(page)?.id === "video" && ["Routing", "Names & locks"].includes(activeModuleState) ? " page-wrap-video-routing" : ""}`}>
+          {moduleForPage(page) ? <ModuleHost module={moduleForPage(page)!} context={moduleContext} /> : page === "Overview" ? <Overview departmentId={department.id} departmentLocation={department.location} timeZone={department.timeZone} contacts={contacts} onNavigate={setPage} /> : page === "Groups" ? <Groups departmentId={department.id} contacts={contacts} canManage={canManageSite} /> : page === "Resources" ? <BookableResources departmentId={department.id} userId={authUser.id} canManage={canManageSite} /> : page === "File storage" ? <FileStorage departmentId={department.id} csrfToken={csrfToken} canManage={canManageSite} /> : page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} contacts={contacts} canManage={canManageSite} onNotice={setNotice} /> : <>
           <input ref={contactImportInput} className="sr-only" type="file" accept=".csv,text/csv" onChange={(event) => void importContactsCsv(event.currentTarget.files?.[0])} />
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Workspace unavailable · ${loadError}` : `People are saved for ${department.location}`}</div>
 

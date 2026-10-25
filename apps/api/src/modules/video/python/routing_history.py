@@ -41,7 +41,7 @@ class RoutingHistory:
                         old = previous[field][index] if index < len(previous[field]) else None
                         if old != value:
                             details.append({'field': field, 'index': index, 'before': old,
-                                            'after': value, 'user': EXTERNAL, 'time': now})
+                                            'after': value, 'user': actor, 'time': now})
                 for output, value in enumerate(state['routes']):
                     old = previous['routes'][output] if output < len(previous['routes']) else None
                     if old != value:
@@ -49,7 +49,7 @@ class RoutingHistory:
                                         'time': now,
                                         'user': actor if output in targets else EXTERNAL})
             event = {'id': uuid.uuid4().hex, 'key': key, 'time': now, 'started_at': now,
-                     'user': actor if changes and all(c['user'] == actor for c in changes) else EXTERNAL,
+                     'user': actor if (changes or details) and all(item['user'] == actor for item in changes + details) else EXTERNAL,
                      'kind': 'change' if previous else 'baseline', 'changes': changes, 'details': details,
                      'state': copy.deepcopy(state)}
             events = copy.deepcopy([e for e in self.events if e['time'] >= now - 30 * 86400])

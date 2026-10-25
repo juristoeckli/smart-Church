@@ -1,0 +1,6 @@
+{
+  "id": "community",
+  "name": "Community data",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts"
+}

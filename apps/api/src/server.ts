@@ -4,9 +4,7 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video/worker-supervisor.js";
-import { registerPresenterRoutes } from "./modules/presenter/routes.js";
-import { registerCommunityRoutes } from "./modules/community/routes.js";
-import { registerChurchToolsSyncRoutes } from "./modules/churchtools-sync/routes.js";
+import { registerServerModules } from "./modules/module-sdk.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
 let databaseReady = false;
@@ -127,40 +125,6 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
   return selectedId;
 }
 
-async function activeVideoDepartment(request: FastifyRequest, reply: FastifyReply, permission: "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin" = "video_basic") {
-  if (!databaseReady || !pool) {
-    reply.code(503).send({ error: "The account database is unavailable." });
-    return null;
-  }
-  const selectedId = await activeDepartmentId(request, reply);
-  if (!selectedId) return null;
-  const result = await pool.query(
-    `SELECT d.enabled_modules, m.role, m.video_permissions
-       FROM departments d
-       JOIN department_memberships m ON m.department_id = d.id
-      WHERE d.id = $1 AND m.user_id = $2`,
-    [selectedId, request.authenticatedUser?.id],
-  );
-  const access = result.rows[0];
-  if (!access?.enabled_modules?.includes("video")) {
-    reply.code(404).send({ error: "The Video module is not enabled for this site." });
-    return null;
-  }
-  const grants = new Set<string>(access.video_permissions ?? []);
-  const hasGrant = permission === "video_basic"
-    ? grants.size > 0
-    : permission === "streaming_operator"
-      ? grants.has("streaming_operator") || grants.has("stream_admin")
-      : permission === "routing_user"
-        ? grants.has("routing_user") || grants.has("routing_admin")
-        : grants.has(permission);
-  if (access.role !== "site_admin" && !hasGrant) {
-    reply.code(403).send({ error: "Video module access is required." });
-    return null;
-  }
-  return selectedId;
-}
-
 function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
   if (request.authenticatedUser?.role === "server_admin") return true;
   reply.code(403).send({ error: "Server administrator access is required." });
@@ -177,8 +141,8 @@ async function createSession(userId: string, reply: { header: (name: string, val
   setSessionCookie(reply, token);
 }
 
-function videoCsrfToken(sessionToken: string) {
-  return createHmac("sha256", sessionToken).update("smart-church-video-csrf").digest("base64url");
+function moduleCsrfToken(sessionToken: string) {
+  return createHmac("sha256", sessionToken).update("smart-church-module-csrf").digest("base64url");
 }
 
 function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
@@ -186,7 +150,7 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
   const csrfHeader = request.headers["x-csrf-token"];
   const originHeader = request.headers.origin;
   if (!sessionToken || !csrfHeader || !originHeader || Array.isArray(csrfHeader)) {
-    reply.code(403).send({ error: "The video request could not be verified. Refresh the page and try again." });
+    reply.code(403).send({ error: "The module request could not be verified. Refresh the page and try again." });
     return false;
   }
   let origin: URL;
@@ -195,17 +159,17 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
     origin = new URL(originHeader);
     requestHost = new URL(`http://${request.headers.host}`);
   } catch {
-    reply.code(403).send({ error: "The video request origin is not valid." });
+    reply.code(403).send({ error: "The module request origin is not valid." });
     return false;
   }
   const allowedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN
     ? origin.origin === process.env.SMART_CHURCH_WEB_ORIGIN
     : origin.hostname === requestHost.hostname && origin.protocol === "http:" &&
       new Set([requestHost.port, "5173"]).has(origin.port);
-  const expected = Buffer.from(videoCsrfToken(sessionToken));
+  const expected = Buffer.from(moduleCsrfToken(sessionToken));
   const actual = Buffer.from(csrfHeader);
   if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-    reply.code(403).send({ error: "The video request origin or session token is not valid." });
+    reply.code(403).send({ error: "The module request origin or session token is not valid." });
     return false;
   }
   return true;
@@ -220,24 +184,6 @@ app.addHook("preHandler", async (request, reply) => {
   request.authenticatedUser = user;
   reply.header("Cache-Control", "no-store");
   if (user.mustChangePassword) return reply.code(403).send({ error: "Change your password before continuing." });
-});
-
-registerPresenterRoutes(app, {
-  pool: pool ?? null,
-  isDatabaseReady: () => databaseReady,
-  getDefaultDepartmentId: () => departmentId,
-  resolveDepartmentId: activeDepartmentId,
-  validateMutation: validModuleMutation,
-});
-registerCommunityRoutes(app, {
-  pool: pool ?? null,
-  isDatabaseReady: () => databaseReady,
-  resolveDepartmentId: activeDepartmentId,
-});
-registerChurchToolsSyncRoutes(app, {
-  pool: pool ?? null,
-  isDatabaseReady: () => databaseReady,
-  resolveDepartmentId: activeDepartmentId,
 });
 
 type ServiceEventRow = {
@@ -332,7 +278,7 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
-    ...(user ? { csrfToken: videoCsrfToken(cookieValue(request.headers.cookie, sessionCookieName)!) } : {}),
+    ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieName)!) } : {}),
     ...(user ? { user } : {}),
   };
 });
@@ -1284,81 +1230,6 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   return { id: result.rows[0].id };
 });
 
-const videoPostOperations = new Set(["command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets"]);
-const videoBodySchema = {
-  type: "object",
-  additionalProperties: true,
-  maxProperties: 24,
-};
-
-app.get("/api/video/status", async (request, reply) => {
-  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const selectedDepartmentId = await activeVideoDepartment(request, reply);
-  if (!selectedDepartmentId) return reply;
-  const worker = videoWorker?.state ?? { state: "starting", error: null };
-  if (!videoWorker || worker.state === "unconfigured") {
-    return { available: false, worker, message: "Configure the private video settings file and map its sites to location IDs." };
-  }
-  try {
-    const status = await videoWorker.request("status", {}, selectedDepartmentId, request.authenticatedUser!.username, 8_000);
-    return { available: true, worker: videoWorker.state, status };
-  } catch (error) {
-    const failure = error as Error & { code?: string };
-    if (failure.code === "UNAVAILABLE") return reply.code(503).send({ available: false, worker: videoWorker.state, error: failure.message });
-    return reply.code(502).send({ available: false, worker: videoWorker.state, error: failure.message });
-  }
-});
-
-app.get<{ Querystring: { device?: string; site_id?: string } }>("/api/video/history", {
-  schema: { querystring: { type: "object", additionalProperties: false, required: ["device"], properties: { device: { type: "string", minLength: 1, maxLength: 80 }, site_id: { type: "string", minLength: 1, maxLength: 80 } } } },
-}, async (request, reply) => {
-  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const selectedDepartmentId = await activeVideoDepartment(request, reply);
-  if (!selectedDepartmentId) return reply;
-  if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
-  try {
-    const events = await videoWorker.request("videohub-history", { device: request.query.device, ...(request.query.site_id ? { site_id: request.query.site_id } : {}) }, selectedDepartmentId, request.authenticatedUser!.username, 8_000);
-    return events;
-  } catch (error) {
-    const failure = error as Error & { code?: string };
-    return reply.code(failure.code === "UNAVAILABLE" ? 503 : 502).send({ error: failure.message });
-  }
-});
-
-app.post<{ Params: { operation: string }; Body: Record<string, unknown> }>("/api/video/:operation", {
-  bodyLimit: 600_000,
-  schema: {
-    params: { type: "object", additionalProperties: false, required: ["operation"], properties: { operation: { type: "string", enum: [...videoPostOperations] } } },
-    body: videoBodySchema,
-  },
-}, async (request, reply) => {
-  if (!videoPostOperations.has(request.params.operation)) return reply.code(404).send({ error: "Video operation is unavailable." });
-  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!validModuleMutation(request, reply)) return reply;
-  const operation = request.params.operation;
-  const subOperation = typeof request.body.operation === "string" ? request.body.operation : "";
-  const requiredPermission = operation === "command" || operation === "restart-site"
-    ? "streaming_operator"
-    : operation === "encoder-settings"
-      ? ["read", "read-preset", "xml-preview", "xml-target"].includes(subOperation) ? "video_basic" : "stream_admin"
-      : operation === "videohub-route"
-        ? "routing_user"
-        : operation === "videohub-presets"
-          ? ["lock", "rename", "delete"].includes(subOperation) ? "routing_admin" : ["save", "import", "recall"].includes(subOperation) ? "routing_user" : "video_basic"
-          : "video_basic";
-  const selectedDepartmentId = await activeVideoDepartment(request, reply, requiredPermission);
-  if (!selectedDepartmentId) return reply;
-  if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
-  const { site: _site, actor: _actor, department_id: _departmentId, ...data } = request.body;
-  try {
-    return await videoWorker.request(request.params.operation, data, selectedDepartmentId, request.authenticatedUser!.username, 35_000);
-  } catch (error) {
-    const failure = error as Error & { code?: string };
-    const status = failure.code === "UNAVAILABLE" ? 503 : failure.code === "TIMEOUT" ? 504 : failure.code === "BUSY" ? 429 : 400;
-    return reply.code(status).send({ error: failure.message });
-  }
-});
-
 app.addHook("onClose", async () => {
   await videoWorker?.close();
   await closeDatabase();
@@ -1384,6 +1255,14 @@ try {
     app.log.error({ err: error }, "Database unavailable; department data will not be saved.");
   }
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
+  await registerServerModules(app, {
+    pool: pool ?? null,
+    isDatabaseReady: () => databaseReady,
+    getDefaultDepartmentId: () => departmentId,
+    resolveDepartmentId: activeDepartmentId,
+    validateMutation: validModuleMutation,
+    getVideoWorker: () => videoWorker,
+  });
   await app.listen({ host: "127.0.0.1", port });
   videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE));
   videoWorker.start();

@@ -62,6 +62,67 @@ def public(state):
             'locks': [state['locks'][o] for o in range(m)]}
 
 
+def mutate(device, timeout=3, field=None, index=None, value=None, expected=None, observe=None):
+    sections = {'inputs': 'INPUT LABELS', 'outputs': 'OUTPUT LABELS', 'locks': 'VIDEO OUTPUT LOCKS'}
+    if field not in sections or isinstance(index, bool) or not isinstance(index, int) or index < 0:
+        raise ValueError('Select a valid input or output')
+    if field == 'locks':
+        if not isinstance(value, bool) or expected not in ('U', 'L', 'O'):
+            raise ValueError('Select a valid output lock state')
+        command_value = 'L' if value else 'U'
+    else:
+        if (not isinstance(value, str) or not value or value != value.strip() or len(value) > 64
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)
+                or not isinstance(expected, str)):
+            raise ValueError('Enter a name with 1 to 64 printable characters')
+        command_value = value
+    with socket.create_connection((device['ip'], device.get('port', 9990)), timeout) as sock:
+        wire, state = Wire(sock), {}
+        deadline = time.monotonic() + timeout
+        while not complete(state):
+            header, lines = wire.block(deadline)
+            update(state, header, lines)
+        if observe:
+            observe(public(state))
+        collection = state[field]
+        if index not in collection:
+            raise ValueError('Input or output is outside the Videohub matrix')
+        if collection[index] != expected:
+            raise ValueError('This name or lock state changed elsewhere. Refresh and review it before retrying')
+        current_is_locked = field == 'locks' and collection[index] != 'U'
+        unchanged = current_is_locked == value if field == 'locks' else collection[index] == value
+        if unchanged:
+            return public(state)
+
+        section = sections[field]
+        command = f'{section}:\n{index} {command_value}\n\n'.encode('utf-8')
+        sock.sendall(command)
+        acknowledged = False
+        deadline = time.monotonic() + timeout
+        while not acknowledged:
+            header, lines = wire.block(deadline)
+            if header in ('NAK', 'NACK'):
+                raise ValueError('Videohub rejected the requested change')
+            if header == 'ACK':
+                acknowledged = True
+            else:
+                update(state, header, lines)
+        sock.sendall(f'{section}:\n\n'.encode('ascii'))
+        deadline = time.monotonic() + timeout
+        while True:
+            header, lines = wire.block(deadline)
+            update(state, header, lines)
+            if header == section and index in state.get(field, {}):
+                actual = state[field][index]
+                if field == 'locks':
+                    verified = (actual != 'U') == value
+                else:
+                    verified = actual == value
+                if not verified:
+                    raise ValueError('Videohub reported a different value; refresh and review the device')
+                return public(state)
+
+
 def request(device, timeout=3, output=None, input_=None, expected=None, routes=None, expected_routes=None, observe=None):
     if output is not None:
         if any(isinstance(v, bool) or not isinstance(v, int) for v in (output, input_, expected)):

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, LockKeyhole, Monitor, Play, Plus, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Trash2, Video } from "lucide-react";
 import "./video.css";
 
@@ -18,31 +19,24 @@ type EncoderSettingsForm = { preset: string; server: string; quality: string; pr
 type XmlService = { platform: string; customizable_url: boolean; servers: { server: string; url: string }[]; profiles: { profile: string }[] };
 type XmlPreflight = { filename?: string; services?: string[]; replaces_existing?: boolean };
 
-const tabs = ["Overview", "Routing", "Streaming", "XML tools"] as const;
+export const videoTabs = ["Overview", "Routing", "Names & locks", "Streaming", "XML tools"] as const;
+export type VideoTab = typeof videoTabs[number];
 const starterXml = `<?xml version="1.0" encoding="UTF-8"?>\n<streaming>\n  <service customizable-url="false">\n    <name>Service 1</name>\n    <servers>\n      <server>\n        <name>Primary</name>\n        <url>rtmp://example.com/live</url>\n      </server>\n    </servers>\n    <profiles default="Streaming High">\n      <profile>\n        <name>Streaming High</name>\n        <config resolution="1080p" fps="30" codec="H264">\n          <bitrate>6000000</bitrate>\n          <audio-bitrate>128000</audio-bitrate>\n        </config>\n      </profile>\n    </profiles>\n  </service>\n</streaming>`;
-type Tab = typeof tabs[number];
-
-function savedVideoTab(departmentId: string): Tab {
-  if (!departmentId) return "Overview";
-  try {
-    const saved = localStorage.getItem(`smart-church-video-tab:${departmentId}`);
-    if (tabs.includes(saved as Tab)) return saved as Tab;
-  } catch { /* Use the default tab when local storage is unavailable. */ }
-  return "Overview";
-}
-
-export function VideoModule({ departmentId, csrfToken, capabilities }: { departmentId: string; csrfToken: string; capabilities: { canOperateStreaming: boolean; canManageEncoders: boolean; canManageRouting: boolean; canAdminRouting: boolean } }) {
-  const [tab, setTab] = useState<Tab>(() => savedVideoTab(departmentId));
-  const tabDepartmentId = useRef(departmentId);
+export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabChange }: { departmentId: string; csrfToken: string; capabilities: { canOperateStreaming: boolean; canManageEncoders: boolean; canManageRouting: boolean; canAdminRouting: boolean }; tab: VideoTab; onTabChange: (tab: VideoTab) => void }) {
   const [snapshot, setSnapshot] = useState<ApiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
-  const [selectedHub, setSelectedHub] = useState("");
   const [history, setHistory] = useState<RouteHistoryEvent[]>([]);
   const [historyLive, setHistoryLive] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [labelDrafts, setLabelDrafts] = useState<Record<string, string>>({});
   const [presets, setPresets] = useState<Preset[]>([]);
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const [presetNameOpen, setPresetNameOpen] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const [pendingPresetAction, setPendingPresetAction] = useState<{ kind: "recall" | "delete"; preset: Preset } | null>(null);
+  const presetsMenuRef = useRef<HTMLDivElement>(null);
   const [hoveredCrosspoint, setHoveredCrosspoint] = useState<{ output: number; input: number } | null>(null);
   const [selectedEncoder, setSelectedEncoder] = useState("");
   const [xml, setXml] = useState(starterXml);
@@ -83,10 +77,6 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
       const result = await api<ApiSnapshot>("/api/video/status");
       setSnapshot(result);
       const sites = result.status?.sites ?? [];
-      if (!selectedHub) {
-        const first = sites.flatMap((site) => site.devices.filter((device) => device.type === "videohub").map((device) => `${site.id}|${device.id}`))[0];
-        if (first) setSelectedHub(first);
-      }
       const encoders = sites.flatMap((site) => site.encoders.map((encoder) => ({ ...encoder, key: `${site.id}|${encoder.id}` })));
       if (!selectedEncoder && encoders[0]) setSelectedEncoder(encoders[0].key);
       setNotice("");
@@ -95,7 +85,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
     } finally {
       setLoading(false);
     }
-  }, [api, selectedEncoder, selectedHub]);
+  }, [api, selectedEncoder]);
 
   useEffect(() => {
     setLoading(true);
@@ -104,16 +94,6 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
     const timer = window.setInterval(() => void refresh(), 5000);
     return () => window.clearInterval(timer);
   }, [refresh]);
-
-  useEffect(() => {
-    if (!departmentId) return;
-    if (tabDepartmentId.current !== departmentId) {
-      tabDepartmentId.current = departmentId;
-      setTab(savedVideoTab(departmentId));
-      return;
-    }
-    try { localStorage.setItem(`smart-church-video-tab:${departmentId}`, tab); } catch { /* Keep the current tab for this session. */ }
-  }, [departmentId, tab]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -127,10 +107,36 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [settingsOpen]);
 
+  useEffect(() => {
+    if (!presetsOpen) return;
+    const closeOnPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Node && !presetsMenuRef.current?.contains(event.target)) {
+        setPresetsOpen(false);
+        setPresetNameOpen(false);
+        setPresetName("");
+        setPendingPresetAction(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPresetsOpen(false);
+        setPresetNameOpen(false);
+        setPresetName("");
+        setPendingPresetAction(null);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnPointerDown);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnPointerDown);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [presetsOpen]);
+
   const sites = snapshot?.status?.sites ?? [];
   const encoders = useMemo(() => sites.flatMap((site) => site.encoders.map((encoder) => ({ ...encoder, site, key: `${site.id}|${encoder.id}` }))), [sites]);
   const hubs = useMemo(() => sites.flatMap((site) => site.devices.filter((device) => device.type === "videohub").map((device) => ({ ...device, site, key: `${site.id}|${device.id}` }))), [sites]);
-  const hub = hubs.find((device) => device.key === selectedHub) ?? hubs[0];
+  const hub = hubs[0];
   const matrix = snapshot?.status?.videohubs?.[hub?.key ?? ""];
   const xmlEncoder = encoders.find((encoder) => encoder.key === selectedEncoder) ?? encoders[0];
   const visualDocument = useMemo(() => parseStreamingXml(xml), [xml]);
@@ -271,20 +277,38 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
   }
 
   async function saveRoutingPreset(name: string) {
-    if (!hub) return;
+    if (!hub) return false;
     const result = await send("videohub-presets", { operation: "save", device: hub.id, site_id: hub.site.id, name }, "Routing preset saved.");
     if (result && typeof result === "object" && "presets" in result && Array.isArray((result as { presets: unknown }).presets)) setPresets((result as { presets: Preset[] }).presets);
+    return Boolean(result);
+  }
+
+  async function submitRoutingPreset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = presetName.trim();
+    if (!name) return;
+    if (await saveRoutingPreset(name)) {
+      setPresetName("");
+      setPresetNameOpen(false);
+    }
   }
 
   async function deleteRoutingPreset(preset: Preset) {
-    if (!hub || !window.confirm(`Delete the saved routing preset “${preset.name}”? This cannot be undone. Current routing will stay unchanged.`)) return;
+    if (!hub) return;
     const result = await send("videohub-presets", { operation: "delete", device: hub.id, site_id: hub.site.id, id: preset.id, revision: preset.revision, confirmed: true }, "Routing preset deleted.");
     if (result && typeof result === "object" && "presets" in result && Array.isArray((result as { presets: unknown }).presets)) setPresets((result as { presets: Preset[] }).presets);
+    if (result) setPendingPresetAction(null);
   }
 
   async function recallRoutingPreset(preset: Preset) {
-    if (!hub || !matrix?.routes || !window.confirm(`Recall “${preset.name}” on ${hub.name}? This will change the Videohub routes.`)) return;
-    await send("videohub-presets", { operation: "recall", device: hub.id, site_id: hub.site.id, id: preset.id, revision: preset.revision, expected_routes: matrix.routes, confirmed: true }, "Routing preset recalled and verified.");
+    if (!hub || !matrix?.routes) return;
+    const result = await send("videohub-presets", { operation: "recall", device: hub.id, site_id: hub.site.id, id: preset.id, revision: preset.revision, expected_routes: matrix.routes, confirmed: true }, "Routing preset recalled and verified.");
+    if (result) {
+      setPresetsOpen(false);
+      setPresetNameOpen(false);
+      setPresetName("");
+      setPendingPresetAction(null);
+    }
   }
 
   async function changeRoute(selectedOutput: number, selectedInput: number) {
@@ -292,6 +316,21 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
     const oldInput = matrix.routes[selectedOutput];
     if (!Number.isInteger(oldInput)) return setNotice("Refresh the routing matrix before changing a route.");
     await send("videohub-route", { device: hub.id, site_id: hub.site.id, output: selectedOutput, input: selectedInput, expected_input: oldInput }, "Route changed and verified by the Videohub.");
+  }
+
+  async function renameRouterLabel(kind: "input" | "output", index: number, currentName: string) {
+    if (!hub || !capabilities.canAdminRouting) return;
+    const key = `${kind}:${index}`;
+    const name = (labelDrafts[key] ?? currentName).trim();
+    if (!name || name === currentName) return;
+    const result = await send("videohub-presets", { operation: "rename", device: hub.id, site_id: hub.site.id, kind, index, name, expected_name: currentName }, `${kind === "input" ? "Input" : "Output"} name updated.`);
+    if (result) setLabelDrafts((current) => { const next = { ...current }; delete next[key]; return next; });
+  }
+
+  async function toggleRouterOutputLock(output: number, lockState: string) {
+    if (!hub || !capabilities.canAdminRouting) return;
+    const locked = lockState === "U";
+    await send("videohub-presets", { operation: "lock", device: hub.id, site_id: hub.site.id, output, locked, expected_lock: lockState }, locked ? "Output locked." : "Output unlocked.");
   }
 
   async function exportXml(includeSecrets = false) {
@@ -534,7 +573,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
             <div className="video-encoder-info"><strong>Streaming profile</strong><small>Profile: {stringValue(settings.platform) || "Not reported"}</small><small>Server name: {stringValue(settings.server_name) || "Not reported"}</small><code>Server address: {stringValue(settings.server) || "Not reported"}</code><small>Key: {stringValue(settings.key_masked) || "Not reported"}</small><small>Quality: {stringValue(settings.quality) || "Not reported"}</small></div>
           </div>
           {!origin && <div className="video-remote-restriction"><Shield size={14} /> Nur für Übertragungen zwischen den Pflegeheimen</div>}
-          {origin && (capabilities.canOperateStreaming || capabilities.canManageEncoders) && <div className="video-site-actions">{capabilities.canOperateStreaming && <><button type="button" className="video-small-button video-button-primary" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Start" }, `${encoder.name}: start accepted; waiting for device status.`)}><Play size={13} /> Start</button><button type="button" className="video-small-button" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop accepted; waiting for device status.`)}><Square size={12} /> Stop</button></>}{capabilities.canManageEncoders && <button type="button" className="video-small-button" disabled={busy} onClick={() => { const key = `${site.id}|${encoder.id}`; const target = { ...encoder, site, key }; setSelectedEncoder(key); setSettingsOpen(true); void loadEncoderSettings(target); }}><Settings2 size={13} /> Settings</button>}</div>}
+          {(capabilities.canOperateStreaming || capabilities.canManageEncoders) && <div className="video-site-actions">{capabilities.canOperateStreaming && <><button type="button" className="video-small-button video-button-primary" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Start" }, `${encoder.name}: start accepted; waiting for device status.`)}><Play size={13} /> Start</button><button type="button" className="video-small-button" disabled={busy || control !== "Connected"} onClick={() => void send("command", { site_id: site.id, encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop accepted; waiting for device status.`)}><Square size={12} /> Stop</button></>}{capabilities.canManageEncoders && <button type="button" className="video-small-button" disabled={busy} onClick={() => { const key = `${site.id}|${encoder.id}`; const target = { ...encoder, site, key }; setSelectedEncoder(key); setSettingsOpen(true); void loadEncoderSettings(target); }}><Settings2 size={13} /> Settings</button>}</div>}
           {encoder.error && <small className="video-error-text">{encoder.error}</small>}
         </article>;
       })}
@@ -543,24 +582,21 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
   }
 
   return <section className="video-module">
+    {presetsOpen && createPortal(<div className="video-popup-backdrop" aria-hidden="true" />, document.body)}
     <div className="video-heading">
-      <div><span className="video-eyebrow">TECHNIK · VIDEO</span><h1>Video &amp; streaming</h1><p>Monitor encoders, inspect routing, and manage streaming equipment for this location.</p></div>
-      <div className={`video-worker video-worker-${ready ? "ready" : "off"}`}><span />{workerLabel(workerState)}<button type="button" title="Refresh video status" onClick={() => { setLoading(true); void refresh(); }}><RefreshCw size={15} /></button></div>
+      <div><h1>Video &amp; streaming</h1><p>Monitor encoders, inspect routing, and manage streaming equipment for this location.</p></div>
+      <div className={`video-worker video-worker-${ready ? "ready" : "off"}`}><span />{workerLabel(workerState)}<small className="video-worker-refresh">Last refresh: {snapshot?.status ? new Date().toLocaleTimeString() : "—"}</small><button type="button" title="Refresh video status" onClick={() => { setLoading(true); void refresh(); }}><RefreshCw size={15} /></button></div>
     </div>
 
     {snapshot?.message && <div className="video-not-configured"><Shield size={20} /><div><strong>Video equipment is not configured</strong><p>{snapshot.message} The private configuration stays on the API server and is never sent to the browser. Add this location ID to the matching site in the private config: <code>{departmentId}</code></p></div></div>}
     {snapshot?.error && <div className="video-not-configured video-not-configured-error"><AlertTriangle size={20} /><div><strong>Video service unavailable</strong><p>{snapshot.error}</p></div></div>}
     {notice && <div className="video-notice" role="status">{notice}<button type="button" onClick={() => setNotice("")}>Dismiss</button></div>}
 
-    <div className="video-tabs" role="tablist" aria-label="Video module">
-      {tabs.map((name) => <button type="button" role="tab" aria-selected={tab === name} className={tab === name ? "video-tab video-tab-active" : "video-tab"} key={name} onClick={() => setTab(name)}>{name === "Overview" ? <Activity size={16} /> : name === "Routing" ? <Route size={16} /> : name === "Streaming" ? <Radio size={16} /> : <Settings2 size={16} />}{name}</button>)}
-    </div>
-
     {!ready && !snapshot?.message && <div className="video-empty"><Video size={28} /><strong>{loading ? "Connecting to the video worker…" : "Video worker is unavailable"}</strong><p>{snapshot?.worker?.error ?? "The Core API starts this module in its own worker process."}</p></div>}
 
     {ready && tab === "Overview" && <>
       <div className="video-summary-grid"><Summary label="Encoders" value={encoders.length} note="Across assigned sites" icon={<Radio size={17} />} /><Summary label="Locations" value={sites.length} note="Equipment groups" icon={<Route size={17} />} /><Summary label="Connected" value={encoders.filter((encoder) => encoder.control === "Connected").length} note={`of ${encoders.length} encoder controls`} icon={<Activity size={17} />} /></div>
-      <section className="video-panel"><div className="video-panel-heading"><div><h2>Equipment overview</h2><p>The equipment map, network links and streaming controls are on the Streaming tab.</p></div><button className="video-small-button video-button-primary" type="button" onClick={() => setTab("Streaming")}><Radio size={14} /> Open Streaming</button></div></section>
+      <section className="video-panel"><div className="video-panel-heading"><div><h2>Equipment overview</h2><p>The equipment map, network links and streaming controls are in Streaming.</p></div><button className="video-small-button video-button-primary" type="button" onClick={() => onTabChange("Streaming")}><Radio size={14} /> Open Streaming</button></div></section>
     </>}
 
     {ready && tab === "Streaming" && <>
@@ -569,11 +605,16 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
       <section className="video-panel"><div className="video-panel-heading"><div><h2>Streaming status</h2><p>Live encoder telemetry for assigned locations</p></div></div>{encoders.length ? <div className="video-stream-grid">{encoders.map((encoder) => { const settings = encoder.streaming_settings ?? {}; return <article className="video-stream-card" key={encoder.key}><div className="video-device-icon"><Radio size={18} /></div><h3>{encoder.name}</h3><p>{encoder.site.name} · {encoder.model ?? "Blackmagic Web Presenter"}</p><dl><div><dt>Stream</dt><dd>{readState(encoder.state)}</dd></div><div><dt>Control</dt><dd>{encoder.control ?? "Unknown"}</dd></div><div><dt>Platform</dt><dd>{stringValue(settings.platform) || "—"}</dd></div><div><dt>Quality</dt><dd>{stringValue(settings.quality) || "—"}</dd></div><div><dt>Last checked</dt><dd>{formatTimestamp(settings.checked_at)}</dd></div></dl>{typeof settings.error === "string" && <p className="video-error-text">{settings.error}</p>}</article>; })}</div> : <Empty text="No streaming encoders are configured." />}</section>
     </>}
 
-    {ready && tab === "Routing" && <div className="video-routing-layout video-routing-page"><section className="video-panel video-routing-matrix-panel"><div className="video-panel-heading"><div><h2>Routing matrix</h2><p>Inputs run across the top; outputs run down the left. Click a crosspoint to route an output to an input.</p></div><button className="video-small-button" type="button" disabled={!hub || busy} onClick={() => hub && void refresh()}><RefreshCw size={14} /> Refresh</button></div>
-      {hubs.length ? <><div className="video-routing-device-row"><label className="video-field">Videohub<select value={hub?.key ?? ""} onChange={(event) => { setSelectedHub(event.target.value); setHistory([]); setPresets([]); }}><option value="">Select device</option>{hubs.map((device) => <option value={device.key} key={device.key}>{device.site.name} · {device.name}</option>)}</select></label>{hub && <div className="video-routing-device-info"><strong>{hub.name}</strong><code>{hub.ip || "Address not configured"}</code><span className={`video-state ${matrix?.connected ? "video-state-good" : ""}`}>{matrix?.connected ? "Connected" : "Disconnected"}</span>{matrix?.inputs && matrix.outputs && <small>{matrix.inputs.length} inputs · {matrix.outputs.length} outputs</small>}</div>}</div>
+    {ready && tab === "Routing" && <div className="video-routing-layout video-routing-page"><section className="video-panel video-routing-matrix-panel">
+        {hubs.length ? <><div className="video-routing-device-row">{hub && <><div className="video-routing-device-info"><strong>{hub.site.name} · {hub.name}</strong><code>{hub.ip || "Address not configured"}</code><span className={`video-state ${matrix?.connected ? "video-state-good" : ""}`}>{matrix?.connected ? "Connected" : "Disconnected"}</span>{matrix?.inputs && matrix.outputs && <small>{matrix.inputs.length} inputs · {matrix.outputs.length} outputs</small>}</div><div className={`video-preset-menu-anchor${presetsOpen ? " video-preset-menu-anchor-open" : ""}`} ref={presetsMenuRef}>
+          <button className="video-small-button" type="button" aria-haspopup="dialog" aria-expanded={presetsOpen} aria-controls="video-routing-presets" disabled={busy} onClick={() => { const opening = !presetsOpen; setPresetsOpen(opening); if (opening) void loadPresets(hub.id, hub.site.id); else { setPresetNameOpen(false); setPresetName(""); setPendingPresetAction(null); } }}><ChevronDown size={14} /> Presets</button>
+          {presetsOpen && <div className="video-preset-menu" id="video-routing-presets" role="dialog" aria-label="Routing presets">
+            <div className="video-preset-menu-heading"><strong>Routing presets</strong>{!presetNameOpen && !pendingPresetAction && <button className="video-small-button" type="button" disabled={busy || !matrix?.connected || !capabilities.canManageRouting} onClick={() => { setPresetName(""); setPresetNameOpen(true); }}><Save size={12} /> Save current</button>}</div>
+            {presetNameOpen && <form className="video-preset-name-form" onSubmit={(event) => void submitRoutingPreset(event)}><label htmlFor="video-preset-name">Preset name</label><div><input id="video-preset-name" autoFocus value={presetName} onChange={(event) => setPresetName(event.target.value)} maxLength={80} placeholder="e.g. Sunday service" required /><button className="video-small-button" type="submit" disabled={busy || !matrix?.connected || !capabilities.canManageRouting || !presetName.trim()}><Save size={12} /> Save</button><button className="video-small-button" type="button" disabled={busy} onClick={() => { setPresetNameOpen(false); setPresetName(""); }}>Cancel</button></div></form>}
+            {pendingPresetAction ? <div className="video-preset-confirm" role="alertdialog" aria-labelledby="video-preset-confirm-title"><strong id="video-preset-confirm-title">{pendingPresetAction.kind === "recall" ? "Recall this preset?" : "Delete this preset?"}</strong><p>{pendingPresetAction.kind === "recall" ? <>This will change the current router outputs to <b>{pendingPresetAction.preset.name}</b>.</> : <>This will remove <b>{pendingPresetAction.preset.name}</b>. Current routing will stay unchanged.</>}</p><div><button className="video-small-button" type="button" disabled={busy} onClick={() => setPendingPresetAction(null)}>Cancel</button><button className={`video-small-button ${pendingPresetAction.kind === "delete" ? "video-preset-delete" : ""}`} type="button" autoFocus disabled={busy} onClick={() => void (pendingPresetAction.kind === "recall" ? recallRoutingPreset(pendingPresetAction.preset) : deleteRoutingPreset(pendingPresetAction.preset))}>{pendingPresetAction.kind === "recall" ? <><Play size={12} /> Recall</> : <><Trash2 size={12} /> Delete</>}</button></div></div> : busy && presets.length === 0 ? <p className="video-preset-menu-empty">Loading presets…</p> : presets.length ? presets.map((preset) => <div className="video-preset-row" key={preset.id}><div className="video-preset-actions"><button type="button" className="video-small-button" disabled={busy || !hub || !matrix?.routes || !capabilities.canManageRouting} onClick={() => setPendingPresetAction({ kind: "recall", preset })}><Play size={12} /> Recall</button><button type="button" className="video-small-button video-preset-delete" disabled={busy || !capabilities.canAdminRouting} onClick={() => setPendingPresetAction({ kind: "delete", preset })} aria-label={`Delete preset ${preset.name}`} title={`Delete ${preset.name}`}><Trash2 size={12} /> Delete</button></div><span><strong>{preset.name}</strong><small>Saved routing preset</small></span></div>) : <p className="video-preset-menu-empty">No saved routing presets.</p>}
+          </div>}
+        </div></>}</div>
         {matrix?.connected && matrix.inputs && matrix.outputs && matrix.routes ? <div className="video-matrix-wrap" role="region" aria-label="Videohub crosspoint routing matrix" tabIndex={0}><table className="video-matrix"><thead><tr><th className="video-matrix-corner"><span>Inputs →</span><span>Outputs ↓</span></th>{matrix.inputs.map((label, inputIndex) => <th className={hoveredCrosspoint?.input === inputIndex ? "video-matrix-input video-matrix-axis-highlight" : "video-matrix-input"} scope="col" key={`${inputIndex}-${label}`}><div title={label}><span>{label}</span></div><small>{inputIndex + 1}</small></th>)}</tr></thead><tbody>{matrix.outputs.map((label, outputIndex) => { const locked = matrix.locks?.[outputIndex] !== "U"; return <tr key={`${outputIndex}-${label}`}><th className={hoveredCrosspoint?.output === outputIndex ? "video-matrix-output video-matrix-axis-highlight" : "video-matrix-output"} scope="row"><small>{outputIndex + 1}</small><span title={label}>{label}</span>{locked && <LockKeyhole className="video-matrix-lock" size={11} aria-label="Output locked" />}</th>{matrix.inputs?.map((inputLabel, inputIndex) => { const active = matrix.routes?.[outputIndex] === inputIndex; const highlighted = hoveredCrosspoint?.output === outputIndex || hoveredCrosspoint?.input === inputIndex; return <td className={`video-matrix-crosspoint${active ? " video-matrix-crosspoint-active" : ""}${hoveredCrosspoint?.output === outputIndex ? " video-matrix-hover-row" : ""}${hoveredCrosspoint?.input === inputIndex ? " video-matrix-hover-column" : ""}`} key={`${outputIndex}-${inputIndex}`}><button type="button" className={`${active ? "video-crosspoint video-crosspoint-active" : "video-crosspoint"}${highlighted ? " video-crosspoint-highlighted" : ""}`} aria-label={`Route output ${outputIndex + 1}, ${label}, to input ${inputIndex + 1}, ${inputLabel}${active ? "; current route" : ""}${locked ? "; locked" : ""}`} aria-pressed={active} title={`${label} ← ${inputLabel}${active ? " · current route" : ""}${locked ? " · locked" : ""}`} disabled={busy || locked || active || !capabilities.canManageRouting} onMouseEnter={() => setHoveredCrosspoint({ output: outputIndex, input: inputIndex })} onMouseLeave={() => setHoveredCrosspoint(null)} onFocus={() => setHoveredCrosspoint({ output: outputIndex, input: inputIndex })} onBlur={() => setHoveredCrosspoint(null)} onClick={() => void changeRoute(outputIndex, inputIndex)}><span /></button></td>; })}</tr>; })}</tbody></table></div> : <Empty text={matrix?.error ?? "Waiting for a Videohub connection."} />}
-        {hub && <div className="video-routing-tools"><button className="video-small-button" type="button" disabled={busy} onClick={() => void loadPresets(hub.id, hub.site.id)}><ChevronDown size={14} /> Load presets</button><button className="video-small-button" type="button" disabled={busy || !matrix?.connected || !capabilities.canManageRouting} onClick={() => { const name = window.prompt("Name this routing preset"); if (name?.trim()) void saveRoutingPreset(name.trim()); }}><Save size={14} /> Save current</button></div>}
-        {presets.map((preset) => <div className="video-preset-row" key={preset.id}><div className="video-preset-actions"><button type="button" className="video-small-button" disabled={busy || !hub || !matrix?.routes || !capabilities.canManageRouting} onClick={() => void recallRoutingPreset(preset)}><Play size={12} /> Recall</button><button type="button" className="video-small-button video-preset-delete" disabled={busy || !capabilities.canAdminRouting} onClick={() => void deleteRoutingPreset(preset)} aria-label={`Delete preset ${preset.name}`} title={`Delete ${preset.name}`}><Trash2 size={12} /> Delete</button></div><span><strong>{preset.name}</strong><small>Saved routing preset</small></span></div>)}
       </> : <Empty text="No Videohub is configured for this location." />}</section>
       <section className="video-panel video-history-panel" aria-label="Routing timeline">
         <div className="video-panel-heading video-timeline-heading">
@@ -618,6 +659,15 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
           {history.length > 40 && <p className="video-timeline-more-count">Showing the latest 40 of {history.length} events.</p>}
         </div> : <div className="video-timeline-empty"><Clock3 size={17} /><span>{historyLoading ? "Loading routing history…" : hub ? "No routing events recorded yet." : "Select a Videohub to view its timeline."}</span></div>}
       </section></div>}
+
+    {ready && tab === "Names & locks" && capabilities.canAdminRouting && <div className="video-router-admin-page">
+      <section className="video-panel video-label-panel"><div className="video-panel-heading"><div><h2>Input names</h2><p>Rename the sources shown in the routing matrix.</p></div></div>
+        {matrix?.connected && matrix.inputs ? <div className="video-label-list">{matrix.inputs.map((name, index) => { const draftKey = `input:${index}`; const draft = labelDrafts[draftKey] ?? name; return <form className="video-label-row" key={`${index}-${name}`} onSubmit={(event) => { event.preventDefault(); void renameRouterLabel("input", index, name); }}><span className="video-label-index">{index + 1}</span><input aria-label={`Input ${index + 1} name`} value={draft} maxLength={64} onChange={(event) => setLabelDrafts((current) => ({ ...current, [draftKey]: event.target.value }))} /><button className="video-small-button" type="submit" disabled={busy || !draft.trim() || draft.trim() === name}><Save size={12} /> Save</button></form>; })}</div> : <Empty text={matrix?.error ?? "Waiting for a Videohub connection."} />}
+      </section>
+      <section className="video-panel video-label-panel"><div className="video-panel-heading"><div><h2>Output names and locks</h2><p>Rename destinations and control their lock state.</p></div></div>
+        {matrix?.connected && matrix.outputs ? <div className="video-label-list">{matrix.outputs.map((name, index) => { const draftKey = `output:${index}`; const draft = labelDrafts[draftKey] ?? name; const lockState = matrix.locks?.[index] ?? "U"; const locked = lockState !== "U"; return <div className="video-label-row video-label-row-output" key={`${index}-${name}`}><span className="video-label-index">{index + 1}</span><form className="video-label-edit" onSubmit={(event) => { event.preventDefault(); void renameRouterLabel("output", index, name); }}><input aria-label={`Output ${index + 1} name`} value={draft} maxLength={64} onChange={(event) => setLabelDrafts((current) => ({ ...current, [draftKey]: event.target.value }))} /><button className="video-small-button" type="submit" disabled={busy || !draft.trim() || draft.trim() === name} aria-label={`Save output ${index + 1} name`} title="Save name"><Save size={12} /></button></form><button className={`video-small-button video-lock-toggle${locked ? " video-lock-toggle-locked" : ""}`} type="button" disabled={busy} aria-pressed={locked} onClick={() => void toggleRouterOutputLock(index, lockState)}><LockKeyhole size={13} />{locked ? "Unlock" : "Lock"}</button></div>; })}</div> : <Empty text={matrix?.error ?? "Waiting for a Videohub connection."} />}
+      </section>
+    </div>}
 
     {ready && tab === "XML tools" && <section className="video-panel video-settings-panel">
       <div className="video-panel-heading"><div><h2>Streaming profile XML tools</h2><p>Create, validate, import, export and distribute encoder profiles.</p></div><button type="button" className="video-small-button" disabled={busy || !xmlEncoder || !capabilities.canManageEncoders} onClick={() => void exportXml(includeSecrets)}><Download size={14} /> Export active XML</button></div>
@@ -702,7 +752,6 @@ export function VideoModule({ departmentId, csrfToken, capabilities }: { departm
       </section>
     </div>}
 
-    <footer className="video-footer"><span><Shield size={13} /> Equipment access is scoped to the selected location</span><span>Last refresh: {snapshot?.status ? new Date().toLocaleTimeString() : "—"}</span></footer>
   </section>;
 }
 

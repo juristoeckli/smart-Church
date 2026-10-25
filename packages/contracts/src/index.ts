@@ -114,7 +114,7 @@ export interface DepartmentProfile {
   location: string;
   timeZone: string;
   role: "site_admin" | "member" | "unassigned";
-  enabledModules?: Array<"video" | "presenter">;
+  enabledModules?: string[];
   videoPermissions?: VideoPermission[];
   presenterPermissions?: PresenterPermission[];
 }

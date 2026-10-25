@@ -1,0 +1,6 @@
+{
+  "id": "churchtools-sync",
+  "name": "ChurchTools sync",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts"
+}

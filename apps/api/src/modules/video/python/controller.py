@@ -15,7 +15,7 @@ from encoder_settings import read_settings, apply_settings, read_preset, apply_p
 from streaming_xml import plan_import, preview_import, apply_import
 from shelly_monitor import read_relay
 from preset_management import delete_preset
-from videohub import request as videohub_request
+from videohub import mutate as videohub_mutate, request as videohub_request
 import routing_presets
 from routing_history import RoutingHistory, EXTERNAL
 
@@ -215,6 +215,27 @@ class Controller:
             raise ValueError('Videohub is not configured')
         operation = data.get('operation')
         preset_limit = config.get('routing_presets', {}).get('max_presets', 20)
+        if operation in ('rename', 'lock'):
+            if operation == 'rename':
+                kind = data.get('kind')
+                if kind not in ('input', 'output'):
+                    raise ValueError('Select an input or output')
+                field = 'inputs' if kind == 'input' else 'outputs'
+                index, value, expected = data.get('index'), data.get('name'), data.get('expected_name')
+                message = f'{kind.title()} name changed and verified'
+            else:
+                field = 'locks'
+                index, value, expected = data.get('output'), data.get('locked'), data.get('expected_lock')
+                message = 'Output lock changed and verified'
+            with self.device_lock(device):
+                key = site['id'] + '|' + device['id']
+                state = videohub_mutate(device, config['timeout_seconds'], field=field, index=index,
+                                        value=value, expected=expected,
+                                        observe=lambda before: self.routing_history.observe(key, before))
+                self.routing_history.observe(key, state, data.get('actor', EXTERNAL))
+                with self.lock:
+                    self.videohub_states[key] = state
+            return {'message': message, 'state': state}
         if operation == 'list':
             return routing_presets.catalog(site['id'], device['id'], preset_limit)
         if operation == 'delete':
