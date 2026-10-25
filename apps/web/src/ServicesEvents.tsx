@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { CalendarDays, Check, Clock3, MapPin, Pencil, Plus, Search, Trash2, X } from "lucide-react";
-import type { CreateServiceEvent, ServiceEvent, ServiceEventKind } from "@smart-church/contracts";
+import { ArrowDown, ArrowUp, CalendarDays, Check, Clock3, MapPin, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import type { BookableResource, Contact, CreateServiceEvent, ServiceEvent, ServiceEventKind, ServicePlanItem, ServicePosition } from "@smart-church/contracts";
 
 type EventFilter = "upcoming" | "all" | "past";
 
@@ -54,8 +54,9 @@ function eventPayload(form: HTMLFormElement): CreateServiceEvent {
   };
 }
 
-export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, canManage, onNotice }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; canManage: boolean; onNotice: (message: string) => void }) {
+export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, contacts, canManage, onNotice }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; contacts: Contact[]; canManage: boolean; onNotice: (message: string) => void }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
+  const [resources, setResources] = useState<BookableResource[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [filter, setFilter] = useState<EventFilter>("upcoming");
@@ -63,6 +64,10 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const [editingEvent, setEditingEvent] = useState<ServiceEvent | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [room, setRoom] = useState("");
+  const [assetIds, setAssetIds] = useState<string[]>([]);
+  const [positions, setPositions] = useState<ServicePosition[]>([]);
+  const [timePlan, setTimePlan] = useState<ServicePlanItem[]>([]);
 
   async function loadEvents(signal?: AbortSignal) {
     setIsLoading(true);
@@ -74,6 +79,9 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         throw new Error(!Array.isArray(result) ? result.error ?? "Could not load services and events." : "Could not load services and events.");
       }
       setEvents(result);
+      const resourceResponse = await fetch("/api/resources", { headers: { "x-department-id": departmentId }, signal });
+      const resourceData = await resourceResponse.json() as BookableResource[];
+      if (resourceResponse.ok && Array.isArray(resourceData)) setResources(resourceData.filter((resource) => resource.active));
     } catch (error) {
       if (!signal?.aborted) setLoadError(error instanceof Error ? error.message : "Could not load services and events.");
     } finally {
@@ -104,18 +112,20 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
 
   function openCreateModal() {
     setEditingEvent(null);
+    setRoom(""); setAssetIds([]); setPositions([{ name: "Tech" }, { name: "Band" }, { name: "Preacher" }, { name: "Moderation" }]); setTimePlan([]);
     setIsModalOpen(true);
   }
 
   function openEditModal(event: ServiceEvent) {
     setEditingEvent(event);
+    setRoom(event.room ?? ""); setAssetIds(event.assetIds ?? []); setPositions(event.positions ?? []); setTimePlan(event.timePlan ?? []);
     setIsModalOpen(true);
   }
 
   async function saveEvent(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
     const form = formEvent.currentTarget;
-    const payload = eventPayload(form);
+    const payload: CreateServiceEvent = { ...eventPayload(form), room, assetIds, positions: positions.filter((position) => position.name.trim()), timePlan: timePlan.filter((item) => item.title.trim()).map((item) => ({ ...item, durationMinutes: item.durationMinutes ? Number(item.durationMinutes) : undefined })) };
     setIsSaving(true);
     try {
       const response = await fetch(editingEvent ? `/api/events/${editingEvent.id}` : "/api/events", {
@@ -190,7 +200,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         <div className="table-scroll"><table className="people-table event-table"><thead><tr><th>DATE</th><th>GATHERING</th><th>TIME</th><th>LOCATION</th><th>TYPE</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
           {filteredEvents.map((event) => {
             const date = formatShortDate(event.eventDate);
-            return <tr key={event.id}><td><div className="event-date-badge"><strong>{date.day}</strong><span>{date.month}</span></div></td><td><div className="event-name-cell"><strong>{event.title}</strong>{event.description && <small>{event.description}</small>}</div></td><td className="event-time-cell">{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</td><td><span className="event-location-cell"><MapPin size={13} />{event.location}</span></td><td><span className={`event-kind event-kind-${event.kind}`}>{eventKindLabel(event.kind)}</span></td><td>{canManage && <div className="event-actions"><button className="event-action" type="button" aria-label={`Edit ${event.title}`} onClick={() => openEditModal(event)}><Pencil size={15} /></button><button className="event-action event-delete-action" type="button" aria-label={`Delete ${event.title}`} onClick={() => void deleteEvent(event)}><Trash2 size={15} /></button></div>}</td></tr>;
+            return <tr key={event.id}><td><div className="event-date-badge"><strong>{date.day}</strong><span>{date.month}</span></div></td><td><div className="event-name-cell"><strong>{event.title}</strong>{event.importedFrom === "churchtools" && <small>ChurchTools · read-only</small>}{event.description && <small>{event.description}</small>}{Boolean(event.positions?.length) && <small>Positions: {event.positions!.map((position) => { const person = contacts.find((contact) => contact.id === position.contactId); return position.name + (person ? ": " + person.firstName + " " + person.lastName : ""); }).join(", ")}</small>}{Boolean(event.timePlan?.length) && <small>Time plan: {event.timePlan!.map((item) => (item.startTime ? item.startTime + " " : "") + item.title + (item.durationMinutes ? " (" + item.durationMinutes + " min)" : "")).join(" → ")}</small>}{Boolean(event.assetIds?.length) && <small>Assets: {resources.filter((resource) => event.assetIds!.includes(resource.id)).map((resource) => resource.name).join(", ")}</small>}</div></td><td className="event-time-cell">{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</td><td><span className="event-location-cell"><MapPin size={13} />{event.location}{event.room ? " · " + event.room : ""}</span></td><td><span className={`event-kind event-kind-${event.kind}`}>{eventKindLabel(event.kind)}</span></td><td>{canManage && !event.importedFrom && <div className="event-actions"><button className="event-action" type="button" aria-label={`Edit ${event.title}`} onClick={() => openEditModal(event)}><Pencil size={15} /></button><button className="event-action event-delete-action" type="button" aria-label={`Delete ${event.title}`} onClick={() => void deleteEvent(event)}><Trash2 size={15} /></button></div>}</td></tr>;
           })}
           {filteredEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? "Loading the schedule…" : loadError ? "The schedule could not be loaded." : query ? "No gatherings match your search." : filter === "past" ? "There are no past gatherings yet." : "No gatherings scheduled. Add your first service or event."}</td></tr>}
         </tbody></table></div>
@@ -201,9 +211,12 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
 
       {isModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsModalOpen(false)}><section className="modal event-modal" role="dialog" aria-modal="true" aria-labelledby="event-modal-title"><div className="modal-heading"><div><span className="eyebrow">CHURCH SCHEDULE</span><h2 id="event-modal-title">{editingEvent ? "Edit gathering" : "Add a gathering"}</h2><p>Share the details so everyone knows when and where to meet.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsModalOpen(false)}><X size={19} /></button></div><form key={editingEvent?.id ?? "new-event"} onSubmit={saveEvent}>
         <label>Title<input name="title" autoFocus required maxLength={160} defaultValue={editingEvent?.title ?? ""} placeholder="Sunday worship service" /></label>
-        <div className="form-row"><label>Type<select name="kind" defaultValue={editingEvent?.kind ?? "service"}>{eventKinds.map((kind) => <option value={kind.value} key={kind.value}>{kind.label}</option>)}</select></label><label>Location<input name="location" required maxLength={160} defaultValue={editingEvent?.location ?? departmentLocation} placeholder="Church hall" /></label></div>
+        <div className="form-row"><label>Type<select name="kind" defaultValue={editingEvent?.kind ?? "service"}>{eventKinds.map((kind) => <option value={kind.value} key={kind.value}>{kind.label}</option>)}</select></label><label>Location / building<input name="location" required maxLength={160} defaultValue={editingEvent?.location ?? departmentLocation} placeholder="Church building" /></label><label>Room<input maxLength={160} value={room} onChange={(event) => setRoom(event.target.value)} placeholder="Main hall" /></label></div>
         <div className="form-row event-time-row"><label>Date<input type="date" name="eventDate" required defaultValue={editingEvent?.eventDate ?? departmentDateString(departmentTimeZone)} /></label><label>Starts at<input type="time" name="startTime" required defaultValue={editingEvent?.startTime ?? "10:00"} /></label><label>Ends at <span className="optional-label">Optional</span><input type="time" name="endTime" defaultValue={editingEvent?.endTime ?? ""} /></label></div>
         <label>Description <span className="optional-label">Optional</span><textarea name="description" maxLength={2000} rows={3} defaultValue={editingEvent?.description ?? ""} placeholder="A few helpful details for the community" /></label>
+        <section className="service-planning-section"><div className="service-planning-heading"><div><h3>Assets</h3><p>Rooms and equipment already listed in Resources.</p></div></div>{resources.length ? <div className="service-asset-list">{resources.map((resource) => <label key={resource.id}><input type="checkbox" checked={assetIds.includes(resource.id)} onChange={(event) => setAssetIds((current) => event.target.checked ? [...current, resource.id] : current.filter((id) => id !== resource.id))} /><span>{resource.name}<small>{resource.category}{resource.location ? " · " + resource.location : ""}</small></span></label>)}</div> : <p className="service-planning-empty">Add rooms or equipment in Resources to attach them here.</p>}</section>
+        <section className="service-planning-section"><div className="service-planning-heading"><div><h3>Positions</h3><p>Assign tech, band, preacher, moderation, and other roles.</p></div><button className="button button-secondary" type="button" onClick={() => setPositions((current) => [...current, { name: "" }])}><Plus size={14} />Add position</button></div>{positions.length ? <div className="service-position-list">{positions.map((position, index) => <div className="service-position-row" key={index}><input aria-label="Position name" required placeholder="e.g. Preacher" value={position.name} onChange={(event) => setPositions((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item))} /><select aria-label="Assigned person" value={position.contactId ?? ""} onChange={(event) => setPositions((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, contactId: event.target.value || undefined } : item))}><option value="">Unassigned</option>{contacts.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select><button className="community-row-action community-row-delete" type="button" aria-label="Remove position" onClick={() => setPositions((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>)}</div> : <p className="service-planning-empty">Add the people and roles needed for this service.</p>}</section>
+        <section className="service-planning-section"><div className="service-planning-heading"><div><h3>Time plan</h3><p>Arrange service moments in the order they will happen.</p></div><button className="button button-secondary" type="button" onClick={() => setTimePlan((current) => [...current, { title: "" }])}><Plus size={14} />Add item</button></div>{timePlan.length ? <div className="service-timeplan-list">{timePlan.map((item, index) => <div className="service-timeplan-row" key={index}><input aria-label="Time plan item" required placeholder="e.g. Welcome and opening song" value={item.title} onChange={(event) => setTimePlan((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, title: event.target.value } : entry))} /><input aria-label="Start time" type="time" value={item.startTime ?? ""} onChange={(event) => setTimePlan((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, startTime: event.target.value || undefined } : entry))} /><input aria-label="Duration in minutes" type="number" min="1" max="1440" placeholder="Minutes" value={item.durationMinutes ?? ""} onChange={(event) => setTimePlan((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, durationMinutes: event.target.value ? Number(event.target.value) : undefined } : entry))} /><div className="service-timeplan-order"><button className="community-row-action" type="button" aria-label="Move item up" disabled={index === 0} onClick={() => setTimePlan((current) => { const next = [...current]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; return next; })}><ArrowUp size={14} /></button><button className="community-row-action" type="button" aria-label="Move item down" disabled={index === timePlan.length - 1} onClick={() => setTimePlan((current) => { const next = [...current]; [next[index], next[index + 1]] = [next[index + 1], next[index]]; return next; })}><ArrowDown size={14} /></button><button className="community-row-action community-row-delete" type="button" aria-label="Remove time plan item" onClick={() => setTimePlan((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={14} /></button></div><input className="service-timeplan-notes" aria-label="Time plan notes" placeholder="Notes (optional)" value={item.notes ?? ""} onChange={(event) => setTimePlan((current) => current.map((entry, itemIndex) => itemIndex === index ? { ...entry, notes: event.target.value } : entry))} /></div>)}</div> : <p className="service-planning-empty">Build an ordered plan for the service.</p>}</section>
         <div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsModalOpen(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={isSaving}><Check size={16} /> {isSaving ? "Saving…" : editingEvent ? "Save changes" : "Add to schedule"}</button></div>
       </form></section></div>}
     </>

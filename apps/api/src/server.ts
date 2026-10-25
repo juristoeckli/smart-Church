@@ -5,6 +5,8 @@ import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, Create
 import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video/worker-supervisor.js";
 import { registerPresenterRoutes } from "./modules/presenter/routes.js";
+import { registerCommunityRoutes } from "./modules/community/routes.js";
+import { registerChurchToolsSyncRoutes } from "./modules/churchtools-sync/routes.js";
 
 const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
 let databaseReady = false;
@@ -227,6 +229,16 @@ registerPresenterRoutes(app, {
   resolveDepartmentId: activeDepartmentId,
   validateMutation: validModuleMutation,
 });
+registerCommunityRoutes(app, {
+  pool: pool ?? null,
+  isDatabaseReady: () => databaseReady,
+  resolveDepartmentId: activeDepartmentId,
+});
+registerChurchToolsSyncRoutes(app, {
+  pool: pool ?? null,
+  isDatabaseReady: () => databaseReady,
+  resolveDepartmentId: activeDepartmentId,
+});
 
 type ServiceEventRow = {
   id: string;
@@ -237,6 +249,11 @@ type ServiceEventRow = {
   end_time: string | null;
   location: string;
   description: string | null;
+  room: string;
+  asset_ids: string[];
+  positions: CreateServiceEvent["positions"];
+  time_plan: CreateServiceEvent["timePlan"];
+  source_system?: string | null;
 };
 
 const serviceEventProperties = {
@@ -247,6 +264,10 @@ const serviceEventProperties = {
   endTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
   location: { type: "string", minLength: 1, maxLength: 160 },
   description: { type: "string", maxLength: 2000 },
+  room: { type: "string", maxLength: 160 },
+  assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
+  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } },
+  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 } } } },
 };
 const serviceEventBodySchema = {
   type: "object",
@@ -265,6 +286,11 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     ...(row.end_time ? { endTime: row.end_time.slice(0, 5) } : {}),
     location: row.location,
     ...(row.description ? { description: row.description } : {}),
+    room: row.room ?? "",
+    assetIds: row.asset_ids ?? [],
+    positions: row.positions ?? [],
+    timePlan: row.time_plan ?? [],
+    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
   };
 }
 
@@ -277,6 +303,22 @@ function validateServiceEvent(event: CreateServiceEvent) {
   if (event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
   if (!event.title.trim()) return "Enter an event title.";
   if (!event.location.trim()) return "Enter a location.";
+  if ((event.positions ?? []).some((position) => !position.name.trim())) return "Each service position needs a name.";
+  if ((event.timePlan ?? []).some((item) => !item.title.trim())) return "Each time plan item needs a title.";
+  return null;
+}
+
+async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent) {
+  const assets = [...new Set(event.assetIds ?? [])];
+  if (assets.length) {
+    const available = await pool!.query("SELECT id FROM bookable_resources WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, assets]);
+    if (available.rowCount !== assets.length) return "One or more selected resources are unavailable for this site.";
+  }
+  const contacts = [...new Set((event.positions ?? []).flatMap((position) => position.contactId ? [position.contactId] : []))];
+  if (contacts.length) {
+    const people = await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, contacts]);
+    if (people.rowCount !== contacts.length) return "One or more assigned people do not belong to this site.";
+  }
   return null;
 }
 
@@ -436,7 +478,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
             phones.phone_numbers, relations.relationships
        FROM app_users u
        LEFT JOIN LATERAL (
-         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role, 'videoPermissions', m.video_permissions, 'presenterPermissions', m.presenter_permissions)), '[]'::json) AS memberships
+         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role, 'contactId', m.contact_id, 'videoPermissions', m.video_permissions, 'presenterPermissions', m.presenter_permissions)), '[]'::json) AS memberships
            FROM department_memberships m WHERE m.user_id = u.id
        ) memberships ON true
        LEFT JOIN LATERAL (
@@ -451,6 +493,19 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
       ORDER BY u.display_name, u.email`,
   );
   return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, memberships: row.memberships }));
+});
+
+app.get("/api/people-options", async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  const result = await pool.query(
+    `SELECT id, department_id, first_name, last_name, email, source_system
+       FROM contacts ORDER BY department_id, lower(last_name), lower(first_name)`,
+  );
+  return result.rows.map((row) => ({
+    id: row.id, departmentId: row.department_id, firstName: row.first_name, lastName: row.last_name,
+    ...(row.email ? { email: row.email } : {}), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
+  }));
 });
 
 const phoneNumbersSchema = {
@@ -554,7 +609,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
           type: "array", maxItems: 100,
-          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } },
+          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } },
         },
       },
     },
@@ -596,9 +651,13 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city],
     );
     for (const membership of memberships) {
+      if (membership.contactId) {
+        const person = await client.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2", [membership.contactId, membership.departmentId]);
+        if (!person.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The linked person must belong to the selected site." }); }
+      }
       await client.query(
-        "INSERT INTO department_memberships (user_id, department_id, role, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5)",
-        [id, membership.departmentId, membership.role, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
+        "INSERT INTO department_memberships (user_id, department_id, role, contact_id, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5, $6)",
+        [id, membership.departmentId, membership.role, membership.contactId ?? null, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
       );
     }
     await insertUserPhoneNumbers(client, id, phoneNumbers);
@@ -612,7 +671,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
-    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
     if ((error as { code?: string }).code === "23503") return reply.code(400).send({ error: "One of the selected locations no longer exists." });
     throw error;
   } finally {
@@ -636,7 +695,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         city: { type: "string", maxLength: 100 },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
-        memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } } },
+        memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } } },
       },
     },
   },
@@ -686,9 +745,13 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       return reply.code(400).send({ error: relationshipError });
     }
     for (const membership of memberships) {
+      if (membership.contactId) {
+        const person = await client.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2", [membership.contactId, membership.departmentId]);
+        if (!person.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The linked person must belong to the selected site." }); }
+      }
       await client.query(
-        "INSERT INTO department_memberships (user_id, department_id, role, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5)",
-        [request.params.id, membership.departmentId, membership.role, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
+        "INSERT INTO department_memberships (user_id, department_id, role, contact_id, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5, $6)",
+        [request.params.id, membership.departmentId, membership.role, membership.contactId ?? null, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
       );
     }
     await client.query("COMMIT");
@@ -696,7 +759,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
-    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists." });
+    if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
     if ((error as { code?: string }).code === "23503") return reply.code(400).send({ error: "One of the selected locations no longer exists." });
     throw error;
   } finally {
@@ -958,7 +1021,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
   if (!selectedDepartmentId) return reply;
 
   const result = await pool.query(
-    `SELECT id, first_name, last_name, email, phone, status
+    `SELECT id, first_name, last_name, email, phone, status, source_system
        FROM contacts
       WHERE department_id = $1
       ORDER BY created_at DESC, last_name, first_name`,
@@ -971,6 +1034,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     ...(request.activeDepartmentRole === "site_admin" && row.email ? { email: row.email } : {}),
     ...(request.activeDepartmentRole === "site_admin" && row.phone ? { phone: row.phone } : {}),
     status: row.status,
+    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
   }));
 });
 
@@ -1019,6 +1083,102 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   });
 });
 
+app.post<{ Body: { contacts: CreateContact[] } }>("/api/contacts/import", {
+  schema: {
+    body: {
+      type: "object", additionalProperties: false, required: ["contacts"],
+      properties: {
+        contacts: {
+          type: "array", minItems: 1, maxItems: 1000,
+          items: {
+            type: "object", additionalProperties: false, required: ["firstName", "lastName", "status"],
+            properties: {
+              firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 },
+              email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }, phone: { type: "string", maxLength: 40 },
+              status: { type: "string", enum: ["member", "visitor"] },
+            },
+          },
+        },
+      },
+    },
+  },
+}, async (request, reply): Promise<Contact[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  if (!selectedDepartmentId) return reply;
+  const client = await pool.connect();
+  const contacts: Contact[] = [];
+  try {
+    await client.query("BEGIN");
+    for (const item of request.body.contacts) {
+      const firstName = item.firstName.trim();
+      const lastName = item.lastName.trim();
+      if (!firstName || !lastName) throw new Error("Each imported person needs a first and last name.");
+      const result = await client.query(
+        `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, first_name, last_name, email, phone, status`,
+        [randomUUID(), selectedDepartmentId, firstName, lastName, item.email?.trim() || null, item.phone?.trim() || null, item.status],
+      );
+      const row = result.rows[0];
+      contacts.push({ id: row.id, firstName: row.first_name, lastName: row.last_name, ...(row.email ? { email: row.email } : {}), ...(row.phone ? { phone: row.phone } : {}), status: row.status });
+    }
+    await client.query("COMMIT");
+    return reply.code(201).send(contacts);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error instanceof Error && error.message === "Each imported person needs a first and last name.") return reply.code(400).send({ error: error.message });
+    throw error;
+  } finally { client.release(); }
+});
+
+app.put<{ Params: { id: string }; Body: CreateContact }>("/api/contacts/:id", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: {
+      type: "object", additionalProperties: false, required: ["firstName", "lastName", "status"],
+      properties: {
+        firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 },
+        email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }, phone: { type: "string", maxLength: 40 },
+        status: { type: "string", enum: ["member", "visitor"] },
+      },
+    },
+  },
+}, async (request, reply): Promise<Contact | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  if (!selectedDepartmentId) return reply;
+
+  const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!existing.rowCount) return reply.code(404).send({ error: "Person not found." });
+  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This person is managed by ChurchTools. Edit them there and sync again." });
+  const firstName = request.body.firstName.trim();
+  const lastName = request.body.lastName.trim();
+  if (!firstName || !lastName) return reply.code(400).send({ error: "First and last name are required." });
+  const result = await pool.query(
+    `UPDATE contacts SET first_name = $3, last_name = $4, email = $5, phone = $6, status = $7, updated_at = now()
+      WHERE id = $1 AND department_id = $2 RETURNING id, first_name, last_name, email, phone, status`,
+    [request.params.id, selectedDepartmentId, firstName, lastName, request.body.email?.trim() || null, request.body.phone?.trim() || null, request.body.status],
+  );
+  const row = result.rows[0];
+  if (!row) return reply.code(404).send({ error: "This person could not be found." });
+  return { id: row.id, firstName: row.first_name, lastName: row.last_name, ...(row.email ? { email: row.email } : {}), ...(row.phone ? { phone: row.phone } : {}), status: row.status };
+});
+
+app.delete<{ Params: { id: string } }>("/api/contacts/:id", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<{ deleted: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  if (!selectedDepartmentId) return reply;
+
+  const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!existing.rowCount) return reply.code(404).send({ error: "Person not found." });
+  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This person is managed by ChurchTools. Remove them there and sync again." });
+  const result = await pool.query("DELETE FROM contacts WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
+  if (!result.rowCount) return reply.code(404).send({ error: "This person could not be found." });
+  return { deleted: true };
+});
+
 app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error: string }> => {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
@@ -1028,7 +1188,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const result = await pool.query<ServiceEventRow>(
     `SELECT id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-            location, description
+            location, description, room, asset_ids, positions, time_plan, source_system
        FROM service_events
       WHERE department_id = $1
       ORDER BY event_date, start_time, title`,
@@ -1054,14 +1214,16 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   };
   const validationError = validateServiceEvent(event);
   if (validationError) return reply.code(400).send({ error: validationError });
+  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
+  if (assignmentError) return reply.code(400).send({ error: assignmentError });
 
   const result = await pool.query<ServiceEventRow>(
-    `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description, room, asset_ids, positions, time_plan)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)
      RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
                CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-               location, description`,
-    [randomUUID(), selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
+               location, description, room, asset_ids, positions, time_plan`,
+    [randomUUID(), selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? [])],
   );
   return reply.code(201).send(mapServiceEvent(result.rows[0]));
 });
@@ -1077,6 +1239,9 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   }
   const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
+  const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
+  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Edit it there and sync again." });
   const event = {
     ...request.body,
     title: request.body.title.trim(),
@@ -1086,16 +1251,18 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   };
   const validationError = validateServiceEvent(event);
   if (validationError) return reply.code(400).send({ error: validationError });
+  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
+  if (assignmentError) return reply.code(400).send({ error: assignmentError });
 
   const result = await pool.query<ServiceEventRow>(
     `UPDATE service_events
         SET title = $3, kind = $4, event_date = $5, start_time = $6, end_time = $7,
-            location = $8, description = $9, updated_at = now()
+            location = $8, description = $9, room = $10, asset_ids = $11, positions = $12::jsonb, time_plan = $13::jsonb, updated_at = now()
       WHERE id = $1 AND department_id = $2
       RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-                location, description`,
-    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null],
+                location, description, room, asset_ids, positions, time_plan, source_system`,
+    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? [])],
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
   return mapServiceEvent(result.rows[0]);
@@ -1109,6 +1276,9 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   }
   const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
+  const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
+  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Remove it there and sync again." });
   const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
   return { id: result.rows[0].id };

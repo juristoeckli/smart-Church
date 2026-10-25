@@ -5,6 +5,7 @@ import "./styles.css";
 import "./events.css";
 import "./dark-mode.css";
 import "./auth.css";
+import "./community.css";
 
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

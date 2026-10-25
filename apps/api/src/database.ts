@@ -42,8 +42,6 @@ export async function initializeDatabase() {
        ON CONFLICT (id) DO NOTHING`,
       [departmentId, departmentName],
     );
-  } catch (error) {
-    throw error;
   } finally {
     client.release();
   }
