@@ -1,8 +1,8 @@
 # smart-Church
 
-A modular application for GfC locations, with one shared web/desktop interface, optional offline operation, trusted server-to-server sharing and extensible worker processes.
+A modular application for Churches, with one shared web/desktop interface, optional offline operation, trusted server-to-server sharing and extensible worker processes.
 
-**Status: local development foundation.** One installation can manage multiple GfC locations. People, services, events and time zones are scoped to the selected location; the site logo is installation-wide. The first account is a Server Administrator who can manage locations; per-location memberships and permissions are still in progress. Keep this API bound to localhost and use fictional data until access controls are complete.
+**Status: local development foundation.** One installation can manage multiple Churches/locations. People, services, events and time zones are scoped to the selected location; the site logo is installation-wide. The first account is a Server Administrator who can manage locations; per-location memberships and permissions are still in progress. Keep this API bound to localhost and use fictional data until access controls are complete.
 
 ## Start here
 
