@@ -6,7 +6,7 @@ import { videoTabs, type VideoTab } from "./VideoModule";
 const VideoWorkspace = lazy(() => import("./VideoModule").then(({ VideoModule }) => ({ default: VideoModule })));
 
 function capabilities(context: ModuleContext) {
-  const grants = new Set(context.department.videoPermissions ?? []);
+  const grants = new Set(context.department.modulePermissions?.video ?? context.department.videoPermissions ?? []);
   const admin = context.canManageSite;
   return {
     canOperateStreaming: admin || grants.has("streaming_operator") || grants.has("stream_admin"),
@@ -37,6 +37,14 @@ export const moduleRegistration: ModuleRegistration = {
   name: "Video & streaming",
   icon: Video,
   initialState: "Overview",
+  accessLabel: "Video & streaming",
+  accessLevels: [
+    { value: "video_basic", label: "View status, streams, routes and history" },
+    { value: "streaming_operator", label: "Operate streaming" },
+    { value: "stream_admin", label: "Manage stream settings" },
+    { value: "routing_user", label: "Use routing" },
+    { value: "routing_admin", label: "Manage routing and locks" },
+  ],
   pageClassName: "page-wrap-video",
   isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("video") && (canManageSite || (department.videoPermissions ?? []).length > 0),
   component: VideoWorkspacePage,

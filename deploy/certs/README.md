@@ -1,0 +1,1 @@
+For the optional bundled Nginx profile, put the TLS certificate chain here as `fullchain.pem` and the matching private key as `privkey.pem`. Keep private keys out of Git and backups that are not encrypted.

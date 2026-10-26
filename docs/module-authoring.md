@@ -20,7 +20,7 @@ export const moduleRegistration: ModuleRegistration = {
 };
 ```
 
-The component receives `department`, `departmentId`, `csrfToken`, `canManageSite`, a module-local `state` string, and `onStateChange`. Optional registration fields include `adminOnly`, `enabledByDefault`, `initialState`, `isAvailable(context)`, `navigation`, and `pageClassName`. Use `isAvailable` for module-specific permissions and `navigation` for module-owned sidebar subsections. The registry adds available modules to the Modules navigation, handles module hash routes and saved state, and renders each module inside a failure boundary. The module implementation is lazy-loaded so an unavailable module does not prevent the core workspace from rendering.
+The component receives `department`, `departmentId`, `csrfToken`, `canManageSite`, a module-local `state` string, and `onStateChange`. Optional registration fields include `adminOnly`, `enabledByDefault`, `initialState`, `isAvailable(context)`, `navigation`, and `pageClassName`. A module with user-selectable access levels can also declare `accessLabel` and `accessLevels`; People & access displays these declarations without Core changes, and selections are available in `department.modulePermissions[<module-id>]`. Site administrators inherit module access. Use `isAvailable` to hide the module when a member has none of its required grants and `navigation` for module-owned sidebar subsections. The registry adds available modules to the Modules navigation, handles module hash routes and saved state, and renders each module inside a failure boundary. The module implementation is lazy-loaded so an unavailable module does not prevent the core workspace from rendering.
 
 ## Optional API routes
 
@@ -34,7 +34,7 @@ Add `apps/api/src/modules/<id>/manifest.json` with a `serverEntry` and a matchin
 }
 ```
 
-`routes.ts` exports `registerModuleRoutes(app, context)`. The shared server context supplies the database pool, database readiness, default location, selected-location resolver, CSRF mutation validator, and the Video worker accessor. The API discovers manifests and registers each module independently. A malformed or unavailable optional module is logged and skipped; core server startup continues. Routes must still enforce authentication, location membership, module enablement, and the permissions declared by their feature.
+`routes.ts` exports `registerModuleRoutes(app, context)`. The shared server context supplies the database pool, database readiness, default location, selected-location resolver, CSRF mutation validator, and the Video worker accessor. After resolving the selected location, a route can read its grants from `request.activeDepartmentModulePermissions?.["<module-id>"]`; site administrators inherit module access. Validate the grant needed by each operation in the module's own routes. The API discovers manifests and registers each module independently. A malformed or unavailable optional module is logged and skipped; core server startup continues. Routes must still enforce authentication, location membership, module enablement, and the permissions declared by their feature.
 
 The Video, Presenter, Sync, and System Laptop client modules use this registration contract. Video, Presenter, Community, ChurchTools Sync, and System Laptop API routes use the manifest loader.
 

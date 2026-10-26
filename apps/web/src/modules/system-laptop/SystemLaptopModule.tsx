@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Expand, Laptop, LoaderCircle, LogOut, MonitorUp, RefreshCw, ShieldCheck, WifiOff } from "lucide-react";
+import { Expand, Laptop, LoaderCircle, LogOut, MonitorUp, Volume2, WifiOff } from "lucide-react";
 import "./system-laptop.css";
 
 interface GuacMouseState {}
@@ -12,6 +12,10 @@ interface GuacKeyboard {
   onkeydown: ((keysym: number) => void) | null;
   onkeyup: ((keysym: number) => void) | null;
 }
+interface GuacAudioContextFactory {
+  singleton: AudioContext | null;
+  getAudioContext(): AudioContext | null;
+}
 interface GuacClient {
   getDisplay(): { getElement(): HTMLElement; scale(factor: number): void };
   connect(data: string): void;
@@ -19,6 +23,7 @@ interface GuacClient {
   sendSize(width: number, height: number): void;
   sendMouseState(state: GuacMouseState): void;
   sendKeyEvent(pressed: number, keysym: number): void;
+  onaudio: ((stream: unknown, mimetype: string) => null) | null;
   onstatechange: ((state: number) => void) | null;
   onerror: ((status: { message?: string }) => void) | null;
 }
@@ -40,11 +45,30 @@ declare global {
       WebSocketTunnel: new (url: string) => unknown;
       Mouse: new (element: HTMLElement) => GuacMouse;
       Keyboard: new (element: HTMLElement) => GuacKeyboard;
+      AudioContextFactory?: GuacAudioContextFactory;
     };
   }
 }
 
 let guacScriptPromise: Promise<void> | null = null;
+let remoteAudioContext: AudioContext | null = null;
+
+function unlockRemoteAudio(): Promise<boolean> {
+  const factory = window.Guacamole?.AudioContextFactory;
+  // Guacamole may initialize its own singleton while its script is loading.
+  // Always resume that context when it exists; resuming a separate context
+  // created by the connect gesture would leave Guacamole's player suspended.
+  if (factory?.singleton) remoteAudioContext = factory.singleton;
+  try {
+    const AudioContextConstructor = window.AudioContext || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!remoteAudioContext && AudioContextConstructor) remoteAudioContext = new AudioContextConstructor();
+    if (factory && remoteAudioContext && !factory.singleton) factory.singleton = remoteAudioContext;
+    if (factory) remoteAudioContext = factory.getAudioContext() ?? remoteAudioContext;
+    if (!remoteAudioContext) return Promise.resolve(false);
+    return remoteAudioContext.state === "suspended" ? remoteAudioContext.resume().then(() => remoteAudioContext?.state === "running").catch(() => false) : Promise.resolve(remoteAudioContext.state === "running");
+  } catch { return Promise.resolve(false); }
+}
+
 function loadGuacamoleClient(libraryUrl: string) {
   if (window.Guacamole) return Promise.resolve();
   if (guacScriptPromise) return guacScriptPromise;
@@ -99,6 +123,8 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
   const [controllerStarting, setControllerStarting] = useState(false);
   const [controllerBusy, setControllerBusy] = useState(false);
   const [role, setRole] = useState<"controller" | "viewer" | null>(null);
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioStreamStatus, setAudioStreamStatus] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
@@ -151,6 +177,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
 
   const connect = async (takeover = false) => {
     if (!displayRef.current || connecting || (connected && !takeover)) return;
+    void unlockRemoteAudio().then(setAudioEnabled);
     if (takeover && role === "viewer") disconnect();
     setError("");
     setConnecting(true);
@@ -165,21 +192,35 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
       await loadGuacamoleClient(result.libraryUrl);
       const guac = window.Guacamole;
       if (!guac || !displayRef.current) throw new Error("The remote desktop client is unavailable.");
+      if (guac.AudioContextFactory) {
+        if (!guac.AudioContextFactory.singleton && remoteAudioContext) guac.AudioContextFactory.singleton = remoteAudioContext;
+        remoteAudioContext = guac.AudioContextFactory.getAudioContext() ?? remoteAudioContext;
+        setAudioEnabled(remoteAudioContext?.state === "running");
+      }
 
       const tunnelUrl = new URL(result.tunnelUrl, window.location.href);
       tunnelUrl.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       const tunnel = new guac.WebSocketTunnel(tunnelUrl.toString());
       const client = new guac.Client(tunnel);
       clientRef.current = client;
+      setAudioStreamStatus("");
+      client.onaudio = (stream, mimetype) => {
+        void stream;
+        setAudioStreamStatus(mimetype);
+        return null;
+      };
       const display = client.getDisplay();
-      displayRef.current.replaceChildren(display.getElement());
-      display.getElement().classList.add("system-laptop-guac-display");
+      const remoteDisplay = display.getElement();
+      remoteDisplay.classList.add("system-laptop-guac-display");
+      remoteDisplay.tabIndex = result.role === "controller" ? 0 : -1;
+      displayRef.current.replaceChildren(remoteDisplay);
 
       if (result.role === "controller") {
-        const keyboard = new guac.Keyboard(display.getElement());
+        remoteDisplay.addEventListener("mousedown", () => remoteDisplay.focus({ preventScroll: true }));
+        const keyboard = new guac.Keyboard(remoteDisplay);
         keyboard.onkeydown = (keysym) => client.sendKeyEvent(1, keysym);
         keyboard.onkeyup = (keysym) => client.sendKeyEvent(0, keysym);
-        const mouse = new guac.Mouse(display.getElement());
+        const mouse = new guac.Mouse(remoteDisplay);
         mouse.onmousedown = (state) => client.sendMouseState(state);
         mouse.onmouseup = (state) => client.sendMouseState(state);
         mouse.onmousemove = (state) => client.sendMouseState(state);
@@ -188,6 +229,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
         if (state === 3) {
           setConnected(true);
           setConnecting(false);
+          if (result.role === "controller") remoteDisplay.focus({ preventScroll: true });
           if (result.role === "controller" && screenRef.current) {
             const sendCurrentSize = () => {
               if (resizeTimerRef.current !== null) window.clearTimeout(resizeTimerRef.current);
@@ -242,18 +284,11 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
   };
 
   return <section className="system-laptop-module">
-    <header className="system-laptop-heading">
-      <div><span className="eyebrow">REMOTE CONTROL</span><h1>System Laptop</h1><p className="page-subtitle">Access the AV control computer and Dante Controller.</p></div>
-      <div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>
-    </header>
-
-    <div className="system-laptop-security"><ShieldCheck size={17} /><p><strong>One controller, shared view</strong><span>A site administrator starts the session. Other users with module access can watch or take control; a transfer disconnects the previous controller. The RDP display follows the controller's screen size.</span></p></div>
-
     {error && <div className="system-laptop-error" role="alert"><WifiOff size={17} /><span>{error}</span></div>}
     {configured === false && !error && <div className="system-laptop-setup"><Laptop size={30} /><strong>Remote desktop is not configured</strong><p>Ask the server administrator to configure the System Laptop gateway and private RDP connection settings.</p></div>}
 
     <section className="system-laptop-screen" aria-label="System Laptop remote desktop">
-      <div className="system-laptop-toolbar"><div><MonitorUp size={16} /><strong>AV control computer</strong><span>{connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div>{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
+      <div className="system-laptop-toolbar"><div className="system-laptop-toolbar-title"><MonitorUp size={16} /><strong className="system-laptop-title">System Laptop</strong><span>AV control computer · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="system-laptop-toolbar-actions"><div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label="Enable browser audio playback" title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "Waiting for an RDP audio stream"} onClick={() => void unlockRemoteAudio().then(setAudioEnabled)}><Volume2 size={14} /> {audioStreamStatus ? "Audio stream" : audioEnabled ? "Audio enabled" : "Enable audio"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
       <div ref={screenRef} className={`system-laptop-display ${connected ? "system-laptop-display-live" : ""}`}>
         <div className="system-laptop-guac-mount" ref={displayRef} />
         {configured && !connected && !connecting && <div className="system-laptop-launch"><span className="system-laptop-launch-icon"><Laptop size={25} /></span><strong>{controllerActive ? "Active remote session" : controllerStarting ? "Controller is connecting" : controllerBusy ? "Remote desktop is in use" : canControl ? "Connect to the System Laptop" : "Waiting for a controller"}</strong><p>{controllerActive ? "Watch in view-only mode, or take control and disconnect the current controller." : controllerStarting ? "The site administrator's session is starting. Try again shortly." : controllerBusy ? "The single remote desktop is currently controlled from another location." : canControl ? "Open Dante Controller on the AV computer to view or change routes." : "A site administrator must start the remote desktop. You can watch once the session is active."}</p>{controllerActive && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Watch session</button>}{controllerActive && canTakeOver && <button className="button button-secondary" type="button" onClick={() => void connect(true)}><MonitorUp size={15} /> Take control</button>}{!controllerActive && canControl && !controllerStarting && !controllerBusy && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Start remote session</button>}<small>{controllerActive ? "Taking control disconnects the current controller; viewers stay read-only." : controllerStarting ? "This module checks for the session automatically." : controllerBusy ? "Only one location can use the remote desktop at a time." : canControl ? "Keyboard and mouse input go to the remote computer." : "This module checks for an active session automatically."}</small></div>}
@@ -261,6 +296,5 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
         {connected && <div className="system-laptop-connected-label" aria-hidden="true">{role === "viewer" ? "Watching System Laptop" : "Controlling System Laptop"}</div>}
       </div>
     </section>
-    <p className="system-laptop-footnote"><RefreshCw size={13} /> Close the session when finished. The Windows PC must remain powered on and connected to the Dante network.</p>
   </section>;
 }

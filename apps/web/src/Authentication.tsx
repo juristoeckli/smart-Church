@@ -13,7 +13,7 @@ export function PasswordChangeRequired({ onChanged }: { onChanged: (user: Authen
     const values = new FormData(event.currentTarget);
     const password = String(values.get("password"));
     const confirmation = String(values.get("confirmation"));
-    if (password.length < 6) { setError("Use at least 6 characters."); return; }
+    if (password.length < 12) { setError("Use at least 12 characters."); return; }
     if (password !== confirmation) { setError("The passwords do not match."); return; }
     setError("");
     setIsSubmitting(true);
@@ -29,7 +29,7 @@ export function PasswordChangeRequired({ onChanged }: { onChanged: (user: Authen
     }
   }
 
-  return <main className="auth-page"><section className="auth-card" aria-labelledby="password-change-title"><a className="auth-brand" href="#home" aria-label="GfC"><img src={defaultLogoUrl} alt="GfC" onError={(event) => { event.currentTarget.style.display = "none"; }} /><span>GfC</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">ACCOUNT SECURITY</span><h1 id="password-change-title">Choose a new password</h1><p>Your administrator reset your password. Set a new one to continue.</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>New password<input name="password" type="password" required minLength={6} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">Use at least 6 characters.</p><label>Confirm new password<input name="confirmation" type="password" required minLength={6} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "Updating…" : "Set new password"}<ArrowRight size={16} /></button></form><p className="auth-footer">Your account is stored on this installation.</p></section></main>;
+  return <main className="auth-page"><section className="auth-card" aria-labelledby="password-change-title"><a className="auth-brand" href="#home" aria-label="GfC"><img src={defaultLogoUrl} alt="GfC" onError={(event) => { event.currentTarget.style.display = "none"; }} /><span>GfC</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">ACCOUNT SECURITY</span><h1 id="password-change-title">Choose a new password</h1><p>Your administrator reset your password. Set a new one to continue.</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>New password<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">Use at least 12 characters.</p><label>Confirm new password<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "Updating…" : "Set new password"}<ArrowRight size={16} /></button></form><p className="auth-footer">Your account is stored on this installation.</p></section></main>;
 }
 
 export function Authentication({
@@ -109,7 +109,7 @@ export function Authentication({
           {setupRequired
             ? <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
             : <label>Username or email address<input name="identifier" required autoComplete="username" maxLength={254} placeholder="username or you@example.com" /></label>}
-          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 6 : 1} maxLength={128} placeholder={setupRequired ? "At least 6 characters" : "Your password"} /></label>
+          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} placeholder={setupRequired ? "At least 12 characters" : "Your password"} /></label>
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
             {isSubmitting ? "Please wait…" : setupRequired ? "Create server administrator" : "Sign in"}
             {!isSubmitting && <ArrowRight size={17} />}

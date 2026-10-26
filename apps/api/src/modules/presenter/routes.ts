@@ -65,7 +65,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const selectedId = await resolveDepartmentId(request, reply, false, allowQueryLocation);
       if (!selectedId) return null;
       const result = await pool.query(
-        `SELECT d.enabled_modules, m.role, m.presenter_permissions
+        `SELECT d.enabled_modules, m.role, m.presenter_permissions, m.module_permissions
            FROM departments d
            JOIN department_memberships m ON m.department_id = d.id
           WHERE d.id = $1 AND m.user_id = $2`,
@@ -76,7 +76,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         reply.code(404).send({ error: "Presenter is not enabled for this location." });
         return null;
       }
-      const permissions = new Set<string>(access.presenter_permissions ?? []);
+      const permissions = new Set<string>(access.module_permissions?.presenter ?? access.presenter_permissions ?? []);
       const isAdmin = access.role === "site_admin" || permissions.has("admin");
       if (!isAdmin && permissions.size === 0) {
         reply.code(403).send({ error: "Presenter access is required." });

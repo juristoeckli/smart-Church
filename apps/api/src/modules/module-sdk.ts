@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
+import type { LocationPermission } from "@smart-church/contracts";
 
 export interface ModuleServerContext {
   pool: Pool | null;
   isDatabaseReady: () => boolean;
   getDefaultDepartmentId: () => string;
-  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean, allowQueryLocation?: boolean) => Promise<string | null>;
+  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean, allowQueryLocation?: boolean, requiredPermission?: LocationPermission) => Promise<string | null>;
   validateMutation: (request: FastifyRequest, reply: FastifyReply) => boolean;
   getVideoWorker: () => {
     state: { state: string; error: string | null };
@@ -16,6 +17,47 @@ export interface ModuleServerContext {
 export interface ServerModuleManifest {
   id: string;
   serverEntry?: string;
+}
+
+function isolateOptionalModule(instance: FastifyInstance, moduleId: string): FastifyInstance {
+  return new Proxy(instance, {
+    get(target, property) {
+      if (property === "register") {
+        const register = Reflect.get(target, property, target) as (...args: unknown[]) => unknown;
+        return (plugin: unknown, ...options: unknown[]) => {
+          if (typeof plugin !== "function") return Reflect.apply(register, target, [plugin, ...options]);
+          const guardedPlugin = async (child: FastifyInstance, pluginOptions: unknown) => {
+            try {
+              await Reflect.apply(plugin, undefined, [isolateOptionalModule(child, moduleId), pluginOptions]);
+            } catch (error) {
+              child.log.error({ err: error, module: moduleId }, "Optional module setup failed; the rest of Smart-Church will continue.");
+            }
+          };
+          return Reflect.apply(register, target, [guardedPlugin, ...options]);
+        };
+      }
+
+      if (property === "addHook") {
+        const addHook = Reflect.get(target, property, target) as (...args: unknown[]) => unknown;
+        return (hookName: string, hook: (...args: unknown[]) => unknown) => {
+          if (!["onReady", "onListen", "onClose", "preClose"].includes(hookName)) {
+            return Reflect.apply(addHook, target, [hookName, hook]);
+          }
+          const guardedHook = async function (this: unknown, ...args: unknown[]) {
+            try {
+              return await Reflect.apply(hook, this, args);
+            } catch (error) {
+              target.log.error({ err: error, module: moduleId, hook: hookName }, "Optional module lifecycle hook failed; the rest of Smart-Church will continue.");
+            }
+          };
+          return Reflect.apply(addHook, target, [hookName, guardedHook]);
+        };
+      }
+
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
 }
 
 export async function registerServerModules(app: FastifyInstance, context: ModuleServerContext) {
@@ -37,7 +79,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
       if (!entry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The server entry must stay inside its module folder.");
       const loaded = await import(pathToFileURL(entry).href) as { registerModuleRoutes?: (app: FastifyInstance, context: ModuleServerContext) => void };
       if (typeof loaded.registerModuleRoutes !== "function") throw new Error("The server entry must export registerModuleRoutes(app, context).");
-      loaded.registerModuleRoutes(app, context);
+      loaded.registerModuleRoutes(isolateOptionalModule(app, manifest.id), context);
       app.log.info({ module: manifest.id }, "Optional server module registered.");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;

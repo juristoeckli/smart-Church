@@ -16,7 +16,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const selectedId = await resolveDepartmentId(request, reply);
     if (!selectedId) return null;
     const result = await pool.query(
-      `SELECT d.enabled_modules, m.role, m.video_permissions
+      `SELECT d.enabled_modules, m.role, m.video_permissions, m.module_permissions
          FROM departments d
          JOIN department_memberships m ON m.department_id = d.id
         WHERE d.id = $1 AND m.user_id = $2`,
@@ -27,7 +27,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       reply.code(404).send({ error: "The Video module is not enabled for this site." });
       return null;
     }
-    const grants = new Set<string>(access.video_permissions ?? []);
+    const grants = new Set<string>(access.module_permissions?.video ?? access.video_permissions ?? []);
     const hasGrant = permission === "video_basic"
       ? grants.size > 0
       : permission === "streaming_operator"

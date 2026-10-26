@@ -1,0 +1,14 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+apps/api/data
+apps/web/dist
+coverage
+*.log
+*.pem
+*.key
+config/streaming.json

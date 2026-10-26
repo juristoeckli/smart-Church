@@ -115,12 +115,15 @@ export interface DepartmentProfile {
   timeZone: string;
   role: "site_admin" | "member" | "unassigned";
   enabledModules?: string[];
+  permissions?: LocationPermission[];
   videoPermissions?: VideoPermission[];
   presenterPermissions?: PresenterPermission[];
+  modulePermissions?: Record<string, string[]>;
 }
 
 export type VideoPermission = "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin";
 export type PresenterPermission = "editor" | "operator" | "admin";
+export type LocationPermission = "people_view_private" | "people_manage" | "events_manage" | "groups_manage" | "resources_manage" | "files_manage";
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
 
@@ -148,7 +151,7 @@ export interface SiteUser {
   phoneNumbers: UserPhoneNumber[];
   relationships: UserRelationship[];
   accountRole: "server_admin" | "user";
-  memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[] }>;
+  memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 
 export interface CreateSiteUser {
@@ -164,7 +167,7 @@ export interface CreateSiteUser {
   relationships?: UserRelationshipInput[];
   password: string;
   accountRole: "server_admin" | "user";
-  memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[] }>;
+  memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 
 export type UserPhoneLabel = "home" | "mobile" | "work" | "work_mobile";

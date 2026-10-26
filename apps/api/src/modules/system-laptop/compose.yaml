@@ -1,9 +1,10 @@
 services:
   system-laptop-guacd:
-    image: guacamole/guacd:1.6.0
+    image: smart-church/guacd:1.6.0-wave2
     profiles: [system-laptop]
     restart: unless-stopped
-
+    networks:
+      - smart-church-private
   system-laptop-guacamole:
     image: guacamole/guacamole:1.6.0
     profiles: [system-laptop]
@@ -14,6 +15,6 @@ services:
       GUACD_PORT: "4822"
       JSON_ENABLED: "true"
       JSON_SECRET_KEY: ${SYSTEM_LAPTOP_JSON_SECRET_KEY:?Set SYSTEM_LAPTOP_JSON_SECRET_KEY in .env}
-    ports:
-      - "127.0.0.1:8080:8080"
     restart: unless-stopped
+    networks:
+      - smart-church-private

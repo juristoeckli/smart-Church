@@ -4,7 +4,13 @@ System Laptop embeds Apache Guacamole's JavaScript remote desktop client inside 
 
 ## Local development
 
-1. Install Apache Guacamole 1.6.0's `guacamole` and `guacd` Docker services using this module's Compose file. Generate a 128-bit secret and use the same 32-character hexadecimal value for `SYSTEM_LAPTOP_JSON_SECRET_KEY` in `.env`:
+1. Build the patched Guacamole 1.6.0 `guacd` image and install the `guacamole` service using this module's Compose file. The patch adds RDPSND Wave2 support from [Apache PR #696](https://github.com/apache/guacamole-server/pull/696), which is required by some modern RDP servers. Run the build script once before starting Compose:
+
+   ```powershell
+   .\apps\api\src\modules\system-laptop\build-guacd.ps1
+   ```
+
+   Generate a 128-bit secret and use the same 32-character hexadecimal value for `SYSTEM_LAPTOP_JSON_SECRET_KEY` in `.env`:
 
    ```powershell
    node -e "console.log(require('node:crypto').randomBytes(16).toString('hex'))"
@@ -38,6 +44,8 @@ One site administrator can control the desktop at a time. The API grants a short
 Any member who can access this module and is watching the session can choose **Take control** to transfer the lease. The previous controller's tunnel is disconnected, and the new controller joins the existing shared Guacamole connection. Other viewers remain read-only. Starting a new session still requires a site administrator.
 
 The controlling browser reports the available display area to Guacamole on connect and whenever that area changes, including when entering or leaving fullscreen. The RDP connection uses the `display-update` resize method, so the Windows host must support RDP 8.1 display updates for dynamic resolution changes. Viewers join at the current controller dimensions and do not control the resolution.
+
+RDP audio output is enabled and plays through the connected browser. The local `guacd` image includes the Wave2 PDU support from Apache PR #696. This addresses modern RDP servers that use Wave2. It does not address the separate intermittent audio-instruction issue tracked as [GUACAMOLE-2095](https://issues.apache.org/jira/browse/GUACAMOLE-2095). Microphone input is not redirected.
 
 ## Access boundary
 

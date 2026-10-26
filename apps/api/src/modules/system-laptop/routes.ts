@@ -55,7 +55,7 @@ function encryptedAuthData(settings: ReturnType<typeof connectionSettings>, user
           username: settings.username,
           password: settings.password,
           "ignore-cert": "true",
-          "enable-audio": "false",
+          "disable-audio": "false",
           "enable-drive": "false",
           "enable-printing": "false",
           "resize-method": "display-update",
