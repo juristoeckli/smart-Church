@@ -16,6 +16,9 @@ interface GuacAudioContextFactory {
   singleton: AudioContext | null;
   getAudioContext(): AudioContext | null;
 }
+interface GuacAudioPlayer {
+  getSupportedTypes(): string[];
+}
 interface GuacClient {
   getDisplay(): { getElement(): HTMLElement; scale(factor: number): void };
   connect(data: string): void;
@@ -46,6 +49,7 @@ declare global {
       Mouse: new (element: HTMLElement) => GuacMouse;
       Keyboard: new (element: HTMLElement) => GuacKeyboard;
       AudioContextFactory?: GuacAudioContextFactory;
+      AudioPlayer: GuacAudioPlayer;
     };
   }
 }
@@ -271,6 +275,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
         GUAC_DPI: "96",
         SC_PROXY_TICKET: result.proxyTicket,
       });
+      for (const mimetype of guac.AudioPlayer.getSupportedTypes()) query.append("GUAC_AUDIO", mimetype);
       client.connect(query.toString());
     } catch (reason) {
       disconnect();
