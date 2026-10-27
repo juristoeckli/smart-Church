@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-cert
 ENV PYTHON_BINARY=python3
 
 FROM node:24-bookworm-slim AS api
-WORKDIR /workspace
+WORKDIR /workspace/apps/api
 RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable && corepack prepare pnpm@11.25.0 --activate
@@ -32,7 +32,7 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=3001
 ENV PRESENTER_MEDIA_DIR=/var/lib/smart-church/presenter-media
 USER node
 EXPOSE 3001
-CMD ["node", "--import", "tsx", "apps/api/src/server.ts"]
+CMD ["node", "--import", "tsx", "src/server.ts"]
 
 FROM node:24-bookworm-slim AS web
 WORKDIR /app
