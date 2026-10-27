@@ -22,7 +22,7 @@ mv "$tmp" .env
 trap - EXIT
 
 compose_files=(-f compose.yaml)
-if grep -q '^SMART_CHURCH_DIRECT_HTTP=1' .env; then
+if [[ -f deploy/compose.direct.yaml ]]; then
   compose_files+=(-f deploy/compose.direct.yaml)
 fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then

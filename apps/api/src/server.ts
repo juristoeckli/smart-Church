@@ -12,7 +12,9 @@ import { registerServerModules } from "./modules/module-sdk.js";
 
 const trustedProxyAddresses = process.env.SMART_CHURCH_TRUST_PROXY?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
 const directHttpMode = process.env.SMART_CHURCH_DIRECT_HTTP === "1";
+const allowHttpFallback = process.env.SMART_CHURCH_ALLOW_HTTP_FALLBACK === "1";
 const directHttpPort = Number(process.env.SMART_CHURCH_DIRECT_HTTP_PORT ?? 81);
+const caddyHttpPort = Number(process.env.SMART_CHURCH_HTTP_PORT ?? 80);
 const webRoot = resolve(fileURLToPath(new URL("../web-dist/", import.meta.url)));
 const webContentTypes = new Map([
   [".css", "text/css; charset=utf-8"], [".html", "text/html; charset=utf-8"],
@@ -32,6 +34,9 @@ const app = Fastify({
 let databaseReady = false;
 let firstRunSetupCode: string | null = null;
 const sessionCookieName = "smart_church_session";
+function sessionCookieNameFor(request: FastifyRequest) {
+  return allowHttpFallback && request.protocol === "http" ? `${sessionCookieName}_http` : sessionCookieName;
+}
 const sessionLifetimeSeconds = 24 * 60 * 60;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
 const maxFailedLoginBuckets = 10_000;
@@ -93,14 +98,14 @@ function verifyPassword(password: string, encoded: string) {
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function setSessionCookie(reply: { header: (name: string, value: string) => unknown }, token: string) {
-  const secure = process.env.NODE_ENV === "production" && !directHttpMode ? "; Secure" : "";
-  reply.header("Set-Cookie", `${sessionCookieName}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${sessionLifetimeSeconds}${secure}`);
+function setSessionCookie(reply: { header: (name: string, value: string) => unknown }, token: string, secure: boolean, name: string) {
+  const secureAttribute = secure ? "; Secure" : "";
+  reply.header("Set-Cookie", `${name}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${sessionLifetimeSeconds}${secureAttribute}`);
 }
 
-function clearSessionCookie(reply: { header: (name: string, value: string) => unknown }) {
-  const secure = process.env.NODE_ENV === "production" && !directHttpMode ? "; Secure" : "";
-  reply.header("Set-Cookie", `${sessionCookieName}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secure}`);
+function clearSessionCookie(reply: { header: (name: string, value: string) => unknown }, secure: boolean, name: string) {
+  const secureAttribute = secure ? "; Secure" : "";
+  reply.header("Set-Cookie", `${name}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secureAttribute}`);
 }
 
 async function currentUser(token: string | undefined): Promise<AuthenticatedUser | null> {
@@ -164,14 +169,14 @@ function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
   return false;
 }
 
-async function createSession(userId: string, reply: { header: (name: string, value: string) => unknown }) {
+async function createSession(userId: string, request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, secure: boolean) {
   const token = randomBytes(32).toString("base64url");
   await pool!.query(
     `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at)
      VALUES ($1, $2, $3, now() + ($4 * interval '1 second'))`,
     [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds],
   );
-  setSessionCookie(reply, token);
+  setSessionCookie(reply, token, secure, sessionCookieNameFor(request));
 }
 
 function moduleCsrfToken(sessionToken: string) {
@@ -179,7 +184,7 @@ function moduleCsrfToken(sessionToken: string) {
 }
 
 function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
-  const sessionToken = cookieValue(request.headers.cookie, sessionCookieName);
+  const sessionToken = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
   const csrfHeader = request.headers["x-csrf-token"];
   const originHeader = request.headers.origin;
   if (!sessionToken || !csrfHeader || !originHeader || Array.isArray(csrfHeader)) {
@@ -195,10 +200,9 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
     reply.code(403).send({ error: "The module request origin is not valid." });
     return false;
   }
-  const allowedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN
-    ? origin.origin === process.env.SMART_CHURCH_WEB_ORIGIN
-    : origin.hostname === requestHost.hostname && origin.protocol === "http:" &&
-      new Set([requestHost.port, "5173"]).has(origin.port);
+  const allowedOrigin = isAllowedWebOrigin(request, origin.origin)
+    || (!process.env.SMART_CHURCH_WEB_ORIGIN && origin.hostname === requestHost.hostname && origin.protocol === "http:" &&
+      new Set([requestHost.port, "5173"]).has(origin.port));
   const expected = Buffer.from(moduleCsrfToken(sessionToken));
   const actual = Buffer.from(csrfHeader);
   if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
@@ -208,8 +212,25 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
   return true;
 }
 
+function isAllowedWebOrigin(request: FastifyRequest, origin: string) {
+  const expectedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN;
+  if (!expectedOrigin) return false;
+  if (directHttpMode || request.protocol === "https") return origin === expectedOrigin;
+  if (!allowHttpFallback || request.protocol !== "http") return false;
+  try {
+    const httpsOrigin = new URL(expectedOrigin);
+    const requestOrigin = new URL(origin);
+    const allowedHttpPorts = new Set([String(caddyHttpPort), String(directHttpPort)]);
+    return requestOrigin.protocol === "http:" && requestOrigin.hostname === httpsOrigin.hostname &&
+      ((requestOrigin.port === "" && caddyHttpPort === 80) || allowedHttpPorts.has(requestOrigin.port));
+  } catch {
+    return false;
+  }
+}
+
 app.addHook("onRequest", async (request, reply) => {
-  if (process.env.NODE_ENV === "production" && !directHttpMode && request.url !== "/api/health" && request.protocol !== "https") {
+  const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
+  if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.protocol !== "https") {
     return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
   }
   const method = request.method.toUpperCase();
@@ -217,18 +238,18 @@ app.addHook("onRequest", async (request, reply) => {
   if (process.env.NODE_ENV === "production") {
     const expectedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN;
     const requestOrigin = request.headers.origin;
-    if (!expectedOrigin || !requestOrigin || requestOrigin !== expectedOrigin) {
+    if (!expectedOrigin || !requestOrigin || !isAllowedWebOrigin(request, requestOrigin)) {
       return reply.code(403).send({ error: "This request origin is not allowed." });
     }
   }
 });
 
-app.addHook("onSend", async (_request, reply, payload) => {
+app.addHook("onSend", async (request, reply, payload) => {
   reply.header("X-Content-Type-Options", "nosniff");
   reply.header("X-Frame-Options", "DENY");
   reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
   reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-  if (process.env.NODE_ENV === "production" && !directHttpMode) reply.header("Strict-Transport-Security", "max-age=31536000");
+  if (process.env.NODE_ENV === "production" && !directHttpMode && !allowHttpFallback && request.protocol === "https") reply.header("Strict-Transport-Security", "max-age=31536000");
   return payload;
 });
 
@@ -236,7 +257,7 @@ app.addHook("preHandler", async (request, reply) => {
   if (request.url === "/api/health" || request.url.startsWith("/api/auth/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
-  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   request.authenticatedUser = user;
   reply.header("Cache-Control", "no-store");
@@ -330,13 +351,13 @@ app.get("/api/health", async () => ({ status: databaseReady ? "ok" : "database_u
 app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error: string }> => {
   reply.header("Cache-Control", "no-store");
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   const count = await pool.query("SELECT count(*)::int AS total FROM app_users");
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
     ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
-    ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieName)!) } : {}),
+    ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieNameFor(request))!) } : {}),
     ...(user ? { user } : {}),
   };
 });
@@ -416,7 +437,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
   } finally {
     client.release();
   }
-  await createSession(user.id, reply);
+  await createSession(user.id, request, reply, request.protocol === "https");
   return reply.code(201).send({ user });
 });
 
@@ -463,15 +484,15 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
   }
   for (const key of buckets) failedLogins.delete(key);
   const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password };
-  await createSession(user.id, reply);
+  await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
 
 app.post("/api/auth/logout", async (request, reply) => {
   reply.header("Cache-Control", "no-store");
-  const token = cookieValue(request.headers.cookie, sessionCookieName);
+  const token = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
   if (pool && token) await pool.query("DELETE FROM auth_sessions WHERE token_hash = $1", [hashToken(token)]);
-  clearSessionCookie(reply);
+  clearSessionCookie(reply, request.protocol === "https", sessionCookieNameFor(request));
   return { ok: true };
 });
 
@@ -482,7 +503,7 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
 }, async (request, reply): Promise<{ user: AuthenticatedUser } | { error: string }> => {
   reply.header("Cache-Control", "no-store");
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieName));
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   const result = await pool.query(
     "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role",
@@ -491,7 +512,7 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
-  await createSession(user.id, reply);
+  await createSession(user.id, request, reply, request.protocol === "https");
   return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false } };
 });
 

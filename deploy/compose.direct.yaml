@@ -1,7 +1,5 @@
 services:
   api:
-    environment:
-      SMART_CHURCH_DIRECT_HTTP: "1"
     ports:
       - "${SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_DIRECT_HTTP_PORT:-81}:3001"
   web:

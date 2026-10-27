@@ -1,5 +1,21 @@
+{
+	auto_https disable_redirects
+}
+
 {$SMART_CHURCH_DOMAIN} {
 	tls internal
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:3001
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}
+
+http://{$SMART_CHURCH_DOMAIN} {
 	encode zstd gzip
 
 	handle /api/* {

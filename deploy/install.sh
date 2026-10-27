@@ -44,36 +44,56 @@ command -v openssl >/dev/null || { echo "Install openssl, then retry." >&2; exit
 [[ -f "$root/compose.yaml" && -f "$root/deploy/Caddyfile" ]] || { echo "Run this from a Smart-Church deployment package." >&2; exit 1; }
 [[ ! -e "$root/.env" ]] || { echo "A .env already exists at $root. Keep it and use deploy/update.sh instead." >&2; exit 1; }
 
-read -r -p "Domain name for Smart-Church: " domain </dev/tty
-[[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "Enter a public DNS name such as church.example.org." >&2; exit 1; }
+read -r -p "Public domain name (optional; leave blank for self-signed HTTPS): " public_domain </dev/tty
+if [[ -z "$public_domain" ]]; then
+  detected_host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  read -r -p "Client-reachable hostname or IPv4 address${detected_host:+ [$detected_host]} for the self-signed certificate: " domain </dev/tty
+  domain="${domain:-$detected_host}"
+  [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]] || {
+    echo "Enter a valid hostname or IPv4 address reachable by the client devices." >&2
+    exit 1
+  }
+  connection_mode=https
+  tls_mode=self-signed
+  caddyfile="./deploy/Caddyfile.self-signed"
+  web_origin="https://$domain"
+  trust_proxy="172.30.250.2"
+  bundled_proxy=1
+  direct_http=0
+else
+  [[ "$public_domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "Enter a public DNS name such as church.example.org, or leave it blank." >&2; exit 1; }
+  domain="$public_domain"
+fi
 read -r -p "Church location name [My Church]: " location </dev/tty
 location="${location:-My Church}"
-read -r -p "Connection mode [https/direct-http] (https uses Caddy; direct-http serves the app on port 81): " connection_mode </dev/tty
-connection_mode="${connection_mode:-https}"
-case "$connection_mode" in
-  https)
-    read -r -p "TLS certificate [public/self-signed] (public requires working public DNS and inbound port 80 or 443): " tls_mode </dev/tty
-    tls_mode="${tls_mode:-public}"
-    case "$tls_mode" in
-      public) caddyfile="./deploy/Caddyfile" ;;
-      self-signed) caddyfile="./deploy/Caddyfile.self-signed" ;;
-      *) echo "Choose public or self-signed." >&2; exit 1 ;;
-    esac
-    web_origin="https://$domain"
-    trust_proxy="172.30.250.2"
-    bundled_proxy=1
-    direct_http=0
-    ;;
-  direct-http)
-    tls_mode=none
-    caddyfile="./deploy/Caddyfile"
-    web_origin="http://$domain:81"
-    trust_proxy=""
-    bundled_proxy=0
-    direct_http=1
-    ;;
-  *) echo "Choose https or direct-http." >&2; exit 1 ;;
-esac
+if [[ -n "$public_domain" ]]; then
+  read -r -p "Connection mode [https/direct-http] (https uses Caddy; direct-http serves the app on port 81): " connection_mode </dev/tty
+  connection_mode="${connection_mode:-https}"
+  case "$connection_mode" in
+    https)
+      read -r -p "TLS certificate [public/self-signed] (public requires working public DNS and inbound port 80 or 443): " tls_mode </dev/tty
+      tls_mode="${tls_mode:-public}"
+      case "$tls_mode" in
+        public) caddyfile="./deploy/Caddyfile" ;;
+        self-signed) caddyfile="./deploy/Caddyfile.self-signed" ;;
+        *) echo "Choose public or self-signed." >&2; exit 1 ;;
+      esac
+      web_origin="https://$domain"
+      trust_proxy="172.30.250.2"
+      bundled_proxy=1
+      direct_http=0
+      ;;
+    direct-http)
+      tls_mode=none
+      caddyfile="./deploy/Caddyfile"
+      web_origin="http://$domain:81"
+      trust_proxy=""
+      bundled_proxy=0
+      direct_http=1
+      ;;
+    *) echo "Choose https or direct-http." >&2; exit 1 ;;
+  esac
+fi
 read -r -p "Release version [${SMART_CHURCH_VERSION:-latest}]: " version </dev/tty
 version="${version:-${SMART_CHURCH_VERSION:-latest}}"
 [[ "$version" == "latest" || "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || { echo "Use a semantic release version such as 1.2.3 or latest." >&2; exit 1; }
@@ -94,6 +114,8 @@ SMART_CHURCH_TRUST_PROXY=$trust_proxy
 SMART_CHURCH_DIRECT_HTTP=$direct_http
 SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS=0.0.0.0
 SMART_CHURCH_DIRECT_HTTP_PORT=81
+SMART_CHURCH_ALLOW_HTTP_FALLBACK=1
+SMART_CHURCH_HTTP_PORT=80
 SMART_CHURCH_DOCKER_SUBNET=172.30.250.0/24
 SMART_CHURCH_DOCKER_IP_RANGE=172.30.250.64/26
 SMART_CHURCH_PROXY_IP=172.30.250.2
@@ -108,11 +130,10 @@ mkdir -p "$root/backups"
 chmod 700 "$root/backups"
 
 cd "$root"
-compose_files=(-f compose.yaml)
+compose_files=(-f compose.yaml -f deploy/compose.direct.yaml)
 profile_args=()
 services=()
 if [[ "$direct_http" == "1" ]]; then
-  compose_files+=(-f deploy/compose.direct.yaml)
   services=(db api)
 else
   profile_args+=(--profile bundled-proxy)
@@ -131,8 +152,17 @@ echo
 echo "Smart-Church is starting at $web_origin"
 if [[ "$tls_mode" == "self-signed" ]]; then
   echo "This uses Caddy's local certificate authority. Browsers will show a trust warning until you install its root certificate."
+  if [[ -z "$public_domain" ]]; then
+    echo "The certificate is for $domain. Make sure clients can resolve or reach that hostname or IP."
+  fi
   echo "Export the public root certificate with: docker compose --profile bundled-proxy cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-local-root.crt"
   echo "Install that certificate as a trusted root on each client device; do not export or share the CA private key."
+fi
+if [[ "$direct_http" != "1" ]]; then
+  echo "HTTP through Caddy (port 80, no redirect): http://$domain"
+  echo "Port 80 is unencrypted. Use HTTPS on port 443 when its certificate is available."
+  echo "Direct HTTP fallback (port 81, connects straight to Smart-Church without Caddy): http://$domain:81"
+  echo "Port 81 is unencrypted. Use it only as a temporary fallback or on a trusted network."
 fi
 if [[ -n "$setup_code" ]]; then
   echo "First-run setup code: $setup_code"

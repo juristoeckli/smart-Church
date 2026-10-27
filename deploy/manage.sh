@@ -45,7 +45,7 @@ command -v docker >/dev/null || { echo "Docker is required to manage Smart-Churc
 docker compose version >/dev/null || { echo "The Docker Compose plugin is required." >&2; exit 1; }
 
 compose_files=(-f compose.yaml)
-if grep -q '^SMART_CHURCH_DIRECT_HTTP=1' .env; then
+if [[ -f deploy/compose.direct.yaml ]]; then
   compose_files+=(-f deploy/compose.direct.yaml)
 fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
@@ -188,30 +188,36 @@ while true; do
       run_compose ps
       run_compose exec -T db sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
       run_compose exec -T api node -e "fetch('http://127.0.0.1:3001/api/health').then(async response => { const body = await response.json(); if (!response.ok || body.status !== 'ok') process.exit(1); console.log('API: healthy') }).catch(() => process.exit(1))"
+      run_compose exec -T api node -e "fetch('http://127.0.0.1:3001/').then(response => { if (!response.ok) process.exit(1); console.log('Direct HTTP service: healthy') }).catch(() => process.exit(1))"
       if grep -q '^SMART_CHURCH_DIRECT_HTTP=1' .env; then
-        run_compose exec -T api node -e "fetch('http://127.0.0.1:3001/').then(response => { if (!response.ok) process.exit(1); console.log('Web UI: healthy') }).catch(() => process.exit(1))"
+        domain="$(env_value SMART_CHURCH_DOMAIN)"
+        port="$(env_value SMART_CHURCH_DIRECT_HTTP_PORT)"
+        echo "Direct HTTP: http://$domain:${port:-81}"
       else
         run_compose exec -T web node -e "fetch('http://127.0.0.1:8080/').then(response => { if (!response.ok) process.exit(1); console.log('Web UI: healthy') }).catch(() => process.exit(1))"
+        domain="$(env_value SMART_CHURCH_DOMAIN)"
+        port="$(env_value SMART_CHURCH_DIRECT_HTTP_PORT)"
+        echo "Direct HTTP fallback: http://$domain:${port:-81}"
       fi
       ;;
     network)
+      direct_bind_address="$(env_value SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS)"
+      direct_port="$(env_value SMART_CHURCH_DIRECT_HTTP_PORT)"
+      read -r -p "Direct HTTP bind IPv4 address [${direct_bind_address:-0.0.0.0}]: " new_direct_bind </dev/tty
+      read -r -p "Direct HTTP fallback port [${direct_port:-81}]: " new_direct_port </dev/tty
+      new_direct_bind="${new_direct_bind:-${direct_bind_address:-0.0.0.0}}"
+      new_direct_port="${new_direct_port:-${direct_port:-81}}"
+      valid_ipv4 "$new_direct_bind" || { echo "Enter an IPv4 address (0.0.0.0 binds all interfaces)." >&2; exit 1; }
+      valid_port "$new_direct_port" || { echo "Enter a port from 1 to 65535." >&2; exit 1; }
+      set_env_value SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS "$new_direct_bind"
+      set_env_value SMART_CHURCH_DIRECT_HTTP_PORT "$new_direct_port"
       if grep -q '^SMART_CHURCH_DIRECT_HTTP=1' .env; then
-        bind_address="$(env_value SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS)"
-        port="$(env_value SMART_CHURCH_DIRECT_HTTP_PORT)"
-        read -r -p "Bind IPv4 address [${bind_address:-0.0.0.0}]: " new_bind </dev/tty
-        read -r -p "Direct HTTP port [${port:-81}]: " new_port </dev/tty
-        new_bind="${new_bind:-${bind_address:-0.0.0.0}}"
-        new_port="${new_port:-${port:-81}}"
-        valid_ipv4 "$new_bind" || { echo "Enter an IPv4 address (0.0.0.0 binds all interfaces)." >&2; exit 1; }
-        valid_port "$new_port" || { echo "Enter a port from 1 to 65535." >&2; exit 1; }
-        set_env_value SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS "$new_bind"
-        set_env_value SMART_CHURCH_DIRECT_HTTP_PORT "$new_port"
         domain="$(env_value SMART_CHURCH_DOMAIN)"
         [[ -n "$domain" ]] || { echo "SMART_CHURCH_DOMAIN is missing from .env." >&2; exit 1; }
-        if [[ "$new_port" == 80 ]]; then
+        if [[ "$new_direct_port" == 80 ]]; then
           set_env_value SMART_CHURCH_WEB_ORIGIN "http://$domain"
         else
-          set_env_value SMART_CHURCH_WEB_ORIGIN "http://$domain:$new_port"
+          set_env_value SMART_CHURCH_WEB_ORIGIN "http://$domain:$new_direct_port"
         fi
       else
         bind_address="$(env_value SMART_CHURCH_HTTPS_BIND_ADDRESS)"
@@ -226,6 +232,7 @@ while true; do
         valid_ipv4 "$new_bind" || { echo "Enter an IPv4 address (0.0.0.0 binds all interfaces)." >&2; exit 1; }
         valid_port "$new_http_port" && valid_port "$new_https_port" || { echo "Enter ports from 1 to 65535." >&2; exit 1; }
         [[ "$new_http_port" != "$new_https_port" ]] || { echo "HTTP and HTTPS must use different ports." >&2; exit 1; }
+        [[ "$new_direct_port" != "$new_http_port" && "$new_direct_port" != "$new_https_port" ]] || { echo "The direct HTTP fallback port must differ from the proxy ports." >&2; exit 1; }
         set_env_value SMART_CHURCH_HTTPS_BIND_ADDRESS "$new_bind"
         set_env_value SMART_CHURCH_HTTP_PORT "$new_http_port"
         set_env_value SMART_CHURCH_HTTPS_PORT "$new_https_port"

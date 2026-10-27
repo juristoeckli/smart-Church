@@ -2,7 +2,7 @@
 
 ## One-command installation
 
-The supported self-hosted path is Docker Engine with the Docker Compose plugin on a Linux server. Point a public DNS name at the server and allow inbound TCP ports 80 and 443. Then run:
+The supported self-hosted path is Docker Engine with the Docker Compose plugin on a Linux server. For a public certificate, point a public DNS name at the server and allow inbound TCP ports 80 and 443. If you do not have a public domain, leave that installer prompt blank and provide a hostname or IPv4 address that client devices can reach; the installer will use Caddy's self-signed HTTPS mode. Then run:
 
 ```sh
 curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/install.sh | sudo bash
@@ -14,7 +14,7 @@ The interactive terminal manager can also start the installation:
 curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/manage.sh | sudo bash
 ```
 
-The installer downloads the latest deployment package, asks for the domain, church location name, connection mode, and release version, generates database and sync secrets, creates a protected `.env`, pulls the published release images and starts the stack. Choose `https` to use Caddy with either `public` (automatically renewed Let's Encrypt certificate) or `self-signed` (Caddy's local certificate authority). With a self-signed certificate, install the exported public root certificate as trusted on each client device to remove browser warnings. Choose `direct-http` to serve the UI and API from the Smart-Church server directly on port 81, without Caddy or another proxy. Direct HTTP has no TLS encryption; use it only on a trusted network. The installer prints the one-time setup code; open the URL it prints and use the code to create the first Server Administrator.
+The installer downloads the latest deployment package, asks for the domain, church location name, connection mode, and release version, generates database and sync secrets, creates a protected `.env`, pulls the published release images and starts the stack. HTTPS mode serves TLS through Caddy on port 443. Caddy serves the app without redirects over HTTP on port 80, and the Smart-Church API service is also exposed directly on port 81. Port 81 bypasses Caddy; both HTTP paths are unencrypted and should be used only temporarily or on a trusted network. Leave the public domain blank to use Caddy HTTPS with its self-signed local certificate authority; the installer then asks for a client-reachable hostname or IPv4 address. Install Caddy's exported public root certificate as trusted on each client device to remove browser warnings. With a public domain, choose `https` to use Caddy with either `public` (automatically renewed Let's Encrypt certificate) or `self-signed`. Choose `direct-http` to run only the direct service on port 81, without Caddy or another proxy. The installer prints the HTTPS URL, both HTTP URLs, and one-time setup code; open either URL and use the code to create the first Server Administrator.
 
 The bundled proxy uses a fixed private-network IP. Docker assigns other containers addresses from a separate IP range so they cannot take the proxy address.
 
@@ -39,7 +39,7 @@ The uninstaller asks you to type `DELETE /opt/smart-church` before it removes an
 
 Enter a version such as `1.2.3` when prompted to pin a particular release. Keep the generated `.env` private. The setup page pre-fills the location name entered by the installer. If the location name is exactly `Steffisburg`, the Steffisburg-specific Video module is enabled; other locations do not receive it.
 
-Requirements: a supported Linux host with Docker Engine, the Docker Compose plugin, `curl`, `tar`, and `openssl`. The installer checks these prerequisites but does not install Docker for you. The HTTPS option needs ports 80 and 443 available; public certificates also require DNS to point to the host. Direct HTTP requires inbound TCP port 81.
+Requirements: a supported Linux host with Docker Engine, the Docker Compose plugin, `curl`, `tar`, and `openssl`. The installer checks these prerequisites but does not install Docker for you. HTTPS needs ports 80 and 443 available. Public certificates also require DNS to point to the host; self-signed certificates need their local CA trusted on clients. The direct HTTP service uses inbound TCP port 81.
 
 ## Existing central reverse proxy
 
@@ -62,7 +62,7 @@ Do not expose the API or web upstream ports to the public internet. Production s
 The base release keeps integrations disabled unless their location has the module enabled. Steffisburg Video has a module-owned Compose overlay and configuration. On that deployment, copy `apps/api/src/modules/video-steffisburg/streaming.example.json` to `apps/api/src/modules/video-steffisburg/streaming.steffisburg.json`, add the real device addresses, and set `SMART_CHURCH_STREAMING_CONFIG_PATH` in `.env`. Start using both Compose files:
 
 ```sh
-docker compose -f compose.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml --profile bundled-proxy up -d
+docker compose -f compose.yaml -f deploy/compose.direct.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml --profile bundled-proxy up -d
 ```
 
 For a direct HTTP installation, include the direct-access overlay and start the database and API services without the Caddy profile:
