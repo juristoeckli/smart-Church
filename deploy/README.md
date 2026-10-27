@@ -16,7 +16,7 @@ To completely remove an installation, including its database, uploaded files, HT
 curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo bash
 ```
 
-The uninstaller asks you to type `DELETE /opt/smart-church` before it removes anything. Docker images stay cached. To uninstall from a custom directory, pass `SMART_CHURCH_INSTALL_DIR` through `sudo`, for example: `curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo env SMART_CHURCH_INSTALL_DIR=/srv/smart-church bash`.
+The uninstaller asks you to type `DELETE /opt/smart-church` before it removes anything. It removes all containers belonging to that Smart-Church Compose project; other containers on the server and Docker images stay untouched. To uninstall from a custom directory, pass `SMART_CHURCH_INSTALL_DIR` through `sudo`, for example: `curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo env SMART_CHURCH_INSTALL_DIR=/srv/smart-church bash`.
 
 Enter a version such as `1.2.3` when prompted to pin a particular release. Keep the generated `.env` private. The setup page pre-fills the location name entered by the installer. If the location name is exactly `Steffisburg`, the Steffisburg-specific Video module is enabled; other locations do not receive it.
 

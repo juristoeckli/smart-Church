@@ -45,11 +45,22 @@ compose_files=(-f compose.yaml)
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env 2>/dev/null; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi
+project_name="${COMPOSE_PROJECT_NAME:-}"
+if [[ -z "$project_name" && -f .env ]]; then
+  project_name="$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env | tail -n 1)"
+fi
+project_name="${project_name:-$(basename -- "$install_dir")}"
 if [[ ! -f .env ]]; then
   export POSTGRES_USER=uninstall POSTGRES_PASSWORD=uninstall POSTGRES_DB=uninstall
   export SMART_CHURCH_STREAMING_CONFIG_PATH=/dev/null
 fi
 docker compose "${compose_files[@]}" --profile bundled-proxy down --volumes --remove-orphans
+remaining_containers="$(docker ps --all --quiet --filter "label=com.docker.compose.project=$project_name")"
+if [[ -n "$remaining_containers" ]]; then
+  while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] && docker rm --force "$container_id"
+  done <<< "$remaining_containers"
+fi
 
 rm -rf -- "$install_dir"
 echo "Smart-Church has been removed from $install_dir."
