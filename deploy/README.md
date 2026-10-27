@@ -10,6 +10,8 @@ curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download
 
 The installer downloads the latest deployment package, asks for the public domain and church location name, generates database and sync secrets, creates a protected `.env`, pulls the published release images and starts the stack. Caddy obtains and renews the HTTPS certificate automatically. The installer prints the one-time setup code; open the URL it prints and use the code to create the first Server Administrator.
 
+The bundled proxy uses a fixed private-network IP. Docker assigns other containers addresses from a separate IP range so they cannot take the proxy address.
+
 To completely remove an installation, including its database, uploaded files, HTTPS certificates, backups, secrets, and configuration, run:
 
 ```sh
