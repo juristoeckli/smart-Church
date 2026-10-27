@@ -38,7 +38,8 @@ export async function initializeDatabase() {
       }
     }
     await client.query(
-      `INSERT INTO departments (id, name) VALUES ($1, $2)
+      `INSERT INTO departments (id, name, enabled_modules)
+       VALUES ($1, $2, CASE WHEN lower($2) = 'steffisburg' THEN ARRAY['video-steffisburg']::TEXT[] ELSE '{}'::TEXT[] END)
        ON CONFLICT (id) DO NOTHING`,
       [departmentId, departmentName],
     );

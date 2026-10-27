@@ -1,0 +1,6 @@
+{
+  "id": "file-storage",
+  "name": "File storage",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts"
+}

@@ -123,7 +123,7 @@ export interface DepartmentProfile {
 
 export type VideoPermission = "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin";
 export type PresenterPermission = "editor" | "operator" | "admin";
-export type LocationPermission = "people_view_private" | "people_manage" | "events_manage" | "groups_manage" | "resources_manage" | "files_manage";
+export type LocationPermission = "people_view_private" | "people_manage" | "events_manage" | "groups_manage" | "resources_manage";
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
 
@@ -193,6 +193,7 @@ export interface UserRelationshipInput {
 export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
+  setupLocation?: string;
   user?: AuthenticatedUser;
   csrfToken?: string;
 }

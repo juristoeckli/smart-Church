@@ -1,0 +1,9 @@
+services:
+  api:
+    environment:
+      STREAMING_CONFIG_FILE: /run/secrets/streaming.json
+    volumes:
+      - type: bind
+        source: ${SMART_CHURCH_STREAMING_CONFIG_PATH:?Set SMART_CHURCH_STREAMING_CONFIG_PATH for the Steffisburg Video module}
+        target: /run/secrets/streaming.json
+        read_only: true

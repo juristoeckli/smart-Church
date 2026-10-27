@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Expand, Laptop, LoaderCircle, LogOut, MonitorUp, Volume2, WifiOff } from "lucide-react";
+import { Expand, Laptop, LoaderCircle, LogOut, MonitorUp, Volume2, VolumeX, WifiOff } from "lucide-react";
 import "./system-laptop.css";
 
 interface GuacMouseState {}
@@ -19,8 +19,15 @@ interface GuacAudioContextFactory {
 interface GuacAudioPlayer {
   getSupportedTypes(): string[];
 }
+interface GuacDisplay {
+  getElement(): HTMLElement;
+  getWidth(): number;
+  getHeight(): number;
+  scale(factor: number): void;
+  onresize: ((width: number, height: number) => void) | null;
+}
 interface GuacClient {
-  getDisplay(): { getElement(): HTMLElement; scale(factor: number): void };
+  getDisplay(): GuacDisplay;
   connect(data: string): void;
   disconnect(): void;
   sendSize(width: number, height: number): void;
@@ -57,7 +64,7 @@ declare global {
 let guacScriptPromise: Promise<void> | null = null;
 let remoteAudioContext: AudioContext | null = null;
 
-function unlockRemoteAudio(): Promise<boolean> {
+function setRemoteAudioPlayback(enabled: boolean): Promise<boolean> {
   const factory = window.Guacamole?.AudioContextFactory;
   // Guacamole may initialize its own singleton while its script is loading.
   // Always resume that context when it exists; resuming a separate context
@@ -69,8 +76,21 @@ function unlockRemoteAudio(): Promise<boolean> {
     if (factory && remoteAudioContext && !factory.singleton) factory.singleton = remoteAudioContext;
     if (factory) remoteAudioContext = factory.getAudioContext() ?? remoteAudioContext;
     if (!remoteAudioContext) return Promise.resolve(false);
-    return remoteAudioContext.state === "suspended" ? remoteAudioContext.resume().then(() => remoteAudioContext?.state === "running").catch(() => false) : Promise.resolve(remoteAudioContext.state === "running");
+    if (enabled && remoteAudioContext.state === "suspended") {
+      return remoteAudioContext.resume().then(() => remoteAudioContext?.state === "running").catch(() => false);
+    }
+    if (!enabled && remoteAudioContext.state === "running") {
+      return remoteAudioContext.suspend().then(() => false).catch(() => remoteAudioContext?.state === "running");
+    }
+    return Promise.resolve(remoteAudioContext.state === "running");
   } catch { return Promise.resolve(false); }
+}
+
+function fitViewerDisplay(display: GuacDisplay, container: HTMLElement | null) {
+  const width = display.getWidth();
+  const height = display.getHeight();
+  if (!container || !width || !height || !container.clientWidth || !container.clientHeight) return;
+  display.scale(Math.min(1, container.clientWidth / width, container.clientHeight / height));
 }
 
 function loadGuacamoleClient(libraryUrl: string) {
@@ -181,7 +201,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
 
   const connect = async (takeover = false) => {
     if (!displayRef.current || connecting || (connected && !takeover)) return;
-    void unlockRemoteAudio().then(setAudioEnabled);
+    void setRemoteAudioPlayback(true).then(setAudioEnabled);
     if (takeover && role === "viewer") disconnect();
     setError("");
     setConnecting(true);
@@ -218,6 +238,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
       remoteDisplay.classList.add("system-laptop-guac-display");
       remoteDisplay.tabIndex = result.role === "controller" ? 0 : -1;
       displayRef.current.replaceChildren(remoteDisplay);
+      if (result.role === "viewer") display.onresize = () => fitViewerDisplay(display, screenRef.current);
 
       if (result.role === "controller") {
         remoteDisplay.addEventListener("mousedown", () => remoteDisplay.focus({ preventScroll: true }));
@@ -234,28 +255,37 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
           setConnected(true);
           setConnecting(false);
           if (result.role === "controller") remoteDisplay.focus({ preventScroll: true });
-          if (result.role === "controller" && screenRef.current) {
-            const sendCurrentSize = () => {
-              if (resizeTimerRef.current !== null) window.clearTimeout(resizeTimerRef.current);
-              resizeTimerRef.current = window.setTimeout(() => {
-                resizeTimerRef.current = null;
-                const size = currentDisplaySize(screenRef.current);
-                if (lastSizeRef.current?.width === size.width && lastSizeRef.current.height === size.height) return;
-                lastSizeRef.current = size;
-                client.sendSize(size.width, size.height);
-                void fetch("/api/modules/system-laptop/size", {
-                  method: "POST",
-                  headers: requestHeaders(departmentId, csrfToken),
-                  body: JSON.stringify({ ...size, proxyTicket: result.proxyTicket }),
-                }).then(async (sizeResponse) => {
-                  await readApiResponse<{ width: number; height: number }>(sizeResponse, "Could not update the remote desktop size.");
-                }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not update the remote desktop size."));
-              }, 180);
-            };
-            resizeObserverRef.current?.disconnect();
-            resizeObserverRef.current = new ResizeObserver(sendCurrentSize);
-            resizeObserverRef.current.observe(screenRef.current);
-            sendCurrentSize();
+          if (screenRef.current) {
+            if (result.role === "viewer") {
+              const fitDisplay = () => fitViewerDisplay(display, screenRef.current);
+              resizeObserverRef.current?.disconnect();
+              resizeObserverRef.current = new ResizeObserver(fitDisplay);
+              resizeObserverRef.current.observe(screenRef.current);
+              fitDisplay();
+            }
+            else {
+              const sendCurrentSize = () => {
+                if (resizeTimerRef.current !== null) window.clearTimeout(resizeTimerRef.current);
+                resizeTimerRef.current = window.setTimeout(() => {
+                  resizeTimerRef.current = null;
+                  const size = currentDisplaySize(screenRef.current);
+                  if (lastSizeRef.current?.width === size.width && lastSizeRef.current.height === size.height) return;
+                  lastSizeRef.current = size;
+                  client.sendSize(size.width, size.height);
+                  void fetch("/api/modules/system-laptop/size", {
+                    method: "POST",
+                    headers: requestHeaders(departmentId, csrfToken),
+                    body: JSON.stringify({ ...size, proxyTicket: result.proxyTicket }),
+                  }).then(async (sizeResponse) => {
+                    await readApiResponse<{ width: number; height: number }>(sizeResponse, "Could not update the remote desktop size.");
+                  }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not update the remote desktop size."));
+                }, 180);
+              };
+              resizeObserverRef.current?.disconnect();
+              resizeObserverRef.current = new ResizeObserver(sendCurrentSize);
+              resizeObserverRef.current.observe(screenRef.current);
+              sendCurrentSize();
+            }
           }
         }
         else if (state === 5) { setConnected(false); setConnecting(false); }
@@ -293,8 +323,8 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
     {configured === false && !error && <div className="system-laptop-setup"><Laptop size={30} /><strong>Remote desktop is not configured</strong><p>Ask the server administrator to configure the System Laptop gateway and private RDP connection settings.</p></div>}
 
     <section className="system-laptop-screen" aria-label="System Laptop remote desktop">
-      <div className="system-laptop-toolbar"><div className="system-laptop-toolbar-title"><MonitorUp size={16} /><strong className="system-laptop-title">System Laptop</strong><span>AV control computer · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="system-laptop-toolbar-actions"><div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label="Enable browser audio playback" title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "Waiting for an RDP audio stream"} onClick={() => void unlockRemoteAudio().then(setAudioEnabled)}><Volume2 size={14} /> {audioStreamStatus ? "Audio stream" : audioEnabled ? "Audio enabled" : "Enable audio"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
-      <div ref={screenRef} className={`system-laptop-display ${connected ? "system-laptop-display-live" : ""}`}>
+      <div className="system-laptop-toolbar"><div className="system-laptop-toolbar-title"><MonitorUp size={16} /><strong className="system-laptop-title">System Laptop</strong><span>AV control computer · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="system-laptop-toolbar-actions"><div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label={audioEnabled ? "Mute remote audio" : "Unmute remote audio"} aria-pressed={audioEnabled} title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "RDP audio playback"} onClick={() => void setRemoteAudioPlayback(!audioEnabled).then(setAudioEnabled)}>{audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />} {audioEnabled ? "Audio on" : "Audio off"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
+      <div ref={screenRef} className={`system-laptop-display ${connected ? "system-laptop-display-live" : ""} ${connected && role === "viewer" ? "system-laptop-display-viewer" : ""}`}>
         <div className="system-laptop-guac-mount" ref={displayRef} />
         {configured && !connected && !connecting && <div className="system-laptop-launch"><span className="system-laptop-launch-icon"><Laptop size={25} /></span><strong>{controllerActive ? "Active remote session" : controllerStarting ? "Controller is connecting" : controllerBusy ? "Remote desktop is in use" : canControl ? "Connect to the System Laptop" : "Waiting for a controller"}</strong><p>{controllerActive ? "Watch in view-only mode, or take control and disconnect the current controller." : controllerStarting ? "The site administrator's session is starting. Try again shortly." : controllerBusy ? "The single remote desktop is currently controlled from another location." : canControl ? "Open Dante Controller on the AV computer to view or change routes." : "A site administrator must start the remote desktop. You can watch once the session is active."}</p>{controllerActive && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Watch session</button>}{controllerActive && canTakeOver && <button className="button button-secondary" type="button" onClick={() => void connect(true)}><MonitorUp size={15} /> Take control</button>}{!controllerActive && canControl && !controllerStarting && !controllerBusy && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Start remote session</button>}<small>{controllerActive ? "Taking control disconnects the current controller; viewers stay read-only." : controllerStarting ? "This module checks for the session automatically." : controllerBusy ? "Only one location can use the remote desktop at a time." : canControl ? "Keyboard and mouse input go to the remote computer." : "This module checks for an active session automatically."}</small></div>}
         {connecting && <div className="system-laptop-launch"><LoaderCircle className="system-laptop-spinner" size={29} /><strong>Connecting to the AV computer…</strong><p>Remote sessions can take a few seconds to start.</p></div>}

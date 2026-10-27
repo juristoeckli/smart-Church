@@ -1,0 +1,102 @@
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { StoredFile } from "@smart-church/contracts";
+import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
+import type { ModuleServerContext } from "../module-sdk.js";
+
+const resourceLimit = 25 * 1024 * 1024;
+type ResourceRow = { id: string; title: string; category: string; file_name: string; content_type: string; file_size: number; created_at: Date | string };
+function mapResource(row: ResourceRow): StoredFile {
+  return { id: row.id, title: row.title, category: row.category, fileName: row.file_name, contentType: row.content_type, fileSize: row.file_size, createdAt: new Date(row.created_at).toISOString() };
+}
+
+export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  const { pool, isDatabaseReady, resolveDepartmentId } = context;
+  app.register(async (routes) => {
+    routes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: resourceLimit }, (_request, body, done) => done(null, body));
+    async function department(request: FastifyRequest, reply: FastifyReply, requireManage = false) {
+      if (!isDatabaseReady() || !pool) {
+        reply.code(503).send({ error: "The file storage database is unavailable." });
+        return null;
+      }
+      const departmentId = await resolveDepartmentId(request, reply);
+      if (!departmentId) return null;
+      const hasManageAccess = request.activeDepartmentRole === "site_admin"
+        || (request.activeDepartmentModulePermissions?.["file-storage"] ?? []).includes("manage");
+      if (requireManage && !hasManageAccess) {
+        reply.code(403).send({ error: "File storage management access is required." });
+        return null;
+      }
+      return departmentId;
+    }
+
+    routes.get("/api/files", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query<ResourceRow>(
+        `SELECT id, title, category, file_name, content_type, file_size, created_at FROM stored_files
+          WHERE department_id = $1 ORDER BY lower(category), lower(title), created_at DESC`,
+        [departmentId],
+      );
+      return result.rows.map(mapResource);
+    });
+
+    routes.post<{ Body: Buffer; Querystring: { title?: string; category?: string; filename?: string } }>("/api/files", { bodyLimit: resourceLimit, schema: {
+      querystring: { type: "object", properties: { title: { type: "string", maxLength: 160 }, category: { type: "string", maxLength: 80 }, filename: { type: "string", maxLength: 255 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      if (!Buffer.isBuffer(request.body) || request.body.length < 1) return reply.code(400).send({ error: "Choose a file to upload." });
+      if (request.body.length > resourceLimit) return reply.code(413).send({ error: "Files must be 25 MiB or smaller." });
+      const fileName = basename(request.query.filename || "resource").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 255) || "resource";
+      const title = (request.query.title?.trim() || fileName).slice(0, 160);
+      const category = (request.query.category?.trim() || "General").slice(0, 80);
+      const requestedType = request.headers["x-resource-content-type"];
+      const contentType = typeof requestedType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(requestedType) ? requestedType.slice(0, 120) : "application/octet-stream";
+      const result = await pool!.query<ResourceRow>(
+        `INSERT INTO stored_files (id, department_id, title, category, file_name, content_type, file_size, file_data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         RETURNING id, title, category, file_name, content_type, file_size, created_at`,
+        [randomUUID(), departmentId, title, category, fileName, contentType, request.body.length, request.body],
+      );
+      return reply.code(201).send(mapResource(result.rows[0]));
+    });
+
+    routes.put<{ Params: { id: string }; Body: { title: string; category: string } }>("/api/files/:id", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["title", "category"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", minLength: 1, maxLength: 80 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const title = request.body.title.trim();
+      const category = request.body.category.trim();
+      if (!title || !category) return reply.code(400).send({ error: "Title and category are required." });
+      const result = await pool!.query<ResourceRow>(
+        `UPDATE stored_files SET title = $3, category = $4, updated_at = now()
+          WHERE id = $1 AND department_id = $2
+          RETURNING id, title, category, file_name, content_type, file_size, created_at`,
+        [request.params.id, departmentId, title, category],
+      );
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return mapResource(result.rows[0]);
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/files/:id/download", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2", [request.params.id, departmentId]);
+      const resource = result.rows[0];
+      if (!resource) return reply.code(404).send({ error: "Resource not found." });
+      reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
+      return resource.file_data as Buffer;
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/files/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const result = await pool!.query("DELETE FROM stored_files WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return { deleted: true };
+    });
+  });
+}

@@ -2,8 +2,8 @@ import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LocationPermission, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
-import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
-import { VideoWorkerSupervisor } from "./modules/video/worker-supervisor.js";
+import { closeDatabase, departmentId, departmentName, initializeDatabase, pool } from "./database.js";
+import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { registerServerModules } from "./modules/module-sdk.js";
 
 const trustedProxyAddresses = process.env.SMART_CHURCH_TRUST_PROXY?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
@@ -321,6 +321,7 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
+    ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
     ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieName)!) } : {}),
     ...(user ? { user } : {}),
   };
@@ -366,7 +367,18 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
       return reply.code(409).send({ error: "The initial server administrator has already been created." });
     }
     const department = await client.query(
-      "UPDATE departments SET name = $2, updated_at = now() WHERE id = $1",
+      `UPDATE departments
+          SET name = $2,
+              enabled_modules = CASE
+                WHEN lower(trim($2)) = 'steffisburg' THEN
+                  CASE WHEN 'video-steffisburg' = ANY(enabled_modules)
+                    THEN array_remove(enabled_modules, 'video')
+                    ELSE array_append(array_remove(enabled_modules, 'video'), 'video-steffisburg')
+                  END
+                ELSE array_remove(array_remove(enabled_modules, 'video'), 'video-steffisburg')
+              END,
+              updated_at = now()
+        WHERE id = $1`,
       [departmentId, location],
     );
     if (!department.rowCount) throw new Error("The configured department could not be found.");
@@ -477,7 +489,7 @@ const locationAccessBodySchema = {
   required: ["role", "permissions", "modulePermissions"],
   properties: {
     role: { type: "string", enum: ["site_admin", "member"] },
-    permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage", "files_manage"] } },
+    permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } },
     modulePermissions: modulePermissionsSchema,
   },
 };
@@ -504,7 +516,7 @@ app.get("/api/location-access", async (request, reply) => {
   return {
     location: location.rows[0]?.name ?? "Location",
     currentUserId: request.authenticatedUser!.id,
-    members: members.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username, role: row.role, permissions: row.permissions ?? [], modulePermissions: { ...(row.module_permissions ?? {}), video: row.module_permissions?.video ?? row.video_permissions ?? [], presenter: row.module_permissions?.presenter ?? row.presenter_permissions ?? [] } })),
+    members: members.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username, role: row.role, permissions: row.permissions ?? [], modulePermissions: { ...(row.module_permissions ?? {}), "video-steffisburg": row.module_permissions?.["video-steffisburg"] ?? row.module_permissions?.video ?? row.video_permissions ?? [], presenter: row.module_permissions?.presenter ?? row.presenter_permissions ?? [] } })),
     availableUsers: availableUsers.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username })),
   };
 });
@@ -542,7 +554,7 @@ app.put<{ Params: { userId: string }; Body: { role: "site_admin" | "member"; per
     }
     const permissions = request.body.role === "site_admin" ? [] : request.body.permissions;
     const modulePermissions = request.body.role === "site_admin" ? {} : request.body.modulePermissions;
-    const videoPermissions = modulePermissions.video ?? [];
+    const videoPermissions = modulePermissions["video-steffisburg"] ?? modulePermissions.video ?? [];
     const presenterPermissions = modulePermissions.presenter ?? [];
     await client.query(
       `INSERT INTO department_memberships (user_id, department_id, role, permissions, video_permissions, presenter_permissions, module_permissions)
@@ -738,7 +750,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
           type: "array", maxItems: 100,
-          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage", "files_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
+          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
         },
       },
     },
@@ -786,7 +798,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       }
       const modulePermissions = membership.role === "site_admin" ? {} : {
         ...(membership.modulePermissions ?? {}),
-        video: membership.videoPermissions ?? membership.modulePermissions?.video ?? [],
+        "video-steffisburg": membership.videoPermissions ?? membership.modulePermissions?.["video-steffisburg"] ?? membership.modulePermissions?.video ?? [],
         presenter: membership.presenterPermissions ?? membership.modulePermissions?.presenter ?? [],
       };
       await client.query(
@@ -837,7 +849,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
               departmentId: { type: "string", format: "uuid" },
               role: { type: "string", enum: ["site_admin", "member"] },
               contactId: { type: "string", format: "uuid" },
-              permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage", "files_manage"] } },
+              permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } },
               videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } },
               presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } },
               modulePermissions: modulePermissionsSchema,
@@ -902,7 +914,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       const preservedModulePermissions = membership.modulePermissions ?? modulePermissionsByDepartment.get(membership.departmentId) ?? {};
       const modulePermissions = membership.role === "site_admin" ? {} : {
         ...preservedModulePermissions,
-        video: membership.videoPermissions ?? preservedModulePermissions.video ?? [],
+        "video-steffisburg": membership.videoPermissions ?? preservedModulePermissions["video-steffisburg"] ?? preservedModulePermissions.video ?? [],
         presenter: membership.presenterPermissions ?? preservedModulePermissions.presenter ?? [],
       };
       await client.query(

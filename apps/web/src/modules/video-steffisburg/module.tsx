@@ -6,7 +6,7 @@ import { videoTabs, type VideoTab } from "./VideoModule";
 const VideoWorkspace = lazy(() => import("./VideoModule").then(({ VideoModule }) => ({ default: VideoModule })));
 
 function capabilities(context: ModuleContext) {
-  const grants = new Set(context.department.modulePermissions?.video ?? context.department.videoPermissions ?? []);
+  const grants = new Set(context.department.modulePermissions?.["video-steffisburg"] ?? context.department.modulePermissions?.video ?? context.department.videoPermissions ?? []);
   const admin = context.canManageSite;
   return {
     canOperateStreaming: admin || grants.has("streaming_operator") || grants.has("stream_admin"),
@@ -33,7 +33,7 @@ function VideoNavigation({ context }: { context: ModuleContext }) {
 }
 
 export const moduleRegistration: ModuleRegistration = {
-  id: "video",
+  id: "video-steffisburg",
   name: "Video & streaming",
   icon: Video,
   initialState: "Overview",
@@ -46,7 +46,7 @@ export const moduleRegistration: ModuleRegistration = {
     { value: "routing_admin", label: "Manage routing and locks" },
   ],
   pageClassName: "page-wrap-video",
-  isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("video") && (canManageSite || (department.videoPermissions ?? []).length > 0),
+  isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("video-steffisburg") && (canManageSite || (department.videoPermissions ?? []).length > 0),
   component: VideoWorkspacePage,
   navigation: VideoNavigation,
 };

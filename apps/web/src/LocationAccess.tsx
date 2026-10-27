@@ -24,7 +24,6 @@ const locationRights: Array<{ value: LocationPermission; label: string; descript
   { value: "events_manage", label: "Manage services and events", description: "Create, edit and delete schedule entries." },
   { value: "groups_manage", label: "Manage groups", description: "Create groups and manage their membership." },
   { value: "resources_manage", label: "Manage resources", description: "Manage rooms, equipment and booking approvals." },
-  { value: "files_manage", label: "Manage files", description: "Upload, rename and delete shared files." },
 ];
 export function LocationAccess({ department, csrfToken, onClose, embedded = false }: { department: DepartmentProfile; csrfToken: string; onClose: () => void; embedded?: boolean }) {
   const [members, setMembers] = useState<LocationMember[]>([]);

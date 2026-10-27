@@ -66,6 +66,13 @@ def load_config():
                 device.setdefault('port', 9990)
             if device.get('type') == 'webpresenter':
                 device.setdefault('port', 9977)
+            if device.get('type') == 'streamingbridge':
+                port = device.setdefault('port', 1935)
+                if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+                    raise ValueError('Streaming Bridge port must be an integer from 1 to 65535')
+                status_port = device.setdefault('status_port', 9977)
+                if isinstance(status_port, bool) or not isinstance(status_port, int) or not 1 <= status_port <= 65535:
+                    raise ValueError('Streaming Bridge status_port must be an integer from 1 to 65535')
         for address in [site['router_ip']] + [e['ip'] for e in site['encoders']] + [d['ip'] for d in site['devices']]:
             if not isinstance(address, str) or (address and (address.startswith('-') or any(c.isspace() for c in address))):
                 raise ValueError('Addresses must be IP addresses or hostnames without whitespace')
@@ -82,6 +89,19 @@ def ping(host, timeout):
         return 'Reachable' if result.returncode == 0 else 'No ping reply'
     except (OSError, subprocess.TimeoutExpired):
         return 'No ping reply'
+
+
+def tcp_listener(host, port, timeout):
+    """Check whether the configured Streaming Bridge input port accepts TCP."""
+    if not host:
+        return 'Not configured'
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return 'Listening'
+    except ConnectionRefusedError:
+        return 'Connection refused'
+    except (OSError, socket.timeout):
+        return 'No response'
 
 
 class Protocol:
@@ -383,6 +403,17 @@ class Controller:
         if device.get('type') == 'webpresenter':
             return self.check_encoder(device, timeout)
         result = dict(device, ping=ping(device['ip'], timeout))
+        if device.get('type') == 'streamingbridge':
+            result['receiver_status'] = tcp_listener(device['ip'], device.get('port', 1935), timeout)
+            result['receiver_checked_at'] = time.time()
+            try:
+                raw_state = encoder_request({**device, 'port': device.get('status_port', 9977)}, timeout)
+                state_fields = ('Status', 'Video Bitrate', 'Video Mode', 'Audio Bitrate', 'Connected', 'Streaming')
+                result['stream_state'] = {field: raw_state[field] for field in state_fields if field in raw_state}
+                result['stream_checked_at'] = time.time()
+            except (OSError, ValueError):
+                result['stream_state'] = {}
+                result['stream_checked_at'] = time.time()
         if device.get('id') == 'shelly' or device.get('type') == 'shelly':
             result.update(read_relay(device, timeout))
         return result

@@ -36,7 +36,7 @@ Add `apps/api/src/modules/<id>/manifest.json` with a `serverEntry` and a matchin
 
 `routes.ts` exports `registerModuleRoutes(app, context)`. The shared server context supplies the database pool, database readiness, default location, selected-location resolver, CSRF mutation validator, and the Video worker accessor. After resolving the selected location, a route can read its grants from `request.activeDepartmentModulePermissions?.["<module-id>"]`; site administrators inherit module access. Validate the grant needed by each operation in the module's own routes. The API discovers manifests and registers each module independently. A malformed or unavailable optional module is logged and skipped; core server startup continues. Routes must still enforce authentication, location membership, module enablement, and the permissions declared by their feature.
 
-The Video, Presenter, Sync, and System Laptop client modules use this registration contract. Video, Presenter, Community, ChurchTools Sync, and System Laptop API routes use the manifest loader.
+The File Storage, Video, Presenter, Sync, and System Laptop client modules use this registration contract. File Storage, Video, Presenter, Community, ChurchTools Sync, and System Laptop API routes use the manifest loader.
 
 ## Enablement
 

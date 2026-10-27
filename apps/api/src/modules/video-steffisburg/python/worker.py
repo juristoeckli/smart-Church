@@ -30,7 +30,8 @@ def public_status(department_id):
     site_fields = {'id', 'name', 'router_ip', 'router_model', 'router_status'}
     fields = {'id', 'name', 'ip', 'port', 'type', 'model', 'destination_site', 'destination_name',
               'usage', 'usage_note', 'ping', 'state', 'control', 'error', 'streaming_settings',
-              'power', 'power_checked_at', 'power_error', 'state_checked_at'}
+              'power', 'power_checked_at', 'power_error', 'state_checked_at',
+              'receiver_status', 'receiver_checked_at', 'status_port', 'stream_state', 'stream_checked_at'}
     result['sites'] = [dict({key: value for key, value in site.items() if key in site_fields},
         encoders=[{key: value for key, value in encoder.items() if key in fields} for encoder in site['encoders']],
         devices=[{key: value for key, value in device.items() if key in fields} for device in site['devices']])

@@ -9,6 +9,11 @@ RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm --filter @smart-church/web build
 
+FROM build AS dev
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+ENV PYTHON_BINARY=python3
+
 FROM node:24-bookworm-slim AS api
 WORKDIR /workspace
 RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \

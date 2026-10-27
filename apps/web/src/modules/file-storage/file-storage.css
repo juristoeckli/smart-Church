@@ -1,0 +1,8 @@
+.community-resource-card{overflow:hidden}
+.community-resource-toolbar{display:flex;gap:10px;align-items:center}
+.community-resource-toolbar .search-field{max-width:none;flex:1;background:var(--panel)}
+.community-category-filter select{height:34px;min-width:140px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px}
+.community-resource-list{padding:0 20px 8px}
+.community-resource-row{min-height:64px;display:flex;align-items:center;gap:12px;border-top:1px solid var(--line)}
+@media(max-width:520px){.community-resource-list{padding-left:13px;padding-right:13px}.community-resource-row{gap:7px}.community-category-filter{flex:1}.community-category-filter select{width:100%;min-width:0}}
+:root[data-theme="dark"] .community-category-filter select{color-scheme:dark}

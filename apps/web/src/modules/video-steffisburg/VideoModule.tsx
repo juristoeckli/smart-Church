@@ -1,10 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, LockKeyhole, Monitor, Play, Plus, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Trash2, Video } from "lucide-react";
+import { BmdVolumeMenu } from "./BmdVolumeMenu";
 import "./video.css";
 
 type Encoder = { id: string; name: string; ip?: string; model?: string; control?: string; state?: Record<string, unknown>; error?: string; streaming_settings?: Record<string, unknown> };
-type Device = { id: string; name: string; type?: string; ip?: string; port?: number; ping?: string; power?: string; error?: string };
+type Device = { id: string; name: string; type?: string; ip?: string; port?: number; status_port?: number; ping?: string; receiver_status?: string; receiver_checked_at?: number; stream_state?: Record<string, string>; stream_checked_at?: number; power?: string; error?: string };
+function bridgeStreamStatus(device: Device): "Live" | "Idle" | "Unavailable" {
+  const state = device.stream_state ?? {};
+  if (!Object.keys(state).length) return "Unavailable";
+  const status = state.Status?.trim().toLowerCase();
+  const streaming = state.Streaming?.trim().toLowerCase();
+  return status === "streaming" || status === "live" || status === "receiving"
+    || ["true", "yes", "1", "streaming", "live", "receiving"].includes(streaming ?? "")
+    ? "Live" : "Idle";
+}
 type VideoSite = { id: string; name: string; router_ip?: string; router_model?: string; router_status?: string; encoders: Encoder[]; devices: Device[] };
 type RouteState = { connected?: boolean; error?: string; model?: string; inputs?: string[]; outputs?: string[]; routes?: number[]; locks?: string[] };
 type RouteHistoryChange = { output: number; before?: number | null; after?: number; user?: string; time?: number };
@@ -559,8 +569,31 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
 
   function renderSite(site: VideoSite, origin: boolean) {
     const gatewayStatus = site.router_status ?? "Status pending";
+    const supportsBmdControls = ["main", "sonnenhof"].includes(site.id);
+    const converterModels = [
+      { id: "mini-converter-sdi-to-audio", name: "BMD SDI to Audio", pattern: /sdi\s*(?:to|→)\s*audio/i },
+      { id: "mini-converter-audio-to-sdi", name: "BMD Audio to SDI", pattern: /audio\s*(?:to|→)\s*sdi/i },
+    ];
+    const configuredConverterIds = new Set(site.devices.flatMap((device) => {
+      const model = converterModels.find((candidate) => candidate.id === device.id || (device.type === "converter" && candidate.pattern.test(device.name)));
+      return model ? [model.id] : [];
+    }));
+    const devices: (Device & { converterControlsId?: string })[] = [
+      ...site.devices.map((device) => ({
+        ...device,
+        converterControlsId: supportsBmdControls
+          ? converterModels.find((candidate) => candidate.id === device.id || (device.type === "converter" && candidate.pattern.test(device.name)))?.id
+          : undefined,
+      })),
+      ...(supportsBmdControls ? converterModels.filter((model) => !configuredConverterIds.has(model.id)).map((model) => ({ id: model.id, name: model.name, type: "converter", converterControlsId: model.id })) : []),
+    ];
+    const audioToSdiIndex = devices.findIndex((device) => device.converterControlsId === "mini-converter-audio-to-sdi");
+    const sdiToAudioIndex = devices.findIndex((device) => device.converterControlsId === "mini-converter-sdi-to-audio");
+    if (audioToSdiIndex >= 0 && sdiToAudioIndex >= 0 && audioToSdiIndex > sdiToAudioIndex) {
+      [devices[audioToSdiIndex], devices[sdiToAudioIndex]] = [devices[sdiToAudioIndex], devices[audioToSdiIndex]];
+    }
     return <section className={`video-site-card${origin ? " video-site-origin" : ""}`} key={site.id}>
-      <header className="video-site-heading"><div><h2>{site.name}</h2><p>{origin ? "Streaming source" : "Remote location"} · {site.encoders.length + site.devices.length} connected assets</p></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus}</span></header>
+      <header className="video-site-heading"><div><h2>{site.name}</h2><p>{origin ? "Streaming source" : "Remote location"} · {site.encoders.length + devices.length} connected assets</p></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus}</span></header>
       <article className="video-gateway"><div className="video-equipment-icon"><Activity size={20} /></div><div className="video-equipment-copy"><strong>{site.router_model || "Network gateway"}</strong><small>{site.router_ip || "Gateway address not configured"}</small></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus === "Reachable" ? "Reachable" : gatewayStatus}</span></article>
       {site.encoders.map((encoder) => {
         const settings = encoder.streaming_settings ?? {};
@@ -577,7 +610,26 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
           {encoder.error && <small className="video-error-text">{encoder.error}</small>}
         </article>;
       })}
-      {site.devices.map((device) => <article className="video-device-card" key={`${site.id}|${device.id}`}><div className="video-equipment-icon"><Settings2 size={19} /></div><div className="video-equipment-copy"><strong>{device.name}</strong><small>{device.type || "Equipment"} · {device.ip || "Address not configured"}</small>{device.power && <small>Power: {String(device.power)}</small>}</div><span className={`video-state ${device.ping === "Reachable" ? "video-state-good" : ""}`}>{device.ping ?? "Status pending"}</span>{capabilities.canOperateStreaming && (device.id === "shelly" || device.type === "shelly") && <button type="button" className="video-small-button" disabled={busy || device.ping !== "Reachable"} onClick={() => { if (window.confirm(`Power-cycle equipment at ${site.name}? Streaming may be interrupted.`)) void send("restart-site", { site_id: site.id, confirmed: true }, `Power cycle requested for ${site.name}.`); }}><RefreshCw size={13} /> Cycle site power</button>}{device.error && <small className="video-error-text">{device.error}</small>}</article>)}
+      {devices.map((device) => <article className="video-device-card" key={`${site.id}|${device.id}`}>
+        <div className="video-equipment-icon"><Settings2 size={19} /></div>
+        <div className="video-equipment-copy">
+          <strong>{device.name}</strong>
+          <small>{device.type === "converter" ? "USB over Silex" : `${device.type || "Equipment"} · ${device.ip || "Address not configured"}`}</small>
+          {device.power && <small>Power: {String(device.power)}</small>}
+          {device.type === "streamingbridge" && <>
+            <small>Video: {device.stream_state?.["Video Mode"] ?? "—"} · {device.stream_state?.["Video Bitrate"] ?? "—"} · Audio: {device.stream_state?.["Audio Bitrate"] ?? "—"}</small>
+          </>}
+        </div>
+        {device.type === "streamingbridge" ? <>
+          <span className={`video-state video-state-bridge ${device.ping === "Reachable" ? "video-state-good" : ""}`}>Network: {device.ping ?? "Status pending"}</span>
+          <span className={`video-state video-state-bridge ${bridgeStreamStatus(device) === "Live" ? "video-state-live" : ""}`}>Stream Status: {bridgeStreamStatus(device)}</span>
+        </> : <span className={`video-state ${device.ping === "Reachable" ? "video-state-good" : ""}`}>{device.type === "converter" ? "Silex USB" : device.ping ?? "Status pending"}</span>}
+        {device.converterControlsId && <BmdVolumeMenu departmentId={departmentId} siteId={site.id} converterId={device.converterControlsId} csrfToken={csrfToken} canControl={capabilities.canManageEncoders} />}
+        <div className="video-device-actions">
+          {capabilities.canOperateStreaming && (device.id === "shelly" || device.type === "shelly") && <button type="button" className="video-small-button" disabled={busy || device.ping !== "Reachable"} onClick={() => { if (window.confirm(`Power-cycle equipment at ${site.name}? Streaming may be interrupted.`)) void send("restart-site", { site_id: site.id, confirmed: true }, `Power cycle requested for ${site.name}.`); }}><RefreshCw size={13} /> Cycle site power</button>}
+        </div>
+        {device.error && <small className="video-error-text">{device.error}</small>}
+      </article>)}
     </section>;
   }
 

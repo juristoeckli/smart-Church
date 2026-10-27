@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test:datasets": "node --experimental-strip-types scripts/test-datasets.mjs"
+    "test:datasets": "node --experimental-strip-types scripts/test-datasets.mjs",
+    "test:converter": "node --env-file-if-exists=../../.env src/modules/video-steffisburg/scripts/test-bmd-converter.mjs"
   },
   "dependencies": {
     "@smart-church/contracts": "workspace:*",

@@ -2,3 +2,50 @@ services:
   db:
     ports:
       - "127.0.0.1:5432:5432"
+
+  api:
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /workspace/apps/api
+    command: ["node", "--import", "tsx", "--watch", "src/server.ts"]
+    environment:
+      NODE_ENV: development
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATABASE_URL: "postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}"
+      SMART_CHURCH_WEB_ORIGIN: http://localhost:5173
+      SMART_CHURCH_TRUST_PROXY: ""
+      PYTHON_BINARY: python3
+    volumes:
+      - ./apps/api/src:/workspace/apps/api/src
+      - ./apps/api/migrations:/workspace/apps/api/migrations
+      - ./packages/contracts/src:/workspace/packages/contracts/src
+    ports:
+      - "127.0.0.1:${SMART_CHURCH_API_DEV_HOST_PORT:-3001}:3001"
+
+  web:
+    pull_policy: build
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    working_dir: /workspace/apps/web
+    command: ["pnpm", "dev", "--host", "0.0.0.0"]
+    environment:
+      VITE_API_PROXY_TARGET: http://api:3001
+    volumes:
+      - ./apps/web/src:/workspace/apps/web/src
+      - ./apps/web/public:/workspace/apps/web/public
+      - ./apps/web/index.html:/workspace/apps/web/index.html
+      - ./apps/web/vite.config.ts:/workspace/apps/web/vite.config.ts
+    ports: !override
+      - "127.0.0.1:${SMART_CHURCH_WEB_DEV_HOST_PORT:-5173}:5173"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5173/').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

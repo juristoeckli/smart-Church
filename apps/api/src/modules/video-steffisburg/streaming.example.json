@@ -14,8 +14,12 @@
         { "id": "encoder-1", "name": "Encoder 1", "ip": "", "port": 9977, "destination_name": "Streaming platform" }
       ],
       "devices": [
+        { "id": "streaming-bridge", "name": "ATEM Streaming Bridge", "type": "streamingbridge", "ip": "", "port": 1935, "status_port": 9977 },
         { "id": "videohub", "name": "Videohub", "type": "videohub", "ip": "", "port": 9990 },
-        { "id": "shelly", "name": "Power relay", "type": "shelly", "ip": "" }
+        { "id": "shelly", "name": "Power relay", "type": "shelly", "ip": "" },
+        { "id": "silex", "name": "Silex DS-700", "type": "network-device", "ip": "" },
+        { "id": "mini-converter-sdi-to-audio", "name": "BMD SDI to Audio", "type": "converter", "ip": "" },
+        { "id": "mini-converter-audio-to-sdi", "name": "BMD Audio to SDI", "type": "converter", "ip": "" }
       ]
     }
   ]

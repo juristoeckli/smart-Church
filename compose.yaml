@@ -18,10 +18,8 @@ services:
       - smart-church-private
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: api
+    image: ghcr.io/juristoeckli/smart-church-api:${SMART_CHURCH_VERSION:-latest}
+    pull_policy: always
     restart: unless-stopped
     init: true
     environment:
@@ -36,7 +34,6 @@ services:
       PRESENTER_DATASETS_DIR: /var/lib/smart-church/presenter-datasets
       PRESENTER_MEDIA_DIR: /var/lib/smart-church/presenter-media
       SMART_CHURCH_SYNC_ENCRYPTION_KEY: ${SMART_CHURCH_SYNC_ENCRYPTION_KEY:-}
-      STREAMING_CONFIG_FILE: ${SMART_CHURCH_STREAMING_CONFIG_FILE:-}
       STREAMING_STATE_DIR: /var/lib/smart-church/video-state
       SYSTEM_LAPTOP_JSON_SECRET_KEY: ${SYSTEM_LAPTOP_JSON_SECRET_KEY:-}
       SYSTEM_LAPTOP_RDP_HOST: ${SYSTEM_LAPTOP_RDP_HOST:-}
@@ -44,14 +41,13 @@ services:
       SYSTEM_LAPTOP_RDP_USERNAME: ${SYSTEM_LAPTOP_RDP_USERNAME:-}
       SYSTEM_LAPTOP_RDP_PASSWORD: ${SYSTEM_LAPTOP_RDP_PASSWORD:-}
       SYSTEM_LAPTOP_GUACAMOLE_API_URL: http://system-laptop-guacamole:8080/guacamole
+      BMD_CONVERTER_DS700_HOST: ${BMD_CONVERTER_DS700_HOST:-}
+      BMD_CONVERTER_DS700_PORT: ${BMD_CONVERTER_DS700_PORT:-19540}
+      BMD_CONVERTER_CLIENT_MAC: ${BMD_CONVERTER_CLIENT_MAC:-}
     ports:
       - "${SMART_CHURCH_API_BIND_ADDRESS:-127.0.0.1}:${SMART_CHURCH_API_HOST_PORT:-3001}:3001"
     volumes:
       - smart-church-data:/var/lib/smart-church
-      - type: bind
-        source: ${SMART_CHURCH_STREAMING_CONFIG_PATH:-./config/streaming.example.json}
-        target: /run/secrets/streaming.json
-        read_only: true
     depends_on:
       db:
         condition: service_healthy
@@ -65,10 +61,8 @@ services:
       - smart-church-private
 
   web:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: web
+    image: ghcr.io/juristoeckli/smart-church-web:${SMART_CHURCH_VERSION:-latest}
+    pull_policy: always
     restart: unless-stopped
     ports:
       - "${SMART_CHURCH_WEB_BIND_ADDRESS:-127.0.0.1}:${SMART_CHURCH_WEB_HOST_PORT:-8080}:8080"
@@ -84,19 +78,19 @@ services:
     networks:
       - smart-church-private
 
-  nginx:
-    image: nginx:1.28-alpine
+  caddy:
+    image: caddy:2-alpine
     profiles: ["bundled-proxy"]
     restart: unless-stopped
     environment:
-      NGINX_ENVSUBST_FILTER: ^SMART_CHURCH_DOMAIN$
       SMART_CHURCH_DOMAIN: ${SMART_CHURCH_DOMAIN:-church.example.org}
     ports:
       - "${SMART_CHURCH_HTTPS_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_HTTP_PORT:-80}:80"
       - "${SMART_CHURCH_HTTPS_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_HTTPS_PORT:-443}:443"
     volumes:
-      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
-      - ./deploy/certs:/etc/nginx/certs:ro
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - smart-church-caddy-data:/data
+      - smart-church-caddy-config:/config
     depends_on:
       api:
         condition: service_healthy
@@ -104,11 +98,13 @@ services:
         condition: service_healthy
     networks:
       smart-church-private:
-        ipv4_address: ${SMART_CHURCH_NGINX_IP:-172.30.250.2}
+        ipv4_address: ${SMART_CHURCH_PROXY_IP:-${SMART_CHURCH_NGINX_IP:-172.30.250.2}}
 
 volumes:
   smart-church-postgres:
   smart-church-data:
+  smart-church-caddy-data:
+  smart-church-caddy-config:
 
 networks:
   smart-church-private:
