@@ -17,9 +17,9 @@ if [[ -z "$script_root" || ! -f "$script_root/.env" ]]; then
     choice="$(dialog --title "Smart-Church Manager" --menu "Smart-Church is not installed yet" 10 72 2 install "Install Smart-Church" exit "Exit" 3>&1 1>&2 2>&3)" || exit 0
   else
     echo "Smart-Church is not installed yet."
-    select choice in install exit </dev/tty >/dev/tty; do
+    select choice in install exit; do
       [[ -n "${choice:-}" ]] && break
-    done
+    done </dev/tty >/dev/tty
   fi
   [[ "$choice" == install ]] || exit 0
   if [[ -n "$script_root" ]]; then
@@ -107,9 +107,9 @@ select_update_branch() {
       cancel "Return to manager" 3>&1 1>&2 2>&3)" || return 1
   else
     echo "Current image: ${current_version:-latest}" >/dev/tty
-    select branch in main beta dev cancel </dev/tty >/dev/tty; do
+    select branch in main beta dev cancel; do
       [[ -n "${branch:-}" ]] && break
-    done
+    done </dev/tty >/dev/tty
   fi
   printf '%s' "$branch"
 }
@@ -173,10 +173,10 @@ choose_action() {
     echo >/dev/tty
     echo "Smart-Church Manager" >/dev/tty
     echo "Install whiptail or dialog for a graphical terminal menu." >/dev/tty
-    select action in health network branch force status start stop restart logs backup restore update uninstall exit </dev/tty >/dev/tty; do
+    select action in health network branch force status start stop restart logs backup restore update uninstall exit; do
       [[ -n "${action:-}" ]] && break
       echo "Choose a number from the menu." >/dev/tty
-    done
+    done </dev/tty >/dev/tty
   fi
   printf '%s' "$action"
 }
