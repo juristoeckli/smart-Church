@@ -1,0 +1,12 @@
+{$SMART_CHURCH_DOMAIN} {
+	tls internal
+	encode zstd gzip
+
+	handle /api/* {
+		reverse_proxy api:3001
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}
