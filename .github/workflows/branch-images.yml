@@ -1,0 +1,56 @@
+name: Publish branch container images
+
+on:
+  push:
+    branches:
+      - main
+      - beta
+      - dev
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: branch-images-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish API branch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: api
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/smart-church-api:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/smart-church-api:${{ github.ref_name }}
+          cache-from: type=gha,scope=api-branch-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=api-branch-${{ github.ref_name }}
+
+      - name: Publish web branch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: web
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/smart-church-web:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/smart-church-web:${{ github.ref_name }}
+          cache-from: type=gha,scope=web-branch-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=web-branch-${{ github.ref_name }}

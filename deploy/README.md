@@ -26,7 +26,7 @@ curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download
 
 The uninstaller asks you to type `DELETE /opt/smart-church` before it removes anything. It removes all containers belonging to that Smart-Church Compose project; other containers on the server and Docker images stay untouched. To uninstall from a custom directory, pass `SMART_CHURCH_INSTALL_DIR` through `sudo`, for example: `curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo env SMART_CHURCH_INSTALL_DIR=/srv/smart-church bash`.
 
-After installation, open a graphical terminal manager with `sudo bash ./deploy/manage.sh`. It uses `whiptail` or `dialog` when installed and otherwise provides a numbered terminal menu. Use it to check health, configure listening ports and host interface, start or stop services, follow logs, create or restore backups, update, or uninstall. The manager calls the same deployment scripts used by direct command-line operations.
+After installation, open a graphical terminal manager with `sudo ./deploy/manage.sh`. It uses `whiptail` or `dialog` when installed and otherwise provides a numbered terminal menu. Use it to check health, configure listening ports and host interface, select `main`, `beta`, or `dev`, and update to that branch's latest commit. The manager resolves the full commit SHA, checks that both images are published, and backs up before updating to that exact SHA. The selected branch is saved so **Force update** can pull its newest commit later, without publishing a release. If the branch build is still running, retry after it finishes. Branch builds may contain unfinished changes. The separate release update option continues to accept a release version such as `1.2.3` or `latest`. The manager also starts and stops services, follows logs, creates or restores backups, and uninstalls Smart-Church.
 
 The bundled proxy uses a fixed private-network IP. Docker assigns other containers addresses from a separate IP range so they cannot take the proxy address.
 
@@ -79,13 +79,13 @@ The private config remains beside the module and is ignored by Git. System Lapto
 Create a consistent backup of PostgreSQL and the persistent application-data volume:
 
 ```sh
-bash deploy/backup.sh
+./deploy/backup.sh
 ```
 
 Backups are written to `backups/` with restrictive permissions. They include the database and persistent application-data volume. Module-specific config files such as the Steffisburg Video device config and `.env` are stored beside the deployment and must be copied separately into protected, encrypted recovery storage. Encrypt backups before copying them off the server and store the decryption key separately. Restore replaces the live database and all persistent application files; the command requires typing `RESTORE`:
 
 ```sh
-bash deploy/restore.sh /absolute/path/to/backups/20261027T120000Z
+./deploy/restore.sh /absolute/path/to/backups/20261027T120000Z
 ```
 
 Practice restore on a separate server before relying on a backup. Include a copy of `.env` in a separately protected recovery location; it contains secrets required to run the restored service.
@@ -95,13 +95,13 @@ Practice restore on a separate server before relying on a backup. Include a copy
 Update to the latest release:
 
 ```sh
-bash deploy/update.sh
+./deploy/update.sh
 ```
 
 Pin a specific release:
 
 ```sh
-bash deploy/update.sh 1.2.3
+./deploy/update.sh 1.2.3
 ```
 
 The updater first creates a database and file backup, then pulls the image and starts the selected version. Database migrations may make a release incompatible with older code; if an update fails, restore the full pre-update backup and return `.env` to the previous `SMART_CHURCH_VERSION`.
