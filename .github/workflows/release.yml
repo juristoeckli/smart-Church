@@ -1,0 +1,102 @@
+name: Publish Smart-Church release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.25.0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check TypeScript
+        run: pnpm typecheck
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: api-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/smart-church-api
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: api
+          push: true
+          tags: ${{ steps.api-meta.outputs.tags }}
+          labels: ${{ steps.api-meta.outputs.labels }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - id: web-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/smart-church-web
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: web
+          push: true
+          tags: ${{ steps.web-meta.outputs.tags }}
+          labels: ${{ steps.web-meta.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      - name: Assemble self-hosted deployment package
+        shell: bash
+        run: |
+          mkdir -p release-package/deploy release-package/apps/api/src/modules/video-steffisburg
+          cp compose.yaml .env.production.example release-package/
+          cp deploy/README.md deploy/Caddyfile deploy/install.sh deploy/backup.sh deploy/restore.sh deploy/update.sh deploy/nginx-central-example.conf release-package/deploy/
+          cp apps/api/src/modules/video-steffisburg/compose.yaml apps/api/src/modules/video-steffisburg/streaming.example.json release-package/apps/api/src/modules/video-steffisburg/
+          tar -czf smart-church-deploy.tar.gz -C release-package .
+
+      - name: Create GitHub release and upload installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --prerelease
+            else
+              gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes
+            fi
+          fi
+          gh release upload "$GITHUB_REF_NAME" deploy/install.sh smart-church-deploy.tar.gz --clobber

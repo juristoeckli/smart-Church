@@ -1,0 +1,26 @@
+{
+  "poll_interval_seconds": 5,
+  "timeout_seconds": 2,
+  "routing_presets": { "max_presets": 20 },
+  "routing_history": { "merge_window_minutes": 5 },
+  "unifi": { "api_key": "", "sdwan_config_ids": [], "poll_interval_seconds": 60 },
+  "sites": [
+    {
+      "id": "testlocation01-video",
+      "department_id": "00000000-0000-4000-8000-000000000001",
+      "name": "Testlocation01",
+      "router_ip": "",
+      "encoders": [
+        { "id": "encoder-1", "name": "Encoder 1", "ip": "", "port": 9977, "destination_name": "Streaming platform" }
+      ],
+      "devices": [
+        { "id": "streaming-bridge", "name": "ATEM Streaming Bridge", "type": "streamingbridge", "ip": "", "port": 1935, "status_port": 9977 },
+        { "id": "videohub", "name": "Videohub", "type": "videohub", "ip": "", "port": 9990 },
+        { "id": "shelly", "name": "Power relay", "type": "shelly", "ip": "" },
+        { "id": "silex", "name": "Silex DS-700", "type": "network-device", "ip": "" },
+        { "id": "mini-converter-sdi-to-audio", "name": "BMD SDI to Audio", "type": "converter", "ip": "" },
+        { "id": "mini-converter-audio-to-sdi", "name": "BMD Audio to SDI", "type": "converter", "ip": "" }
+      ]
+    }
+  ]
+}

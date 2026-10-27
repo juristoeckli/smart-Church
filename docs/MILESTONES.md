@@ -1,17 +1,17 @@
 # Delivery plan
 
-Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC locations/logo, local sign-in, explicit location memberships, and initial server-enforced access checks are in place. Fine-grained permissions, worker management and remaining Milestone 1 modules are still outstanding.
+Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC locations/logo, local sign-in, explicit location memberships, and server-enforced access checks are in place. Core location rights cover private people details and management of people, events, groups, and bookable resources. File Storage manages its own access rights and shared files; the Notifications module provides an in-app inbox, location announcements and event reminders. Worker management, full account lifecycle, email delivery/templates and remaining Milestone 1 modules are still outstanding.
 
 ## Milestone 1 — foundation
 
-Agreed scope: Core, departments, local login, permissions, worker management, required Notifications/System Management modules and one example module.
+Agreed scope: Core, departments, local login, permissions, worker management, required Notifications, System Management and File Storage modules, and one example module.
 
 - [x] [M1: Set up TypeScript workspace and shared contracts](https://github.com/juristoeckli/smart-Church/issues/1)
 - [ ] [M1: Implement installation setup and location isolation](https://github.com/juristoeckli/smart-Church/issues/2) — first Server Administrator setup, location switching, explicit memberships and API location checks are in place; worker-backed example records and end-to-end isolation verification remain outstanding.
-- [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3) — local users can be assigned to locations as members or site administrators; coarse role checks are in place, with granular permissions and complete account lifecycle work still outstanding.
+- [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3) — local users can be assigned to locations as members or site administrators; core location rights are enforced by the API, while account lifecycle work and permissions for remaining capabilities are still outstanding.
 - [ ] [M1: Implement module SDK and worker supervision](https://github.com/juristoeckli/smart-Church/issues/4)
 - [ ] [M1: Build shared React shell and example module](https://github.com/juristoeckli/smart-Church/issues/5)
-- [ ] [M1: Add required Notifications module](https://github.com/juristoeckli/smart-Church/issues/6)
+- [ ] [M1: Add required Notifications module](https://github.com/juristoeckli/smart-Church/issues/6) — the in-app inbox, site-admin announcements, read state and one-day event reminders are in place; email delivery/templates remain outstanding.
 - [ ] [M1: Add required System Management module](https://github.com/juristoeckli/smart-Church/issues/7)
 - [ ] [M1: Verify end-to-end isolation and failure recovery](https://github.com/juristoeckli/smart-Church/issues/8)
 
@@ -23,7 +23,7 @@ Completion: a browser user can log in, select an authorised department, edit an 
 
 1. Desktop and offline: Electron shell, SQLite adapters, profile modes, last-confirmed permissions, offline editing/conflicts, module-specific incompatible-reset flow and selected local workers.
 2. Identity and sharing: remote installation signing/trust, home-server authentication, explicit central administration grants, cross-server department navigation, library sharing and readonly replicas; push login approval and password recovery.
-3. Files and retention: shared storage APIs, per-module browsers, resumable 2 GB uploads/quotas, separate licensed datasets, offline downloads, History/trash.
+3. Files and retention: larger and resumable uploads, quotas, separate licensed datasets, offline downloads, History/trash.
 4. Operations: Backup selectable Application/Storage/Database, recovery tool, managed PostgreSQL/external option, optional Nginx, resource limits and managed GitHub Release updates.
 5. Optional interfaces/modules: Kiosk, actual device-control modules and Android wrapper.
 

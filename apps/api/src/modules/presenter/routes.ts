@@ -5,6 +5,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { datasetArchive, deleteDataset, installDatasetArchive, installLibraryPicture, installPresentationDataset, listDatasets, readDataset, readDatasetAsset, readDatasetHtmlAsset } from "./datasets.js";
 import { deletePresenterMedia, installPresenterMedia, listPresenterMedia, readPresenterMedia } from "./media.js";
 import { readPowerPointSlides } from "./pptx-import.js";
+import type { ModuleServerContext } from "../module-sdk.js";
 
 const presenterSessions = [
   { id: "main", name: "Main" },
@@ -15,15 +16,7 @@ const presenterMediaUploadLimit = 1024 * 1024 * 1024;
 const aktuellAssetVersion = "20261025-layout-6";
 const outputTokenHash = (token: string) => createHash("sha256").update(token).digest("hex");
 
-interface PresenterRouteDependencies {
-  pool: Pool | null;
-  isDatabaseReady: () => boolean;
-  getDefaultDepartmentId: () => string;
-  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean, allowQueryLocation?: boolean) => Promise<string | null>;
-  validateMutation: (request: FastifyRequest, reply: FastifyReply) => boolean;
-}
-
-export function registerPresenterRoutes(app: FastifyInstance, dependencies: PresenterRouteDependencies) {
+export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, getDefaultDepartmentId, resolveDepartmentId, validateMutation } = dependencies;
   type OutputClient = { response: ServerResponse; token: string; revision: number; close: () => void };
   const outputClients = new Map<string, Set<OutputClient>>();
@@ -72,7 +65,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
       const selectedId = await resolveDepartmentId(request, reply, false, allowQueryLocation);
       if (!selectedId) return null;
       const result = await pool.query(
-        `SELECT d.enabled_modules, m.role, m.presenter_permissions
+        `SELECT d.enabled_modules, m.role, m.presenter_permissions, m.module_permissions
            FROM departments d
            JOIN department_memberships m ON m.department_id = d.id
           WHERE d.id = $1 AND m.user_id = $2`,
@@ -83,7 +76,7 @@ export function registerPresenterRoutes(app: FastifyInstance, dependencies: Pres
         reply.code(404).send({ error: "Presenter is not enabled for this location." });
         return null;
       }
-      const permissions = new Set<string>(access.presenter_permissions ?? []);
+      const permissions = new Set<string>(access.module_permissions?.presenter ?? access.presenter_permissions ?? []);
       const isAdmin = access.role === "site_admin" || permissions.has("admin");
       if (!isAdmin && permissions.size === 0) {
         reply.code(403).send({ error: "Presenter access is required." });

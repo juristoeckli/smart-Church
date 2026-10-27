@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Building2, CalendarDays, ContactRound, FolderOpen, UsersRound } from "lucide-react";
-import type { BookableResource, ChurchGroup, Contact, ServiceEvent, StoredFile } from "@smart-church/contracts";
+import { ArrowRight, Building2, CalendarDays, ContactRound, UsersRound } from "lucide-react";
+import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
 
-type OverviewPage = "People" | "Services & events" | "Groups" | "Resources" | "File storage";
+type OverviewPage = "People" | "Services & events" | "Groups" | "Resources";
 
 export function Overview({ departmentId, departmentLocation, timeZone, contacts, onNavigate }: {
   departmentId: string;
@@ -14,7 +14,6 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [resources, setResources] = useState<BookableResource[]>([]);
-  const [files, setFiles] = useState<StoredFile[]>([]);
   const [error, setError] = useState("");
   const today = new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date());
 
@@ -25,15 +24,13 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
       fetch("/api/events", { headers, signal: controller.signal }),
       fetch("/api/groups", { headers, signal: controller.signal }),
       fetch("/api/resources", { headers, signal: controller.signal }),
-      fetch("/api/files", { headers, signal: controller.signal }),
-    ]).then(async ([eventResponse, groupResponse, resourceResponse, fileResponse]) => {
-      const [eventData, groupData, resourceData, fileData] = await Promise.all([eventResponse.json(), groupResponse.json(), resourceResponse.json(), fileResponse.json()]);
-      const failed = [eventResponse, groupResponse, resourceResponse, fileResponse].find((response) => !response.ok);
+    ]).then(async ([eventResponse, groupResponse, resourceResponse]) => {
+      const [eventData, groupData, resourceData] = await Promise.all([eventResponse.json(), groupResponse.json(), resourceResponse.json()]);
+      const failed = [eventResponse, groupResponse, resourceResponse].find((response) => !response.ok);
       if (failed) throw new Error("Some overview information could not be loaded.");
       setEvents(eventData as ServiceEvent[]);
       setGroups(groupData as ChurchGroup[]);
       setResources(resourceData as BookableResource[]);
-      setFiles(fileData as StoredFile[]);
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load overview."); });
     return () => controller.abort();
   }, [departmentId]);
@@ -45,7 +42,6 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
     { label: "Upcoming events", value: events.filter((event) => event.eventDate >= today).length, detail: "On the church calendar", icon: CalendarDays, page: "Services & events" as const },
     { label: "Groups", value: groups.length, detail: `${groups.reduce((count, group) => count + group.memberCount, 0)} group memberships`, icon: ContactRound, page: "Groups" as const },
     { label: "Resources", value: resources.filter((resource) => resource.active).length, detail: "Rooms, vehicles, and equipment", icon: Building2, page: "Resources" as const },
-    { label: "File storage", value: files.length, detail: "Shared files and documents", icon: FolderOpen, page: "File storage" as const },
   ];
 
   return <>

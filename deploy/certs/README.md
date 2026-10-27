@@ -1,0 +1,1 @@
+The bundled Caddy proxy stores HTTPS certificates in its persistent Docker volume and renews them automatically. This directory is retained for deployments that use an external proxy with administrator-managed certificates.

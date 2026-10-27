@@ -1,0 +1,6 @@
+{
+  "id": "presenter",
+  "name": "Presenter",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts"
+}

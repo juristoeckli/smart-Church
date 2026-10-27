@@ -1,0 +1,7 @@
+{
+  "id": "chat",
+  "name": "Chat",
+  "version": "0.1.0",
+  "description": "Location-scoped conversations for church members.",
+  "serverEntry": "./routes.ts"
+}

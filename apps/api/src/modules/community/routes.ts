@@ -1,27 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Pool } from "pg";
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
-import type { BookableResource, ChurchGroup, ResourceBooking, StoredFile } from "@smart-church/contracts";
+import type { BookableResource, ChurchGroup, LocationPermission, ResourceBooking } from "@smart-church/contracts";
+import type { ModuleServerContext } from "../module-sdk.js";
 
-const resourceLimit = 25 * 1024 * 1024;
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
-
-interface CommunityRouteDependencies {
-  pool: Pool | null;
-  isDatabaseReady: () => boolean;
-  resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean) => Promise<string | null>;
-}
-
-type ResourceRow = {
-  id: string;
-  title: string;
-  category: string;
-  file_name: string;
-  content_type: string;
-  file_size: number;
-  created_at: Date | string;
-};
 
 type BookableResourceRow = {
   id: string; name: string; category: BookableResource["category"]; description: string; location: string;
@@ -32,10 +14,6 @@ type BookingRow = {
   id: string; resource_id: string; resource_name: string; requested_by: string; requester_name: string;
   purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
 };
-
-function mapResource(row: ResourceRow): StoredFile {
-  return { id: row.id, title: row.title, category: row.category, fileName: row.file_name, contentType: row.content_type, fileSize: row.file_size, createdAt: new Date(row.created_at).toISOString() };
-}
 
 function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; created_at: Date | string; source_system?: string | null }): ChurchGroup {
   return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], createdAt: new Date(row.created_at).toISOString(), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
@@ -49,17 +27,15 @@ function mapBooking(row: BookingRow): ResourceBooking {
   return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, createdAt: new Date(row.created_at).toISOString() };
 }
 
-export function registerCommunityRoutes(app: FastifyInstance, dependencies: CommunityRouteDependencies) {
+export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = dependencies;
   app.register(async (routes) => {
-    routes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: resourceLimit }, (_request, body, done) => done(null, body));
-
-    async function department(request: FastifyRequest, reply: FastifyReply, manage = false) {
+    async function department(request: FastifyRequest, reply: FastifyReply, permission?: LocationPermission) {
       if (!isDatabaseReady() || !pool) {
         reply.code(503).send({ error: "The community database is unavailable." });
         return null;
       }
-      return resolveDepartmentId(request, reply, manage);
+      return resolveDepartmentId(request, reply, false, false, permission);
     }
 
     routes.get("/api/groups", async (request, reply) => {
@@ -79,7 +55,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
     routes.post<{ Body: { name: string; description?: string } }>("/api/groups", { schema: {
       body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } },
     } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const name = request.body.name.trim();
       const description = request.body.description?.trim() ?? "";
@@ -101,7 +77,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } },
     } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
@@ -128,7 +104,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       body: { type: "object", additionalProperties: false, required: ["contactIds"], properties: { contactIds: { type: "array", maxItems: 2000, uniqueItems: true, items: { type: "string", format: "uuid" } } } },
     } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const client = await pool!.connect();
       try {
@@ -151,7 +127,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
     });
 
     routes.delete<{ Params: { id: string } }>("/api/groups/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
@@ -172,7 +148,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
       if (!departmentId) return reply;
       const result = await pool!.query<BookableResourceRow>(
         `SELECT id, name, category, description, location, capacity, requires_approval, active, source_system
-           FROM bookable_resources WHERE department_id = $1 ${request.activeDepartmentRole === "site_admin" ? "" : "AND active = true"}
+           FROM bookable_resources WHERE department_id = $1 ${request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage") ? "" : "AND active = true"}
           ORDER BY active DESC, category, lower(name)`,
         [departmentId],
       );
@@ -180,7 +156,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
     });
 
     routes.post<{ Body: { name: string; category: BookableResource["category"]; description?: string; location?: string; capacity?: number; requiresApproval: boolean; active: boolean } }>("/api/resources", { schema: { body: bookableResourceBodySchema } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "resources_manage");
       if (!departmentId) return reply;
       const name = request.body.name.trim();
       if (!name) return reply.code(400).send({ error: "Enter a resource name." });
@@ -201,7 +177,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
     routes.put<{ Params: { id: string }; Body: { name: string; category: BookableResource["category"]; description?: string; location?: string; capacity?: number; requiresApproval: boolean; active: boolean } }>("/api/resources/:id", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: bookableResourceBodySchema,
     } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "resources_manage");
       if (!departmentId) return reply;
       const existing = await pool!.query("SELECT source_system FROM bookable_resources WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Resource not found." });
@@ -223,7 +199,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
     });
 
     routes.delete<{ Params: { id: string } }>("/api/resources/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
+      const departmentId = await department(request, reply, "resources_manage");
       if (!departmentId) return reply;
       const existing = await pool!.query("SELECT source_system FROM bookable_resources WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Resource not found." });
@@ -289,7 +265,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
     } }, async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      const isAdmin = request.activeDepartmentRole === "site_admin";
+      const isAdmin = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
@@ -301,7 +277,7 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
           if (booking.status === "cancelled" || booking.status === "declined") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This booking is already closed." }); }
         } else if (!isAdmin || booking.status !== "requested") {
           await client.query("ROLLBACK");
-          return reply.code(403).send({ error: "Only a site administrator can approve or decline a pending request." });
+          return reply.code(403).send({ error: "Resource management permission is required to approve or decline a pending request." });
         }
         if (request.body.status === "approved") {
           await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [departmentId, booking.resource_id]);
@@ -321,73 +297,6 @@ export function registerCommunityRoutes(app: FastifyInstance, dependencies: Comm
       } finally { client.release(); }
     });
 
-    routes.get("/api/files", async (request, reply) => {
-      const departmentId = await department(request, reply);
-      if (!departmentId) return reply;
-      const result = await pool!.query<ResourceRow>(
-        `SELECT id, title, category, file_name, content_type, file_size, created_at FROM stored_files
-          WHERE department_id = $1 ORDER BY lower(category), lower(title), created_at DESC`,
-        [departmentId],
-      );
-      return result.rows.map(mapResource);
-    });
 
-    routes.post<{ Body: Buffer; Querystring: { title?: string; category?: string; filename?: string } }>("/api/files", { bodyLimit: resourceLimit, schema: {
-      querystring: { type: "object", properties: { title: { type: "string", maxLength: 160 }, category: { type: "string", maxLength: 80 }, filename: { type: "string", maxLength: 255 } } },
-    } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
-      if (!departmentId) return reply;
-      if (!Buffer.isBuffer(request.body) || request.body.length < 1) return reply.code(400).send({ error: "Choose a file to upload." });
-      if (request.body.length > resourceLimit) return reply.code(413).send({ error: "Resources must be 25 MiB or smaller." });
-      const fileName = basename(request.query.filename || "resource").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 255) || "resource";
-      const title = (request.query.title?.trim() || fileName).slice(0, 160);
-      const category = (request.query.category?.trim() || "General").slice(0, 80);
-      const requestedType = request.headers["x-resource-content-type"];
-      const contentType = typeof requestedType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(requestedType) ? requestedType.slice(0, 120) : "application/octet-stream";
-      const result = await pool!.query<ResourceRow>(
-        `INSERT INTO stored_files (id, department_id, title, category, file_name, content_type, file_size, file_data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         RETURNING id, title, category, file_name, content_type, file_size, created_at`,
-        [randomUUID(), departmentId, title, category, fileName, contentType, request.body.length, request.body],
-      );
-      return reply.code(201).send(mapResource(result.rows[0]));
-    });
-
-    routes.put<{ Params: { id: string }; Body: { title: string; category: string } }>("/api/files/:id", { schema: {
-      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["title", "category"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", minLength: 1, maxLength: 80 } } },
-    } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
-      if (!departmentId) return reply;
-      const title = request.body.title.trim();
-      const category = request.body.category.trim();
-      if (!title || !category) return reply.code(400).send({ error: "Title and category are required." });
-      const result = await pool!.query<ResourceRow>(
-        `UPDATE stored_files SET title = $3, category = $4, updated_at = now()
-          WHERE id = $1 AND department_id = $2
-          RETURNING id, title, category, file_name, content_type, file_size, created_at`,
-        [request.params.id, departmentId, title, category],
-      );
-      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
-      return mapResource(result.rows[0]);
-    });
-
-    routes.get<{ Params: { id: string } }>("/api/files/:id/download", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
-      const departmentId = await department(request, reply);
-      if (!departmentId) return reply;
-      const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2", [request.params.id, departmentId]);
-      const resource = result.rows[0];
-      if (!resource) return reply.code(404).send({ error: "Resource not found." });
-      reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
-      return resource.file_data as Buffer;
-    });
-
-    routes.delete<{ Params: { id: string } }>("/api/files/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
-      const departmentId = await department(request, reply, true);
-      if (!departmentId) return reply;
-      const result = await pool!.query("DELETE FROM stored_files WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
-      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
-      return { deleted: true };
-    });
   });
 }

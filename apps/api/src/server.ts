@@ -1,30 +1,41 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
-import { closeDatabase, departmentId, initializeDatabase, pool } from "./database.js";
-import { VideoWorkerSupervisor } from "./modules/video/worker-supervisor.js";
-import { registerPresenterRoutes } from "./modules/presenter/routes.js";
-import { registerCommunityRoutes } from "./modules/community/routes.js";
-import { registerChurchToolsSyncRoutes } from "./modules/churchtools-sync/routes.js";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LocationPermission, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
+import { closeDatabase, departmentId, departmentName, initializeDatabase, pool } from "./database.js";
+import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
+import { registerServerModules } from "./modules/module-sdk.js";
 
-const app = Fastify({ logger: true, bodyLimit: 3 * 1024 * 1024 });
+const trustedProxyAddresses = process.env.SMART_CHURCH_TRUST_PROXY?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
+const app = Fastify({
+  logger: {
+    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken"],
+  },
+  bodyLimit: 3 * 1024 * 1024,
+  disableRequestLogging: true,
+  trustProxy: trustedProxyAddresses.length ? trustedProxyAddresses : false,
+});
 let databaseReady = false;
 let firstRunSetupCode: string | null = null;
 const sessionCookieName = "smart_church_session";
 const sessionLifetimeSeconds = 24 * 60 * 60;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
+const maxFailedLoginBuckets = 10_000;
 let videoWorker: VideoWorkerSupervisor | null = null;
 
 declare module "fastify" {
   interface FastifyRequest {
     authenticatedUser: AuthenticatedUser | null;
     activeDepartmentRole: "site_admin" | "member" | null;
+    activeDepartmentPermissions: LocationPermission[] | null;
+    activeDepartmentModulePermissions: Record<string, string[]> | null;
   }
 }
 
 app.decorateRequest("authenticatedUser", null);
 app.decorateRequest("activeDepartmentRole", null);
+app.decorateRequest("activeDepartmentPermissions", null);
+app.decorateRequest("activeDepartmentModulePermissions", null);
 
 function cookieValue(cookieHeader: string | undefined, name: string) {
   return cookieHeader?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -97,7 +108,7 @@ function setupCodeMatches(candidate: string) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, requireSiteAdmin = false, allowQueryLocation = false) {
+async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, requireSiteAdmin = false, allowQueryLocation = false, requiredPermission?: LocationPermission) {
   if (!pool) return null;
   const header = request.headers["x-department-id"];
   const queryLocation = allowQueryLocation && request.query && typeof request.query === "object"
@@ -109,7 +120,7 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
     return null;
   }
   const result = await pool.query(
-    `SELECT m.role
+    `SELECT m.role, m.permissions, m.module_permissions
        FROM department_memberships m
        JOIN departments d ON d.id = m.department_id
       WHERE m.department_id = $1 AND m.user_id = $2`,
@@ -120,42 +131,14 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
     return null;
   }
   request.activeDepartmentRole = result.rows[0].role;
+  request.activeDepartmentPermissions = result.rows[0].permissions ?? [];
+  request.activeDepartmentModulePermissions = result.rows[0].module_permissions ?? {};
   if (requireSiteAdmin && request.activeDepartmentRole !== "site_admin") {
     reply.code(403).send({ error: "Site administrator access is required for this action." });
     return null;
   }
-  return selectedId;
-}
-
-async function activeVideoDepartment(request: FastifyRequest, reply: FastifyReply, permission: "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin" = "video_basic") {
-  if (!databaseReady || !pool) {
-    reply.code(503).send({ error: "The account database is unavailable." });
-    return null;
-  }
-  const selectedId = await activeDepartmentId(request, reply);
-  if (!selectedId) return null;
-  const result = await pool.query(
-    `SELECT d.enabled_modules, m.role, m.video_permissions
-       FROM departments d
-       JOIN department_memberships m ON m.department_id = d.id
-      WHERE d.id = $1 AND m.user_id = $2`,
-    [selectedId, request.authenticatedUser?.id],
-  );
-  const access = result.rows[0];
-  if (!access?.enabled_modules?.includes("video")) {
-    reply.code(404).send({ error: "The Video module is not enabled for this site." });
-    return null;
-  }
-  const grants = new Set<string>(access.video_permissions ?? []);
-  const hasGrant = permission === "video_basic"
-    ? grants.size > 0
-    : permission === "streaming_operator"
-      ? grants.has("streaming_operator") || grants.has("stream_admin")
-      : permission === "routing_user"
-        ? grants.has("routing_user") || grants.has("routing_admin")
-        : grants.has(permission);
-  if (access.role !== "site_admin" && !hasGrant) {
-    reply.code(403).send({ error: "Video module access is required." });
+  if (requiredPermission && request.activeDepartmentRole !== "site_admin" && !(request.activeDepartmentPermissions ?? []).includes(requiredPermission)) {
+    reply.code(403).send({ error: "You do not have permission to manage this area." });
     return null;
   }
   return selectedId;
@@ -177,8 +160,8 @@ async function createSession(userId: string, reply: { header: (name: string, val
   setSessionCookie(reply, token);
 }
 
-function videoCsrfToken(sessionToken: string) {
-  return createHmac("sha256", sessionToken).update("smart-church-video-csrf").digest("base64url");
+function moduleCsrfToken(sessionToken: string) {
+  return createHmac("sha256", sessionToken).update("smart-church-module-csrf").digest("base64url");
 }
 
 function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
@@ -186,7 +169,7 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
   const csrfHeader = request.headers["x-csrf-token"];
   const originHeader = request.headers.origin;
   if (!sessionToken || !csrfHeader || !originHeader || Array.isArray(csrfHeader)) {
-    reply.code(403).send({ error: "The video request could not be verified. Refresh the page and try again." });
+    reply.code(403).send({ error: "The module request could not be verified. Refresh the page and try again." });
     return false;
   }
   let origin: URL;
@@ -195,21 +178,45 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
     origin = new URL(originHeader);
     requestHost = new URL(`http://${request.headers.host}`);
   } catch {
-    reply.code(403).send({ error: "The video request origin is not valid." });
+    reply.code(403).send({ error: "The module request origin is not valid." });
     return false;
   }
   const allowedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN
     ? origin.origin === process.env.SMART_CHURCH_WEB_ORIGIN
     : origin.hostname === requestHost.hostname && origin.protocol === "http:" &&
       new Set([requestHost.port, "5173"]).has(origin.port);
-  const expected = Buffer.from(videoCsrfToken(sessionToken));
+  const expected = Buffer.from(moduleCsrfToken(sessionToken));
   const actual = Buffer.from(csrfHeader);
   if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-    reply.code(403).send({ error: "The video request origin or session token is not valid." });
+    reply.code(403).send({ error: "The module request origin or session token is not valid." });
     return false;
   }
   return true;
 }
+
+app.addHook("onRequest", async (request, reply) => {
+  if (process.env.NODE_ENV === "production" && request.url !== "/api/health" && request.protocol !== "https") {
+    return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
+  }
+  const method = request.method.toUpperCase();
+  if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method)) return;
+  if (process.env.NODE_ENV === "production") {
+    const expectedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN;
+    const requestOrigin = request.headers.origin;
+    if (!expectedOrigin || !requestOrigin || requestOrigin !== expectedOrigin) {
+      return reply.code(403).send({ error: "This request origin is not allowed." });
+    }
+  }
+});
+
+app.addHook("onSend", async (_request, reply, payload) => {
+  reply.header("X-Content-Type-Options", "nosniff");
+  reply.header("X-Frame-Options", "DENY");
+  reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  if (process.env.NODE_ENV === "production") reply.header("Strict-Transport-Security", "max-age=31536000");
+  return payload;
+});
 
 app.addHook("preHandler", async (request, reply) => {
   if (request.url === "/api/health" || request.url.startsWith("/api/auth/")) return;
@@ -220,24 +227,6 @@ app.addHook("preHandler", async (request, reply) => {
   request.authenticatedUser = user;
   reply.header("Cache-Control", "no-store");
   if (user.mustChangePassword) return reply.code(403).send({ error: "Change your password before continuing." });
-});
-
-registerPresenterRoutes(app, {
-  pool: pool ?? null,
-  isDatabaseReady: () => databaseReady,
-  getDefaultDepartmentId: () => departmentId,
-  resolveDepartmentId: activeDepartmentId,
-  validateMutation: validModuleMutation,
-});
-registerCommunityRoutes(app, {
-  pool: pool ?? null,
-  isDatabaseReady: () => databaseReady,
-  resolveDepartmentId: activeDepartmentId,
-});
-registerChurchToolsSyncRoutes(app, {
-  pool: pool ?? null,
-  isDatabaseReady: () => databaseReady,
-  resolveDepartmentId: activeDepartmentId,
 });
 
 type ServiceEventRow = {
@@ -332,7 +321,8 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
-    ...(user ? { csrfToken: videoCsrfToken(cookieValue(request.headers.cookie, sessionCookieName)!) } : {}),
+    ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
+    ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieName)!) } : {}),
     ...(user ? { user } : {}),
   };
 });
@@ -349,7 +339,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
-        password: { type: "string", minLength: 6, maxLength: 128 },
+        password: { type: "string", minLength: 12, maxLength: 128 },
       },
     },
   },
@@ -377,7 +367,18 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
       return reply.code(409).send({ error: "The initial server administrator has already been created." });
     }
     const department = await client.query(
-      "UPDATE departments SET name = $2, updated_at = now() WHERE id = $1",
+      `UPDATE departments
+          SET name = $2,
+              enabled_modules = CASE
+                WHEN lower(trim($2)) = 'steffisburg' THEN
+                  CASE WHEN 'video-steffisburg' = ANY(enabled_modules)
+                    THEN array_remove(enabled_modules, 'video')
+                    ELSE array_append(array_remove(enabled_modules, 'video'), 'video-steffisburg')
+                  END
+                ELSE array_remove(array_remove(enabled_modules, 'video'), 'video-steffisburg')
+              END,
+              updated_at = now()
+        WHERE id = $1`,
       [departmentId, location],
     );
     if (!department.rowCount) throw new Error("The configured department could not be found.");
@@ -421,22 +422,32 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
   reply.header("Cache-Control", "no-store");
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const now = Date.now();
-  const attempts = failedLogins.get(request.ip);
-  if (attempts && attempts.resetAt > now && attempts.count >= 5) {
+  const identifier = request.body.identifier.trim().toLocaleLowerCase("en-US");
+  const buckets = [request.ip, `${request.ip}:${createHash("sha256").update(identifier).digest("hex")}`];
+  const attempts = buckets.map((key) => failedLogins.get(key));
+  if (attempts.some((entry) => entry && entry.resetAt > now && entry.count >= 5)) {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
     "SELECT id, email, username, display_name, password_hash, role FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
-    [request.body.identifier.trim().toLocaleLowerCase("en-US")],
+    [identifier],
   );
   const row = result.rows[0];
   const passwordMatches = verifyPassword(request.body.password, row?.password_hash ?? dummyPasswordHash);
   if (!row || !passwordMatches) {
-    const current = attempts && attempts.resetAt > now ? attempts : { count: 0, resetAt: now + 15 * 60_000 };
-    failedLogins.set(request.ip, { count: current.count + 1, resetAt: current.resetAt });
+    for (let index = 0; index < buckets.length; index += 1) {
+      const key = buckets[index]!;
+      const current = attempts[index] && attempts[index]!.resetAt > now ? attempts[index]! : { count: 0, resetAt: now + 15 * 60_000 };
+      failedLogins.set(key, { count: current.count + 1, resetAt: current.resetAt });
+    }
+    if (failedLogins.size > maxFailedLoginBuckets) {
+      for (const [key, entry] of failedLogins) {
+        if (entry.resetAt <= now || failedLogins.size > maxFailedLoginBuckets) failedLogins.delete(key);
+      }
+    }
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
-  failedLogins.delete(request.ip);
+  for (const key of buckets) failedLogins.delete(key);
   const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password };
   await createSession(user.id, reply);
   return { user };
@@ -452,7 +463,7 @@ app.post("/api/auth/logout", async (request, reply) => {
 
 app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   schema: {
-    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 6, maxLength: 128 } } },
+    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 12, maxLength: 128 } } },
   },
 }, async (request, reply): Promise<{ user: AuthenticatedUser } | { error: string }> => {
   reply.header("Cache-Control", "no-store");
@@ -465,7 +476,137 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   );
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
+  await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
+  await createSession(user.id, reply);
   return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false } };
+});
+
+const modulePermissionsSchema = { type: "object", maxProperties: 100, propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,63}$" }, additionalProperties: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 80 } } };
+
+const locationAccessBodySchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["role", "permissions", "modulePermissions"],
+  properties: {
+    role: { type: "string", enum: ["site_admin", "member"] },
+    permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } },
+    modulePermissions: modulePermissionsSchema,
+  },
+};
+
+app.get("/api/location-access", async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  if (!selectedDepartmentId) return reply;
+  const [location, members, availableUsers] = await Promise.all([
+    pool.query("SELECT name FROM departments WHERE id = $1", [selectedDepartmentId]),
+    pool.query(
+      `SELECT u.id, u.display_name, u.username, m.role, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
+         FROM department_memberships m JOIN app_users u ON u.id = m.user_id
+        WHERE m.department_id = $1 ORDER BY lower(u.display_name), lower(u.username)`,
+      [selectedDepartmentId],
+    ),
+    pool.query(
+      `SELECT u.id, u.display_name, u.username FROM app_users u
+        WHERE NOT EXISTS (SELECT 1 FROM department_memberships m WHERE m.department_id = $1 AND m.user_id = u.id)
+        ORDER BY lower(u.display_name), lower(u.username)`,
+      [selectedDepartmentId],
+    ),
+  ]);
+  return {
+    location: location.rows[0]?.name ?? "Location",
+    currentUserId: request.authenticatedUser!.id,
+    members: members.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username, role: row.role, permissions: row.permissions ?? [], modulePermissions: { ...(row.module_permissions ?? {}), "video-steffisburg": row.module_permissions?.["video-steffisburg"] ?? row.module_permissions?.video ?? row.video_permissions ?? [], presenter: row.module_permissions?.presenter ?? row.presenter_permissions ?? [] } })),
+    availableUsers: availableUsers.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username })),
+  };
+});
+
+app.put<{ Params: { userId: string }; Body: { role: "site_admin" | "member"; permissions: LocationPermission[]; modulePermissions: Record<string, string[]> } }>("/api/location-access/:userId", {
+  schema: {
+    params: { type: "object", required: ["userId"], properties: { userId: { type: "string", format: "uuid" } } },
+    body: locationAccessBodySchema,
+  },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!validModuleMutation(request, reply)) return reply;
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  if (!selectedDepartmentId) return reply;
+  if (request.params.userId === request.authenticatedUser!.id && request.body.role !== "site_admin") {
+    return reply.code(400).send({ error: "You cannot remove your own site administrator access." });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(1196571730, 4)");
+    await client.query("SELECT id FROM departments WHERE id = $1 FOR UPDATE", [selectedDepartmentId]);
+    const target = await client.query("SELECT id FROM app_users WHERE id = $1", [request.params.userId]);
+    if (!target.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This account could not be found on this server." });
+    }
+    const current = await client.query("SELECT role FROM department_memberships WHERE department_id = $1 AND user_id = $2 FOR UPDATE", [selectedDepartmentId, request.params.userId]);
+    if (current.rows[0]?.role === "site_admin" && request.body.role !== "site_admin") {
+      const administrators = await client.query("SELECT count(*)::int AS total FROM department_memberships WHERE department_id = $1 AND role = 'site_admin'", [selectedDepartmentId]);
+      if (administrators.rows[0].total <= 1) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Keep at least one site administrator for this location." });
+      }
+    }
+    const permissions = request.body.role === "site_admin" ? [] : request.body.permissions;
+    const modulePermissions = request.body.role === "site_admin" ? {} : request.body.modulePermissions;
+    const videoPermissions = modulePermissions["video-steffisburg"] ?? modulePermissions.video ?? [];
+    const presenterPermissions = modulePermissions.presenter ?? [];
+    await client.query(
+      `INSERT INTO department_memberships (user_id, department_id, role, permissions, video_permissions, presenter_permissions, module_permissions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (user_id, department_id) DO UPDATE
+         SET role = EXCLUDED.role, permissions = EXCLUDED.permissions,
+             video_permissions = EXCLUDED.video_permissions, presenter_permissions = EXCLUDED.presenter_permissions,
+             module_permissions = EXCLUDED.module_permissions`,
+      [request.params.userId, selectedDepartmentId, request.body.role, permissions, videoPermissions, presenterPermissions, JSON.stringify(modulePermissions)],
+    );
+    await client.query("COMMIT");
+    const user = await pool.query("SELECT id, display_name, username FROM app_users WHERE id = $1", [request.params.userId]);
+    if (!user.rows[0]) return reply.code(404).send({ error: "This account could not be found on this server." });
+    return { member: { id: user.rows[0].id, displayName: user.rows[0].display_name, username: user.rows[0].username, role: request.body.role, permissions, modulePermissions } };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
+});
+
+app.delete<{ Params: { userId: string } }>("/api/location-access/:userId", {
+  schema: { params: { type: "object", required: ["userId"], properties: { userId: { type: "string", format: "uuid" } } } },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!validModuleMutation(request, reply)) return reply;
+  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  if (!selectedDepartmentId) return reply;
+  if (request.params.userId === request.authenticatedUser!.id) return reply.code(400).send({ error: "Ask another site administrator to remove your location access." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(1196571730, 4)");
+    await client.query("SELECT id FROM departments WHERE id = $1 FOR UPDATE", [selectedDepartmentId]);
+    const member = await client.query("SELECT role FROM department_memberships WHERE department_id = $1 AND user_id = $2 FOR UPDATE", [selectedDepartmentId, request.params.userId]);
+    if (!member.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This user does not have access to this location." });
+    }
+    if (member.rows[0].role === "site_admin") {
+      const administrators = await client.query("SELECT count(*)::int AS total FROM department_memberships WHERE department_id = $1 AND role = 'site_admin'", [selectedDepartmentId]);
+      if (administrators.rows[0].total <= 1) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Keep at least one site administrator for this location." });
+      }
+    }
+    await client.query("DELETE FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, request.params.userId]);
+    await client.query("COMMIT");
+    return { id: request.params.userId };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally { client.release(); }
 });
 
 app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: string }> => {
@@ -478,7 +619,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
             phones.phone_numbers, relations.relationships
        FROM app_users u
        LEFT JOIN LATERAL (
-         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role, 'contactId', m.contact_id, 'videoPermissions', m.video_permissions, 'presenterPermissions', m.presenter_permissions)), '[]'::json) AS memberships
+         SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role, 'contactId', m.contact_id, 'permissions', m.permissions, 'videoPermissions', m.video_permissions, 'presenterPermissions', m.presenter_permissions, 'modulePermissions', m.module_permissions)), '[]'::json) AS memberships
            FROM department_memberships m WHERE m.user_id = u.id
        ) memberships ON true
        LEFT JOIN LATERAL (
@@ -605,11 +746,11 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         city: { type: "string", maxLength: 100 },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
-        password: { type: "string", minLength: 6, maxLength: 128 },
+        password: { type: "string", minLength: 12, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         memberships: {
           type: "array", maxItems: 100,
-          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } },
+          items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
         },
       },
     },
@@ -655,9 +796,14 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         const person = await client.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2", [membership.contactId, membership.departmentId]);
         if (!person.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The linked person must belong to the selected site." }); }
       }
+      const modulePermissions = membership.role === "site_admin" ? {} : {
+        ...(membership.modulePermissions ?? {}),
+        "video-steffisburg": membership.videoPermissions ?? membership.modulePermissions?.["video-steffisburg"] ?? membership.modulePermissions?.video ?? [],
+        presenter: membership.presenterPermissions ?? membership.modulePermissions?.presenter ?? [],
+      };
       await client.query(
-        "INSERT INTO department_memberships (user_id, department_id, role, contact_id, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5, $6)",
-        [id, membership.departmentId, membership.role, membership.contactId ?? null, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
+        "INSERT INTO department_memberships (user_id, department_id, role, contact_id, permissions, video_permissions, presenter_permissions, module_permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        [id, membership.departmentId, membership.role, membership.contactId ?? null, membership.permissions ?? [], membership.videoPermissions ?? [], membership.presenterPermissions ?? [], JSON.stringify(modulePermissions)],
       );
     }
     await insertUserPhoneNumbers(client, id, phoneNumbers);
@@ -695,7 +841,21 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         city: { type: "string", maxLength: 100 },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
-        memberships: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } } } } },
+        memberships: {
+          type: "array", maxItems: 100,
+          items: {
+            type: "object", additionalProperties: false, required: ["departmentId", "role"],
+            properties: {
+              departmentId: { type: "string", format: "uuid" },
+              role: { type: "string", enum: ["site_admin", "member"] },
+              contactId: { type: "string", format: "uuid" },
+              permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } },
+              videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } },
+              presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } },
+              modulePermissions: modulePermissionsSchema,
+            },
+          },
+        },
       },
     },
   },
@@ -736,6 +896,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
+    const previousModulePermissions = await client.query("SELECT department_id, module_permissions FROM department_memberships WHERE user_id = $1", [request.params.id]);
+    const modulePermissionsByDepartment = new Map(previousModulePermissions.rows.map((membership) => [membership.department_id, membership.module_permissions ?? {}]));
     await client.query("DELETE FROM department_memberships WHERE user_id = $1", [request.params.id]);
     await client.query("DELETE FROM user_phone_numbers WHERE user_id = $1", [request.params.id]);
     await insertUserPhoneNumbers(client, request.params.id, phoneNumbers);
@@ -749,9 +911,15 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         const person = await client.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2", [membership.contactId, membership.departmentId]);
         if (!person.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The linked person must belong to the selected site." }); }
       }
+      const preservedModulePermissions = membership.modulePermissions ?? modulePermissionsByDepartment.get(membership.departmentId) ?? {};
+      const modulePermissions = membership.role === "site_admin" ? {} : {
+        ...preservedModulePermissions,
+        "video-steffisburg": membership.videoPermissions ?? preservedModulePermissions["video-steffisburg"] ?? preservedModulePermissions.video ?? [],
+        presenter: membership.presenterPermissions ?? preservedModulePermissions.presenter ?? [],
+      };
       await client.query(
-        "INSERT INTO department_memberships (user_id, department_id, role, contact_id, video_permissions, presenter_permissions) VALUES ($1, $2, $3, $4, $5, $6)",
-        [request.params.id, membership.departmentId, membership.role, membership.contactId ?? null, membership.videoPermissions ?? [], membership.presenterPermissions ?? []],
+        "INSERT INTO department_memberships (user_id, department_id, role, contact_id, permissions, video_permissions, presenter_permissions, module_permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        [request.params.id, membership.departmentId, membership.role, membership.contactId ?? null, membership.permissions ?? [], membership.videoPermissions ?? [], membership.presenterPermissions ?? [], JSON.stringify(modulePermissions)],
       );
     }
     await client.query("COMMIT");
@@ -808,7 +976,7 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
 app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword: boolean } }>("/api/users/:id/reset-password", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["password", "mustChangePassword"], properties: { password: { type: "string", minLength: 6, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
+    body: { type: "object", additionalProperties: false, required: ["password", "mustChangePassword"], properties: { password: { type: "string", minLength: 12, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
   },
 }, async (request, reply): Promise<{ id: string; mustChangePassword: boolean } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
@@ -838,24 +1006,24 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
   if (request.authenticatedUser?.role === "server_admin") {
     const result = await pool.query(
-      `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, COALESCE(m.video_permissions, '{}'::TEXT[]) AS video_permissions, COALESCE(m.presenter_permissions, '{}'::TEXT[]) AS presenter_permissions
+      `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, COALESCE(m.permissions, '{}'::TEXT[]) AS permissions, COALESCE(m.video_permissions, '{}'::TEXT[]) AS video_permissions, COALESCE(m.presenter_permissions, '{}'::TEXT[]) AS presenter_permissions, COALESCE(m.module_permissions, '{}'::JSONB) AS module_permissions
          FROM departments d
          LEFT JOIN department_memberships m
            ON m.department_id = d.id AND m.user_id = $1
         ORDER BY d.name`,
       [request.authenticatedUser.id],
     );
-    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions }));
+    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions }));
   }
   const result = await pool.query(
-    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, m.video_permissions, m.presenter_permissions
+    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
        FROM department_memberships m
        JOIN departments d ON d.id = m.department_id
       WHERE m.user_id = $1
       ORDER BY d.name`,
     [request.authenticatedUser?.id],
   );
-  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions }));
+  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
 app.post<{ Body: CreateDepartment }>("/api/departments", {
@@ -909,7 +1077,7 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
   const selectedDepartmentId = await activeDepartmentId(request, reply);
   if (!selectedDepartmentId) return reply;
   const result = await pool.query(
-    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.video_permissions, m.presenter_permissions
+    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
        FROM departments d
        JOIN department_memberships m ON m.department_id = d.id
       WHERE d.id = $1 AND m.user_id = $2`,
@@ -917,7 +1085,7 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole!, enabledModules: row.enabled_modules, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole!, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
 });
 
 app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
@@ -1031,8 +1199,8 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     id: row.id,
     firstName: row.first_name,
     lastName: row.last_name,
-    ...(request.activeDepartmentRole === "site_admin" && row.email ? { email: row.email } : {}),
-    ...(request.activeDepartmentRole === "site_admin" && row.phone ? { phone: row.phone } : {}),
+    ...((request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage")) && row.email ? { email: row.email } : {}),
+    ...((request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage")) && row.phone ? { phone: row.phone } : {}),
     status: row.status,
     ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
   }));
@@ -1057,7 +1225,7 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "people_manage");
   if (!selectedDepartmentId) return reply;
 
   const firstName = request.body.firstName.trim();
@@ -1104,7 +1272,7 @@ app.post<{ Body: { contacts: CreateContact[] } }>("/api/contacts/import", {
   },
 }, async (request, reply): Promise<Contact[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "people_manage");
   if (!selectedDepartmentId) return reply;
   const client = await pool.connect();
   const contacts: Contact[] = [];
@@ -1145,7 +1313,7 @@ app.put<{ Params: { id: string }; Body: CreateContact }>("/api/contacts/:id", {
   },
 }, async (request, reply): Promise<Contact | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "people_manage");
   if (!selectedDepartmentId) return reply;
 
   const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
@@ -1168,7 +1336,7 @@ app.delete<{ Params: { id: string } }>("/api/contacts/:id", {
   schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
 }, async (request, reply): Promise<{ deleted: true } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "people_manage");
   if (!selectedDepartmentId) return reply;
 
   const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
@@ -1203,7 +1371,7 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
   const event = {
     ...request.body,
@@ -1237,7 +1405,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
@@ -1274,7 +1442,7 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
-  const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
@@ -1284,91 +1452,29 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   return { id: result.rows[0].id };
 });
 
-const videoPostOperations = new Set(["command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets"]);
-const videoBodySchema = {
-  type: "object",
-  additionalProperties: true,
-  maxProperties: 24,
-};
-
-app.get("/api/video/status", async (request, reply) => {
-  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const selectedDepartmentId = await activeVideoDepartment(request, reply);
-  if (!selectedDepartmentId) return reply;
-  const worker = videoWorker?.state ?? { state: "starting", error: null };
-  if (!videoWorker || worker.state === "unconfigured") {
-    return { available: false, worker, message: "Configure the private video settings file and map its sites to location IDs." };
-  }
-  try {
-    const status = await videoWorker.request("status", {}, selectedDepartmentId, request.authenticatedUser!.username, 8_000);
-    return { available: true, worker: videoWorker.state, status };
-  } catch (error) {
-    const failure = error as Error & { code?: string };
-    if (failure.code === "UNAVAILABLE") return reply.code(503).send({ available: false, worker: videoWorker.state, error: failure.message });
-    return reply.code(502).send({ available: false, worker: videoWorker.state, error: failure.message });
-  }
-});
-
-app.get<{ Querystring: { device?: string; site_id?: string } }>("/api/video/history", {
-  schema: { querystring: { type: "object", additionalProperties: false, required: ["device"], properties: { device: { type: "string", minLength: 1, maxLength: 80 }, site_id: { type: "string", minLength: 1, maxLength: 80 } } } },
-}, async (request, reply) => {
-  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  const selectedDepartmentId = await activeVideoDepartment(request, reply);
-  if (!selectedDepartmentId) return reply;
-  if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
-  try {
-    const events = await videoWorker.request("videohub-history", { device: request.query.device, ...(request.query.site_id ? { site_id: request.query.site_id } : {}) }, selectedDepartmentId, request.authenticatedUser!.username, 8_000);
-    return events;
-  } catch (error) {
-    const failure = error as Error & { code?: string };
-    return reply.code(failure.code === "UNAVAILABLE" ? 503 : 502).send({ error: failure.message });
-  }
-});
-
-app.post<{ Params: { operation: string }; Body: Record<string, unknown> }>("/api/video/:operation", {
-  bodyLimit: 600_000,
-  schema: {
-    params: { type: "object", additionalProperties: false, required: ["operation"], properties: { operation: { type: "string", enum: [...videoPostOperations] } } },
-    body: videoBodySchema,
-  },
-}, async (request, reply) => {
-  if (!videoPostOperations.has(request.params.operation)) return reply.code(404).send({ error: "Video operation is unavailable." });
-  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!validModuleMutation(request, reply)) return reply;
-  const operation = request.params.operation;
-  const subOperation = typeof request.body.operation === "string" ? request.body.operation : "";
-  const requiredPermission = operation === "command" || operation === "restart-site"
-    ? "streaming_operator"
-    : operation === "encoder-settings"
-      ? ["read", "read-preset", "xml-preview", "xml-target"].includes(subOperation) ? "video_basic" : "stream_admin"
-      : operation === "videohub-route"
-        ? "routing_user"
-        : operation === "videohub-presets"
-          ? ["lock", "rename", "delete"].includes(subOperation) ? "routing_admin" : ["save", "import", "recall"].includes(subOperation) ? "routing_user" : "video_basic"
-          : "video_basic";
-  const selectedDepartmentId = await activeVideoDepartment(request, reply, requiredPermission);
-  if (!selectedDepartmentId) return reply;
-  if (!videoWorker) return reply.code(503).send({ error: "The video worker is not configured." });
-  const { site: _site, actor: _actor, department_id: _departmentId, ...data } = request.body;
-  try {
-    return await videoWorker.request(request.params.operation, data, selectedDepartmentId, request.authenticatedUser!.username, 35_000);
-  } catch (error) {
-    const failure = error as Error & { code?: string };
-    const status = failure.code === "UNAVAILABLE" ? 503 : failure.code === "TIMEOUT" ? 504 : failure.code === "BUSY" ? 429 : 400;
-    return reply.code(status).send({ error: failure.message });
-  }
-});
-
 app.addHook("onClose", async () => {
   await videoWorker?.close();
   await closeDatabase();
 });
 
 const port = Number(process.env.PORT ?? 3001);
+const host = process.env.HOST ?? "127.0.0.1";
 
 try {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("Department memberships and permission checks are still in local development; production mode is disabled until they are complete.");
+    if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL must be set in production.");
+    let publicOrigin: URL;
+    try { publicOrigin = new URL(process.env.SMART_CHURCH_WEB_ORIGIN ?? ""); }
+    catch { throw new Error("Set SMART_CHURCH_WEB_ORIGIN to the public HTTPS origin (for example, https://church.example.org)."); }
+    if (publicOrigin.protocol !== "https:" || publicOrigin.origin !== process.env.SMART_CHURCH_WEB_ORIGIN || publicOrigin.pathname !== "/") {
+      throw new Error("Set SMART_CHURCH_WEB_ORIGIN to the public HTTPS origin (for example, https://church.example.org).");
+    }
+    if (!trustedProxyAddresses.length) {
+      throw new Error("Set SMART_CHURCH_TRUST_PROXY to the address or CIDR of the trusted reverse proxy.");
+    }
+    if (host === "127.0.0.1" || host === "localhost") {
+      throw new Error("Set HOST to the private container-network interface (usually 0.0.0.0) in production.");
+    }
   }
   try {
     databaseReady = await initializeDatabase();
@@ -1381,10 +1487,22 @@ try {
       }
     }
   } catch (error) {
+    if (process.env.NODE_ENV === "production") throw error;
     app.log.error({ err: error }, "Database unavailable; department data will not be saved.");
   }
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
-  await app.listen({ host: "127.0.0.1", port });
+  await registerServerModules(app, {
+    pool: pool ?? null,
+    isDatabaseReady: () => databaseReady,
+    getDefaultDepartmentId: () => departmentId,
+    resolveDepartmentId: activeDepartmentId,
+    validateMutation: validModuleMutation,
+    getVideoWorker: () => videoWorker,
+  });
+  await app.listen({ host, port });
+  const shutdown = () => { void app.close().catch((error) => { app.log.error({ err: error }, "Server shutdown failed."); process.exitCode = 1; }); };
+  process.once("SIGTERM", shutdown);
+  process.once("SIGINT", shutdown);
   videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE));
   videoWorker.start();
 } catch (error) {

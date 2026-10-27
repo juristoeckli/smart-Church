@@ -1,12 +1,11 @@
 services:
   db:
     image: postgres:18.6-alpine3.24
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
-      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
-    ports:
-      - "127.0.0.1:5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in the deployment .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the deployment .env}
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in the deployment .env}
     volumes:
       - smart-church-postgres:/var/lib/postgresql
     healthcheck:
@@ -14,6 +13,101 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 10s
+    networks:
+      - smart-church-private
+
+  api:
+    image: ghcr.io/juristoeckli/smart-church-api:${SMART_CHURCH_VERSION:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3001
+      DATABASE_URL: ${SMART_CHURCH_DATABASE_URL:-}
+      SMART_CHURCH_WEB_ORIGIN: ${SMART_CHURCH_WEB_ORIGIN:-}
+      SMART_CHURCH_TRUST_PROXY: ${SMART_CHURCH_TRUST_PROXY:-}
+      SMART_CHURCH_DEPARTMENT_ID: ${SMART_CHURCH_DEPARTMENT_ID:-00000000-0000-4000-8000-000000000001}
+      SMART_CHURCH_DEPARTMENT_NAME: ${SMART_CHURCH_DEPARTMENT_NAME:-Location not configured}
+      PRESENTER_DATASETS_DIR: /var/lib/smart-church/presenter-datasets
+      PRESENTER_MEDIA_DIR: /var/lib/smart-church/presenter-media
+      SMART_CHURCH_SYNC_ENCRYPTION_KEY: ${SMART_CHURCH_SYNC_ENCRYPTION_KEY:-}
+      STREAMING_STATE_DIR: /var/lib/smart-church/video-state
+      SYSTEM_LAPTOP_JSON_SECRET_KEY: ${SYSTEM_LAPTOP_JSON_SECRET_KEY:-}
+      SYSTEM_LAPTOP_RDP_HOST: ${SYSTEM_LAPTOP_RDP_HOST:-}
+      SYSTEM_LAPTOP_RDP_PORT: ${SYSTEM_LAPTOP_RDP_PORT:-3389}
+      SYSTEM_LAPTOP_RDP_USERNAME: ${SYSTEM_LAPTOP_RDP_USERNAME:-}
+      SYSTEM_LAPTOP_RDP_PASSWORD: ${SYSTEM_LAPTOP_RDP_PASSWORD:-}
+      SYSTEM_LAPTOP_GUACAMOLE_API_URL: http://system-laptop-guacamole:8080/guacamole
+      BMD_CONVERTER_DS700_HOST: ${BMD_CONVERTER_DS700_HOST:-}
+      BMD_CONVERTER_DS700_PORT: ${BMD_CONVERTER_DS700_PORT:-19540}
+      BMD_CONVERTER_CLIENT_MAC: ${BMD_CONVERTER_CLIENT_MAC:-}
+    ports:
+      - "${SMART_CHURCH_API_BIND_ADDRESS:-127.0.0.1}:${SMART_CHURCH_API_HOST_PORT:-3001}:3001"
+    volumes:
+      - smart-church-data:/var/lib/smart-church
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then(async r => { const j = await r.json(); if (!r.ok || j.status !== 'ok') process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - smart-church-private
+
+  web:
+    image: ghcr.io/juristoeckli/smart-church-web:${SMART_CHURCH_VERSION:-latest}
+    pull_policy: always
+    restart: unless-stopped
+    ports:
+      - "${SMART_CHURCH_WEB_BIND_ADDRESS:-127.0.0.1}:${SMART_CHURCH_WEB_HOST_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - smart-church-private
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["bundled-proxy"]
+    restart: unless-stopped
+    environment:
+      SMART_CHURCH_DOMAIN: ${SMART_CHURCH_DOMAIN:-church.example.org}
+    ports:
+      - "${SMART_CHURCH_HTTPS_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_HTTP_PORT:-80}:80"
+      - "${SMART_CHURCH_HTTPS_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - smart-church-caddy-data:/data
+      - smart-church-caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks:
+      smart-church-private:
+        ipv4_address: ${SMART_CHURCH_PROXY_IP:-${SMART_CHURCH_NGINX_IP:-172.30.250.2}}
 
 volumes:
   smart-church-postgres:
+  smart-church-data:
+  smart-church-caddy-data:
+  smart-church-caddy-config:
+
+networks:
+  smart-church-private:
+    ipam:
+      config:
+        - subnet: ${SMART_CHURCH_DOCKER_SUBNET:-172.30.250.0/24}
