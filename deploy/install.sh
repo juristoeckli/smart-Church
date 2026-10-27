@@ -39,17 +39,18 @@ root="$(pwd)"
 command -v docker >/dev/null || { echo "Install Docker Engine and the Docker Compose plugin, then retry." >&2; exit 1; }
 docker compose version >/dev/null || { echo "The Docker Compose plugin is required." >&2; exit 1; }
 command -v openssl >/dev/null || { echo "Install openssl, then retry." >&2; exit 1; }
+[[ -r /dev/tty ]] || { echo "Run this command from an interactive terminal so the installer can ask for your domain and location." >&2; exit 1; }
 [[ "$(uname -m)" == "x86_64" ]] || { echo "This release currently supports Linux x86_64 servers." >&2; exit 1; }
 [[ -f "$root/compose.yaml" && -f "$root/deploy/Caddyfile" ]] || { echo "Run this from a Smart-Church deployment package." >&2; exit 1; }
 [[ ! -e "$root/.env" ]] || { echo "A .env already exists at $root. Keep it and use deploy/update.sh instead." >&2; exit 1; }
 
-read -r -p "Public domain name (DNS must point here; ports 80/443 must be open): " domain
+read -r -p "Public domain name (DNS must point here; ports 80/443 must be open): " domain </dev/tty
 [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "Enter a public DNS name such as church.example.org." >&2; exit 1; }
-read -r -p "Church location name [My Church]: " location
+read -r -p "Church location name [My Church]: " location </dev/tty
 location="${location:-My Church}"
-read -r -p "Release version [${SMART_CHURCH_VERSION:-latest}]: " version
+read -r -p "Release version [${SMART_CHURCH_VERSION:-latest}]: " version </dev/tty
 version="${version:-${SMART_CHURCH_VERSION:-latest}}"
-[[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Use a release version such as 1.2.3 or latest." >&2; exit 1; }
+[[ "$version" == "latest" || "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || { echo "Use a semantic release version such as 1.2.3 or latest." >&2; exit 1; }
 version="${version#v}"
 
 db_password="$(openssl rand -hex 24)"

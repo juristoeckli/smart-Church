@@ -10,6 +10,14 @@ curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download
 
 The installer downloads the latest deployment package, asks for the public domain and church location name, generates database and sync secrets, creates a protected `.env`, pulls the published release images and starts the stack. Caddy obtains and renews the HTTPS certificate automatically. The installer prints the one-time setup code; open the URL it prints and use the code to create the first Server Administrator.
 
+To completely remove an installation, including its database, uploaded files, HTTPS certificates, backups, secrets, and configuration, run:
+
+```sh
+curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo bash
+```
+
+The uninstaller asks you to type `DELETE /opt/smart-church` before it removes anything. It removes all containers belonging to that Smart-Church Compose project; other containers on the server and Docker images stay untouched. To uninstall from a custom directory, pass `SMART_CHURCH_INSTALL_DIR` through `sudo`, for example: `curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo env SMART_CHURCH_INSTALL_DIR=/srv/smart-church bash`.
+
 Enter a version such as `1.2.3` when prompted to pin a particular release. Keep the generated `.env` private. The setup page pre-fills the location name entered by the installer. If the location name is exactly `Steffisburg`, the Steffisburg-specific Video module is enabled; other locations do not receive it.
 
 Requirements: a supported Linux host with Docker Engine, the Docker Compose plugin, `curl`, `tar`, and `openssl`. The installer checks these prerequisites but does not install Docker for you. The standalone Caddy profile needs ports 80 and 443 available and the public DNS record working before first startup.
