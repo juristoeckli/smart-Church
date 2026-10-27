@@ -97,18 +97,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
+          is_draft="false"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             is_draft="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)"
-            if [[ "$is_draft" != "true" ]]; then
-              echo "Release $GITHUB_REF_NAME is already published and immutable; publish a new version tag." >&2
-              exit 1
-            fi
           else
             if [[ "$GITHUB_REF_NAME" == *-* ]]; then
               gh release create "$GITHUB_REF_NAME" --title "V${GITHUB_REF_NAME#v}" --generate-notes --prerelease --draft
             else
               gh release create "$GITHUB_REF_NAME" --title "V${GITHUB_REF_NAME#v}" --generate-notes --draft
             fi
+            is_draft="true"
           fi
           gh release upload "$GITHUB_REF_NAME" deploy/install.sh deploy/manage.sh uninstall.sh smart-church-deploy.tar.gz --clobber
-          gh release edit "$GITHUB_REF_NAME" --draft=false
+          if [[ "$is_draft" == "true" ]]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          fi

@@ -28,6 +28,8 @@ The uninstaller asks you to type `DELETE /opt/smart-church` before it removes an
 
 After installation, open a graphical terminal manager with `sudo ./deploy/manage.sh`. It uses `whiptail` or `dialog` when installed and otherwise provides a numbered terminal menu. Use it to check health, configure listening ports and host interface, select `main`, `beta`, or `dev`, and update to that branch's latest commit. The manager resolves the full commit SHA, checks that both images are published, and backs up before updating to that exact SHA. The selected branch is saved so **Force update** can pull its newest commit later, without publishing a release. If the branch build is still running, retry after it finishes. Branch builds may contain unfinished changes. The separate release update option continues to accept a release version such as `1.2.3` or `latest`. The manager also starts and stops services, follows logs, creates or restores backups, and uninstalls Smart-Church.
 
+The bundled proxy uses a fixed private-network IP. Docker assigns other containers addresses from a separate IP range so they cannot take the proxy address.
+
 To completely remove an installation, including its database, uploaded files, HTTPS certificates, backups, secrets, and configuration, run:
 
 ```sh

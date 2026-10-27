@@ -113,3 +113,4 @@ networks:
     ipam:
       config:
         - subnet: ${SMART_CHURCH_DOCKER_SUBNET:-172.30.250.0/24}
+          ip_range: ${SMART_CHURCH_DOCKER_IP_RANGE:-172.30.250.64/26}
