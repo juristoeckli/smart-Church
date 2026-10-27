@@ -29,6 +29,8 @@ services:
       DATABASE_URL: ${SMART_CHURCH_DATABASE_URL:-}
       SMART_CHURCH_WEB_ORIGIN: ${SMART_CHURCH_WEB_ORIGIN:-}
       SMART_CHURCH_TRUST_PROXY: ${SMART_CHURCH_TRUST_PROXY:-}
+      SMART_CHURCH_DIRECT_HTTP: ${SMART_CHURCH_DIRECT_HTTP:-0}
+      SMART_CHURCH_DIRECT_HTTP_PORT: ${SMART_CHURCH_DIRECT_HTTP_PORT:-81}
       SMART_CHURCH_DEPARTMENT_ID: ${SMART_CHURCH_DEPARTMENT_ID:-00000000-0000-4000-8000-000000000001}
       SMART_CHURCH_DEPARTMENT_NAME: ${SMART_CHURCH_DEPARTMENT_NAME:-Location not configured}
       PRESENTER_DATASETS_DIR: /var/lib/smart-church/presenter-datasets
@@ -88,7 +90,7 @@ services:
       - "${SMART_CHURCH_HTTPS_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_HTTP_PORT:-80}:80"
       - "${SMART_CHURCH_HTTPS_BIND_ADDRESS:-0.0.0.0}:${SMART_CHURCH_HTTPS_PORT:-443}:443"
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${SMART_CHURCH_CADDYFILE:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
       - smart-church-caddy-data:/data
       - smart-church-caddy-config:/config
     depends_on:

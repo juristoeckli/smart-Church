@@ -42,6 +42,9 @@ read -r -p "Type DELETE $install_dir to continue: " confirmation </dev/tty
 
 cd "$install_dir"
 compose_files=(-f compose.yaml)
+if [[ -f "$install_dir/deploy/compose.direct.yaml" ]] && grep -q '^SMART_CHURCH_DIRECT_HTTP=1' .env 2>/dev/null; then
+  compose_files+=(-f deploy/compose.direct.yaml)
+fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env 2>/dev/null; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi

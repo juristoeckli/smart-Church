@@ -1,4 +1,8 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
+import { extname, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LocationPermission, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
@@ -7,6 +11,16 @@ import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-superv
 import { registerServerModules } from "./modules/module-sdk.js";
 
 const trustedProxyAddresses = process.env.SMART_CHURCH_TRUST_PROXY?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
+const directHttpMode = process.env.SMART_CHURCH_DIRECT_HTTP === "1";
+const directHttpPort = Number(process.env.SMART_CHURCH_DIRECT_HTTP_PORT ?? 81);
+const webRoot = resolve(fileURLToPath(new URL("../web-dist/", import.meta.url)));
+const webContentTypes = new Map([
+  [".css", "text/css; charset=utf-8"], [".html", "text/html; charset=utf-8"],
+  [".ico", "image/x-icon"], [".jpeg", "image/jpeg"], [".jpg", "image/jpeg"],
+  [".js", "text/javascript; charset=utf-8"], [".json", "application/json; charset=utf-8"],
+  [".png", "image/png"], [".svg", "image/svg+xml"], [".webp", "image/webp"],
+  [".woff", "font/woff"], [".woff2", "font/woff2"],
+]);
 const app = Fastify({
   logger: {
     redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken"],
@@ -80,12 +94,12 @@ function verifyPassword(password: string, encoded: string) {
 }
 
 function setSessionCookie(reply: { header: (name: string, value: string) => unknown }, token: string) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  const secure = process.env.NODE_ENV === "production" && !directHttpMode ? "; Secure" : "";
   reply.header("Set-Cookie", `${sessionCookieName}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${sessionLifetimeSeconds}${secure}`);
 }
 
 function clearSessionCookie(reply: { header: (name: string, value: string) => unknown }) {
-  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  const secure = process.env.NODE_ENV === "production" && !directHttpMode ? "; Secure" : "";
   reply.header("Set-Cookie", `${sessionCookieName}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0${secure}`);
 }
 
@@ -195,7 +209,7 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
 }
 
 app.addHook("onRequest", async (request, reply) => {
-  if (process.env.NODE_ENV === "production" && request.url !== "/api/health" && request.protocol !== "https") {
+  if (process.env.NODE_ENV === "production" && !directHttpMode && request.url !== "/api/health" && request.protocol !== "https") {
     return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
   }
   const method = request.method.toUpperCase();
@@ -214,7 +228,7 @@ app.addHook("onSend", async (_request, reply, payload) => {
   reply.header("X-Frame-Options", "DENY");
   reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
   reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
-  if (process.env.NODE_ENV === "production") reply.header("Strict-Transport-Security", "max-age=31536000");
+  if (process.env.NODE_ENV === "production" && !directHttpMode) reply.header("Strict-Transport-Security", "max-age=31536000");
   return payload;
 });
 
@@ -1465,11 +1479,16 @@ try {
     if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL must be set in production.");
     let publicOrigin: URL;
     try { publicOrigin = new URL(process.env.SMART_CHURCH_WEB_ORIGIN ?? ""); }
-    catch { throw new Error("Set SMART_CHURCH_WEB_ORIGIN to the public HTTPS origin (for example, https://church.example.org)."); }
-    if (publicOrigin.protocol !== "https:" || publicOrigin.origin !== process.env.SMART_CHURCH_WEB_ORIGIN || publicOrigin.pathname !== "/") {
-      throw new Error("Set SMART_CHURCH_WEB_ORIGIN to the public HTTPS origin (for example, https://church.example.org).");
+    catch { throw new Error("Set SMART_CHURCH_WEB_ORIGIN to the public Smart-Church origin."); }
+    const expectedProtocol = directHttpMode ? "http:" : "https:";
+    const originPort = publicOrigin.port || (publicOrigin.protocol === "http:" ? "80" : "443");
+    const validDirectPort = !directHttpMode || originPort === String(directHttpPort);
+    if (publicOrigin.protocol !== expectedProtocol || !validDirectPort || publicOrigin.origin !== process.env.SMART_CHURCH_WEB_ORIGIN || publicOrigin.pathname !== "/") {
+      throw new Error(directHttpMode
+        ? `Set SMART_CHURCH_WEB_ORIGIN to the direct HTTP origin, including port ${directHttpPort} (for example, http://church.example.org:${directHttpPort}).`
+        : "Set SMART_CHURCH_WEB_ORIGIN to the public HTTPS origin (for example, https://church.example.org).");
     }
-    if (!trustedProxyAddresses.length) {
+    if (!directHttpMode && !trustedProxyAddresses.length) {
       throw new Error("Set SMART_CHURCH_TRUST_PROXY to the address or CIDR of the trusted reverse proxy.");
     }
     if (host === "127.0.0.1" || host === "localhost") {
@@ -1498,6 +1517,29 @@ try {
     resolveDepartmentId: activeDepartmentId,
     validateMutation: validModuleMutation,
     getVideoWorker: () => videoWorker,
+  });
+  app.setNotFoundHandler(async (request, reply) => {
+    if ((request.method !== "GET" && request.method !== "HEAD") || request.url === "/api" || request.url.startsWith("/api/")) {
+      return reply.code(404).send({ error: "Not found." });
+    }
+    let pathname: string;
+    try { pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname); }
+    catch { return reply.code(400).send({ error: "Invalid path." }); }
+    const requested = resolve(webRoot, `.${pathname}`);
+    if (!requested.startsWith(`${webRoot}${sep}`) && requested !== webRoot) return reply.code(404).send({ error: "Not found." });
+    let target = requested;
+    try {
+      const details = await stat(target);
+      if (details.isDirectory()) target = resolve(target, "index.html");
+      await stat(target);
+    } catch {
+      if (extname(pathname)) return reply.code(404).send({ error: "Not found." });
+      target = resolve(webRoot, "index.html");
+    }
+    reply.type(webContentTypes.get(extname(target).toLowerCase()) ?? "application/octet-stream");
+    reply.header("Cache-Control", target.includes(`${sep}assets${sep}`) ? "public, max-age=31536000, immutable" : "no-cache");
+    if (request.method === "HEAD") return reply.code(200).send();
+    return reply.send(createReadStream(target));
   });
   await app.listen({ host, port });
   const shutdown = () => { void app.close().catch((error) => { app.log.error({ err: error }, "Server shutdown failed."); process.exitCode = 1; }); };

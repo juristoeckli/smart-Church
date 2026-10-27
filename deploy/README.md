@@ -8,7 +8,25 @@ The supported self-hosted path is Docker Engine with the Docker Compose plugin o
 curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/install.sh | sudo bash
 ```
 
-The installer downloads the latest deployment package, asks for the public domain and church location name, generates database and sync secrets, creates a protected `.env`, pulls the published release images and starts the stack. Caddy obtains and renews the HTTPS certificate automatically. The installer prints the one-time setup code; open the URL it prints and use the code to create the first Server Administrator.
+The interactive terminal manager can also start the installation:
+
+```sh
+curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/manage.sh | sudo bash
+```
+
+The installer downloads the latest deployment package, asks for the domain, church location name, connection mode, and release version, generates database and sync secrets, creates a protected `.env`, pulls the published release images and starts the stack. Choose `https` to use Caddy with either `public` (automatically renewed Let's Encrypt certificate) or `self-signed` (Caddy's local certificate authority). With a self-signed certificate, install the exported public root certificate as trusted on each client device to remove browser warnings. Choose `direct-http` to serve the UI and API from the Smart-Church server directly on port 81, without Caddy or another proxy. Direct HTTP has no TLS encryption; use it only on a trusted network. The installer prints the one-time setup code; open the URL it prints and use the code to create the first Server Administrator.
+
+The bundled proxy uses a fixed private-network IP. Docker assigns other containers addresses from a separate IP range so they cannot take the proxy address.
+
+To completely remove an installation, including its database, uploaded files, HTTPS certificates, backups, secrets, and configuration, run:
+
+```sh
+curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo bash
+```
+
+The uninstaller asks you to type `DELETE /opt/smart-church` before it removes anything. It removes all containers belonging to that Smart-Church Compose project; other containers on the server and Docker images stay untouched. To uninstall from a custom directory, pass `SMART_CHURCH_INSTALL_DIR` through `sudo`, for example: `curl -fsSL https://github.com/juristoeckli/smart-Church/releases/latest/download/uninstall.sh | sudo env SMART_CHURCH_INSTALL_DIR=/srv/smart-church bash`.
+
+After installation, open a graphical terminal manager with `sudo bash ./deploy/manage.sh`. It uses `whiptail` or `dialog` when installed and otherwise provides a numbered terminal menu. Use it to check health, configure listening ports and host interface, start or stop services, follow logs, create or restore backups, update, or uninstall. The manager calls the same deployment scripts used by direct command-line operations.
 
 The bundled proxy uses a fixed private-network IP. Docker assigns other containers addresses from a separate IP range so they cannot take the proxy address.
 
@@ -22,7 +40,7 @@ The uninstaller asks you to type `DELETE /opt/smart-church` before it removes an
 
 Enter a version such as `1.2.3` when prompted to pin a particular release. Keep the generated `.env` private. The setup page pre-fills the location name entered by the installer. If the location name is exactly `Steffisburg`, the Steffisburg-specific Video module is enabled; other locations do not receive it.
 
-Requirements: a supported Linux host with Docker Engine, the Docker Compose plugin, `curl`, `tar`, and `openssl`. The installer checks these prerequisites but does not install Docker for you. The standalone Caddy profile needs ports 80 and 443 available and the public DNS record working before first startup.
+Requirements: a supported Linux host with Docker Engine, the Docker Compose plugin, `curl`, `tar`, and `openssl`. The installer checks these prerequisites but does not install Docker for you. The HTTPS option needs ports 80 and 443 available; public certificates also require DNS to point to the host. Direct HTTP requires inbound TCP port 81.
 
 ## Existing central reverse proxy
 
@@ -46,6 +64,12 @@ The base release keeps integrations disabled unless their location has the modul
 
 ```sh
 docker compose -f compose.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml --profile bundled-proxy up -d
+```
+
+For a direct HTTP installation, include the direct-access overlay and start the database and API services without the Caddy profile:
+
+```sh
+docker compose -f compose.yaml -f deploy/compose.direct.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml up -d db api
 ```
 
 The private config remains beside the module and is ignored by Git. System Laptop and other hardware integrations have separate prerequisites; they are not required for a standard church installation.

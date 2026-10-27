@@ -27,6 +27,7 @@ RUN pnpm install --prod --frozen-lockfile
 RUN cd /workspace/apps/api && node --import tsx --input-type=module -e "await import('tsx')"
 COPY --from=build --chown=node:node /workspace/apps/api/src /workspace/apps/api/src
 COPY --from=build --chown=node:node /workspace/apps/api/migrations /workspace/apps/api/migrations
+COPY --from=build --chown=node:node /workspace/apps/web/dist /workspace/apps/api/web-dist
 COPY --from=build --chown=node:node /workspace/packages/contracts/src /workspace/packages/contracts/src
 RUN mkdir -p /workspace/apps/api/data /var/lib/smart-church && chown -R node:node /workspace/apps/api/data /var/lib/smart-church
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3001
