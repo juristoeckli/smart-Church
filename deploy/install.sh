@@ -44,10 +44,36 @@ command -v openssl >/dev/null || { echo "Install openssl, then retry." >&2; exit
 [[ -f "$root/compose.yaml" && -f "$root/deploy/Caddyfile" ]] || { echo "Run this from a Smart-Church deployment package." >&2; exit 1; }
 [[ ! -e "$root/.env" ]] || { echo "A .env already exists at $root. Keep it and use deploy/update.sh instead." >&2; exit 1; }
 
-read -r -p "Public domain name (DNS must point here; ports 80/443 must be open): " domain </dev/tty
+read -r -p "Domain name for Smart-Church: " domain </dev/tty
 [[ "$domain" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || { echo "Enter a public DNS name such as church.example.org." >&2; exit 1; }
 read -r -p "Church location name [My Church]: " location </dev/tty
 location="${location:-My Church}"
+read -r -p "Connection mode [https/direct-http] (https uses Caddy; direct-http serves the app on port 81): " connection_mode </dev/tty
+connection_mode="${connection_mode:-https}"
+case "$connection_mode" in
+  https)
+    read -r -p "TLS certificate [public/self-signed] (public requires working public DNS and inbound port 80 or 443): " tls_mode </dev/tty
+    tls_mode="${tls_mode:-public}"
+    case "$tls_mode" in
+      public) caddyfile="./deploy/Caddyfile" ;;
+      self-signed) caddyfile="./deploy/Caddyfile.self-signed" ;;
+      *) echo "Choose public or self-signed." >&2; exit 1 ;;
+    esac
+    web_origin="https://$domain"
+    trust_proxy="172.30.250.2"
+    bundled_proxy=1
+    direct_http=0
+    ;;
+  direct-http)
+    tls_mode=none
+    caddyfile="./deploy/Caddyfile"
+    web_origin="http://$domain:81"
+    trust_proxy=""
+    bundled_proxy=0
+    direct_http=1
+    ;;
+  *) echo "Choose https or direct-http." >&2; exit 1 ;;
+esac
 read -r -p "Release version [${SMART_CHURCH_VERSION:-latest}]: " version </dev/tty
 version="${version:-${SMART_CHURCH_VERSION:-latest}}"
 [[ "$version" == "latest" || "$version" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || { echo "Use a semantic release version such as 1.2.3 or latest." >&2; exit 1; }
@@ -61,39 +87,60 @@ POSTGRES_USER=smart_church
 POSTGRES_PASSWORD=$db_password
 POSTGRES_DB=smart_church
 SMART_CHURCH_DATABASE_URL=postgresql://smart_church:$db_password@db:5432/smart_church
-SMART_CHURCH_WEB_ORIGIN=https://$domain
+SMART_CHURCH_WEB_ORIGIN=$web_origin
 SMART_CHURCH_DOMAIN=$domain
-SMART_CHURCH_TRUST_PROXY=172.30.250.2
+SMART_CHURCH_CADDYFILE=$caddyfile
+SMART_CHURCH_TRUST_PROXY=$trust_proxy
+SMART_CHURCH_DIRECT_HTTP=$direct_http
+SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS=0.0.0.0
+SMART_CHURCH_DIRECT_HTTP_PORT=81
 SMART_CHURCH_DOCKER_SUBNET=172.30.250.0/24
 SMART_CHURCH_PROXY_IP=172.30.250.2
 SMART_CHURCH_DEPARTMENT_ID=$department_id
 SMART_CHURCH_DEPARTMENT_NAME=$location
 SMART_CHURCH_SYNC_ENCRYPTION_KEY=$sync_key
 SMART_CHURCH_VERSION=$version
-SMART_CHURCH_USE_BUNDLED_PROXY=1
+SMART_CHURCH_USE_BUNDLED_PROXY=$bundled_proxy
 EOF
 chmod 600 "$root/.env"
 mkdir -p "$root/backups"
 chmod 700 "$root/backups"
 
 cd "$root"
-docker compose --profile bundled-proxy pull
-docker compose --profile bundled-proxy up -d
+compose_files=(-f compose.yaml)
+profile_args=()
+services=()
+if [[ "$direct_http" == "1" ]]; then
+  compose_files+=(-f deploy/compose.direct.yaml)
+  services=(db api)
+else
+  profile_args+=(--profile bundled-proxy)
+fi
+docker compose "${compose_files[@]}" "${profile_args[@]}" pull "${services[@]}"
+docker compose "${compose_files[@]}" "${profile_args[@]}" up -d "${services[@]}"
 
 setup_code=""
 for _ in $(seq 1 60); do
-  setup_code="$(docker compose --profile bundled-proxy logs --no-color --tail=100 api 2>/dev/null | sed -n 's/.*"setupCode":"\([^"]*\)".*/\1/p' | tail -n 1)"
+  setup_code="$(docker compose "${compose_files[@]}" "${profile_args[@]}" logs --no-color --tail=100 api 2>/dev/null | sed -n 's/.*"setupCode":"\([^"]*\)".*/\1/p' | tail -n 1)"
   [[ -n "$setup_code" ]] && break
   sleep 2
 done
 
 echo
-echo "Smart-Church is starting at https://$domain"
+echo "Smart-Church is starting at $web_origin"
+if [[ "$tls_mode" == "self-signed" ]]; then
+  echo "This uses Caddy's local certificate authority. Browsers will show a trust warning until you install its root certificate."
+  echo "Export the public root certificate with: docker compose --profile bundled-proxy cp caddy:/data/caddy/pki/authorities/local/root.crt ./caddy-local-root.crt"
+  echo "Install that certificate as a trusted root on each client device; do not export or share the CA private key."
+fi
 if [[ -n "$setup_code" ]]; then
   echo "First-run setup code: $setup_code"
   echo "Enter it in the browser to create the first Server Administrator."
 else
-  echo "The first-run code is not in the recent logs yet. Read it with: docker compose --profile bundled-proxy logs api"
+  echo "The first-run code is not in the recent logs yet. Read it with: docker compose ${compose_files[*]} ${profile_args[*]} logs api"
+fi
+if [[ "$direct_http" == "1" ]]; then
+  echo "Direct HTTP mode exposes the Smart-Church application on port 81 without TLS. Allow inbound TCP 81 and use HTTPS mode for browser access over the public internet."
 fi
 echo "Save the generated database and sync secrets in the protected .env file."
 echo "Back up with: ./deploy/backup.sh"

@@ -31,7 +31,7 @@ jobs:
         run: pnpm typecheck
 
       - name: Check deployment shell scripts
-        run: bash -n deploy/install.sh deploy/uninstall.sh deploy/backup.sh deploy/restore.sh deploy/update.sh
+        run: bash -n deploy/install.sh deploy/uninstall.sh deploy/backup.sh deploy/restore.sh deploy/update.sh deploy/manage.sh
 
       - uses: docker/setup-buildx-action@v4
 
@@ -86,7 +86,8 @@ jobs:
         run: |
           mkdir -p release-package/deploy release-package/apps/api/src/modules/video-steffisburg
           cp compose.yaml .env.production.example release-package/
-          cp deploy/README.md deploy/Caddyfile deploy/install.sh deploy/uninstall.sh deploy/backup.sh deploy/restore.sh deploy/update.sh deploy/nginx-central-example.conf release-package/deploy/
+          cp deploy/compose.direct.yaml release-package/deploy/compose.direct.yaml
+          cp deploy/README.md deploy/Caddyfile deploy/Caddyfile.self-signed deploy/install.sh deploy/uninstall.sh deploy/backup.sh deploy/restore.sh deploy/update.sh deploy/manage.sh deploy/nginx-central-example.conf release-package/deploy/
           cp apps/api/src/modules/video-steffisburg/compose.yaml apps/api/src/modules/video-steffisburg/streaming.example.json release-package/apps/api/src/modules/video-steffisburg/
           tar -czf smart-church-deploy.tar.gz -C release-package .
           cp deploy/uninstall.sh uninstall.sh
@@ -109,5 +110,5 @@ jobs:
               gh release create "$GITHUB_REF_NAME" --title "V${GITHUB_REF_NAME#v}" --generate-notes --draft
             fi
           fi
-          gh release upload "$GITHUB_REF_NAME" deploy/install.sh uninstall.sh smart-church-deploy.tar.gz --clobber
+          gh release upload "$GITHUB_REF_NAME" deploy/install.sh deploy/manage.sh uninstall.sh smart-church-deploy.tar.gz --clobber
           gh release edit "$GITHUB_REF_NAME" --draft=false
