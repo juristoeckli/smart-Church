@@ -24,6 +24,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 RUN pnpm install --prod --frozen-lockfile
+RUN cd /workspace/apps/api && node --import tsx --input-type=module -e "await import('tsx')"
 COPY --from=build --chown=node:node /workspace/apps/api/src /workspace/apps/api/src
 COPY --from=build --chown=node:node /workspace/apps/api/migrations /workspace/apps/api/migrations
 COPY --from=build --chown=node:node /workspace/packages/contracts/src /workspace/packages/contracts/src
@@ -32,7 +33,8 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=3001
 ENV PRESENTER_MEDIA_DIR=/var/lib/smart-church/presenter-media
 USER node
 EXPOSE 3001
-CMD ["node", "--import", "tsx", "apps/api/src/server.ts"]
+WORKDIR /workspace/apps/api
+CMD ["node", "--import", "tsx", "src/server.ts"]
 
 FROM node:24-bookworm-slim AS web
 WORKDIR /app
