@@ -14,7 +14,7 @@
 	}
 }
 
-http://{$SMART_CHURCH_DOMAIN} {
+:80 {
 	encode zstd gzip
 
 	handle /api/* {

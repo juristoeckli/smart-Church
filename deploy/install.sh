@@ -46,11 +46,13 @@ command -v openssl >/dev/null || { echo "Install openssl, then retry." >&2; exit
 
 read -r -p "Public domain name (optional; leave blank for self-signed HTTPS): " public_domain </dev/tty
 if [[ -z "$public_domain" ]]; then
-  detected_host="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  read -r -p "Client-reachable hostname or IPv4 address${detected_host:+ [$detected_host]} for the self-signed certificate: " domain </dev/tty
-  domain="${domain:-$detected_host}"
+  read -r -p "DNS hostname clients will use for self-signed HTTPS (enter the exact hostname they will open): " domain </dev/tty
   [[ -n "$domain" && "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$ ]] || {
-    echo "Enter a valid hostname or IPv4 address reachable by the client devices." >&2
+    echo "Enter the exact DNS hostname that client devices will use to reach this server." >&2
+    exit 1
+  }
+  [[ ! "$domain" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+    echo "Use a DNS hostname for HTTPS; clients do not send TLS server names when connecting by IP address." >&2
     exit 1
   }
   connection_mode=https

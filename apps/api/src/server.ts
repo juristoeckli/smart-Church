@@ -254,6 +254,10 @@ app.addHook("onSend", async (request, reply, payload) => {
 });
 
 app.addHook("preHandler", async (request, reply) => {
+  // The API container also serves the built web app for direct HTTP access
+  // on port 81. Keep static page and asset requests public so the login UI can
+  // load; protect application data and actions under /api/ below.
+  if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
   if (request.url === "/api/health" || request.url.startsWith("/api/auth/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
