@@ -91,12 +91,58 @@ valid_port() {
   [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
 }
 
+select_update_branch() {
+  local current_version="$(env_value SMART_CHURCH_VERSION)" branch
+  if command -v whiptail >/dev/null; then
+    branch="$(whiptail --title "Smart-Church Branch" --menu "Current image: ${current_version:-latest}. Branch builds may contain unfinished changes." 14 72 4 \
+      main "Production branch" \
+      beta "Beta branch" \
+      dev "Development branch" \
+      cancel "Return to manager" 3>&1 1>&2 2>&3)" || return 1
+  elif command -v dialog >/dev/null; then
+    branch="$(dialog --title "Smart-Church Branch" --menu "Current image: ${current_version:-latest}. Branch builds may contain unfinished changes." 14 72 4 \
+      main "Production branch" \
+      beta "Beta branch" \
+      dev "Development branch" \
+      cancel "Return to manager" 3>&1 1>&2 2>&3)" || return 1
+  else
+    echo "Current image: ${current_version:-latest}" >/dev/tty
+    select branch in main beta dev cancel </dev/tty >/dev/tty; do
+      [[ -n "${branch:-}" ]] && break
+    done
+  fi
+  printf '%s' "$branch"
+}
+
+force_update_branch() {
+  local branch="$1" commit_sha image
+  case "$branch" in
+    main|beta|dev) ;;
+    *) echo "Choose main, beta, or dev before forcing a branch update." >&2; return 0 ;;
+  esac
+  command -v curl >/dev/null || { echo "curl is required to resolve the selected branch." >&2; return 1; }
+  commit_sha="$(curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/juristoeckli/smart-Church/commits/$branch" \
+    | sed -n 's/^[[:space:]]*{"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p; s/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
+  [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not resolve the latest $branch commit from GitHub." >&2; return 1; }
+  for image in smart-church-api smart-church-web; do
+    if ! docker manifest inspect "ghcr.io/juristoeckli/$image:$commit_sha" >/dev/null 2>&1; then
+      echo "The $branch images for commit $commit_sha are not published yet. Wait for the branch image build to finish, then retry." >&2
+      return 0
+    fi
+  done
+  echo "Forcing an update to $branch commit $commit_sha."
+  bash ./deploy/update.sh "$commit_sha"
+}
+
 choose_action() {
   local action
   if command -v whiptail >/dev/null; then
-    action="$(whiptail --title "Smart-Church Manager" --menu "Choose an operation" 22 78 11 \
+    action="$(whiptail --title "Smart-Church Manager" --menu "Choose an operation" 22 78 13 \
       health "Check database, API and web health" \
       network "Manage listening ports and interface" \
+      branch "Select branch and update" \
+      force "Force update selected branch" \
       status "Show service status" \
       start "Start services" \
       stop "Stop services" \
@@ -108,9 +154,11 @@ choose_action() {
       uninstall "Uninstall Smart-Church" \
       exit "Exit" 3>&1 1>&2 2>&3)" || return 1
   elif command -v dialog >/dev/null; then
-    action="$(dialog --title "Smart-Church Manager" --menu "Choose an operation" 22 78 11 \
+    action="$(dialog --title "Smart-Church Manager" --menu "Choose an operation" 22 78 13 \
       health "Check database, API and web health" \
       network "Manage listening ports and interface" \
+      branch "Select branch and update" \
+      force "Force update selected branch" \
       status "Show service status" \
       start "Start services" \
       stop "Stop services" \
@@ -122,10 +170,10 @@ choose_action() {
       uninstall "Uninstall Smart-Church" \
       exit "Exit" 3>&1 1>&2 2>&3)" || return 1
   else
-    echo
+    echo >/dev/tty
     echo "Smart-Church Manager" >/dev/tty
     echo "Install whiptail or dialog for a graphical terminal menu." >/dev/tty
-    select action in health network status start stop restart logs backup restore update uninstall exit </dev/tty >/dev/tty; do
+    select action in health network branch force status start stop restart logs backup restore update uninstall exit </dev/tty >/dev/tty; do
       [[ -n "${action:-}" ]] && break
       echo "Choose a number from the menu." >/dev/tty
     done
@@ -192,6 +240,18 @@ while true; do
       run_compose up -d
       echo "Network settings applied."
       ;;
+    branch)
+      branch="$(select_update_branch)" || branch=cancel
+      case "$branch" in
+        main|beta|dev)
+          set_env_value SMART_CHURCH_UPDATE_BRANCH "$branch"
+          force_update_branch "$branch"
+          ;;
+        cancel) ;;
+        *) echo "Choose main, beta, dev, or cancel." >&2; exit 1 ;;
+      esac
+      ;;
+    force) force_update_branch "$(env_value SMART_CHURCH_UPDATE_BRANCH)" ;;
     status) run_compose ps ;;
     start) run_compose up -d ;;
     stop) run_compose stop ;;
