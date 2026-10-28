@@ -2,6 +2,7 @@
 import collections
 import json
 import time
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -108,7 +109,7 @@ def evaluate(config, edges, checked_at):
 
 def poll_unifi(config):
     settings = config.get('unifi', {})
-    key = settings.get('api_key', '')
+    key = os.environ.get('SMART_CHURCH_VIDEO_STEFFISBURG_UNIFI_API_KEY') or settings.get('api_key', '')
     if not key:
         return {'state': 'error', 'error': 'UniFi API key missing', 'checked_at': time.time()}, []
     edges = []

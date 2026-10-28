@@ -59,7 +59,7 @@ Do not expose the API or web upstream ports to the public internet. Production s
 
 ## Optional modules
 
-The base release keeps integrations disabled unless their location has the module enabled. Steffisburg Video has a module-owned Compose overlay and configuration. On that deployment, copy `apps/api/src/modules/video-steffisburg/streaming.example.json` to `apps/api/src/modules/video-steffisburg/streaming.steffisburg.json`, add the real device addresses, and set `SMART_CHURCH_STREAMING_CONFIG_PATH` in `.env`. Start using both Compose files:
+The base release keeps integrations disabled unless their location has the module enabled. Steffisburg Video has a module-owned Compose overlay and site configuration included in the deployment package. The included `streaming.steffisburg.json` contains the Steffisburg and linked site network/device settings. Set `SMART_CHURCH_STREAMING_CONFIG_PATH` to that file and configure the UniFi API key plus optional DS-700 overrides using `apps/api/src/modules/video-steffisburg/.env.example`. Keep those environment values in the protected `.env`; the UniFi API key is not part of the module JSON. Start using both Compose files:
 
 ```sh
 docker compose -f compose.yaml -f deploy/compose.direct.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml --profile bundled-proxy up -d
@@ -71,7 +71,7 @@ For a direct HTTP installation, include the direct-access overlay and start the 
 docker compose -f compose.yaml -f deploy/compose.direct.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml up -d db api
 ```
 
-The private config remains beside the module and is ignored by Git. System Laptop and other hardware integrations have separate prerequisites; they are not required for a standard church installation.
+System Laptop and other hardware integrations have separate prerequisites; they are not required for a standard church installation.
 
 ## Backups and restore
 
@@ -81,7 +81,7 @@ Create a consistent backup of PostgreSQL and the persistent application-data vol
 ./deploy/backup.sh
 ```
 
-Backups are written to `backups/` with restrictive permissions. They include the database and persistent application-data volume. Module-specific config files such as the Steffisburg Video device config and `.env` are stored beside the deployment and must be copied separately into protected, encrypted recovery storage. Encrypt backups before copying them off the server and store the decryption key separately. Restore replaces the live database and all persistent application files; the command requires typing `RESTORE`:
+Backups are written to `backups/` with restrictive permissions. They include the database and persistent application-data volume. The `.env` is stored beside the deployment and must be copied separately into protected, encrypted recovery storage. Encrypt backups before copying them off the server and store the decryption key separately. Restore replaces the live database and all persistent application files; the command requires typing `RESTORE`:
 
 ```sh
 ./deploy/restore.sh /absolute/path/to/backups/20261027T120000Z

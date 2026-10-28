@@ -129,12 +129,18 @@ SMART_CHURCH_SYNC_ENCRYPTION_KEY=$sync_key
 SMART_CHURCH_VERSION=$version
 SMART_CHURCH_USE_BUNDLED_PROXY=$bundled_proxy
 EOF
+if [[ "$location" == "Steffisburg" ]]; then
+  printf '%s\n' 'SMART_CHURCH_STREAMING_CONFIG_PATH=./apps/api/src/modules/video-steffisburg/streaming.steffisburg.json' >> "$root/.env"
+fi
 chmod 600 "$root/.env"
 mkdir -p "$root/backups"
 chmod 700 "$root/backups"
 
 cd "$root"
 compose_files=(-f compose.yaml -f deploy/compose.direct.yaml)
+if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
+  compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
+fi
 profile_args=()
 services=()
 if [[ "$direct_http" == "1" ]]; then

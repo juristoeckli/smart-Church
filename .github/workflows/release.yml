@@ -88,7 +88,7 @@ jobs:
           cp compose.yaml .env.production.example release-package/
           cp deploy/compose.direct.yaml release-package/deploy/compose.direct.yaml
           cp deploy/README.md deploy/Caddyfile deploy/Caddyfile.self-signed deploy/install.sh deploy/uninstall.sh deploy/backup.sh deploy/restore.sh deploy/update.sh deploy/manage.sh deploy/nginx-central-example.conf release-package/deploy/
-          cp apps/api/src/modules/video-steffisburg/compose.yaml apps/api/src/modules/video-steffisburg/streaming.example.json release-package/apps/api/src/modules/video-steffisburg/
+          cp apps/api/src/modules/video-steffisburg/compose.yaml apps/api/src/modules/video-steffisburg/streaming.example.json apps/api/src/modules/video-steffisburg/streaming.steffisburg.json apps/api/src/modules/video-steffisburg/.env.example apps/api/src/modules/video-steffisburg/README.md release-package/apps/api/src/modules/video-steffisburg/
           tar -czf smart-church-deploy.tar.gz -C release-package .
           cp deploy/uninstall.sh uninstall.sh
 

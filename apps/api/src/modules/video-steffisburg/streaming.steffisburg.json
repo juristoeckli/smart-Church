@@ -1,0 +1,188 @@
+{
+  "listen_port": 8080,
+  "poll_interval_seconds": 5,
+  "timeout_seconds": 2,
+  "unifi": {
+    "api_key": "",
+    "sdwan_config_ids": [
+      "85bf30f5-000b-4477-9f8e-1a3d362f3e11"
+    ],
+    "poll_interval_seconds": 60
+  },
+  "sites": [
+    {
+      "id": "main",
+      "name": "Provivatis Seewinkel",
+      "router_ip": "10.6.127.1",
+      "encoders": [
+        {
+          "id": "webpresenter",
+          "name": "Web Presenter",
+          "ip": "10.6.127.61",
+          "type": "webpresenter",
+          "port": 9977,
+          "destination_site": "sonnenhof",
+          "destination_name": "Streaming Bridge"
+        }
+      ],
+      "devices": [
+        {
+          "id": "shelly",
+          "name": "ShellyPro1",
+          "ip": "10.6.127.11",
+          "type": "ping"
+        },
+        {
+          "id": "streamingbridge",
+          "name": "Streaming Bridge",
+          "ip": "10.6.127.71",
+          "type": "streamingbridge",
+          "port": 1935,
+          "status_port": 9977
+        },
+        {
+          "id": "silex",
+          "name": "Silex DS-700",
+          "ip": "10.6.127.91",
+          "type": "ping"
+        },
+        {
+          "id": "mini-converter-sdi-to-audio",
+          "name": "BMD SDI to Audio",
+          "type": "converter",
+          "ip": ""
+        },
+        {
+          "id": "mini-converter-audio-to-sdi",
+          "name": "BMD Audio to SDI",
+          "type": "converter",
+          "ip": ""
+        }
+      ],
+      "vpn_monitor": {
+        "enabled": true,
+        "label": "Seewinkel VPN path"
+      },
+      "router_model": "Ubiquiti UCG",
+      "unifi_host_id": "6C63F81E6A5F0000000008E3C44B00000000095D3A240000000067DE0ECC:1628506774",
+      "department_id": "$SMART_CHURCH_DEPARTMENT_ID"
+    },
+    {
+      "id": "gfc-steffisburg",
+      "name": "GfC Steffisburg",
+      "router_ip": "10.6.10.1",
+      "encoders": [
+        {
+          "id": "encoder-1",
+          "name": "Encoder 1",
+          "ip": "10.6.70.51",
+          "port": 9977,
+          "destination_site": "main",
+          "destination_name": "Streaming Bridge"
+        },
+        {
+          "id": "encoder-2",
+          "name": "Encoder 2",
+          "ip": "10.6.70.52",
+          "port": 9977,
+          "destination_site": "sonnenhof",
+          "destination_name": "Streaming Bridge"
+        },
+        {
+          "id": "encoder-3",
+          "name": "Encoder 3",
+          "ip": "10.6.70.53",
+          "port": 9977,
+          "destination_name": "YouTube"
+        }
+      ],
+      "router_model": "Ubiquiti UDMP",
+      "unifi_host_id": "D8B3703401D500000000077D47E70000000007D9B488000000006459B9AE:102755573",
+      "devices": [
+        {
+          "id": "atem-constellation",
+          "name": "ATEM Constellation 1 M/E",
+          "type": "atem",
+          "ip": "",
+          "planned": true
+        },
+        {
+          "id": "videohub",
+          "name": "Compact Videohub 40x40",
+          "type": "videohub",
+          "ip": "10.12.0.230",
+          "planned": false,
+          "inputs": 40,
+          "outputs": 40
+        }
+      ],
+      "department_id": "$SMART_CHURCH_DEPARTMENT_ID"
+    },
+    {
+      "id": "sonnenhof",
+      "name": "Provivatis Sonnenhof",
+      "router_ip": "10.6.126.1",
+      "encoders": [
+        {
+          "id": "webpresenter",
+          "name": "Web Presenter",
+          "ip": "10.6.126.62",
+          "type": "webpresenter",
+          "port": 9977,
+          "destination_site": "main",
+          "destination_name": "Streaming Bridge"
+        }
+      ],
+      "devices": [
+        {
+          "id": "shelly",
+          "name": "ShellyPro1",
+          "ip": "10.6.126.12",
+          "type": "ping"
+        },
+        {
+          "id": "streamingbridge",
+          "name": "Streaming Bridge",
+          "ip": "10.6.126.72",
+          "type": "streamingbridge",
+          "port": 1935,
+          "status_port": 9977
+        },
+        {
+          "id": "silex",
+          "name": "Silex DS-700",
+          "ip": "10.6.126.92",
+          "type": "ping"
+        },
+        {
+          "id": "mini-converter-sdi-to-audio",
+          "name": "BMD SDI to Audio",
+          "type": "converter",
+          "ip": ""
+        },
+        {
+          "id": "mini-converter-audio-to-sdi",
+          "name": "BMD Audio to SDI",
+          "type": "converter",
+          "ip": ""
+        }
+      ],
+      "vpn_monitor": {
+        "enabled": true,
+        "label": "Sonnenhof VPN path"
+      },
+      "router_model": "Ubiquiti UCG",
+      "unifi_host_id": "6C63F8A7CD1B00000000093ABA780000000009B9D46E0000000068590B3A:2015884364",
+      "department_id": "$SMART_CHURCH_DEPARTMENT_ID"
+    }
+  ],
+  "applications": {
+    "sx_virtual_link_path": "C:\\Program Files\\silex technology\\SX Virtual Link\\Connect.exe"
+  },
+  "routing_presets": {
+    "max_presets": 20
+  },
+  "routing_history": {
+    "merge_window_minutes": 5
+  }
+}

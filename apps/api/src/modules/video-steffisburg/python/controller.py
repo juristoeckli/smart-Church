@@ -21,6 +21,9 @@ from routing_history import RoutingHistory, EXTERNAL
 
 def load_config():
     config = json.loads(Path(os.environ['STREAMING_CONFIG_FILE']).read_text(encoding='utf-8-sig'))
+    for site in config.get('sites', []):
+        if site.get('department_id') == '$SMART_CHURCH_DEPARTMENT_ID':
+            site['department_id'] = os.environ.get('SMART_CHURCH_DEPARTMENT_ID', '00000000-0000-4000-8000-000000000001')
     for key, default, minimum, maximum in [('poll_interval_seconds', 5, 1, 300), ('timeout_seconds', 2, .2, 30)]:
         value = config.setdefault(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum:

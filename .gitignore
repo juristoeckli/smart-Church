@@ -13,7 +13,6 @@ data/streaming/
 /data/presenter-datasets/
 /apps/api/data/presenter-datasets/
 config/streaming.json
-/apps/api/src/modules/video-steffisburg/streaming.steffisburg.json
 __pycache__/
 *.py[cod]
 /apps/api/src/modules/video/python/tmp*/
