@@ -7,6 +7,11 @@ cd "$root"
 version="${1:-latest}"
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Use a release version such as 1.2.3 or latest." >&2; exit 1; }
 version="${version#v}"
+current_version="$(sed -n 's/^SMART_CHURCH_VERSION=//p' .env | tail -n 1)"
+update_branch="$(sed -n 's/^SMART_CHURCH_UPDATE_BRANCH=//p' .env | tail -n 1)"
+[[ -n "$update_branch" ]] || update_branch=release
+if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then current_version="${current_version:0:7}"; fi
+echo "Current version: ${current_version:-unknown} ($update_branch); target: $version"
 
 bash ./deploy/backup.sh
 

@@ -64,6 +64,16 @@ env_value() {
   sed -n "s/^$1=//p" .env | tail -n 1
 }
 
+manager_version_label() {
+  local version branch
+  version="$(env_value SMART_CHURCH_VERSION)"
+  branch="$(env_value SMART_CHURCH_UPDATE_BRANCH)"
+  version="${version:-unknown}"
+  branch="${branch:-release}"
+  if [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then version="${version:0:7}"; fi
+  printf 'Installed version: %s | Update branch: %s' "$version" "$branch"
+}
+
 set_env_value() {
   local key="$1" value="$2" tmp
   tmp="$(mktemp .env.XXXXXX)"
@@ -136,9 +146,11 @@ force_update_branch() {
 }
 
 choose_action() {
-  local action
+  local action prompt
+  prompt="$(manager_version_label)"
+  prompt+=$'\nChoose an operation'
   if command -v whiptail >/dev/null; then
-    action="$(whiptail --title "Smart-Church Manager" --menu "Choose an operation" 22 78 13 \
+    action="$(whiptail --title "Smart-Church Manager" --menu "$prompt" 24 78 13 \
       health "Check database, API and web health" \
       network "Manage listening ports and interface" \
       branch "Select branch and update" \
@@ -154,7 +166,7 @@ choose_action() {
       uninstall "Uninstall Smart-Church" \
       exit "Exit" 3>&1 1>&2 2>&3)" || return 1
   elif command -v dialog >/dev/null; then
-    action="$(dialog --title "Smart-Church Manager" --menu "Choose an operation" 22 78 13 \
+    action="$(dialog --title "Smart-Church Manager" --menu "$prompt" 24 78 13 \
       health "Check database, API and web health" \
       network "Manage listening ports and interface" \
       branch "Select branch and update" \
@@ -172,6 +184,7 @@ choose_action() {
   else
     echo >/dev/tty
     echo "Smart-Church Manager" >/dev/tty
+    echo "$prompt" >/dev/tty
     echo "Install whiptail or dialog for a graphical terminal menu." >/dev/tty
     select action in health network branch force status start stop restart logs backup restore update uninstall exit; do
       [[ -n "${action:-}" ]] && break
@@ -270,7 +283,7 @@ while true; do
       [[ -n "$backup_path" ]] && bash ./deploy/restore.sh "$backup_path"
       ;;
     update)
-      read -r -p "Release version [latest]: " version </dev/tty
+      read -r -p "Release version to install [latest; current $(env_value SMART_CHURCH_VERSION)]: " version </dev/tty
       bash ./deploy/update.sh "${version:-latest}"
       ;;
     uninstall) bash ./deploy/uninstall.sh; exit ;;
