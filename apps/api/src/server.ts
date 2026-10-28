@@ -10,6 +10,10 @@ import { closeDatabase, departmentId, departmentName, initializeDatabase, pool }
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { registerServerModules } from "./modules/module-sdk.js";
 
+if (!process.env.STREAMING_CONFIG_FILE && departmentName.trim().toLowerCase() === "steffisburg") {
+  process.env.STREAMING_CONFIG_FILE = resolve(fileURLToPath(new URL("./modules/video-steffisburg/streaming.steffisburg.json", import.meta.url)));
+}
+
 const trustedProxyAddresses = process.env.SMART_CHURCH_TRUST_PROXY?.split(",").map((entry) => entry.trim()).filter(Boolean) ?? [];
 const directHttpMode = process.env.SMART_CHURCH_DIRECT_HTTP === "1";
 const allowHttpFallback = process.env.SMART_CHURCH_ALLOW_HTTP_FALLBACK === "1";
