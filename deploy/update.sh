@@ -36,6 +36,8 @@ sync_deployment_files() {
     apps/api/src/modules/video-steffisburg/.env.example
     apps/api/src/modules/video-steffisburg/README.md
     apps/api/src/modules/system-laptop/compose.yaml
+    apps/api/src/modules/system-laptop/guacd-wave2.patch
+    deploy/build-system-laptop-guacd.sh
   )
   temp_dir="$(mktemp -d)"
   trap 'rm -rf "$temp_dir"' RETURN
@@ -170,7 +172,21 @@ fi
 profile_args=()
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then profile_args+=(--profile bundled-proxy); fi
 if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then profile_args+=(--profile system-laptop); fi
-docker compose "${compose_files[@]}" "${profile_args[@]}" pull
+pull_services=(db api web)
+if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then pull_services+=(caddy); fi
+if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
+  pull_services+=(system-laptop-guacamole)
+  guacd_image="$(sed -n 's/^SYSTEM_LAPTOP_GUACD_IMAGE=//p' .env | tail -n 1)"
+  if [[ "$guacd_image" == "smart-church/guacd:1.6.0-wave2" ]]; then
+    docker image inspect "$guacd_image" >/dev/null 2>&1 || {
+      echo "The locally built Wave2 guacd image is missing. Rebuild it with: bash ./deploy/build-system-laptop-guacd.sh" >&2
+      exit 1
+    }
+  else
+    pull_services+=(system-laptop-guacd)
+  fi
+fi
+docker compose "${compose_files[@]}" "${profile_args[@]}" pull "${pull_services[@]}"
 docker compose "${compose_files[@]}" "${profile_args[@]}" up -d
 echo "Updated to $version. Verify with: docker compose ps"
 echo "If migration or startup fails, restore the backup created immediately before this update."

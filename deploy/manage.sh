@@ -261,7 +261,7 @@ configure_video_settings() {
 }
 
 configure_system_laptop_settings() {
-  local host port username password secret default_port default_username
+  local host port username password secret default_port default_username wave2_choice guacd_image
   secret="$(env_value SYSTEM_LAPTOP_JSON_SECRET_KEY)"
   if [[ ! "$secret" =~ ^[[:xdigit:]]{32}$ ]]; then
     command -v openssl >/dev/null || { echo "openssl is required to generate the Guacamole JSON secret." >&2; return 1; }
@@ -290,6 +290,24 @@ configure_system_laptop_settings() {
     set_env_value SYSTEM_LAPTOP_RDP_PASSWORD ""
   elif [[ -n "$password" ]]; then
     set_env_value SYSTEM_LAPTOP_RDP_PASSWORD "$password"
+  fi
+  guacd_image="$(env_value SYSTEM_LAPTOP_GUACD_IMAGE)"
+  if [[ "$guacd_image" == "smart-church/guacd:1.6.0-wave2" ]]; then
+    read -r -p "Patched Wave2 audio support is enabled. Keep it? [Y/n]: " wave2_choice </dev/tty
+    if [[ "$wave2_choice" =~ ^[Nn]$ ]]; then
+      unset_env_value SYSTEM_LAPTOP_GUACD_IMAGE
+      echo "Using the standard Apache guacd image."
+    fi
+  else
+    read -r -p "Build and use patched Wave2 audio support? [y/N]: " wave2_choice </dev/tty
+    if [[ "$wave2_choice" =~ ^[Yy]([Ee][Ss])?$ ]]; then
+      if ! docker image inspect smart-church/guacd:1.6.0-wave2 >/dev/null 2>&1; then
+        bash ./deploy/build-system-laptop-guacd.sh || return 1
+      fi
+      set_env_value SYSTEM_LAPTOP_GUACD_IMAGE smart-church/guacd:1.6.0-wave2
+    else
+      unset_env_value SYSTEM_LAPTOP_GUACD_IMAGE
+    fi
   fi
   echo "System Laptop settings saved in the protected .env file."
   if [[ "$(env_value SMART_CHURCH_USE_SYSTEM_LAPTOP)" == 1 ]]; then

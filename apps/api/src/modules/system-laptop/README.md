@@ -4,13 +4,13 @@ System Laptop embeds Apache Guacamole's JavaScript remote desktop client inside 
 
 ## Local development
 
-1. The deployment uses the public Apache Guacamole 1.6.0 `guacd` image by default. If the remote RDP server requires RDPSND Wave2 audio support, build the patched image from [Apache PR #696](https://github.com/apache/guacamole-server/pull/696):
+1. The deployment uses the public Apache Guacamole 1.6.0 `guacd` image by default. In the terminal Manager's System Laptop settings, choose the patched Wave2 audio option when the remote RDP server requires RDPSND Wave2 support from [Apache PR #696](https://github.com/apache/guacamole-server/pull/696). The manager builds the image locally; the server needs `git`, Docker, and outbound access to GitHub and the Docker build dependencies. To build it manually instead:
 
    ```powershell
    .\apps\api\src\modules\system-laptop\build-guacd.ps1
    ```
 
-   The build script tags it `smart-church/guacd:1.6.0-wave2`. To use that optional image, set `SYSTEM_LAPTOP_GUACD_IMAGE=smart-church/guacd:1.6.0-wave2` in `.env`. Otherwise leave the setting unset to use `guacamole/guacd:1.6.0`.
+   The build script tags it `smart-church/guacd:1.6.0-wave2`. To select it manually, set `SYSTEM_LAPTOP_GUACD_IMAGE=smart-church/guacd:1.6.0-wave2` in `.env`. Otherwise leave the setting unset to use `guacamole/guacd:1.6.0`.
 
    Generate a 128-bit secret and use the same 32-character hexadecimal value for `SYSTEM_LAPTOP_JSON_SECRET_KEY` in `.env`:
 

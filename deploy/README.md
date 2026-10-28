@@ -59,7 +59,7 @@ Do not expose the API or web upstream ports to the public internet. Production s
 
 ## Optional modules
 
-Use **Modules** in `./deploy/manage.sh` to enable or disable packaged modules for the primary location and change their basic settings. Current optional modules are Video & streaming (Steffisburg only), System Laptop, and Presenter. The manager starts System Laptop's Compose services, generates its Guacamole key, and keeps deployment settings in the protected `.env`. Presenter content is managed in the web app. Chat, File storage, Notifications, and Sync are enabled by default.
+Use **Modules** in `./deploy/manage.sh` to enable or disable packaged modules for the primary location and change their basic settings. Current optional modules are Video & streaming (Steffisburg only), System Laptop, and Presenter. The manager starts System Laptop's Compose services, generates its Guacamole key, and keeps deployment settings in the protected `.env`. Its settings can also build and select the patched Wave2 audio proxy locally; this requires `git` and Docker on the server. Presenter content is managed in the web app. Chat, File storage, Notifications, and Sync are enabled by default.
 
 Steffisburg Video has a module-owned Compose overlay and site configuration included in the deployment package. The included `streaming.steffisburg.json` contains the Steffisburg and linked site network/device settings. Configure the UniFi API key and optional DS-700 overrides through the manager or using `apps/api/src/modules/video-steffisburg/.env.example`. The UniFi API key is kept in `.env`, not in the module JSON. For manual Compose startup, set `SMART_CHURCH_STREAMING_CONFIG_PATH` to that file and include both Compose files:
 
