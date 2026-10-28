@@ -10,7 +10,9 @@ import { closeDatabase, departmentId, departmentName, initializeDatabase, pool }
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { registerServerModules } from "./modules/module-sdk.js";
 
-if (!process.env.STREAMING_CONFIG_FILE && departmentName.trim().toLowerCase() === "steffisburg") {
+if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
+  delete process.env.STREAMING_CONFIG_FILE;
+} else if (!process.env.STREAMING_CONFIG_FILE && departmentName.trim().toLowerCase() === "steffisburg") {
   process.env.STREAMING_CONFIG_FILE = resolve(fileURLToPath(new URL("./modules/video-steffisburg/streaming.steffisburg.json", import.meta.url)));
 }
 

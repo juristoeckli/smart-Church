@@ -91,8 +91,12 @@ fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi
+if [[ -f apps/api/src/modules/system-laptop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
+  compose_files+=(-f apps/api/src/modules/system-laptop/compose.yaml)
+fi
 profile_args=()
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then profile_args+=(--profile bundled-proxy); fi
+if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then profile_args+=(--profile system-laptop); fi
 docker compose "${compose_files[@]}" "${profile_args[@]}" pull
 docker compose "${compose_files[@]}" "${profile_args[@]}" up -d
 echo "Updated to $version. Verify with: docker compose ps"
