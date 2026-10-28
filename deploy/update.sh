@@ -15,6 +15,79 @@ echo "Current version: ${current_version:-unknown} ($update_branch); target: $ve
 
 bash ./deploy/backup.sh
 
+sync_deployment_files() {
+  local temp_dir source_url tag file mode local_path
+  local files=(
+    compose.yaml
+    .env.production.example
+    deploy/compose.direct.yaml
+    deploy/README.md
+    deploy/Caddyfile
+    deploy/Caddyfile.self-signed
+    deploy/install.sh
+    deploy/uninstall.sh
+    deploy/backup.sh
+    deploy/restore.sh
+    deploy/update.sh
+    deploy/manage.sh
+    deploy/nginx-central-example.conf
+    apps/api/src/modules/video-steffisburg/compose.yaml
+    apps/api/src/modules/video-steffisburg/streaming.example.json
+    apps/api/src/modules/video-steffisburg/.env.example
+    apps/api/src/modules/video-steffisburg/README.md
+    apps/api/src/modules/system-laptop/compose.yaml
+  )
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' RETURN
+
+  if [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then
+    for file in "${files[@]}" apps/api/src/modules/video-steffisburg/streaming.steffisburg.json; do
+      source_url="https://raw.githubusercontent.com/juristoeckli/smart-Church/$version/$file"
+      curl -fsSL --retry 3 "$source_url" -o "$temp_dir/${file//\//_}" || {
+        echo "Could not retrieve deployment file $file from commit $version." >&2
+        return 1
+      }
+    done
+  else
+    if [[ "$version" == "latest" ]]; then
+      source_url="https://github.com/juristoeckli/smart-Church/releases/latest/download/smart-church-deploy.tar.gz"
+    else
+      tag="v$version"
+      source_url="https://github.com/juristoeckli/smart-Church/releases/download/$tag/smart-church-deploy.tar.gz"
+    fi
+    curl -fsSL --retry 3 "$source_url" -o "$temp_dir/deploy.tar.gz" || {
+      echo "Could not retrieve the deployment package for $version." >&2
+      return 1
+    }
+    tar -xzf "$temp_dir/deploy.tar.gz" -C "$temp_dir"
+  fi
+
+  for file in "${files[@]}"; do
+    local_path="$temp_dir/$file"
+    if [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then
+      local_path="$temp_dir/${file//\//_}"
+    fi
+    [[ -f "$local_path" ]] || { echo "Deployment package is missing $file." >&2; return 1; }
+    mode=644
+    [[ "$file" == deploy/*.sh ]] && mode=755
+    install -D -m "$mode" "$local_path" "$root/$file"
+  done
+
+  local config_file="apps/api/src/modules/video-steffisburg/streaming.steffisburg.json"
+  if [[ ! -e "$root/$config_file" ]]; then
+    if [[ "$version" =~ ^[0-9a-f]{40}$ ]]; then
+      local_path="$temp_dir/${config_file//\//_}"
+    else
+      local_path="$temp_dir/$config_file"
+    fi
+    if [[ -f "$local_path" ]]; then install -D -m 644 "$local_path" "$root/$config_file"; fi
+  fi
+  trap - RETURN
+  rm -rf "$temp_dir"
+}
+
+sync_deployment_files || exit 1
+
 sync_video_module() {
   local module_dir="apps/api/src/modules/video-steffisburg"
   local temp_dir archive tag source_url

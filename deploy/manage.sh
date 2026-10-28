@@ -143,7 +143,7 @@ select_update_branch() {
 }
 
 force_update_branch() {
-  local branch="$1" commit_sha image
+  local branch="$1" commit_sha image update_script
   case "$branch" in
     main|beta|dev) ;;
     *) echo "Choose main, beta, or dev before forcing a branch update." >&2; return 0 ;;
@@ -160,7 +160,18 @@ force_update_branch() {
     fi
   done
   echo "Forcing an update to $branch commit $commit_sha."
-  bash ./deploy/update.sh "$commit_sha"
+  update_script="deploy/.update-${commit_sha}.sh"
+  curl -fsSL --retry 3 "https://raw.githubusercontent.com/juristoeckli/smart-Church/$commit_sha/deploy/update.sh" -o "$update_script" || {
+    rm -f "$update_script"
+    echo "Could not retrieve the updater from commit $commit_sha." >&2
+    return 1
+  }
+  bash "$update_script" "$commit_sha" || {
+    local status=$?
+    rm -f "$update_script"
+    return "$status"
+  }
+  rm -f "$update_script"
 }
 
 module_enabled() {
