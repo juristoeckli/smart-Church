@@ -1,6 +1,6 @@
 services:
   system-laptop-guacd:
-    image: smart-church/guacd:1.6.0-wave2
+    image: ${SYSTEM_LAPTOP_GUACD_IMAGE:-guacamole/guacd:1.6.0}
     profiles: [system-laptop]
     restart: unless-stopped
     networks:
