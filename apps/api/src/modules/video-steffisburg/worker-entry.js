@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -10,6 +11,12 @@ if (!coreUrl || !token) process.exit(1);
 
 const pythonPath = fileURLToPath(new URL("./python/worker.py", import.meta.url));
 const stateDirectory = process.env.STREAMING_STATE_DIR || dirname(resolve(process.env.STREAMING_CONFIG_FILE));
+try {
+  mkdirSync(stateDirectory, { recursive: true });
+} catch (error) {
+  console.error(`Could not create Video worker state directory: ${error instanceof Error ? error.message : "unknown error"}`);
+  process.exit(1);
+}
 const pythonCommand = process.env.PYTHON_BINARY || (process.platform === "win32" ? "py" : "python3");
 const pythonArgs = [...(process.platform === "win32" && !process.env.PYTHON_BINARY ? ["-3"] : []), "-u", pythonPath];
 const python = spawn(pythonCommand, pythonArgs, {
@@ -85,7 +92,10 @@ lines.on("line", (line) => {
   socket.send(JSON.stringify({ type: "response", id: message.id, ...(message.error ? { error: message.error } : { result: message.result }) }));
 });
 
-python.on("error", () => stop(1));
+python.on("error", (error) => {
+  console.error(`Could not start the Video worker Python process: ${error.message}`);
+  stop(1);
+});
 python.on("exit", (code) => { if (!shuttingDown) stop(code ?? 1); });
 process.on("SIGTERM", () => stop());
 process.on("SIGINT", () => stop());
