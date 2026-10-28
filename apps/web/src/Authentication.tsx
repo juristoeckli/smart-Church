@@ -3,6 +3,19 @@ import { ArrowRight, Church, LockKeyhole } from "lucide-react";
 import type { AuthenticatedUser } from "@smart-church/contracts";
 
 const defaultLogoUrl = "/gfc-logo.svg";
+const usernamePattern = "[A-Za-z0-9][A-Za-z0-9._-]{2,31}";
+const usernameHelp = "Use 3–32 characters: letters, numbers, dots, hyphens, or underscores. Put your email in the Email address field.";
+
+function authValidationMessage(message: string | undefined) {
+  const detail = message?.toLowerCase() ?? "";
+  if (detail.includes("username")) return usernameHelp;
+  if (detail.includes("email")) return "Enter a valid email address.";
+  if (detail.includes("password")) return "Use a password between 12 and 128 characters.";
+  if (detail.includes("setupcode")) return "Check the one-time setup code and enter at least 8 characters.";
+  if (detail.includes("location")) return "Enter a church location with no more than 120 characters.";
+  if (detail.includes("displayname")) return "Enter your name with no more than 100 characters.";
+  return "Some information is invalid. Check the field requirements and try again.";
+}
 
 function AuthDove({ className }: { className: string }) {
   return <svg className={className} viewBox="0 0 180 215" aria-hidden="true">
@@ -108,8 +121,13 @@ export function Authentication({
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = await response.json() as { user?: AuthenticatedUser; error?: string };
-      if (!response.ok || !result.user) throw new Error(result.error ?? "Could not sign in.");
+      const result = await response.json() as { user?: AuthenticatedUser; error?: string; message?: string };
+      if (!response.ok || !result.user) {
+        const message = response.status === 400 && result.error === "Bad Request"
+          ? authValidationMessage(result.message)
+          : result.error ?? result.message ?? "Could not sign in.";
+        throw new Error(message);
+      }
       onAuthenticated(result.user);
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : "Could not sign in.");
@@ -143,12 +161,14 @@ export function Authentication({
             <label>Church location<input name="location" required autoComplete="address-level2" maxLength={120} placeholder="Enter your location" defaultValue={setupLocation ?? ""} /></label>
             <p className="auth-hint">You can change this later in location settings.</p>
             <label>Your name<input name="displayName" required autoComplete="name" maxLength={100} placeholder="Juri Stöckli" /></label>
-            <label>Username<input name="username" required autoComplete="username" minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}" placeholder="juri.stoeckli" /></label>
+            <label>Username<input name="username" required autoComplete="username" minLength={3} maxLength={32} pattern={usernamePattern} title={usernameHelp} aria-describedby="username-help" placeholder="juri.stoeckli" /></label>
+            <p className="auth-hint" id="username-help">{usernameHelp}</p>
           </>}
           {setupRequired
             ? <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
             : <label>Username or email address<input name="identifier" required autoComplete="username" maxLength={254} placeholder="username or you@example.com" /></label>}
-          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} placeholder={setupRequired ? "At least 12 characters" : "Your password"} /></label>
+          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} aria-describedby={setupRequired ? "setup-password-help" : undefined} placeholder={setupRequired ? "At least 12 characters" : "Your password"} /></label>
+          {setupRequired && <p className="auth-hint" id="setup-password-help">Use 12–128 characters.</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
             {isSubmitting ? "Please wait…" : setupRequired ? "Create server administrator" : "Sign in"}
             {!isSubmitting && <ArrowRight size={17} />}
