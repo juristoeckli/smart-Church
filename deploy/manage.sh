@@ -184,13 +184,18 @@ module_enabled() {
 }
 
 set_module_enabled() {
-  local department_id="$1" module_id="$2" desired="$3" query result
+  local department_id="$1" module_id="$2" desired="$3" query result expected
   case "$module_id" in video-steffisburg|system-laptop|presenter) ;; *) return 2 ;; esac
   [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "The primary location ID is missing or invalid." >&2; return 1; }
   [[ "$desired" == true || "$desired" == false ]] || return 2
-  query="UPDATE departments SET enabled_modules = CASE WHEN $desired AND NOT ('$module_id' = ANY(enabled_modules)) THEN array_append(enabled_modules, '$module_id') WHEN NOT $desired THEN array_remove(enabled_modules, '$module_id') ELSE enabled_modules END, updated_at = now() WHERE id = '$department_id'::uuid RETURNING id"
-  result="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "$1"' sh "$query" | tr -d '\r')"
-  [[ "$result" == "$department_id" ]] || { echo "Could not update module availability for the primary location." >&2; return 1; }
+  query="UPDATE departments SET enabled_modules = CASE WHEN $desired AND NOT ('$module_id' = ANY(enabled_modules)) THEN array_append(enabled_modules, '$module_id') WHEN NOT $desired THEN array_remove(enabled_modules, '$module_id') ELSE enabled_modules END, updated_at = now() WHERE id = '$department_id'::uuid RETURNING '$module_id' = ANY(enabled_modules)"
+  result="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$query" | tr -d '\r')"
+  expected=t
+  [[ "$desired" == false ]] && expected=f
+  [[ "$result" == "$expected" ]] || {
+    echo "Could not set $module_id to $desired for location $department_id (database verification returned '${result:-no row}')." >&2
+    return 1
+  }
 }
 
 select_module() {
