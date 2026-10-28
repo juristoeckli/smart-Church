@@ -104,6 +104,7 @@ version="${version#v}"
 db_password="$(openssl rand -hex 24)"
 sync_key="$(openssl rand -hex 32)"
 department_id="$(cat /proc/sys/kernel/random/uuid)"
+direct_http_hosts="$(hostname -I 2>/dev/null | awk '{print $1}')"
 cat > "$root/.env" <<EOF
 POSTGRES_USER=smart_church
 POSTGRES_PASSWORD=$db_password
@@ -116,6 +117,7 @@ SMART_CHURCH_TRUST_PROXY=$trust_proxy
 SMART_CHURCH_DIRECT_HTTP=$direct_http
 SMART_CHURCH_DIRECT_HTTP_BIND_ADDRESS=0.0.0.0
 SMART_CHURCH_DIRECT_HTTP_PORT=81
+SMART_CHURCH_DIRECT_HTTP_HOSTS=$direct_http_hosts
 SMART_CHURCH_ALLOW_HTTP_FALLBACK=1
 SMART_CHURCH_HTTP_PORT=80
 SMART_CHURCH_DOCKER_SUBNET=172.30.250.0/24

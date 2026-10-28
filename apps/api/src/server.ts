@@ -15,6 +15,7 @@ const directHttpMode = process.env.SMART_CHURCH_DIRECT_HTTP === "1";
 const allowHttpFallback = process.env.SMART_CHURCH_ALLOW_HTTP_FALLBACK === "1";
 const directHttpPort = Number(process.env.SMART_CHURCH_DIRECT_HTTP_PORT ?? 81);
 const caddyHttpPort = Number(process.env.SMART_CHURCH_HTTP_PORT ?? 80);
+const directHttpOriginHosts = new Set(process.env.SMART_CHURCH_DIRECT_HTTP_HOSTS?.split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean) ?? []);
 const webRoot = resolve(fileURLToPath(new URL("../web-dist/", import.meta.url)));
 const webContentTypes = new Map([
   [".css", "text/css; charset=utf-8"], [".html", "text/html; charset=utf-8"],
@@ -221,8 +222,11 @@ function isAllowedWebOrigin(request: FastifyRequest, origin: string) {
     const httpsOrigin = new URL(expectedOrigin);
     const requestOrigin = new URL(origin);
     const allowedHttpPorts = new Set([String(caddyHttpPort), String(directHttpPort)]);
-    return requestOrigin.protocol === "http:" && requestOrigin.hostname === httpsOrigin.hostname &&
+    if (requestOrigin.protocol !== "http:") return false;
+    const isConfiguredHostname = requestOrigin.hostname === httpsOrigin.hostname &&
       ((requestOrigin.port === "" && caddyHttpPort === 80) || allowedHttpPorts.has(requestOrigin.port));
+    const isDirectHttpAlias = directHttpOriginHosts.has(requestOrigin.hostname) && requestOrigin.port === String(directHttpPort);
+    return isConfiguredHostname || isDirectHttpAlias;
   } catch {
     return false;
   }
