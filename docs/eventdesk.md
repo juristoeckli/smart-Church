@@ -19,6 +19,8 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Send manual or scheduled overdue payment reminders for regular and deposit invoices. Locations configure the delay schedule and maximum attempts; finance users can preview the live balance and pause reminders per invoice. Payments, draft or issued credits, cancellations, and settlement are checked before scheduled delivery, and every attempt and provider result is recorded.
 - Create credit notes against the unpaid balance of sent invoices or deposit invoices. Draft credits reserve balance; issued credits settle it and can be cancelled with the invoice balance recalculated.
 - Export issued invoices, deposit invoices, credit notes, and payment records to a date-filtered CSV for accounting. The export includes document links, customer and job references, net, tax, gross, payments, status, and due dates.
+- Import customers, equipment, suppliers, venues, freelancers, and jobs from the CSV templates in Reports & data. Templates use UTF-8 CSV, comma separators, snake_case headers, ISO date/time values, CHF cents for rates, and true/false active values. Job rows can link existing customers and venues through their exported `customer_ref` and `venue_ref` IDs; equipment rows can link suppliers with `supplier_ref`. Preview validates rows, flags location duplicates, and requires a separate commit; previews expire after 30 minutes. Record exports include IDs and relationship references for repeatable imports.
+- Run date-filtered utilisation, job cost and margin, multi-warehouse availability, overdue supplier returns, maintenance, and crew fulfilment reports. Reports can filter by status, customer, and equipment and export their result rows to CSV. Job margin subtracts booked equipment and crew costs, sub-rentals, and non-cancelled purchase commitments from issued documents, with credit notes counted as negative revenue.
 - Edit draft document lines and tax before sending; set location-specific company contact details, tax ID, payment terms, and a footer for printed and emailed documents.
 - Upload a location logo, preview reusable templates for every document type, and configure tax rates with legal disclosures. New documents save branding, logo, and tax-profile snapshots so later settings changes do not rewrite existing documents.
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
@@ -37,14 +39,26 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 
 Every job and resource is scoped to the selected Smart-Church location. A job does not need a linked church event. Crew can be assigned to location contacts or separate EventDesk freelancer records. Freelancers can respond to requests without a separate portal account.
 
+### CSV templates
+
+Template downloads contain the header row below. Import one entity at a time; import referenced customers, venues, and suppliers before jobs or equipment. `id` is optional on import; if supplied, it must be an unused UUID. Empty optional cells use EventDesk defaults. `active` accepts `true` or `false`. A preview accepts up to 1,000 data rows and expires after 30 minutes.
+
+| Record | Required columns | Optional columns |
+| --- | --- | --- |
+| Customers | `name` | `id`, `kind` (`company`/`person`), `contact_person`, `email`, `phone`, `street`, `postal_code`, `city`, `country`, `notes`, `active` |
+| Equipment | `name`, `category`, `quantity` | `id`, `daily_rate_cents`, `active`, `notes`, `barcode`, `supplier_ref` |
+| Suppliers and venues | `name` | `id`, `contact_person`, `email`, `phone`, `street`, `postal_code`, `city`, `country`, `notes`, `active` |
+| Freelancers | `name` | `id`, `email`, `phone`, `roles` (semicolon separated), `hourly_rate_cents`, `notes`, `active` |
+| Jobs | `title`, `starts_at`, `ends_at` | `id`, `customer_name`, `customer_ref`, `venue`, `venue_ref`, `status`, `notes` |
+
+Job timestamps use ISO 8601 and must include an end after the start. `customer_ref`, `venue_ref`, and `supplier_ref` refer to IDs exported from the same location. Monetary rates use integer cents.
+
 The SQL migrations are applied during normal Smart-Church startup. EventDesk is optional and off by default. A Server Administrator activates optional modules for the whole installation in Settings → Modules. After activation, site administrators can grant EventDesk access levels separately at each location in People & access.
 
 ### Email delivery setup
 
 EventDesk uses the shared [Resend email API](https://resend.com/docs/api-reference/emails/send-email). Configure `SMART_CHURCH_RESEND_API_KEY` and `SMART_CHURCH_EMAIL_FROM` on the Smart-Church server, using a verified sender address. The legacy `RESEND_API_KEY` and `EVENTDESK_EMAIL_FROM` names remain supported for existing deployments. Email delivery is optional; PDF download and browser printing work without a provider.
 
-## Planned product areas
+## Roadmap
 
-These remaining areas are needed before EventDesk can cover a full rental office workflow:
-
-- Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.
+The rental-office implementation tracked by issues #20–#27 is complete. Further enhancements can be planned from new requests and operational feedback.

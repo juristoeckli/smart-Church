@@ -6,6 +6,7 @@ import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions } from "./do
 import { startEventDeskReminderWorker } from "./reminders.js";
 import { startEventDeskInspectionWorker } from "./inspections.js";
 import { registerEventDeskSupplyRoutes } from "./supply.js";
+import { registerEventDeskDataRoutes } from "./data.js";
 
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
@@ -87,6 +88,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   startEventDeskReminderWorker(app, pool);
   startEventDeskInspectionWorker(app, pool);
   registerEventDeskSupplyRoutes(app, context);
+  registerEventDeskDataRoutes(app, context);
   const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
   const emailFrom = () => process.env.SMART_CHURCH_EMAIL_FROM?.trim() || process.env.EVENTDESK_EMAIL_FROM?.trim() || "";
 
