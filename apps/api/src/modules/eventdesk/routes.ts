@@ -17,6 +17,7 @@ const jobSchema = {
     properties: {
       title: { type: "string", minLength: 1, maxLength: 160 }, customerName: { type: "string", maxLength: 160 }, customerId: { type: ["string", "null"], format: "uuid" },
       customerContactId: { type: ["string", "null"], format: "uuid" }, linkedEventId: { type: ["string", "null"], format: "uuid" }, venueId: { type: ["string", "null"], format: "uuid" },
+      supplierRateCardId: { type: ["string", "null"], format: "uuid" },
       startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
       venue: { type: "string", maxLength: 240 }, notes: { type: "string", maxLength: 4000 },
     },
@@ -42,7 +43,12 @@ const partnerSchema = { body: { type: "object", additionalProperties: false, req
 } } };
 const packageSchema = { body: { type: "object", additionalProperties: false, required: ["name", "items"], properties: {
   name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 },
+  discountBps: { type: "integer", minimum: 0, maximum: 10000 },
   items: { type: "array", minItems: 1, maxItems: 40, items: { type: "object", additionalProperties: false, required: ["assetId", "quantity"], properties: { assetId: { type: "string", format: "uuid" }, quantity: { type: "integer", minimum: 1, maximum: 100000 } } } },
+} } };
+const supplierRateCardSchema = { body: { type: "object", additionalProperties: false, required: ["supplierId", "name", "validFrom", "lines"], properties: {
+  supplierId: { type: "string", format: "uuid" }, name: { type: "string", minLength: 1, maxLength: 160 }, validFrom: { type: "string", format: "date" }, validTo: { type: ["string", "null"], format: "date" },
+  lines: { type: "array", minItems: 1, maxItems: 500, items: { type: "object", additionalProperties: false, required: ["dailyRateCents"], properties: { assetId: { type: "string", format: "uuid" }, category: { type: "string", minLength: 1, maxLength: 80 }, dailyRateCents: { type: "integer", minimum: 0, maximum: 100000000 } } } },
 } } };
 const documentSettingsSchema = { body: { type: "object", additionalProperties: false, required: ["businessName", "street", "postalCode", "city", "country", "email", "phone", "taxIdentifier", "paymentTerms", "footer"], properties: {
   businessName: { type: "string", maxLength: 160 }, street: { type: "string", maxLength: 200 }, postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 },
@@ -86,6 +92,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
     async function rollback(client: PoolClient) { await client.query("ROLLBACK"); }
 
+    async function rentalRate(client: PoolClient, departmentId: string, rateCardId: string | null, startsAt: Date | string, asset: { id: string; category: string; daily_rate_cents: number; supplier_id: string | null }) {
+      if (!rateCardId) return Number(asset.daily_rate_cents);
+      const result = await client.query(`SELECT l.daily_rate_cents
+        FROM eventdesk_supplier_rate_cards c JOIN eventdesk_supplier_rate_lines l ON l.rate_card_id=c.id AND l.department_id=c.department_id
+        WHERE c.id=$1 AND c.department_id=$2 AND c.supplier_id=$6 AND c.active=true AND c.valid_from<=$3::date AND (c.valid_to IS NULL OR c.valid_to>=$3::date)
+          AND (l.asset_id=$4 OR (l.asset_id IS NULL AND lower(l.category)=lower($5)))
+        ORDER BY (l.asset_id IS NOT NULL) DESC LIMIT 1`, [rateCardId, departmentId, startsAt, asset.id, asset.category, asset.supplier_id]);
+      return result.rowCount ? Number(result.rows[0].daily_rate_cents) : Number(asset.daily_rate_cents);
+    }
+
     async function refreshInvoiceSettlement(client: PoolClient, departmentId: string, invoiceId: string) {
       const result = await client.query(`SELECT d.total_cents,d.status,
           coalesce((SELECT sum(p.amount_cents) FROM eventdesk_document_payments p WHERE p.document_id=d.id AND p.department_id=d.department_id),0)::int AS paid_cents,
@@ -103,8 +119,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
-      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, documents, docSettings, deliveries] = await Promise.all([
-        pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,
+      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries] = await Promise.all([
+        pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
                        FROM eventdesk_jobs j LEFT JOIN service_events e ON e.id=j.linked_event_id AND e.department_id=j.department_id
@@ -136,12 +152,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        FROM eventdesk_customers WHERE department_id=$1 ORDER BY active DESC, lower(name)`, [departmentId]),
         pool!.query(`SELECT id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,active
                        FROM eventdesk_partners WHERE department_id=$1 ORDER BY kind,active DESC,lower(name)`, [departmentId]),
-        pool!.query(`SELECT p.id,p.name,p.description,
+        pool!.query(`SELECT p.id,p.name,p.description,p.discount_bps,
                             coalesce(jsonb_agg(jsonb_build_object('assetId',a.id,'assetName',a.name,'quantity',i.quantity) ORDER BY lower(a.name))
                               FILTER (WHERE i.asset_id IS NOT NULL),'[]'::jsonb) AS items
                        FROM eventdesk_packages p LEFT JOIN eventdesk_package_items i ON i.package_id=p.id AND i.department_id=p.department_id
                        LEFT JOIN eventdesk_assets a ON a.id=i.asset_id AND a.department_id=i.department_id
                       WHERE p.department_id=$1 GROUP BY p.id ORDER BY lower(p.name)`, [departmentId]),
+        pool!.query(`SELECT c.id,c.supplier_id,s.name AS supplier_name,c.name,c.valid_from,c.valid_to,c.active,
+                            coalesce(jsonb_agg(jsonb_build_object('assetId',l.asset_id,'category',l.category,'dailyRateCents',l.daily_rate_cents) ORDER BY coalesce(l.category,a.category),a.name)
+                              FILTER (WHERE l.id IS NOT NULL),'[]'::jsonb) AS lines
+                       FROM eventdesk_supplier_rate_cards c JOIN eventdesk_partners s ON s.id=c.supplier_id AND s.department_id=c.department_id
+                       LEFT JOIN eventdesk_supplier_rate_lines l ON l.rate_card_id=c.id AND l.department_id=c.department_id
+                       LEFT JOIN eventdesk_assets a ON a.id=l.asset_id AND a.department_id=l.department_id
+                      WHERE c.department_id=$1 GROUP BY c.id,s.name ORDER BY c.active DESC,c.valid_from DESC,lower(c.name)`, [departmentId]),
         pool!.query(`SELECT d.id, d.job_id, j.title AS job_title, d.kind, d.document_number, d.related_document_id, original.document_number AS related_document_number, d.status, d.issue_date, d.due_date,
                             d.customer_snapshot, d.lines, d.tax_rate_bps, d.subtotal_cents, d.tax_cents, d.total_cents,
                             coalesce(sum(p.amount_cents),0)::int AS paid_cents,
@@ -161,7 +184,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                       WHERE x.department_id=$1 AND $2::boolean ORDER BY x.created_at DESC`, [departmentId, canFinance]),
       ]);
       return {
-        jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
+        jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, supplierRateCardId: row.supplier_rate_card_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
         assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes, barcode: row.barcode, supplierId: row.supplier_id, supplierName: row.supplier_name })),
         bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
         maintenance: maintenance.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), quantity: row.quantity, status: row.status, notes: row.notes })),
@@ -172,7 +195,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
         customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active, defaultDiscountBps: row.default_discount_bps })),
         partners: partners.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
-        packages: packages.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, items: row.items })),
+        packages: packages.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, discountBps: row.discount_bps, items: row.items })),
+        rateCards: rateCards.rows.map((row) => ({ id: row.id, supplierId: row.supplier_id, supplierName: row.supplier_name, name: row.name, validFrom: row.valid_from, validTo: row.valid_to, active: row.active, lines: row.lines })),
         documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, relatedDocumentId: row.related_document_id, relatedDocumentNumber: row.related_document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, creditedCents: row.credited_cents, pendingCreditCents: row.pending_credit_cents, payments: row.payments })),
         documentDeliveries: deliveries.rows.map((row) => ({ id: row.id, documentId: row.document_id, recipientEmail: row.recipient_email, subject: row.subject, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
@@ -501,7 +525,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
-    routes.post<{ Body: { title: string; customerName?: string; customerId?: string | null; customerContactId?: string | null; linkedEventId?: string | null; venueId?: string | null; startsAt: string; endsAt: string; venue?: string; notes?: string } }>("/api/eventdesk/jobs", { schema: jobSchema }, async (request, reply) => {
+    routes.post<{ Body: { title: string; customerName?: string; customerId?: string | null; customerContactId?: string | null; linkedEventId?: string | null; venueId?: string | null; supplierRateCardId?: string | null; startsAt: string; endsAt: string; venue?: string; notes?: string } }>("/api/eventdesk/jobs", { schema: jobSchema }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "jobs_manage");
       if (!departmentId) return reply;
@@ -522,8 +546,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         customerName = customer.rows[0].name;
         discountBps = Number(customer.rows[0].default_discount_bps);
       }
-      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,venue_id,starts_at,ends_at,venue,notes,discount_bps)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? "", discountBps]);
+      if (body.supplierRateCardId && !(await pool!.query(`SELECT 1 FROM eventdesk_supplier_rate_cards WHERE id=$1 AND department_id=$2 AND active=true AND valid_from<=$3::date AND (valid_to IS NULL OR valid_to>=$3::date)`, [body.supplierRateCardId, departmentId, body.startsAt])).rowCount) return reply.code(400).send({ error: "Choose an active supplier rate card that is valid on the job start date." });
+      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,venue_id,starts_at,ends_at,venue,notes,discount_bps,supplier_rate_card_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? "", discountBps, body.supplierRateCardId ?? null]);
       return reply.code(201).send({ id: result.rows[0].id });
     });
 
@@ -565,6 +590,41 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query(`UPDATE eventdesk_partners SET name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),updated_at=now()
         WHERE id=$1 AND department_id=$2 AND kind=$3 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
       return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Supplier or venue not found, or its type does not match." });
+    });
+
+    routes.post<{ Body: { supplierId: string; name: string; validFrom: string; validTo?: string | null; lines: { assetId?: string; category?: string; dailyRateCents: number }[] } }>("/api/eventdesk/rate-cards", { schema: supplierRateCardSchema }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "partners_manage");
+      if (!departmentId) return reply;
+      const body = request.body;
+      if (body.validTo && body.validTo < body.validFrom) return reply.code(400).send({ error: "The rate card end date must be on or after its start date." });
+      if (body.lines.some((line) => Boolean(line.assetId) === Boolean(line.category?.trim()))) return reply.code(400).send({ error: "Each rate line must target either one equipment item or one category." });
+      const targets = body.lines.map((line) => line.assetId ? `asset:${line.assetId}` : `category:${line.category!.trim().toLocaleLowerCase()}`);
+      if (new Set(targets).size !== targets.length) return reply.code(400).send({ error: "A rate card cannot repeat an equipment item or category." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const supplier = await client.query("SELECT id FROM eventdesk_partners WHERE id=$1 AND department_id=$2 AND kind='supplier' AND active=true FOR SHARE", [body.supplierId, departmentId]);
+        if (!supplier.rowCount) { await rollback(client); return reply.code(400).send({ error: "Choose an active supplier from this location." }); }
+        const assetIds = body.lines.flatMap((line) => line.assetId ? [line.assetId] : []);
+        if (assetIds.length) {
+          const validAssets = await client.query("SELECT id FROM eventdesk_assets WHERE department_id=$1 AND supplier_id=$2 AND id=ANY($3::uuid[])", [departmentId, body.supplierId, assetIds]);
+          if (validAssets.rowCount !== assetIds.length) { await rollback(client); return reply.code(400).send({ error: "Equipment-specific rates must target items linked to the selected supplier." }); }
+        }
+        const id = randomUUID();
+        await client.query("INSERT INTO eventdesk_supplier_rate_cards (id,department_id,supplier_id,name,valid_from,valid_to) VALUES ($1,$2,$3,$4,$5,$6)", [id, departmentId, body.supplierId, body.name.trim(), body.validFrom, body.validTo ?? null]);
+        for (const line of body.lines) await client.query("INSERT INTO eventdesk_supplier_rate_lines (id,department_id,rate_card_id,asset_id,category,daily_rate_cents) VALUES ($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, id, line.assetId ?? null, line.category?.trim() || null, line.dailyRateCents]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id });
+      } catch (error) { await rollback(client); if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A rate card already contains that item or category." }); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { active: boolean } }>("/api/eventdesk/rate-cards/:id/status", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["active"], properties: { active: { type: "boolean" } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "partners_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query("UPDATE eventdesk_supplier_rate_cards SET active=$3,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, departmentId, request.body.active]);
+      return result.rowCount ? { id: request.params.id, active: request.body.active } : reply.code(404).send({ error: "Rate card not found." });
     });
 
     routes.put<{ Params: { id: string }; Body: { status: JobStatus } }>("/api/eventdesk/jobs/:id/status", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: jobStatuses } } } } }, async (request, reply) => {
@@ -617,7 +677,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
-    routes.post<{ Body: { name: string; description?: string; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/packages", { schema: packageSchema }, async (request, reply) => {
+    routes.post<{ Body: { name: string; description?: string; discountBps?: number; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/packages", { schema: packageSchema }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
@@ -630,14 +690,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("BEGIN");
         const assets = await client.query("SELECT id FROM eventdesk_assets WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, itemIds]);
         if (assets.rowCount !== itemIds.length) { await rollback(client); return reply.code(400).send({ error: "Choose active equipment from this location for every package item." }); }
-        const created = await client.query("INSERT INTO eventdesk_packages (id,department_id,name,description) VALUES ($1,$2,$3,$4) RETURNING id", [randomUUID(), departmentId, name, request.body.description?.trim() ?? ""]);
+        const created = await client.query("INSERT INTO eventdesk_packages (id,department_id,name,description,discount_bps) VALUES ($1,$2,$3,$4,$5) RETURNING id", [randomUUID(), departmentId, name, request.body.description?.trim() ?? "", request.body.discountBps ?? 0]);
         for (const item of request.body.items) await client.query("INSERT INTO eventdesk_package_items (department_id,package_id,asset_id,quantity) VALUES ($1,$2,$3,$4)", [departmentId, created.rows[0].id, item.assetId, item.quantity]);
         await client.query("COMMIT");
         return reply.code(201).send({ id: created.rows[0].id });
       } catch (error) { await rollback(client); if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A package with that name already exists." }); throw error; } finally { client.release(); }
     });
 
-    routes.put<{ Params: { id: string }; Body: { name: string; description?: string; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/packages/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: packageSchema.body } }, async (request, reply) => {
+    routes.put<{ Params: { id: string }; Body: { name: string; description?: string; discountBps?: number; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/packages/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: packageSchema.body } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
@@ -652,7 +712,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!current.rowCount) { await rollback(client); return reply.code(404).send({ error: "Package not found." }); }
         const assets = await client.query("SELECT id FROM eventdesk_assets WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, itemIds]);
         if (assets.rowCount !== itemIds.length) { await rollback(client); return reply.code(400).send({ error: "Choose active equipment from this location for every package item." }); }
-        await client.query("UPDATE eventdesk_packages SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, name, request.body.description?.trim() ?? ""]);
+        await client.query("UPDATE eventdesk_packages SET name=$3,description=$4,discount_bps=$5,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, name, request.body.description?.trim() ?? "", request.body.discountBps ?? 0]);
         await client.query("DELETE FROM eventdesk_package_items WHERE package_id=$1 AND department_id=$2", [request.params.id, departmentId]);
         for (const item of request.body.items) await client.query("INSERT INTO eventdesk_package_items (department_id,package_id,asset_id,quantity) VALUES ($1,$2,$3,$4)", [departmentId, request.params.id, item.assetId, item.quantity]);
         await client.query("COMMIT");
@@ -670,16 +730,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const job = await client.query("SELECT starts_at,ends_at,status FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.params.id, departmentId]);
+        const job = await client.query("SELECT starts_at,ends_at,status,supplier_rate_card_id FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.params.id, departmentId]);
         if (!job.rowCount || ["cancelled", "completed"].includes(job.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "An active job is required for an equipment booking." }); }
-        const packageResult = await client.query("SELECT id,name FROM eventdesk_packages WHERE id=$1 AND department_id=$2 FOR SHARE", [request.body.packageId, departmentId]);
+        const packageResult = await client.query("SELECT id,name,discount_bps FROM eventdesk_packages WHERE id=$1 AND department_id=$2 FOR SHARE", [request.body.packageId, departmentId]);
         if (!packageResult.rowCount) { await rollback(client); return reply.code(404).send({ error: "Package not found." }); }
         const items = await client.query(`SELECT i.asset_id,i.quantity
           FROM eventdesk_package_items i JOIN eventdesk_assets a ON a.id=i.asset_id AND a.department_id=i.department_id
           WHERE i.package_id=$1 AND i.department_id=$2 ORDER BY i.asset_id`, [request.body.packageId, departmentId]);
         if (!items.rowCount) { await rollback(client); return reply.code(409).send({ error: "This package has no equipment items." }); }
         const assetIds = items.rows.map((item) => item.asset_id);
-        const lockedAssets = await client.query("SELECT id,active,quantity,daily_rate_cents,name FROM eventdesk_assets WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE", [departmentId, assetIds]);
+        const lockedAssets = await client.query("SELECT id,active,quantity,daily_rate_cents,name,category,supplier_id FROM eventdesk_assets WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE", [departmentId, assetIds]);
         if (lockedAssets.rowCount !== items.rowCount) { await rollback(client); return reply.code(409).send({ error: "A package item is no longer available in this location." }); }
         const lockedById = new Map(lockedAssets.rows.map((asset) => [asset.id, asset]));
         for (const item of items.rows) {
@@ -701,8 +761,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           const available = Number(item.stock_quantity) - Number(reserved.rows[0].quantity);
           if (required > available) { await rollback(client); return reply.code(409).send({ error: `${asset.name}: only ${Math.max(0, available)} unit(s) are available for those dates; package requires ${required}.` }); }
         }
-        for (const item of items.rows) { const asset = lockedById.get(item.asset_id)!; await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents)
-          VALUES ($1,$2,$3,$4,$5,$6)`, [randomUUID(), departmentId, request.params.id, item.asset_id, Number(item.quantity) * request.body.quantity, asset.daily_rate_cents]); }
+        for (const item of items.rows) {
+          const asset = lockedById.get(item.asset_id)!;
+          const baseRate = await rentalRate(client, departmentId, job.rows[0].supplier_rate_card_id, job.rows[0].starts_at, asset);
+          const packageRate = Math.round(baseRate * (10000 - Number(packageResult.rows[0].discount_bps)) / 10000);
+          await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents)
+            VALUES ($1,$2,$3,$4,$5,$6)`, [randomUUID(), departmentId, request.params.id, item.asset_id, Number(item.quantity) * request.body.quantity, packageRate]);
+        }
         await client.query("COMMIT");
         return reply.code(201).send({ packageName: packageResult.rows[0].name, itemCount: items.rowCount });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
@@ -715,9 +780,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const job = await client.query("SELECT starts_at,ends_at,status FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.params.id, departmentId]);
+        const job = await client.query("SELECT starts_at,ends_at,status,supplier_rate_card_id FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.params.id, departmentId]);
         if (!job.rowCount || ["cancelled", "completed"].includes(job.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "An active job is required for an equipment booking." }); }
-        const asset = await client.query("SELECT name,quantity,daily_rate_cents,active FROM eventdesk_assets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.body.assetId, departmentId]);
+        const asset = await client.query("SELECT id,name,category,quantity,daily_rate_cents,active,supplier_id FROM eventdesk_assets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.body.assetId, departmentId]);
         if (!asset.rowCount || !asset.rows[0].active) { await rollback(client); return reply.code(404).send({ error: "Active equipment item not found." }); }
         const reserved = await client.query(`WITH points AS (
           SELECT $3::timestamptz AS moment
@@ -732,8 +797,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at]);
         const available = asset.rows[0].quantity - Number(reserved.rows[0].quantity);
         if (request.body.quantity > available) { await rollback(client); return reply.code(409).send({ error: `Only ${Math.max(0, available)} unit(s) are available for those dates.` }); }
+        const dailyRate = await rentalRate(client, departmentId, job.rows[0].supplier_rate_card_id, job.rows[0].starts_at, asset.rows[0]);
         const result = await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents)
-          VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [randomUUID(), departmentId, request.params.id, request.body.assetId, request.body.quantity, asset.rows[0].daily_rate_cents]);
+          VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [randomUUID(), departmentId, request.params.id, request.body.assetId, request.body.quantity, dailyRate]);
         await client.query("COMMIT");
         return reply.code(201).send({ id: result.rows[0].id });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
