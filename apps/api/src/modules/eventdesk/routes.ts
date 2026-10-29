@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -352,6 +352,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       await ensureDefaultWarehouse(departmentId);
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
+      const canCrew = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true;
       const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases, serviceTickets, inspectionSchedules, staff] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
@@ -375,13 +376,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                             f.name AS freelancer_name,f.email AS freelancer_email,c.hours,c.hourly_rate_cents,c.status,c.notes,
                             (SELECT max(sent_at) FROM eventdesk_crew_deliveries x WHERE x.crew_id=c.id AND x.department_id=c.department_id AND x.status='sent') AS invite_sent_at,
                             (SELECT x.status FROM eventdesk_crew_deliveries x WHERE x.crew_id=c.id AND x.department_id=c.department_id ORDER BY x.created_at DESC LIMIT 1) AS invite_status,
-                            (SELECT x.error_summary FROM eventdesk_crew_deliveries x WHERE x.crew_id=c.id AND x.department_id=c.department_id ORDER BY x.created_at DESC LIMIT 1) AS invite_error
+                            (SELECT x.error_summary FROM eventdesk_crew_deliveries x WHERE x.crew_id=c.id AND x.department_id=c.department_id ORDER BY x.created_at DESC LIMIT 1) AS invite_error,
+                            coalesce((SELECT jsonb_agg(jsonb_build_object('fromStatus',h.from_status,'toStatus',h.to_status,'actor',h.actor_label,'details',h.details,'createdAt',h.created_at) ORDER BY h.created_at DESC) FROM eventdesk_crew_response_history h WHERE h.crew_id=c.id AND h.department_id=c.department_id),'[]'::jsonb) AS response_history
                        FROM eventdesk_job_crew c LEFT JOIN contacts p ON p.id=c.contact_id AND p.department_id=c.department_id
                        LEFT JOIN eventdesk_freelancers f ON f.id=c.freelancer_id AND f.department_id=c.department_id
                       WHERE c.department_id=$1 ORDER BY lower(c.role), c.created_at`, [departmentId]),
         pool!.query(`SELECT id, first_name, last_name FROM contacts WHERE department_id=$1 ORDER BY lower(last_name), lower(first_name)`, [departmentId]),
         pool!.query(`SELECT id,name,email,phone,roles,hourly_rate_cents,notes,active FROM eventdesk_freelancers WHERE department_id=$1 ORDER BY active DESC,lower(name)`, [departmentId]),
-        pool!.query(`SELECT id,freelancer_id,starts_at,ends_at,reason FROM eventdesk_freelancer_unavailability WHERE department_id=$1 AND ends_at>now() ORDER BY starts_at`, [departmentId]),
+        pool!.query(`SELECT id,freelancer_id,starts_at,ends_at,reason FROM eventdesk_freelancer_unavailability WHERE department_id=$1 ORDER BY starts_at`, [departmentId]),
         pool!.query(`SELECT id, title, event_date, start_time FROM service_events WHERE department_id=$1 ORDER BY event_date DESC, start_time DESC LIMIT 250`, [departmentId]),
         pool!.query(`SELECT id, kind, name, contact_person, email, phone, street, postal_code, city, country, notes, active, default_discount_bps
                        FROM eventdesk_customers WHERE department_id=$1 ORDER BY active DESC, lower(name)`, [departmentId]),
@@ -460,10 +462,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes, barcode: row.barcode, supplierId: row.supplier_id, supplierName: row.supplier_name })),
         bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status, warehouseId: row.warehouse_id, warehouseName: row.warehouse_name, serialisedUnits: row.serialised_units })),
         maintenance: maintenance.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), quantity: row.quantity, status: row.status, notes: row.notes })),
-        crew: crew.rows.map((row) => ({ id: row.id, jobId: row.job_id, role: row.role, contactId: row.contact_id, contactName: row.contact_name?.trim() || null, freelancerId: row.freelancer_id, freelancerName: row.freelancer_name, freelancerEmail: row.freelancer_email, inviteSentAt: row.invite_sent_at, inviteStatus: row.invite_status, inviteError: row.invite_error, hours: Number(row.hours), hourlyRateCents: row.hourly_rate_cents, status: row.status, notes: row.notes })),
+        crew: crew.rows.map((row) => ({ id: row.id, jobId: row.job_id, role: row.role, contactId: row.contact_id, contactName: row.contact_name?.trim() || null, freelancerId: row.freelancer_id, freelancerName: row.freelancer_name, freelancerEmail: canCrew ? row.freelancer_email : null, inviteSentAt: row.invite_sent_at, inviteStatus: row.invite_status, inviteError: canCrew ? row.invite_error : null, responseHistory: row.response_history, hours: Number(row.hours), hourlyRateCents: row.hourly_rate_cents, status: row.status, notes: row.notes })),
         contacts: contacts.rows.map((row) => ({ id: row.id, name: `${row.first_name} ${row.last_name}`.trim() })),
-        freelancers: freelancers.rows.map((row) => ({ id: row.id, name: row.name, email: row.email, phone: row.phone, roles: row.roles, hourlyRateCents: row.hourly_rate_cents, notes: row.notes, active: row.active })),
-        freelancerUnavailability: unavailability.rows.map((row) => ({ id: row.id, freelancerId: row.freelancer_id, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), reason: row.reason })),
+        freelancers: canCrew ? freelancers.rows.map((row) => ({ id: row.id, name: row.name, email: row.email, phone: row.phone, roles: row.roles, hourlyRateCents: row.hourly_rate_cents, notes: row.notes, active: row.active })) : [],
+        freelancerUnavailability: canCrew ? unavailability.rows.map((row) => ({ id: row.id, freelancerId: row.freelancer_id, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), reason: row.reason })) : [],
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
         customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active, defaultDiscountBps: row.default_discount_bps })),
         partners: partners.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
@@ -1395,6 +1397,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const status = assigned ? "assigned" : "requested";
       const result = await pool!.query(`INSERT INTO eventdesk_job_crew (id,department_id,job_id,role,contact_id,freelancer_id,hours,hourly_rate_cents,status,notes)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [randomUUID(), departmentId, request.params.id, request.body.role.trim(), request.body.contactId ?? null, request.body.freelancerId ?? null, request.body.hours ?? 0, request.body.hourlyRateCents ?? 0, status, request.body.notes?.trim() ?? ""]);
+      await pool!.query("INSERT INTO eventdesk_crew_response_history (id,department_id,crew_id,from_status,to_status,changed_by,actor_label,details) VALUES ($1,$2,$3,$4,$5,$6,'EventDesk manager','Crew position created.')", [randomUUID(), departmentId, result.rows[0].id, "requested", status, request.authenticatedUser?.id ?? null]);
       return reply.code(201).send({ id: result.rows[0].id, status });
     });
 
@@ -1429,6 +1432,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       await pool!.query(`UPDATE eventdesk_job_crew SET contact_id=$3,freelancer_id=$4,hours=$5,hourly_rate_cents=$6,status=$7,notes=$8,updated_at=now() WHERE id=$1 AND department_id=$2`,
         [request.params.id, departmentId, contactId ?? null, freelancerId ?? null, b.hours ?? existing.rows[0].hours, b.hourlyRateCents ?? existing.rows[0].hourly_rate_cents, status, b.notes ?? existing.rows[0].notes]);
+      await pool!.query("UPDATE eventdesk_crew_response_links SET revoked_at=now() WHERE department_id=$1 AND crew_id=$2 AND revoked_at IS NULL", [departmentId, request.params.id]);
+      if (status !== existing.rows[0].status) await pool!.query("INSERT INTO eventdesk_crew_response_history (id,department_id,crew_id,from_status,to_status,changed_by,actor_label,details) VALUES ($1,$2,$3,$4,$5,$6,'EventDesk manager','Crew status updated by a manager.')", [randomUUID(), departmentId, request.params.id, existing.rows[0].status, status, request.authenticatedUser?.id ?? null]);
       return { id: request.params.id, contactId: contactId ?? null, freelancerId: freelancerId ?? null, status };
     });
 
@@ -1451,7 +1456,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
       const schedule = `${new Date(crew.starts_at).toLocaleString("en-CH")}  -  ${new Date(crew.ends_at).toLocaleString("en-CH")}`;
       const subject = `Crew request: ${crew.title}`;
-      const html = `<div style="font-family:Arial,sans-serif;color:#202b28;max-width:640px;margin:auto"><h2>Crew request</h2><p>Hello ${escapeHtml(crew.name)},</p><p>Would you be available to work on <strong>${escapeHtml(crew.title)}</strong>?</p><p>${escapeHtml(schedule)}${crew.venue ? `<br>${escapeHtml(crew.venue)}` : ""}</p>${request.body.message ? `<p>${escapeHtml(request.body.message).replaceAll("\n", "<br>")}</p>` : ""}<p>Please reply to this email to confirm or decline. The church will update the request status when you reply.</p></div>`;
+      const token = randomBytes(32).toString("base64url");
+      const tokenHash = createHash("sha256").update(token).digest("hex");
+      const origin = process.env.SMART_CHURCH_WEB_ORIGIN?.trim() || (typeof request.headers.origin === "string" ? request.headers.origin : "");
+      if (!origin) return reply.code(503).send({ error: "Set SMART_CHURCH_WEB_ORIGIN before sending secure freelancer response links." });
+      const responseLink = `${origin.replace(/\/$/, "")}/api/public/eventdesk/crew-response?token=${encodeURIComponent(token)}`;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const current = await client.query("SELECT status,freelancer_id FROM eventdesk_job_crew WHERE id=$1 AND department_id=$2 FOR UPDATE", [crew.id, departmentId]);
+        if (!current.rowCount || current.rows[0].status !== crew.status || current.rows[0].freelancer_id !== crew.freelancer_id) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This crew request changed. Refresh it before sending another invitation." }); }
+        await client.query("UPDATE eventdesk_crew_response_links SET revoked_at=now() WHERE department_id=$1 AND crew_id=$2 AND revoked_at IS NULL", [departmentId, crew.id]);
+        await client.query("INSERT INTO eventdesk_crew_response_links (id,department_id,crew_id,token_hash,expires_at) VALUES ($1,$2,$3,$4,now()+interval '7 days')", [randomUUID(), departmentId, crew.id, tokenHash]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
+      const html = `<div style="font-family:Arial,sans-serif;color:#202b28;max-width:640px;margin:auto"><h2>Crew request</h2><p>Hello ${escapeHtml(crew.name)},</p><p>Would you be available to work on <strong>${escapeHtml(crew.title)}</strong>?</p><p>${escapeHtml(schedule)}${crew.venue ? `<br>${escapeHtml(crew.venue)}` : ""}</p>${request.body.message ? `<p>${escapeHtml(request.body.message).replaceAll("\n", "<br>")}</p>` : ""}<p><a href="${escapeHtml(responseLink)}" style="display:inline-block;background:#225c49;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none">Confirm or decline</a></p><p>This private link expires in seven days and can be used once.</p></div>`;
       const response = await fetch("https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ from, to: [crew.email], subject, html }), signal: AbortSignal.timeout(20_000) }).catch(() => null);
       let providerId = "";
       let errorSummary = "";
@@ -1465,9 +1484,62 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       await pool!.query(`INSERT INTO eventdesk_crew_deliveries (id,department_id,crew_id,freelancer_id,recipient_email,status,provider_message_id,error_summary,sent_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $6='sent' THEN now() ELSE NULL END)`, [randomUUID(), departmentId, crew.id, crew.freelancer_id, crew.email, errorSummary ? "failed" : "sent", providerId, errorSummary]);
-      if (errorSummary) return reply.code(502).send({ error: `Crew request email failed: ${errorSummary}` });
+      if (errorSummary) {
+        await pool!.query("UPDATE eventdesk_crew_response_links SET revoked_at=now() WHERE department_id=$1 AND crew_id=$2 AND token_hash=$3", [departmentId, crew.id, tokenHash]);
+        return reply.code(502).send({ error: `Crew request email failed: ${errorSummary}` });
+      }
       await pool!.query("UPDATE eventdesk_job_crew SET status='invited',updated_at=now() WHERE id=$1 AND department_id=$2 AND status IN ('assigned','invited')", [crew.id, departmentId]);
+      await pool!.query("INSERT INTO eventdesk_crew_response_history (id,department_id,crew_id,from_status,to_status,changed_by,actor_label,details) VALUES ($1,$2,$3,$4,'invited',$5,'EventDesk manager','Invitation sent with an expiring response link.')", [randomUUID(), departmentId, crew.id, crew.status, request.authenticatedUser?.id ?? null]);
       return { id: crew.id, status: "invited", recipientEmail: crew.email, providerMessageId: providerId };
+    });
+
+    routes.get<{ Querystring: { token?: string } }>("/api/public/eventdesk/crew-response", { schema: { querystring: { type: "object", additionalProperties: false, properties: { token: { type: "string", minLength: 40, maxLength: 100 } } } } }, async (request, reply) => {
+      const token = request.query.token ?? "";
+      const hash = createHash("sha256").update(token).digest("hex");
+      const invite = await pool!.query(`SELECT l.id,l.expires_at,l.responded_at,c.status,j.title,j.status AS job_status,f.name,f.active AS freelancer_active,
+          NOT EXISTS (SELECT 1 FROM eventdesk_freelancer_unavailability u WHERE u.department_id=c.department_id AND u.freelancer_id=c.freelancer_id AND u.starts_at<j.ends_at AND u.ends_at>j.starts_at)
+          AND NOT EXISTS (SELECT 1 FROM eventdesk_job_crew other JOIN eventdesk_jobs oj ON oj.id=other.job_id AND oj.department_id=other.department_id WHERE other.department_id=c.department_id AND other.id<>c.id AND other.freelancer_id=c.freelancer_id AND other.status IN ('assigned','invited','confirmed') AND oj.status NOT IN ('cancelled','completed') AND oj.starts_at<j.ends_at AND oj.ends_at>j.starts_at) AS still_available
+        FROM eventdesk_crew_response_links l JOIN eventdesk_job_crew c ON c.id=l.crew_id AND c.department_id=l.department_id
+        JOIN eventdesk_jobs j ON j.id=c.job_id AND j.department_id=c.department_id
+        JOIN eventdesk_freelancers f ON f.id=c.freelancer_id AND f.department_id=c.department_id
+        WHERE l.token_hash=$1 AND l.revoked_at IS NULL ORDER BY l.created_at DESC LIMIT 1`, [hash]);
+      if (!invite.rowCount || invite.rows[0].responded_at || new Date(invite.rows[0].expires_at) < new Date() || invite.rows[0].status !== "invited" || ["cancelled", "completed"].includes(invite.rows[0].job_status) || !invite.rows[0].freelancer_active || !invite.rows[0].still_available) return reply.type("text/html; charset=utf-8").code(410).send("<!doctype html><meta charset=utf-8><title>Link expired</title><main><h1>This crew response link has expired or the assignment changed</h1><p>Ask the EventDesk manager to send a new invitation.</p></main>");
+      const escapeHtml = (value: unknown) => String(value ?? "").replace(/[&<>\"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+      const form = (response: "confirmed" | "declined", label: string) => `<form method="post" action="/api/public/eventdesk/crew-response"><input type="hidden" name="token" value="${escapeHtml(token)}"><input type="hidden" name="response" value="${response}"><button style="padding:12px 20px;margin:8px;background:${response === "confirmed" ? "#225c49" : "#7a3f3f"};color:white;border:0;border-radius:6px;font-size:16px">${label}</button></form>`;
+      return reply.type("text/html; charset=utf-8").header("Cache-Control", "no-store").send(`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Crew response</title><main style="font:16px system-ui;max-width:620px;margin:12vh auto;padding:24px;color:#202b28"><h1>Crew request</h1><p>Hello ${escapeHtml(invite.rows[0].name)}. Please respond to the request for <strong>${escapeHtml(invite.rows[0].title)}</strong>.</p>${form("confirmed", "Confirm")}${form("declined", "Decline")}</main>`);
+    });
+
+    routes.post<{ Body: { token: string; response: "confirmed" | "declined" } }>("/api/public/eventdesk/crew-response", { schema: { body: { type: "object", additionalProperties: false, required: ["token", "response"], properties: { token: { type: "string", minLength: 40, maxLength: 100 }, response: { type: "string", enum: ["confirmed", "declined"] } } } } }, async (request, reply) => {
+      const hash = createHash("sha256").update(request.body.token).digest("hex");
+      const client = await pool!.connect();
+      let departmentId = "";
+      let crewId = "";
+      let previousStatus = "";
+      try {
+        await client.query("BEGIN");
+        const invite = await client.query(`SELECT l.id,l.department_id,l.crew_id,l.expires_at,l.responded_at,c.status,c.freelancer_id,j.title,j.status AS job_status,f.name,f.active AS freelancer_active,
+            NOT EXISTS (SELECT 1 FROM eventdesk_freelancer_unavailability u WHERE u.department_id=c.department_id AND u.freelancer_id=c.freelancer_id AND u.starts_at<j.ends_at AND u.ends_at>j.starts_at)
+            AND NOT EXISTS (SELECT 1 FROM eventdesk_job_crew other JOIN eventdesk_jobs oj ON oj.id=other.job_id AND oj.department_id=other.department_id WHERE other.department_id=c.department_id AND other.id<>c.id AND other.freelancer_id=c.freelancer_id AND other.status IN ('assigned','invited','confirmed') AND oj.status NOT IN ('cancelled','completed') AND oj.starts_at<j.ends_at AND oj.ends_at>j.starts_at) AS still_available
+          FROM eventdesk_crew_response_links l JOIN eventdesk_job_crew c ON c.id=l.crew_id AND c.department_id=l.department_id
+          JOIN eventdesk_jobs j ON j.id=c.job_id AND j.department_id=c.department_id
+          JOIN eventdesk_freelancers f ON f.id=c.freelancer_id AND f.department_id=c.department_id
+          WHERE l.token_hash=$1 AND l.revoked_at IS NULL FOR UPDATE OF l,c`, [hash]);
+        if (!invite.rowCount || invite.rows[0].responded_at || new Date(invite.rows[0].expires_at) < new Date() || invite.rows[0].status !== "invited" || ["cancelled", "completed"].includes(invite.rows[0].job_status) || !invite.rows[0].freelancer_active || !invite.rows[0].still_available) { await client.query("ROLLBACK"); return reply.type("text/html; charset=utf-8").code(410).send("<!doctype html><meta charset=utf-8><h1>This response link is expired or no longer current.</h1><p>Contact the EventDesk manager if you still need to respond.</p>"); }
+        departmentId = invite.rows[0].department_id; crewId = invite.rows[0].crew_id; previousStatus = invite.rows[0].status;
+        const used = await client.query("UPDATE eventdesk_crew_response_links SET responded_at=now(),response=$2 WHERE id=$1 AND responded_at IS NULL AND revoked_at IS NULL RETURNING id", [invite.rows[0].id, request.body.response]);
+        if (!used.rowCount) { await client.query("ROLLBACK"); return reply.type("text/html; charset=utf-8").code(410).send("<!doctype html><meta charset=utf-8><h1>This link has already been used.</h1>"); }
+        await client.query("UPDATE eventdesk_job_crew SET status=$3,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='invited'", [crewId, departmentId, request.body.response]);
+        await client.query("INSERT INTO eventdesk_crew_response_history (id,department_id,crew_id,from_status,to_status,actor_label,details) VALUES ($1,$2,$3,$4,$5,$6,$7)", [randomUUID(), departmentId, crewId, previousStatus, request.body.response, invite.rows[0].name, `Freelancer responded ${request.body.response}.`]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; } finally { client.release(); }
+      const managers = await pool!.query(`SELECT DISTINCT u.email FROM department_memberships m JOIN app_users u ON u.id=m.user_id
+        WHERE m.department_id=$1 AND (m.role='site_admin' OR m.module_permissions->'eventdesk' ? 'crew_manage')`, [departmentId]);
+      const apiKey = resendApiKey(); const from = emailFrom();
+      if (apiKey && from && managers.rowCount) {
+        const summary = await pool!.query("SELECT f.name,c.role,j.title FROM eventdesk_job_crew c JOIN eventdesk_freelancers f ON f.id=c.freelancer_id AND f.department_id=c.department_id JOIN eventdesk_jobs j ON j.id=c.job_id AND j.department_id=c.department_id WHERE c.id=$1 AND c.department_id=$2", [crewId, departmentId]);
+        if (summary.rowCount) await fetch("https://api.resend.com/emails", { method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" }, body: JSON.stringify({ from, to: managers.rows.map((row) => row.email), subject: `Crew ${request.body.response}: ${summary.rows[0].title}`, html: `<p>${String(summary.rows[0].name).replace(/[&<>\"']/g, "") } responded <strong>${request.body.response}</strong> for ${String(summary.rows[0].role).replace(/[&<>\"']/g, "")} on ${String(summary.rows[0].title).replace(/[&<>\"']/g, "")}.</p>` }), signal: AbortSignal.timeout(20_000) }).catch(() => undefined);
+      }
+      return reply.type("text/html; charset=utf-8").header("Cache-Control", "no-store").send(`<!doctype html><meta charset=utf-8><title>Response recorded</title><main style="font:16px system-ui;max-width:620px;margin:12vh auto;padding:24px"><h1>Response recorded</h1><p>Thank you. Your response has been sent to the EventDesk manager.</p></main>`);
     });
   });
 }

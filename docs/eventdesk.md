@@ -30,11 +30,12 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Open repair and inspection tickets for catalog items or individual serialised units, assign a staff owner, track diagnosis, parts, work, labour and parts costs, and attach service documents. Open tickets remove stock from availability; completing or cancelling a ticket releases its maintenance hold. Recurring inspection schedules generate service tickets when due and keep a service history.
 - Request crew positions, optionally assign a person from the location's people directory, and prevent overlapping assignments.
 - Maintain separate freelancer profiles with skills, contact details, and default rates. Record unavailable periods; EventDesk rejects assignments that overlap an unavailable period or another assigned job.
-- Email a job request to an assigned freelancer, keep a delivery record, and track requested, invited, confirmed, or declined status. Confirmation is recorded by the EventDesk manager after the freelancer replies.
+- Email a job request to an assigned freelancer with a private, expiring, single-use link to confirm or decline without an account. Resending or editing the assignment revokes earlier links; responses are checked against current conflicts and job status, added to staffing history, and emailed to EventDesk crew managers. Managers can still override a response from the crew schedule.
+- Use the crew calendar to review staffing requests, confirmations, and freelancer unavailable periods by date range and role. Freelancer email, phone, and availability data are returned only to crew managers.
 - Estimate the job total from booked equipment and crew rates.
 - Restrict viewing and job, customer, inventory, crew, and finance management with EventDesk-specific access levels.
 
-Every job and resource is scoped to the selected Smart-Church location. A job does not need a linked church event. Crew can be assigned to location contacts or separate EventDesk freelancer records. This first release runs inside Smart-Church; freelancers receive email requests and managers record their replies, with no separate freelancer portal or sign-in.
+Every job and resource is scoped to the selected Smart-Church location. A job does not need a linked church event. Crew can be assigned to location contacts or separate EventDesk freelancer records. Freelancers can respond to requests without a separate portal account.
 
 The SQL migrations are applied during normal Smart-Church startup. EventDesk is optional and off by default. A Server Administrator activates optional modules for the whole installation in Settings → Modules. After activation, site administrators can grant EventDesk access levels separately at each location in People & access.
 
