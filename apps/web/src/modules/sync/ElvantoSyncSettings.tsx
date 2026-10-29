@@ -5,7 +5,6 @@ type Direction = "off" | "bidirectional" | "elvanto_to_smart_church" | "smart_ch
 type Area = "people" | "peopleFlows" | "groups" | "services" | "songs" | "calendar" | "financial";
 type Directions = Record<Area, Direction>;
 type ImportProgress = { page: number; total: number | null; created: number; updated: number; skipped: number; complete: boolean };
-type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
 type PermissionCheck = { area: Area; accessible: boolean; recordCount?: number; detail?: string };
 type PeoplePreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
@@ -28,6 +27,15 @@ type CalendarPreview = {
   createCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
   sample: Array<{ title: string; date: string; action: string }>;
 };
+type PeopleFlowsPreview = {
+  flowCount: number; reportedFlowCount: number; stepCount: number; assignmentCount: number; complete: boolean;
+  createCount: number; updateCount: number;
+  sample: Array<{ name: string; steps: number; assignments: number; action: string }>;
+};
+type PeopleFlowsImportProgress = ImportProgress & { lastImportAt: string | null };
+type ImportedPeopleFlow = { sourceId: string; name: string; steps: number; members: number; importedAt: string };
+type PeopleFlowDetail = { sourceId: string; name: string; definition: { steps: Array<{ id: string; parentStepId: string | null; name: string; description: string; instructions: string; priority: string; due: Record<string, unknown>; admins: Array<{ id: string; role: string }> }> }; members: Array<{ stepId: string; stepName: string; personId: string; status: string; assignedAdminId: string; dueDate: string; completedDate: string; completedBy: string; contactId: string | null; contactName: string | null }>; memberOffset: number; memberTotal: number; importedAt: string };
+type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
 
 function shiftUtcYear(years: number) {
   const date = new Date();
@@ -61,6 +69,8 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [calendarStartDate, setCalendarStartDate] = useState(() => shiftUtcYear(-5));
   const [calendarEndDate, setCalendarEndDate] = useState(() => shiftUtcYear(5));
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
+  const [peopleFlowsPreview, setPeopleFlowsPreview] = useState<PeopleFlowsPreview | null>(null);
+  const [peopleFlowDetail, setPeopleFlowDetail] = useState<PeopleFlowDetail | null>(null);
 
   async function load() {
     try {
@@ -190,6 +200,53 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     finally { setBusy(false); }
   }
 
+  async function previewPeopleFlows() {
+    setBusy(true); setFeedback(""); setError(""); setPeopleFlowsPreview(null);
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/people-flows-preview", { method: "POST", headers: { "x-department-id": departmentId } });
+      const result = await response.json() as PeopleFlowsPreview & { error?: string };
+      if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto People Flows.");
+      await load(); setPeopleFlowsPreview(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto People Flows."); }
+    finally { setBusy(false); }
+  }
+
+  async function importPeopleFlows() {
+    if (!peopleFlowsPreview?.complete || peopleFlowsPreview.flowCount <= 0) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/people-flows-import", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, ...(status?.peopleFlowsImport?.complete ? { body: JSON.stringify({ restart: true }) } : {}) });
+      const result = await response.json() as { peopleFlowsImport?: PeopleFlowsImportProgress; error?: string };
+      if (!response.ok || !result.peopleFlowsImport) throw new Error(result.error ?? "Could not import Elvanto People Flows.");
+      await load(); setFeedback(result.peopleFlowsImport.complete ? "Elvanto People Flows import is complete." : "People Flows batch complete. Continue the import to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import Elvanto People Flows."); }
+    finally { setBusy(false); }
+  }
+
+  async function viewPeopleFlow(sourceId: string) {
+    setBusy(true); setError(""); setPeopleFlowDetail(null);
+    try {
+      const response = await fetch(`/api/modules/sync/elvanto/people-flows/${encodeURIComponent(sourceId)}?offset=0&limit=100`, { headers: { "x-department-id": departmentId } });
+      const result = await response.json() as PeopleFlowDetail & { error?: string };
+      if (!response.ok || !Array.isArray(result.members) || !result.definition?.steps) throw new Error(result.error ?? "Could not load imported People Flow.");
+      setPeopleFlowDetail(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load imported People Flow."); }
+    finally { setBusy(false); }
+  }
+
+  async function loadMorePeopleFlowAssignments() {
+    if (!peopleFlowDetail || peopleFlowDetail.members.length >= peopleFlowDetail.memberTotal) return;
+    setBusy(true); setError("");
+    try {
+      const offset = peopleFlowDetail.members.length;
+      const response = await fetch(`/api/modules/sync/elvanto/people-flows/${encodeURIComponent(peopleFlowDetail.sourceId)}?offset=${offset}&limit=100`, { headers: { "x-department-id": departmentId } });
+      const result = await response.json() as PeopleFlowDetail & { error?: string };
+      if (!response.ok || !Array.isArray(result.members)) throw new Error(result.error ?? "Could not load more assignments.");
+      setPeopleFlowDetail((current) => current ? { ...result, members: [...current.members, ...result.members] } : result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load more assignments."); }
+    finally { setBusy(false); }
+  }
+
   async function previewCalendar() {
     setBusy(true); setFeedback(""); setError(""); setCalendarPreview(null);
     try {
@@ -217,7 +274,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
 
   return <section className="directory-card sync-settings-card elvanto-settings-card">
     <div className="directory-heading"><div><h2>Elvanto</h2><p>{status?.configured ? "Connection verified" : "Connect this location to Elvanto."}</p></div>{status?.configured && <span className="event-kind event-kind-service">Connected</span>}</div>
-    <div className="demo-notice demo-notice-error"><span className="demo-dot" /><span>Read-only People, Groups, Services, and Calendar previews with resumable Elvanto-to-Smart-Church imports are available.</span> <span>Other data areas, exports, and bidirectional sync are still under development.</span></div>
+    <div className="demo-notice demo-notice-error"><span className="demo-dot" /><span>Read-only People, People Flows, Groups, Services, and Calendar previews with resumable Elvanto-to-Smart-Church imports are available.</span> <span>Other data areas, exports, and bidirectional sync are still under development.</span></div>
     <form className="sync-connection-form" onSubmit={(event) => void save(event)}>
       <label>Elvanto Secret API Key<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved key" : "Paste the Elvanto API key"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></label>
       <p className="sync-help">Find the key in Elvanto under Settings → Developers → API. It is encrypted on the server and never sent back to this screen. The connection check requires People read access.</p>
@@ -228,10 +285,14 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     </form>
     {status?.configured && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void checkPermissions()} disabled={busy || !areas.some(({ id }) => directions[id] !== "off" && (id !== "financial" || financialEnabled))}><RefreshCw size={15} />{busy ? "Checking permissions…" : "Check selected API permissions"}</button><span className="sync-help">Checks read access only; no Elvanto records are imported or changed.</span></div>}
     {status?.configured && directions.people !== "off" && directions.people !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewPeople()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview People import"}</button><span className="sync-help">Reads Elvanto people and compares them with this location. No records are written.</span></div>}
+    {status?.configured && directions.peopleFlows !== "off" && directions.peopleFlows !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewPeopleFlows()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview People Flows import"}</button><span className="sync-help">Reads People Flow definitions, steps, instructions, assignments, and statuses. No records are written.</span></div>}
     {status?.configured && directions.groups !== "off" && directions.groups !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewGroups()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Groups import"}</button><span className="sync-help">Preview shows up to 50 groups. Existing Elvanto groups will refresh; only memberships for imported groups are replaced.</span></div>}
     {status?.configured && directions.services !== "off" && directions.services !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewServices()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Services import"}</button><span className="sync-help">Previews Elvanto services, service times, plans, and volunteer assignments. Same-title events on the same date are skipped for manual review.</span></div>}
     {status?.configured && directions.calendar !== "off" && directions.calendar !== "smart_church_to_elvanto" && <div className="sync-connection-form"><div className="form-row"><label>Calendar start date<input type="date" value={calendarStartDate} max={calendarEndDate} onChange={(event) => { setCalendarStartDate(event.target.value); setCalendarPreview(null); }} /></label><label>Calendar end date<input type="date" value={calendarEndDate} min={calendarStartDate} onChange={(event) => { setCalendarEndDate(event.target.value); setCalendarPreview(null); }} /></label></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewCalendar()} disabled={busy || !calendarStartDate || !calendarEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Calendar import"}</button><span className="sync-help">Choose the date range to import. Elvanto calendar timestamps are returned in UTC.</span></div></div>}
     {status?.configured && status.peopleImport && <div className="sync-feedback" aria-live="polite"><strong>People import progress</strong><span>{status.peopleImport.complete ? "Complete" : <>Next Elvanto page: {status.peopleImport.page}</>}{status.peopleImport.total !== null && <> · {status.peopleImport.total} records</>} · {status.peopleImport.created} created · {status.peopleImport.updated} updated · {status.peopleImport.skipped} skipped</span></div>}
+    {status?.configured && status.peopleFlowsImport && <div className="sync-feedback" aria-live="polite"><strong>People Flows import progress</strong><span>{status.peopleFlowsImport.complete ? "Complete" : <>Next batch: {status.peopleFlowsImport.page}</>}{status.peopleFlowsImport.total !== null && <> · {status.peopleFlowsImport.total} flows</>} · {status.peopleFlowsImport.created} created · {status.peopleFlowsImport.updated} updated · {status.peopleFlowsImport.skipped} skipped</span></div>}
+    {status?.configured && status.peopleFlows?.length > 0 && <div className="sync-connection-form"><strong>Imported People Flows</strong>{status.peopleFlows.map((flow) => <div className="sync-feedback" key={flow.sourceId}><strong>{flow.name}</strong><span>{flow.steps} steps · {flow.members} assignments <button className="button button-secondary" type="button" onClick={() => void viewPeopleFlow(flow.sourceId)} disabled={busy}>View</button></span></div>)}</div>}
+    {peopleFlowDetail && <div className="sync-connection-form" aria-live="polite"><h3>{peopleFlowDetail.name}</h3><small className="sync-help">Imported {new Date(peopleFlowDetail.importedAt).toLocaleString()}</small><strong>Steps and instructions</strong>{peopleFlowDetail.definition.steps.map((step) => <div className="sync-feedback" key={step.id}><strong>{step.name}</strong>{step.description && <span>{step.description}</span>}{step.instructions && <small>{step.instructions}</small>}{typeof step.due.days === "number" || typeof step.due.days === "string" ? <small className="sync-help">Due after {String(step.due.days)} {String(step.due.type ?? "days")}</small> : null}</div>)}<strong>Assignments ({peopleFlowDetail.members.length} of {peopleFlowDetail.memberTotal})</strong>{peopleFlowDetail.members.map((member, index) => <div className="sync-feedback" key={`${member.stepId}-${member.personId}-${index}`}><strong>{member.contactName || `Elvanto person ${member.personId}`}</strong><span>{member.stepName} · {member.status || "Not started"}{member.dueDate ? ` · due ${member.dueDate}` : ""}{member.assignedAdminId ? ` · assigned to ${member.assignedAdminId}` : ""}{member.completedDate ? ` · completed ${member.completedDate}` : ""}{member.completedBy ? ` · completed by ${member.completedBy}` : ""}</span></div>)}{peopleFlowDetail.members.length < peopleFlowDetail.memberTotal && <button className="button button-secondary" type="button" onClick={() => void loadMorePeopleFlowAssignments()} disabled={busy}>Load more assignments</button>}</div>}
     {status?.configured && status.groupsImport && <div className="sync-feedback" aria-live="polite"><strong>Groups import progress</strong><span>{status.groupsImport.complete ? "Complete" : <>Next Elvanto page: {status.groupsImport.page}</>}{status.groupsImport.total !== null && <> · {status.groupsImport.total} groups</>} · {status.groupsImport.created} created · {status.groupsImport.updated} updated · {status.groupsImport.skipped} skipped</span></div>}
     {status?.configured && status.servicesImport && <div className="sync-feedback" aria-live="polite"><strong>Services import progress</strong><span>{status.servicesImport.complete ? "Complete" : <>Next Elvanto page: {status.servicesImport.page}</>}{status.servicesImport.total !== null && <> · {status.servicesImport.total} Elvanto services</>} · {status.servicesImport.created} events created · {status.servicesImport.updated} updated · {status.servicesImport.skipped} skipped</span></div>}
     {status?.configured && status.calendarImport && <div className="sync-feedback" aria-live="polite"><strong>Calendar import progress</strong><span>{status.calendarImport.startDate && status.calendarImport.endDate ? `${status.calendarImport.startDate} – ${status.calendarImport.endDate} · ` : ""}{status.calendarImport.complete ? "Complete" : <>Next Elvanto page: {status.calendarImport.page}</>}{status.calendarImport.total !== null && <> · {status.calendarImport.total} events</>} · {status.calendarImport.created} created · {status.calendarImport.updated} updated · {status.calendarImport.skipped} skipped</span></div>}
@@ -242,6 +303,13 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       {peoplePreview.sample.map((person, index) => <div className="sync-feedback" key={`${person.email ?? person.firstName}-${index}`}><strong>{person.firstName} {person.lastName}</strong><span>{person.email || "No email"} · {person.action === "already_linked" ? "Already linked" : person.action === "review_email_match" ? "Review email match" : person.action === "review_ambiguous_email" ? "Review ambiguous email match" : person.action === "needs_review" ? "Needs review" : person.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New contact"}</span></div>)}
       <small className="sync-help">Email matches are shown for review only. They will not be merged automatically.</small>
       <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importPeople()} disabled={busy || !peoplePreview.complete || (peoplePreview.createCount + peoplePreview.alreadyLinkedCount === 0)}><Check size={15} />{busy ? "Importing…" : status?.peopleImport?.complete ? "Refresh People from Elvanto" : status?.peopleImport ? "Continue People import" : "Import eligible contacts"}</button><span className="sync-help">Requires a complete preview. Work advances five Elvanto pages per batch; email matches are skipped for manual resolution.</span></div>
+    </div>}
+    {peopleFlowsPreview && <div className="sync-connection-form" aria-live="polite">
+      <div className="sync-feedback"><strong>People Flows import preview</strong><span>{peopleFlowsPreview.flowCount} flows scanned of {peopleFlowsPreview.reportedFlowCount} reported by Elvanto · {peopleFlowsPreview.stepCount} steps · {peopleFlowsPreview.assignmentCount} assignments{!peopleFlowsPreview.complete && <em> — preview is incomplete</em>}</span></div>
+      <div className="sync-feedback"><span>{peopleFlowsPreview.createCount} new flows</span> · <span>{peopleFlowsPreview.updateCount} already imported and will refresh</span></div>
+      {peopleFlowsPreview.sample.map((flow) => <div className="sync-feedback" key={flow.name}><strong>{flow.name}</strong><span>{flow.steps} steps · {flow.assignments} assignments · {flow.action === "update" ? "Refresh" : "New"}</span></div>)}
+      <small className="sync-help">Assignments link to stable Elvanto person IDs. Imported flow definitions and assignments are read-only; records absent from Elvanto are not deleted. Continue in batches of five flows.</small>
+      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importPeopleFlows()} disabled={busy || !peopleFlowsPreview.complete || peopleFlowsPreview.flowCount === 0}><Check size={15} />{busy ? "Importing…" : status?.peopleFlowsImport?.complete ? "Refresh People Flows from Elvanto" : status?.peopleFlowsImport ? "Continue People Flows import" : "Import People Flows"}</button></div>
     </div>}
     {groupsPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Groups import preview</strong><span>{groupsPreview.scannedCount} scanned{groupsPreview.reportedTotal !== null && <> of {groupsPreview.reportedTotal} reported by Elvanto</>}{!groupsPreview.complete && <em> — preview is incomplete</em>}</span></div>
