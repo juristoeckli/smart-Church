@@ -451,7 +451,7 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     registrationCount: row.registration_count ?? 0,
     ...(row.attendance_recorded_at ? { attendanceRecordedAt: row.attendance_recorded_at } : {}),
     ...(row.recurrence_id ? { seriesId: row.recurrence_id } : {}),
-    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
+    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
   };
 }
 
@@ -1994,7 +1994,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Edit it there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Edit it there and sync again.` });
   const event = {
     ...request.body,
     title: request.body.title.trim(),
@@ -2043,7 +2043,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   if (!selectedDepartmentId) return reply;
   const source = await pool.query<{ recurrence_id: string | null; source_system: string | null; event_date: string }>("SELECT recurrence_id,source_system,event_date::text FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!source.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (source.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Edit it there and sync again." });
+  if (source.rows[0].source_system === "churchtools" || source.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${source.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Edit it there and sync again.` });
   if (!source.rows[0].recurrence_id) return reply.code(400).send({ error: "This gathering is not part of a recurring series." });
   const event = { ...request.body, title: request.body.title.trim(), location: request.body.location.trim(), endTime: request.body.endTime?.trim() || undefined, description: request.body.description?.trim() || undefined };
   const validationError = validateServiceEvent({ ...event, recurrence: undefined });
@@ -2082,7 +2082,7 @@ app.delete<{ Params: { id: string } }>("/api/events/:id/series", {
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query<{ recurrence_id: string | null; source_system: string | null }>("SELECT recurrence_id,source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Remove it there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Remove it there and sync again.` });
   if (!existing.rows[0].recurrence_id) return reply.code(400).send({ error: "This gathering is not part of a recurring series." });
   const result = await pool.query("DELETE FROM service_events WHERE department_id=$1 AND recurrence_id=$2 RETURNING id", [selectedDepartmentId, existing.rows[0].recurrence_id]);
   return { deleted: result.rowCount ?? 0 };
@@ -2104,8 +2104,9 @@ app.put<{ Params: { id: string; positionIndex: string }; Body: { status: "pendin
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const eventResult = await client.query<{ positions: ServiceEvent["positions"] }>("SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    const eventResult = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null }>("SELECT positions,source_system FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
     if (!eventResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    if (eventResult.rows[0].source_system === "churchtools" || eventResult.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
     const position = eventResult.rows[0].positions?.[positionIndex];
     if (!position || position.contactId !== contactId) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You are not assigned to this service position." }); }
     const result = await client.query<{ status: string }>(
@@ -2134,11 +2135,11 @@ app.put<{ Params: { id: string }; Body: { adults: number; children: number } }>(
   if (!selectedDepartmentId) return reply;
   const result = await pool.query<{ attendance_adults: number; attendance_children: number; attendance_recorded_at: string }>(
     `UPDATE service_events SET attendance_adults=$3, attendance_children=$4, attendance_recorded_at=now(), updated_at=now()
-      WHERE id=$1 AND department_id=$2 AND source_system IS DISTINCT FROM 'churchtools'
+      WHERE id=$1 AND department_id=$2 AND (source_system IS NULL OR source_system NOT IN ('churchtools','elvanto'))
       RETURNING attendance_adults, attendance_children, attendance_recorded_at`,
     [request.params.id, selectedDepartmentId, request.body.adults, request.body.children],
   );
-  if (!result.rowCount) return reply.code(404).send({ error: "This gathering could not be found or is managed by ChurchTools." });
+  if (!result.rowCount) return reply.code(404).send({ error: "This gathering could not be found or is managed by an external service." });
   return { attendanceAdults: result.rows[0].attendance_adults, attendanceChildren: result.rows[0].attendance_children, attendanceRecordedAt: result.rows[0].attendance_recorded_at };
 });
 
@@ -2148,7 +2149,7 @@ app.get<{ Params: { id: string } }>("/api/events/:id/check-ins", {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
-  const event = await pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2 AND source_system IS DISTINCT FROM 'churchtools'", [request.params.id, selectedDepartmentId]);
+  const event = await pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2 AND (source_system IS NULL OR source_system NOT IN ('churchtools','elvanto'))", [request.params.id, selectedDepartmentId]);
   if (!event.rowCount) return reply.code(404).send({ error: "This locally managed gathering could not be found." });
   const result = await pool.query<ServiceEventCheckIn>(
     `SELECT checkin.contact_id AS "contactId", checkin.first_time_visitor AS "firstTimeVisitor", checkin.follow_up_status AS "followUpStatus", checkin.checked_in_at AS "checkedInAt"
@@ -2175,7 +2176,7 @@ app.put<{ Params: { id: string }; Body: { contactId: string; firstTimeVisitor?: 
     `INSERT INTO event_attendance_checkins (event_id,contact_id,first_time_visitor,follow_up_status)
      SELECT gathering.id,person.id,$4,COALESCE($5,CASE WHEN $4 THEN 'needed' ELSE 'not_needed' END)
        FROM service_events gathering JOIN contacts person ON person.id=$2 AND person.department_id=gathering.department_id
-      WHERE gathering.id=$1 AND gathering.department_id=$3 AND gathering.source_system IS DISTINCT FROM 'churchtools'
+      WHERE gathering.id=$1 AND gathering.department_id=$3 AND (gathering.source_system IS NULL OR gathering.source_system NOT IN ('churchtools','elvanto'))
      ON CONFLICT (event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,follow_up_status=EXCLUDED.follow_up_status,updated_at=now()
      RETURNING contact_id AS "contactId",first_time_visitor AS "firstTimeVisitor",follow_up_status AS "followUpStatus",checked_in_at AS "checkedInAt"`,
     [request.params.id, request.body.contactId, selectedDepartmentId, request.body.firstTimeVisitor ?? false, request.body.followUpStatus ?? null],
@@ -2193,7 +2194,7 @@ app.delete<{ Params: { id: string; contactId: string } }>("/api/events/:id/check
   const result = await pool.query(
     `DELETE FROM event_attendance_checkins checkin USING service_events gathering, contacts person
       WHERE checkin.event_id=gathering.id AND checkin.contact_id=person.id AND gathering.id=$1 AND person.id=$2
-        AND gathering.department_id=$3 AND person.department_id=$3 AND gathering.source_system IS DISTINCT FROM 'churchtools'`,
+        AND gathering.department_id=$3 AND person.department_id=$3 AND (gathering.source_system IS NULL OR gathering.source_system NOT IN ('churchtools','elvanto'))`,
     [request.params.id, request.params.contactId, selectedDepartmentId],
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This check-in could not be found in the selected location." });
@@ -2361,7 +2362,7 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Remove it there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Remove it there and sync again.` });
   const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
   return { id: result.rows[0].id };

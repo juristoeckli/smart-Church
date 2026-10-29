@@ -49,7 +49,7 @@ export interface ServiceEvent {
   registrationToken?: string;
   registrationCount?: number;
   seriesId?: string;
-  importedFrom?: "churchtools";
+  importedFrom?: "churchtools" | "elvanto";
 }
 
 export interface ServiceEventCheckIn {
