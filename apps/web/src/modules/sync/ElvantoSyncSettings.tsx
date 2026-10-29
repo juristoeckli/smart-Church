@@ -33,9 +33,13 @@ type PeopleFlowsPreview = {
   sample: Array<{ name: string; steps: number; assignments: number; action: string }>;
 };
 type PeopleFlowsImportProgress = ImportProgress & { lastImportAt: string | null };
+type SongsPreview = { songCount: number; reportedSongCount: number; complete: boolean; createCount: number; updateCount: number; sample: Array<{ title: string; arrangements: number; action: string }> };
+type SongsImportProgress = ImportProgress & { previewComplete: boolean; previewCount: number; importedCount: number; lastImportAt: string | null };
+type ImportedSong = { sourceId: string; title: string; arrangements: number; importedAt: string };
+type SongDetail = { sourceId: string; title: string; song: Record<string, unknown>; arrangements: Array<Record<string, unknown>>; importedAt: string };
 type ImportedPeopleFlow = { sourceId: string; name: string; steps: number; members: number; importedAt: string };
 type PeopleFlowDetail = { sourceId: string; name: string; definition: { steps: Array<{ id: string; parentStepId: string | null; name: string; description: string; instructions: string; priority: string; due: Record<string, unknown>; admins: Array<{ id: string; role: string }> }> }; members: Array<{ stepId: string; stepName: string; personId: string; status: string; assignedAdminId: string; dueDate: string; completedDate: string; completedBy: string; contactId: string | null; contactName: string | null }>; memberOffset: number; memberTotal: number; importedAt: string };
-type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
+type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; songsImport: SongsImportProgress | null; songs: ImportedSong[]; songsTotal: number; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
 
 function shiftUtcYear(years: number) {
   const date = new Date();
@@ -71,6 +75,8 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
   const [peopleFlowsPreview, setPeopleFlowsPreview] = useState<PeopleFlowsPreview | null>(null);
   const [peopleFlowDetail, setPeopleFlowDetail] = useState<PeopleFlowDetail | null>(null);
+  const [songsPreview, setSongsPreview] = useState<SongsPreview | null>(null);
+  const [songDetail, setSongDetail] = useState<SongDetail | null>(null);
 
   async function load() {
     try {
@@ -200,6 +206,52 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     finally { setBusy(false); }
   }
 
+  async function previewSongs() {
+    setBusy(true); setFeedback(""); setError(""); setSongsPreview(null);
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/songs-preview", { method: "POST", headers: { "x-department-id": departmentId } });
+      const result = await response.json() as SongsPreview & { error?: string };
+      if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto songs.");
+      await load(); setSongsPreview(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto songs."); }
+    finally { setBusy(false); }
+  }
+
+  async function importSongs() {
+    if (!songsPreview?.complete || songsPreview.songCount <= 0) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/songs-import", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, ...(status?.songsImport?.complete ? { body: JSON.stringify({ restart: true }) } : {}) });
+      const result = await response.json() as { songsImport?: SongsImportProgress & { processedThisBatch?: number }; error?: string };
+      if (!response.ok || !result.songsImport) throw new Error(result.error ?? "Could not import Elvanto songs.");
+      await load(); setFeedback(result.songsImport.complete ? "Elvanto Songs import is complete." : "Songs batch complete. Continue the import to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import Elvanto songs."); }
+    finally { setBusy(false); }
+  }
+
+  async function loadMoreSongs() {
+    if (!status || status.songs.length >= status.songsTotal) return;
+    setBusy(true); setError("");
+    try {
+      const response = await fetch(`/api/modules/sync/elvanto/songs?offset=${status.songs.length}&limit=100`, { headers: { "x-department-id": departmentId } });
+      const result = await response.json() as { songs?: ImportedSong[]; total?: number; error?: string };
+      if (!response.ok || !Array.isArray(result.songs)) throw new Error(result.error ?? "Could not load more imported songs.");
+      setStatus((current) => current ? { ...current, songs: [...current.songs, ...result.songs!], songsTotal: result.total ?? current.songsTotal } : current);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load more imported songs."); }
+    finally { setBusy(false); }
+  }
+
+  async function viewSong(sourceId: string) {
+    setBusy(true); setError(""); setSongDetail(null);
+    try {
+      const response = await fetch(`/api/modules/sync/elvanto/songs/${encodeURIComponent(sourceId)}`, { headers: { "x-department-id": departmentId } });
+      const result = await response.json() as SongDetail & { error?: string };
+      if (!response.ok || !Array.isArray(result.arrangements)) throw new Error(result.error ?? "Could not load imported song.");
+      setSongDetail(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load imported song."); }
+    finally { setBusy(false); }
+  }
+
   async function previewPeopleFlows() {
     setBusy(true); setFeedback(""); setError(""); setPeopleFlowsPreview(null);
     try {
@@ -289,6 +341,11 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {status?.configured && directions.groups !== "off" && directions.groups !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewGroups()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Groups import"}</button><span className="sync-help">Preview shows up to 50 groups. Existing Elvanto groups will refresh; only memberships for imported groups are replaced.</span></div>}
     {status?.configured && directions.services !== "off" && directions.services !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewServices()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Services import"}</button><span className="sync-help">Previews Elvanto services, service times, plans, and volunteer assignments. Same-title events on the same date are skipped for manual review.</span></div>}
     {status?.configured && directions.calendar !== "off" && directions.calendar !== "smart_church_to_elvanto" && <div className="sync-connection-form"><div className="form-row"><label>Calendar start date<input type="date" value={calendarStartDate} max={calendarEndDate} onChange={(event) => { setCalendarStartDate(event.target.value); setCalendarPreview(null); }} /></label><label>Calendar end date<input type="date" value={calendarEndDate} min={calendarStartDate} onChange={(event) => { setCalendarEndDate(event.target.value); setCalendarPreview(null); }} /></label></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewCalendar()} disabled={busy || !calendarStartDate || !calendarEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Calendar import"}</button><span className="sync-help">Choose the date range to import. Elvanto calendar timestamps are returned in UTC.</span></div></div>}
+    {status?.configured && directions.songs !== "off" && directions.songs !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewSongs()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Songs import"}</button><span className="sync-help">Reads songs, arrangements, keys, lyrics, and chord charts. No records are written.</span></div>}
+    {status?.configured && status.songsImport && <div className="sync-feedback" aria-live="polite"><strong>Songs import progress</strong><span>{status.songsImport.complete ? "Complete" : <>Next song: {status.songsImport.page}</>}{status.songsImport.total !== null && <> · {status.songsImport.total} songs</>} · {status.songsImport.created} created · {status.songsImport.updated} refreshed</span></div>}
+    {status?.configured && status.songs?.length > 0 && <div className="sync-connection-form"><strong>Imported Songs</strong>{status.songs.map((song) => <div className="sync-feedback" key={song.sourceId}><strong>{song.title}</strong><span>{song.arrangements} arrangements <button className="button button-secondary" type="button" onClick={() => void viewSong(song.sourceId)} disabled={busy}>View</button></span></div>)}{status.songs.length < status.songsTotal && <button className="button button-secondary" type="button" onClick={() => void loadMoreSongs()} disabled={busy}>Load more songs ({status.songs.length} of {status.songsTotal})</button>}</div>}
+    {songDetail && <div className="sync-connection-form" aria-live="polite"><h3>{songDetail.title}</h3><small className="sync-help">Imported {new Date(songDetail.importedAt).toLocaleString()}</small><strong>Song details</strong><pre className="sync-song-json">{JSON.stringify(songDetail.song, null, 2)}</pre><strong>Arrangements, keys, lyrics, and charts</strong>{songDetail.arrangements.map((arrangement, index) => <div className="sync-feedback" key={String(arrangement.id ?? index)}><strong>{String(arrangement.name ?? arrangement.title ?? `Arrangement ${index + 1}`)}</strong><pre className="sync-song-json">{JSON.stringify(arrangement, null, 2)}</pre></div>)}</div>}
+    {songsPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Songs import preview</strong><span>{songsPreview.songCount} songs scanned of {songsPreview.reportedSongCount} reported by Elvanto{!songsPreview.complete && <em> — preview is incomplete</em>}</span></div><div className="sync-feedback"><span>{songsPreview.createCount} new songs</span> · <span>{songsPreview.updateCount} songs will refresh</span></div>{songsPreview.sample.map((song) => <div className="sync-feedback" key={song.title}><strong>{song.title}</strong><span>{song.action === "update" ? "Refresh" : "New"}</span></div>)}<small className="sync-help">Imports five songs at a time, including all arrangements and keys. Imported snapshots are read-only and are not deleted when absent from Elvanto.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importSongs()} disabled={busy || !songsPreview.complete || songsPreview.songCount === 0}><Check size={15} />{busy ? "Importing…" : status?.songsImport?.complete ? "Refresh Songs from Elvanto" : status?.songsImport ? "Continue Songs import" : "Import Songs"}</button></div></div>}
     {status?.configured && status.peopleImport && <div className="sync-feedback" aria-live="polite"><strong>People import progress</strong><span>{status.peopleImport.complete ? "Complete" : <>Next Elvanto page: {status.peopleImport.page}</>}{status.peopleImport.total !== null && <> · {status.peopleImport.total} records</>} · {status.peopleImport.created} created · {status.peopleImport.updated} updated · {status.peopleImport.skipped} skipped</span></div>}
     {status?.configured && status.peopleFlowsImport && <div className="sync-feedback" aria-live="polite"><strong>People Flows import progress</strong><span>{status.peopleFlowsImport.complete ? "Complete" : <>Next batch: {status.peopleFlowsImport.page}</>}{status.peopleFlowsImport.total !== null && <> · {status.peopleFlowsImport.total} flows</>} · {status.peopleFlowsImport.created} created · {status.peopleFlowsImport.updated} updated · {status.peopleFlowsImport.skipped} skipped</span></div>}
     {status?.configured && status.peopleFlows?.length > 0 && <div className="sync-connection-form"><strong>Imported People Flows</strong>{status.peopleFlows.map((flow) => <div className="sync-feedback" key={flow.sourceId}><strong>{flow.name}</strong><span>{flow.steps} steps · {flow.members} assignments <button className="button button-secondary" type="button" onClick={() => void viewPeopleFlow(flow.sourceId)} disabled={busy}>View</button></span></div>)}</div>}

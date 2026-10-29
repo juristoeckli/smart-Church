@@ -145,3 +145,5 @@
 .group-join-request > label { display: grid; gap: 0.35rem; font-size: 0.8rem; }
 .group-join-request-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }
 @media (max-width: 720px) { .group-join-request { grid-template-columns: 1fr; } .group-join-request-actions { justify-content: flex-start; } }
+
+.sync-song-json{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;padding:10px;border-radius:6px;background:var(--surface,#191b22);color:var(--text-color,#e9e9ef);font-size:.78rem}
