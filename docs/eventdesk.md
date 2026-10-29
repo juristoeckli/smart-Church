@@ -9,7 +9,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Maintain an equipment catalog with stock quantity and daily rental rates.
 - Create numbered, print-ready quote and invoice snapshots from a job's current equipment and crew plan; set tax, issue invoices with a due date, mark quotes sent/accepted/rejected, and record full or partial invoice payments.
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
-- Track equipment as reserved, checked out, returned, or cancelled.
+- Track reserved, checked-out, and returned quantities. The Warehouse section provides printable job pick lists and barcode scanning for each unit checked out or returned.
 - Request crew positions, optionally assign a person from the location's people directory, and prevent overlapping assignments.
 - Estimate the job total from booked equipment and crew rates.
 - Restrict viewing and job, customer, inventory, crew, and finance management with EventDesk-specific access levels.
@@ -33,6 +33,6 @@ The document workflow is a first operational slice. These remaining areas are ne
 
 - Supplier CRM, rate cards, discounts, and reusable item bundles.
 - Editable document lines, branded PDF/email delivery, rental contracts, deposits, credit notes, reminders, accounting exports, and configurable tax/legal settings.
-- Pick lists, delivery notes, serial number and barcode scanning, and warehouse check-in/out with packing/casing.
+- Delivery notes, serial-number-level stock, barcode label generation, packing/casing, multi-warehouse stock, and transfers.
 - Maintenance and workshop scheduling, sub-rentals, purchases, and multi-warehouse stock.
 - Supplier, freelancer, and venue records; calendar and availability views; staff confirmations; import/export and operational reporting.

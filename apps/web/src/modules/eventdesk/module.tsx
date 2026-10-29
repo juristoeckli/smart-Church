@@ -4,7 +4,7 @@ import type { ModuleContext, ModuleRegistration } from "../../module-registry";
 import "./eventdesk.css";
 
 const EventDeskPage = lazy(() => import("./EventDeskModule").then(({ EventDeskModule }) => ({ default: EventDeskModule })));
-const sections = ["Overview", "Jobs", "Customers", "Equipment", "Crew", "Documents"];
+const sections = ["Overview", "Jobs", "Customers", "Equipment", "Warehouse", "Crew", "Documents"];
 
 function EventDesk(context: ModuleContext) {
   return <EventDeskPage departmentId={context.departmentId} csrfToken={context.csrfToken} canManageSite={context.canManageSite} section={sections.includes(context.state) ? context.state : "Overview"} onSectionChange={context.onStateChange} />;

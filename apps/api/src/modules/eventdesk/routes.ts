@@ -78,9 +78,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        FROM eventdesk_jobs j LEFT JOIN service_events e ON e.id=j.linked_event_id AND e.department_id=j.department_id
                        LEFT JOIN eventdesk_customers c ON c.id=j.customer_id AND c.department_id=j.department_id
                       WHERE j.department_id=$1 ORDER BY j.starts_at, j.created_at DESC`, [departmentId]),
-        pool!.query(`SELECT id, name, category, quantity, daily_rate_cents, active, notes
+        pool!.query(`SELECT id, name, category, quantity, daily_rate_cents, active, notes, barcode
                        FROM eventdesk_assets WHERE department_id=$1 ORDER BY active DESC, lower(category), lower(name)`, [departmentId]),
-        pool!.query(`SELECT b.id, b.job_id, b.asset_id, a.name AS asset_name, b.quantity, b.daily_rate_cents, b.status
+        pool!.query(`SELECT b.id, b.job_id, b.asset_id, a.name AS asset_name, a.barcode, b.quantity, b.checked_out_quantity, b.daily_rate_cents, b.status
                        FROM eventdesk_job_assets b JOIN eventdesk_assets a ON a.id=b.asset_id AND a.department_id=b.department_id
                       WHERE b.department_id=$1 ORDER BY a.name`, [departmentId]),
         pool!.query(`SELECT c.id, c.job_id, c.role, c.contact_id, trim(coalesce(p.first_name,'') || ' ' || coalesce(p.last_name,'')) AS contact_name,
@@ -103,8 +103,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
-        assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes })),
-        bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
+        assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes, barcode: row.barcode })),
+        bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
         crew: crew.rows.map((row) => ({ id: row.id, jobId: row.job_id, role: row.role, contactId: row.contact_id, contactName: row.contact_name?.trim() || null, hours: Number(row.hours), hourlyRateCents: row.hourly_rate_cents, status: row.status, notes: row.notes })),
         contacts: contacts.rows.map((row) => ({ id: row.id, name: `${row.first_name} ${row.last_name}`.trim() })),
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
@@ -245,17 +245,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return result.rowCount ? { id: request.params.id, status: request.body.status } : reply.code(404).send({ error: "Job not found." });
     });
 
-    routes.post<{ Body: { name: string; category?: string; quantity: number; dailyRateCents?: number; notes?: string } }>("/api/eventdesk/assets", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "quantity"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", maxLength: 80 }, quantity: { type: "integer", minimum: 1, maximum: 100000 }, dailyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 1000 } } } } }, async (request, reply) => {
+    routes.post<{ Body: { name: string; category?: string; quantity: number; dailyRateCents?: number; notes?: string; barcode?: string } }>("/api/eventdesk/assets", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "quantity"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", maxLength: 80 }, quantity: { type: "integer", minimum: 1, maximum: 100000 }, dailyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 1000 }, barcode: { type: "string", maxLength: 120 } } } } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
       const body = request.body;
-      const result = await pool!.query(`INSERT INTO eventdesk_assets (id,department_id,name,category,quantity,daily_rate_cents,notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [randomUUID(), departmentId, body.name.trim(), body.category?.trim() || "General", body.quantity, body.dailyRateCents ?? 0, body.notes?.trim() ?? ""]);
+      const result = await pool!.query(`INSERT INTO eventdesk_assets (id,department_id,name,category,quantity,daily_rate_cents,notes,barcode)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, [randomUUID(), departmentId, body.name.trim(), body.category?.trim() || "General", body.quantity, body.dailyRateCents ?? 0, body.notes?.trim() ?? "", body.barcode?.trim() ?? ""]);
       return reply.code(201).send({ id: result.rows[0].id });
     });
 
-    routes.put<{ Params: { id: string }; Body: { name: string; category?: string; quantity: number; dailyRateCents?: number; notes?: string; active?: boolean } }>("/api/eventdesk/assets/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["name", "quantity"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", maxLength: 80 }, quantity: { type: "integer", minimum: 1, maximum: 100000 }, dailyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 1000 }, active: { type: "boolean" } } } } }, async (request, reply) => {
+    routes.put<{ Params: { id: string }; Body: { name: string; category?: string; quantity: number; dailyRateCents?: number; notes?: string; active?: boolean; barcode?: string } }>("/api/eventdesk/assets/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["name", "quantity"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", maxLength: 80 }, quantity: { type: "integer", minimum: 1, maximum: 100000 }, dailyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, barcode: { type: "string", maxLength: 120 } } } } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
@@ -274,7 +274,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed')
             AND j.starts_at <= p.moment AND j.ends_at > p.moment)),0)::int AS quantity FROM points p`, [departmentId, request.params.id]);
         if (b.quantity < booked.rows[0].quantity) { await rollback(client); return reply.code(409).send({ error: `At least ${booked.rows[0].quantity} units are already booked at the busiest time.` }); }
-        await client.query(`UPDATE eventdesk_assets SET name=$3,category=$4,quantity=$5,daily_rate_cents=$6,notes=$7,active=coalesce($8,active),updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.id, departmentId, b.name.trim(), b.category?.trim() || "General", b.quantity, b.dailyRateCents ?? 0, b.notes?.trim() ?? "", b.active ?? null]);
+        await client.query(`UPDATE eventdesk_assets SET name=$3,category=$4,quantity=$5,daily_rate_cents=$6,notes=$7,active=coalesce($8,active),barcode=$9,updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.id, departmentId, b.name.trim(), b.category?.trim() || "General", b.quantity, b.dailyRateCents ?? 0, b.notes?.trim() ?? "", b.active ?? null, b.barcode?.trim() ?? ""]);
         await client.query("COMMIT");
         return { id: request.params.id };
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
@@ -312,8 +312,39 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
-      const result = await pool!.query("UPDATE eventdesk_job_assets SET status=$3 WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, departmentId, request.body.status]);
-      return result.rowCount ? { id: request.params.id, status: request.body.status } : reply.code(404).send({ error: "Equipment booking not found." });
+      const result = await pool!.query(`UPDATE eventdesk_job_assets SET status=$3,
+        checked_out_quantity=CASE WHEN $3='checked_out' THEN quantity WHEN $3 IN ('returned','cancelled','reserved') THEN 0 ELSE checked_out_quantity END
+        WHERE id=$1 AND department_id=$2 AND NOT ($3='cancelled' AND checked_out_quantity>0) RETURNING id`, [request.params.id, departmentId, request.body.status]);
+      return result.rowCount ? { id: request.params.id, status: request.body.status } : reply.code(409).send({ error: "Equipment booking not found or checked-out units must be checked in first." });
+    });
+
+    routes.post<{ Body: { jobId: string; barcode: string; action: "out" | "in" } }>("/api/eventdesk/warehouse/scan", { schema: { body: {
+      type: "object", additionalProperties: false, required: ["jobId", "barcode", "action"], properties: {
+        jobId: { type: "string", format: "uuid" }, barcode: { type: "string", minLength: 1, maxLength: 120 }, action: { type: "string", enum: ["out", "in"] },
+      },
+    } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const job = await client.query("SELECT status FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.body.jobId, departmentId]);
+        if (!job.rowCount || ["cancelled", "completed"].includes(job.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "An active job is required for warehouse scanning." }); }
+        const current = await client.query(`SELECT b.id,b.quantity,b.checked_out_quantity,b.status,a.name AS asset_name
+          FROM eventdesk_job_assets b JOIN eventdesk_assets a ON a.id=b.asset_id AND a.department_id=b.department_id
+         WHERE b.job_id=$1 AND b.department_id=$2 AND lower(a.barcode)=lower($3)
+           AND (($4='out' AND b.status IN ('reserved','checked_out') AND b.checked_out_quantity < b.quantity)
+             OR ($4='in' AND b.status='checked_out' AND b.checked_out_quantity > 0))
+         ORDER BY b.created_at LIMIT 1 FOR UPDATE OF b`, [request.body.jobId, departmentId, request.body.barcode.trim(), request.body.action]);
+        if (!current.rowCount) { await rollback(client); return reply.code(404).send({ error: "No matching item is due for that scan on this job." }); }
+        const line = current.rows[0];
+        const checkedOut = Number(line.checked_out_quantity) + (request.body.action === "out" ? 1 : -1);
+        const status = checkedOut > 0 ? "checked_out" : request.body.action === "in" ? "returned" : "reserved";
+        await client.query("UPDATE eventdesk_job_assets SET checked_out_quantity=$3,status=$4 WHERE id=$1 AND department_id=$2", [line.id, departmentId, checkedOut, status]);
+        await client.query("COMMIT");
+        return { id: line.id, assetName: line.asset_name, checkedOutQuantity: checkedOut, quantity: Number(line.quantity), status };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Params: { id: string }; Body: { role: string; contactId?: string | null; hours?: number; hourlyRateCents?: number; notes?: string } }>("/api/eventdesk/jobs/:id/crew", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["role"], properties: { role: { type: "string", minLength: 1, maxLength: 100 }, contactId: { type: ["string", "null"], format: "uuid" }, hours: { type: "number", minimum: 0, maximum: 1000 }, hourlyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 500 } } } } }, async (request, reply) => {
