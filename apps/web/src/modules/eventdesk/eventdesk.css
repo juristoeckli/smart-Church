@@ -65,6 +65,7 @@
 .eventdesk-empty-detail p{margin:0;font-size:12px}
 .eventdesk-asset-row{display:flex;align-items:center;gap:12px;min-height:64px;padding:10px 18px;border-bottom:1px solid var(--line)}
 .eventdesk-asset-row:last-of-type{border-bottom:0}
+.eventdesk-customer-row{min-height:78px}
 .eventdesk-active-pill{padding:4px 8px;border-radius:999px;background:#e4f4ec;color:#28734a;font-size:10px;font-weight:650}
 .eventdesk-row-edit{padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--green);font:inherit;font-size:11px;font-weight:650;cursor:pointer}
 .eventdesk-inactive{background:#f0f0f0;color:#737373}
@@ -75,6 +76,8 @@
 .eventdesk-modal label{display:grid;gap:5px;font-size:11px;font-weight:600}
 .eventdesk-modal input,.eventdesk-modal select,.eventdesk-modal textarea{width:100%;min-height:38px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
 .eventdesk-modal textarea{resize:vertical}
+.eventdesk-active-toggle{display:flex!important;grid-template-columns:auto 1fr;align-items:center;justify-content:flex-start;gap:9px}
+.eventdesk-active-toggle input{width:auto!important;min-height:0!important}
 @media(max-width:920px){.eventdesk-workspace{grid-template-columns:1fr}.eventdesk-jobs-panel{max-height:360px}.eventdesk-crew-form{flex-wrap:wrap}.eventdesk-crew-form input:first-child{min-width:180px}}
 @media(max-width:620px){.eventdesk-stat-grid{grid-template-columns:1fr}.eventdesk-heading{align-items:flex-start;flex-direction:column}.eventdesk-heading-actions{width:100%}.eventdesk-heading-actions .button{flex:1;justify-content:center}.eventdesk-split{grid-template-columns:1fr;gap:14px}.eventdesk-job-row{gap:8px;padding:9px 11px}.eventdesk-job-main small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.eventdesk-status{font-size:9px}.eventdesk-inline-form{flex-wrap:wrap}.eventdesk-inline-form select{flex:1 1 45%}.eventdesk-crew-form>*{flex:1 1 42%}.eventdesk-booking-row{align-items:flex-start;padding:9px 0}.eventdesk-booking-row select{max-width:145px}}
 :root[data-theme="dark"] .eventdesk-status{background:#303745;color:#c6ced8}

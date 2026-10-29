@@ -4,7 +4,7 @@ import type { ModuleContext, ModuleRegistration } from "../../module-registry";
 import "./eventdesk.css";
 
 const EventDeskPage = lazy(() => import("./EventDeskModule").then(({ EventDeskModule }) => ({ default: EventDeskModule })));
-const sections = ["Overview", "Jobs", "Equipment", "Crew"];
+const sections = ["Overview", "Jobs", "Customers", "Equipment", "Crew"];
 
 function EventDesk(context: ModuleContext) {
   return <EventDeskPage departmentId={context.departmentId} csrfToken={context.csrfToken} canManageSite={context.canManageSite} section={sections.includes(context.state) ? context.state : "Overview"} onSectionChange={context.onStateChange} />;
@@ -22,8 +22,9 @@ export const moduleRegistration: ModuleRegistration = {
   initialState: "Overview",
   accessLabel: "EventDesk",
   accessLevels: [
-    { value: "view", label: "View EventDesk", description: "View jobs, equipment bookings, and crew requests." },
+    { value: "view", label: "View EventDesk", description: "View jobs, customers, equipment bookings, and crew requests." },
     { value: "jobs_manage", label: "Manage jobs", description: "Create jobs, link events, and update job status." },
+    { value: "customers_manage", label: "Manage customers", description: "Create and update customer records used by jobs." },
     { value: "inventory_manage", label: "Manage equipment", description: "Manage the equipment catalog and job bookings." },
     { value: "crew_manage", label: "Manage crew", description: "Request and assign personnel to jobs." },
   ],

@@ -6,7 +6,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
 type CrewStatus = "requested" | "assigned" | "confirmed" | "declined";
-type Permission = "view" | "jobs_manage" | "inventory_manage" | "crew_manage";
+type Permission = "view" | "jobs_manage" | "customers_manage" | "inventory_manage" | "crew_manage";
 
 const jobSchema = {
   body: {
@@ -14,7 +14,7 @@ const jobSchema = {
     additionalProperties: false,
     required: ["title", "startsAt", "endsAt"],
     properties: {
-      title: { type: "string", minLength: 1, maxLength: 160 }, customerName: { type: "string", maxLength: 160 },
+      title: { type: "string", minLength: 1, maxLength: 160 }, customerName: { type: "string", maxLength: 160 }, customerId: { type: ["string", "null"], format: "uuid" },
       customerContactId: { type: ["string", "null"], format: "uuid" }, linkedEventId: { type: ["string", "null"], format: "uuid" },
       startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
       venue: { type: "string", maxLength: 240 }, notes: { type: "string", maxLength: 4000 },
@@ -25,6 +25,14 @@ const jobSchema = {
 const jobStatuses = ["lead", "quoted", "confirmed", "in_progress", "completed", "cancelled"] as const;
 const bookingStatuses = ["reserved", "checked_out", "returned", "cancelled"] as const;
 const crewStatuses = ["requested", "assigned", "confirmed", "declined"] as const;
+const customerSchema = {
+  body: { type: "object", additionalProperties: false, required: ["kind", "name"], properties: {
+    kind: { type: "string", enum: ["company", "person"] }, name: { type: "string", minLength: 1, maxLength: 160 },
+    contactPerson: { type: "string", maxLength: 160 }, email: { type: "string", maxLength: 254 }, phone: { type: "string", maxLength: 40 },
+    street: { type: "string", maxLength: 200 }, postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 },
+    country: { type: "string", maxLength: 80 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" },
+  } },
+};
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
@@ -44,7 +52,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const grants = request.activeDepartmentModulePermissions?.eventdesk ?? [];
       const allowed = request.activeDepartmentRole === "site_admin" || grants.includes(permission)
-        || (permission === "view" && grants.some((grant) => ["jobs_manage", "inventory_manage", "crew_manage"].includes(grant)));
+        || (permission === "view" && grants.some((grant) => ["jobs_manage", "customers_manage", "inventory_manage", "crew_manage"].includes(grant)));
       if (!allowed) {
         reply.code(403).send({ error: "You do not have access to this EventDesk feature." });
         return null;
@@ -52,7 +60,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return id;
     }
 
-    async function sameDepartmentRecord(table: "contacts" | "service_events", id: string | null | undefined, departmentId: string) {
+    async function sameDepartmentRecord(table: "contacts" | "service_events" | "eventdesk_customers", id: string | null | undefined, departmentId: string) {
       if (!id) return true;
       const result = await pool!.query(`SELECT 1 FROM ${table} WHERE id = $1 AND department_id = $2`, [id, departmentId]);
       return Boolean(result.rowCount);
@@ -63,10 +71,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get("/api/eventdesk/bootstrap", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      const [jobs, assets, bookings, crew, contacts, events] = await Promise.all([
+      const [jobs, assets, bookings, crew, contacts, events, customers] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id,
+                            j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue, j.status, j.notes, j.created_at
                        FROM eventdesk_jobs j LEFT JOIN service_events e ON e.id=j.linked_event_id AND e.department_id=j.department_id
+                       LEFT JOIN eventdesk_customers c ON c.id=j.customer_id AND c.department_id=j.department_id
                       WHERE j.department_id=$1 ORDER BY j.starts_at, j.created_at DESC`, [departmentId]),
         pool!.query(`SELECT id, name, category, quantity, daily_rate_cents, active, notes
                        FROM eventdesk_assets WHERE department_id=$1 ORDER BY active DESC, lower(category), lower(name)`, [departmentId]),
@@ -79,28 +89,57 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                       WHERE c.department_id=$1 ORDER BY lower(c.role), c.created_at`, [departmentId]),
         pool!.query(`SELECT id, first_name, last_name FROM contacts WHERE department_id=$1 ORDER BY lower(last_name), lower(first_name)`, [departmentId]),
         pool!.query(`SELECT id, title, event_date, start_time FROM service_events WHERE department_id=$1 ORDER BY event_date DESC, start_time DESC LIMIT 250`, [departmentId]),
+        pool!.query(`SELECT id, kind, name, contact_person, email, phone, street, postal_code, city, country, notes, active
+                       FROM eventdesk_customers WHERE department_id=$1 ORDER BY active DESC, lower(name)`, [departmentId]),
       ]);
       return {
-        jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_name, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
+        jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
         assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes })),
         bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
         crew: crew.rows.map((row) => ({ id: row.id, jobId: row.job_id, role: row.role, contactId: row.contact_id, contactName: row.contact_name?.trim() || null, hours: Number(row.hours), hourlyRateCents: row.hourly_rate_cents, status: row.status, notes: row.notes })),
         contacts: contacts.rows.map((row) => ({ id: row.id, name: `${row.first_name} ${row.last_name}`.trim() })),
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
-        permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true },
+        customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
+        permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true },
       };
     });
 
-    routes.post<{ Body: { title: string; customerName?: string; customerContactId?: string | null; linkedEventId?: string | null; startsAt: string; endsAt: string; venue?: string; notes?: string } }>("/api/eventdesk/jobs", { schema: jobSchema }, async (request, reply) => {
+    routes.post<{ Body: { title: string; customerName?: string; customerId?: string | null; customerContactId?: string | null; linkedEventId?: string | null; startsAt: string; endsAt: string; venue?: string; notes?: string } }>("/api/eventdesk/jobs", { schema: jobSchema }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "jobs_manage");
       if (!departmentId) return reply;
       const body = request.body;
       if (new Date(body.endsAt) <= new Date(body.startsAt)) return reply.code(400).send({ error: "The job end must be after its start." });
       if (!await sameDepartmentRecord("contacts", body.customerContactId, departmentId) || !await sameDepartmentRecord("service_events", body.linkedEventId, departmentId)) return reply.code(400).send({ error: "Choose a person or event from this location." });
-      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_contact_id,linked_event_id,starts_at,ends_at,venue,notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), body.customerName?.trim() ?? "", body.customerContactId ?? null, body.linkedEventId ?? null, body.startsAt, body.endsAt, body.venue?.trim() ?? "", body.notes?.trim() ?? ""]);
+      let customerName = body.customerName?.trim() ?? "";
+      if (body.customerId) {
+        const customer = await pool!.query("SELECT name FROM eventdesk_customers WHERE id=$1 AND department_id=$2 AND active=true", [body.customerId, departmentId]);
+        if (!customer.rowCount) return reply.code(400).send({ error: "Choose an active customer from this location." });
+        customerName = customer.rows[0].name;
+      }
+      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,starts_at,ends_at,venue,notes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.startsAt, body.endsAt, body.venue?.trim() ?? "", body.notes?.trim() ?? ""]);
       return reply.code(201).send({ id: result.rows[0].id });
+    });
+
+    routes.post<{ Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string } }>("/api/eventdesk/customers", { schema: customerSchema }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "customers_manage");
+      if (!departmentId) return reply;
+      const b = request.body;
+      const result = await pool!.query(`INSERT INTO eventdesk_customers (id,department_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? ""]);
+      return reply.code(201).send({ id: result.rows[0].id });
+    });
+
+    routes.put<{ Params: { id: string }; Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; active?: boolean } }>("/api/eventdesk/customers/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: customerSchema.body } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "customers_manage");
+      if (!departmentId) return reply;
+      const b = request.body;
+      const result = await pool!.query(`UPDATE eventdesk_customers SET kind=$3,name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),updated_at=now()
+        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
+      return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Customer not found." });
     });
 
     routes.put<{ Params: { id: string }; Body: { status: JobStatus } }>("/api/eventdesk/jobs/:id/status", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: jobStatuses } } } } }, async (request, reply) => {

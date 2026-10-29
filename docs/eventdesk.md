@@ -5,6 +5,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 ## Included in the first release
 
 - Create jobs with customer, schedule, venue, notes, and an optional Smart-Church event link.
+- Maintain customer records for companies and individuals, including contact details, billing address, notes, and active status; link customers to jobs.
 - Maintain an equipment catalog with stock quantity and daily rental rates.
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
 - Track equipment as reserved, checked out, returned, or cancelled.
@@ -29,7 +30,7 @@ After enabling it, a site administrator can grant EventDesk access levels in Peo
 
 This release establishes the job, inventory, and crew workflows. Comparable rental platforms also include business documents and warehouse operations; those need separate delivery work:
 
-- Customer and supplier CRM, contacts, rate cards, discounts, and reusable item bundles.
+- Supplier CRM, rate cards, discounts, and reusable item bundles.
 - Formal quotations, rental contracts, invoices, payment tracking, and accounting exports.
 - Pick lists, delivery notes, serial number and barcode scanning, and warehouse check-in/out.
 - Maintenance and workshop scheduling, sub-rentals, purchases, and multi-warehouse stock.
