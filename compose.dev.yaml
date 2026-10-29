@@ -19,6 +19,8 @@ services:
       SMART_CHURCH_WEB_ORIGIN: http://localhost:5173
       SMART_CHURCH_TRUST_PROXY: ""
       PYTHON_BINARY: python3
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EVENTDESK_EMAIL_FROM: ${EVENTDESK_EMAIL_FROM:-}
     volumes:
       - ./apps/api/src:/workspace/apps/api/src
       - ./apps/api/migrations:/workspace/apps/api/migrations

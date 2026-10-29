@@ -8,16 +8,23 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Maintain customer records for companies and individuals, including contact details, billing address, notes, and active status; link customers to jobs.
 - Maintain separate supplier and venue directories; link a supplier to equipment and select a saved venue for a job.
 - Maintain an equipment catalog with stock quantity and daily rental rates.
-- Create numbered, print-ready quotes, rental contracts, delivery notes, and invoices from a job plan; track quote decisions, contract signatures, delivery returns, invoice due dates, and full or partial payments.
-- Edit draft document lines and tax before marking them sent; set location-specific company contact details, tax ID, payment terms, and a footer for the print layout.
+- Create reusable rental packages from catalog equipment, then add a package to a job in one step. EventDesk expands it into normal component bookings and checks availability for every item before saving the entire package.
+- Create numbered quotes, rental contracts, delivery notes, regular invoices, and deposit invoices from a job plan; download branded PDFs, print them, or email them to a customer with the PDF attached.
+- Track every email delivery attempt by recipient, subject, provider response, and time; a draft moves to sent only after the email provider accepts it. Quote decisions, contract signatures, delivery returns, invoice due dates, and full or partial payments are also tracked.
+- Send an on-demand overdue payment reminder for an unpaid regular or deposit invoice. The reminder includes the current balance and the invoice PDF and is recorded in that document's delivery history. Scheduled automatic reminders are not included yet.
+- Create credit notes against the unpaid balance of sent invoices or deposit invoices. Draft credits reserve balance; issued credits settle it and can be cancelled with the invoice balance recalculated.
+- Export issued invoices, deposit invoices, credit notes, and payment records to a date-filtered CSV for accounting. The export includes document links, customer and job references, net, tax, gross, payments, status, and due dates.
+- Edit draft document lines and tax before sending; set location-specific company contact details, tax ID, payment terms, and a footer for printed and emailed documents.
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
 - Track reserved, checked-out, and returned quantities. The Warehouse section provides printable job pick lists and barcode scanning for each unit checked out or returned.
 - Schedule workshop maintenance for all or part of an equipment item's quantity; overlapping job bookings and maintenance windows share the same availability check.
 - Request crew positions, optionally assign a person from the location's people directory, and prevent overlapping assignments.
+- Maintain separate freelancer profiles with skills, contact details, and default rates. Record unavailable periods; EventDesk rejects assignments that overlap an unavailable period or another assigned job.
+- Email a job request to an assigned freelancer, keep a delivery record, and track requested, invited, confirmed, or declined status. Confirmation is recorded by the EventDesk manager after the freelancer replies.
 - Estimate the job total from booked equipment and crew rates.
 - Restrict viewing and job, customer, inventory, crew, and finance management with EventDesk-specific access levels.
 
-Every job and resource is scoped to the selected Smart-Church location. A job does not need a linked church event. Crew assignments use the location's contacts. This first release runs inside Smart-Church and does not provide a separate freelancer portal or an independent sign-in.
+Every job and resource is scoped to the selected Smart-Church location. A job does not need a linked church event. Crew can be assigned to location contacts or separate EventDesk freelancer records. This first release runs inside Smart-Church; freelancers receive email requests and managers record their replies, with no separate freelancer portal or sign-in.
 
 The SQL migrations are applied during normal Smart-Church startup. EventDesk is off by default for every location. A Server Administrator can enable it for a location with:
 
@@ -30,12 +37,23 @@ UPDATE departments
 
 After enabling it, a site administrator can grant EventDesk access levels in People & access.
 
+### Email delivery setup
+
+EventDesk uses the [Resend email API](https://resend.com/docs/api-reference/emails/send-email). Configure a Resend API key and a verified sender address on the Smart-Church server. For Docker deployments, add these values to the protected `.env` file; for local development, add them to `.env`:
+
+```dotenv
+RESEND_API_KEY=re_...
+EVENTDESK_EMAIL_FROM=Church Rentals <rentals@example.org>
+```
+
+Restart the API after changing environment values. Finance users can then download a branded PDF or email it from the document preview. Email delivery is optional; PDF download and browser printing work without a provider.
+
 ## Planned product areas
 
 The document workflow is a first operational slice. These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
-- Supplier rate cards, discounts, and reusable item bundles.
-- Logo and template customization, email delivery through a configured mail provider, deposits, credit notes, reminders, accounting exports, and configurable tax/legal settings.
+- Supplier rate cards, discounts, and package pricing.
+- Logo and template customization, scheduled automatic reminders, and configurable tax/legal settings.
 - Delivery notes, serial-number-level stock, barcode label generation, packing/casing, multi-warehouse stock, and transfers.
 - Repair tickets with service history and recurring inspection reminders, sub-rentals, purchases, and multi-warehouse stock.
-- Freelancer records, calendar and availability views, staff confirmations, import/export, and operational reporting.
+- Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.
