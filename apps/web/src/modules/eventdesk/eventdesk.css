@@ -85,3 +85,19 @@
 :root[data-theme="dark"] .eventdesk-status-lead,:root[data-theme="dark"] .eventdesk-status-requested{background:#493b1d;color:#e7c677}
 :root[data-theme="dark"] .eventdesk-status-quoted{background:#263858;color:#a8c0ff}
 :root[data-theme="dark"] .eventdesk-status-cancelled,:root[data-theme="dark"] .eventdesk-status-declined{background:#4c2929;color:#f0aaaa}
+.eventdesk-document-create{display:grid;gap:12px;padding-bottom:18px;margin-bottom:18px;border-bottom:1px solid var(--line)}
+.eventdesk-document-create h2{margin:0;font-size:16px}
+.eventdesk-document-preview{padding:18px}
+.eventdesk-document-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.eventdesk-document-top h2{margin:5px 0;font-size:24px}
+.eventdesk-document-top p,.eventdesk-document-address span{color:var(--muted)}
+.eventdesk-document-address{display:grid;gap:3px;margin:20px 0}
+.eventdesk-document-lines{border-top:1px solid var(--line)}
+.eventdesk-document-line{display:grid;grid-template-columns:minmax(0,1fr) minmax(130px,.65fr) minmax(75px,.4fr);gap:10px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}
+.eventdesk-document-line>:last-child{text-align:right}
+.eventdesk-document-line-heading{color:var(--muted);font-size:11px}
+.eventdesk-document-totals{display:grid;gap:8px;max-width:310px;margin:16px 0 16px auto}
+.eventdesk-document-totals>div{display:flex;justify-content:space-between;gap:16px}
+.eventdesk-document-grand-total{padding-top:9px;border-top:1px solid var(--line);font-size:15px}
+.eventdesk-payment-form{margin-top:14px}
+@media print{body *{visibility:hidden!important}.eventdesk-document-preview,.eventdesk-document-preview *{visibility:visible!important}.eventdesk-document-preview{position:absolute;inset:0;width:100%;padding:1.5cm;color:#111;background:#fff}.eventdesk-document-preview button,.eventdesk-document-preview form{display:none!important}.eventdesk-document-line,.eventdesk-document-totals{border-color:#bbb}}

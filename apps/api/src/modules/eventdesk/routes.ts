@@ -6,7 +6,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
 type CrewStatus = "requested" | "assigned" | "confirmed" | "declined";
-type Permission = "view" | "jobs_manage" | "customers_manage" | "inventory_manage" | "crew_manage";
+type Permission = "view" | "jobs_manage" | "customers_manage" | "inventory_manage" | "crew_manage" | "finance_manage";
 
 const jobSchema = {
   body: {
@@ -52,7 +52,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const grants = request.activeDepartmentModulePermissions?.eventdesk ?? [];
       const allowed = request.activeDepartmentRole === "site_admin" || grants.includes(permission)
-        || (permission === "view" && grants.some((grant) => ["jobs_manage", "customers_manage", "inventory_manage", "crew_manage"].includes(grant)));
+        || (permission === "view" && grants.some((grant) => ["jobs_manage", "customers_manage", "inventory_manage", "crew_manage", "finance_manage"].includes(grant)));
       if (!allowed) {
         reply.code(403).send({ error: "You do not have access to this EventDesk feature." });
         return null;
@@ -71,7 +71,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get("/api/eventdesk/bootstrap", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      const [jobs, assets, bookings, crew, contacts, events, customers] = await Promise.all([
+      const [jobs, assets, bookings, crew, contacts, events, customers, documents] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue, j.status, j.notes, j.created_at
@@ -91,6 +91,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         pool!.query(`SELECT id, title, event_date, start_time FROM service_events WHERE department_id=$1 ORDER BY event_date DESC, start_time DESC LIMIT 250`, [departmentId]),
         pool!.query(`SELECT id, kind, name, contact_person, email, phone, street, postal_code, city, country, notes, active
                        FROM eventdesk_customers WHERE department_id=$1 ORDER BY active DESC, lower(name)`, [departmentId]),
+        pool!.query(`SELECT d.id, d.job_id, j.title AS job_title, d.kind, d.document_number, d.status, d.issue_date, d.due_date,
+                            d.customer_snapshot, d.lines, d.tax_rate_bps, d.subtotal_cents, d.tax_cents, d.total_cents,
+                            coalesce(sum(p.amount_cents),0)::int AS paid_cents,
+                            coalesce(jsonb_agg(jsonb_build_object('amountCents',p.amount_cents,'paidAt',p.paid_at,'note',p.note) ORDER BY p.paid_at)
+                              FILTER (WHERE p.id IS NOT NULL),'[]'::jsonb) AS payments
+                       FROM eventdesk_documents d JOIN eventdesk_jobs j ON j.id=d.job_id AND j.department_id=d.department_id
+                       LEFT JOIN eventdesk_document_payments p
+                         ON p.document_id=d.id AND p.department_id=d.department_id
+                      WHERE d.department_id=$1 AND $2::boolean GROUP BY d.id,j.title ORDER BY d.issue_date DESC, d.created_at DESC`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
@@ -100,8 +109,94 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         contacts: contacts.rows.map((row) => ({ id: row.id, name: `${row.first_name} ${row.last_name}`.trim() })),
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
         customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
-        permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true },
+        documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, payments: row.payments })),
+        permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true },
       };
+    });
+
+    routes.post<{ Params: { id: string }; Body: { kind: "quote" | "invoice"; taxRateBps?: number; dueDate?: string } }>("/api/eventdesk/jobs/:id/documents", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { type: "string", enum: ["quote", "invoice"] }, taxRateBps: { type: "integer", minimum: 0, maximum: 3000 }, dueDate: { type: "string", format: "date" } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const jobResult = await client.query(`SELECT j.id,j.title,j.customer_name,j.customer_id,j.starts_at,j.ends_at,j.venue,
+            c.kind,c.name,c.contact_person,c.email,c.phone,c.street,c.postal_code,c.city,c.country
+          FROM eventdesk_jobs j LEFT JOIN eventdesk_customers c ON c.id=j.customer_id AND c.department_id=j.department_id
+         WHERE j.id=$1 AND j.department_id=$2 FOR UPDATE OF j`, [request.params.id, departmentId]);
+        if (!jobResult.rowCount) { await rollback(client); return reply.code(404).send({ error: "Job not found." }); }
+        const job = jobResult.rows[0];
+        const [assetRows, crewRows] = await Promise.all([
+          client.query(`SELECT a.name,b.quantity,b.daily_rate_cents FROM eventdesk_job_assets b JOIN eventdesk_assets a ON a.id=b.asset_id AND a.department_id=b.department_id WHERE b.job_id=$1 AND b.department_id=$2 AND b.status <> 'cancelled' ORDER BY a.name`, [job.id, departmentId]),
+          client.query(`SELECT role,hours,hourly_rate_cents FROM eventdesk_job_crew WHERE job_id=$1 AND department_id=$2 AND status <> 'declined' ORDER BY role`, [job.id, departmentId]),
+        ]);
+        const days = Math.max(1, Math.ceil((new Date(job.ends_at).getTime() - new Date(job.starts_at).getTime()) / 86400000));
+        const lines = [
+          ...assetRows.rows.map((line) => ({ description: line.name, quantity: Number(line.quantity), unitCents: Number(line.daily_rate_cents), unitLabel: `day${days === 1 ? "" : "s"}`, lineTotalCents: Number(line.quantity) * Number(line.daily_rate_cents) * days })),
+          ...crewRows.rows.map((line) => ({ description: `${line.role} (crew)`, quantity: Number(line.hours), unitCents: Number(line.hourly_rate_cents), unitLabel: "hour", lineTotalCents: Math.round(Number(line.hours) * Number(line.hourly_rate_cents)) })),
+        ];
+        if (!lines.length) { await rollback(client); return reply.code(400).send({ error: "Add equipment or crew to the job before creating a document." }); }
+        const subtotal = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
+        const taxRateBps = request.body.taxRateBps ?? 0;
+        const tax = Math.round(subtotal * taxRateBps / 10000);
+        const seq = await client.query(`INSERT INTO eventdesk_document_sequences (department_id,kind,last_number) VALUES ($1,$2,1)
+          ON CONFLICT (department_id,kind) DO UPDATE SET last_number=eventdesk_document_sequences.last_number+1 RETURNING last_number`, [departmentId, request.body.kind]);
+        const number = `${request.body.kind === "quote" ? "Q" : "I"}-${new Date().getFullYear()}-${String(seq.rows[0].last_number).padStart(5, "0")}`;
+        const customer = { name: job.name ?? job.customer_name, kind: job.kind ?? null, contactPerson: job.contact_person ?? "", email: job.email ?? "", phone: job.phone ?? "", street: job.street ?? "", postalCode: job.postal_code ?? "", city: job.city ?? "", country: job.country ?? "", jobTitle: job.title, venue: job.venue };
+        const inserted = await client.query(`INSERT INTO eventdesk_documents
+          (id,department_id,job_id,kind,document_number,status,due_date,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents)
+          VALUES ($1,$2,$3,$4,$5,'draft',$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12) RETURNING id`,
+          [randomUUID(), departmentId, job.id, request.body.kind, number, request.body.dueDate ?? null, JSON.stringify(customer), JSON.stringify(lines), taxRateBps, subtotal, tax, subtotal + tax]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id: inserted.rows[0].id, number });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { status: "sent" | "accepted" | "rejected" | "cancelled" } }>("/api/eventdesk/documents/:id/status", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["sent", "accepted", "rejected", "cancelled"] } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query(`UPDATE eventdesk_documents SET status=$3,updated_at=now()
+        WHERE id=$1 AND department_id=$2 AND (
+          (status='draft' AND $3='sent') OR
+          (kind='quote' AND status='sent' AND $3 IN ('accepted','rejected')) OR
+          (kind='invoice' AND status IN ('draft','sent') AND $3='cancelled')
+        ) RETURNING id,job_id,kind`, [request.params.id, departmentId, request.body.status]);
+      if (!result.rowCount) return reply.code(409).send({ error: "That document cannot move to the requested status." });
+      if (result.rows[0].kind === "quote" && request.body.status === "accepted") {
+        await pool!.query("UPDATE eventdesk_jobs SET status='confirmed',updated_at=now() WHERE id=$1 AND department_id=$2 AND status IN ('lead','quoted')", [result.rows[0].job_id, departmentId]);
+      }
+      return { id: request.params.id, status: request.body.status };
+    });
+
+    routes.post<{ Params: { id: string }; Body: { amountCents: number; paidAt?: string; note?: string } }>("/api/eventdesk/documents/:id/payments", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["amountCents"], properties: { amountCents: { type: "integer", minimum: 1, maximum: 1000000000 }, paidAt: { type: "string", format: "date" }, note: { type: "string", maxLength: 500 } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const document = await client.query("SELECT total_cents,status FROM eventdesk_documents WHERE id=$1 AND department_id=$2 AND kind='invoice' FOR UPDATE", [request.params.id, departmentId]);
+        if (!document.rowCount || !["sent", "partial"].includes(document.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "A sent, unpaid invoice was not found." }); }
+        const paid = await client.query("SELECT coalesce(sum(amount_cents),0)::int AS amount FROM eventdesk_document_payments WHERE document_id=$1 AND department_id=$2", [request.params.id, departmentId]);
+        const nextPaid = Number(paid.rows[0].amount) + request.body.amountCents;
+        if (nextPaid > Number(document.rows[0].total_cents)) { await rollback(client); return reply.code(400).send({ error: "Payment exceeds the invoice balance." }); }
+        await client.query("INSERT INTO eventdesk_document_payments (id,department_id,document_id,amount_cents,paid_at,note) VALUES ($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, request.body.amountCents, request.body.paidAt ?? new Date().toISOString().slice(0, 10), request.body.note?.trim() ?? ""]);
+        const status = nextPaid === Number(document.rows[0].total_cents) ? "paid" : "partial";
+        await client.query("UPDATE eventdesk_documents SET status=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, status]);
+        await client.query("COMMIT");
+        return { id: request.params.id, paidCents: nextPaid, status };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Body: { title: string; customerName?: string; customerId?: string | null; customerContactId?: string | null; linkedEventId?: string | null; startsAt: string; endsAt: string; venue?: string; notes?: string } }>("/api/eventdesk/jobs", { schema: jobSchema }, async (request, reply) => {
