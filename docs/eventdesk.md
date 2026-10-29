@@ -8,7 +8,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Maintain customer records for companies and individuals, including contact details, billing address, notes, and active status; link customers to jobs.
 - Maintain separate supplier and venue directories; link a supplier to equipment and select a saved venue for a job.
 - Maintain an equipment catalog with stock quantity and daily rental rates.
-- Create numbered, print-ready quote and invoice snapshots from a job's current equipment and crew plan; set tax, issue invoices with a due date, mark quotes sent/accepted/rejected, and record full or partial invoice payments.
+- Create numbered, print-ready quotes, rental contracts, delivery notes, and invoices from a job plan; track quote decisions, contract signatures, delivery returns, invoice due dates, and full or partial payments.
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
 - Track reserved, checked-out, and returned quantities. The Warehouse section provides printable job pick lists and barcode scanning for each unit checked out or returned.
 - Schedule workshop maintenance for all or part of an equipment item's quantity; overlapping job bookings and maintenance windows share the same availability check.
@@ -34,7 +34,7 @@ After enabling it, a site administrator can grant EventDesk access levels in Peo
 The document workflow is a first operational slice. These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
 - Supplier rate cards, discounts, and reusable item bundles.
-- Editable document lines, branded PDF/email delivery, rental contracts, deposits, credit notes, reminders, accounting exports, and configurable tax/legal settings.
+- Editable document lines, branded PDF/email delivery, deposits, credit notes, reminders, accounting exports, and configurable tax/legal settings.
 - Delivery notes, serial-number-level stock, barcode label generation, packing/casing, multi-warehouse stock, and transfers.
 - Repair tickets with service history and recurring inspection reminders, sub-rentals, purchases, and multi-warehouse stock.
 - Freelancer records, calendar and availability views, staff confirmations, import/export, and operational reporting.

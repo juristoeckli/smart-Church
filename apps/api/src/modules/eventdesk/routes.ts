@@ -129,9 +129,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       };
     });
 
-    routes.post<{ Params: { id: string }; Body: { kind: "quote" | "invoice"; taxRateBps?: number; dueDate?: string } }>("/api/eventdesk/jobs/:id/documents", { schema: {
+    routes.post<{ Params: { id: string }; Body: { kind: "quote" | "invoice" | "contract" | "delivery_note"; taxRateBps?: number; dueDate?: string } }>("/api/eventdesk/jobs/:id/documents", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { type: "string", enum: ["quote", "invoice"] }, taxRateBps: { type: "integer", minimum: 0, maximum: 3000 }, dueDate: { type: "string", format: "date" } } },
+      body: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { type: "string", enum: ["quote", "invoice", "contract", "delivery_note"] }, taxRateBps: { type: "integer", minimum: 0, maximum: 3000 }, dueDate: { type: "string", format: "date" } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "finance_manage");
@@ -139,7 +139,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const jobResult = await client.query(`SELECT j.id,j.title,j.customer_name,j.customer_id,j.starts_at,j.ends_at,j.venue,
+        const jobResult = await client.query(`SELECT j.id,j.title,j.customer_name,j.customer_id,j.starts_at,j.ends_at,j.venue,j.notes,
             c.kind,c.name,c.contact_person,c.email,c.phone,c.street,c.postal_code,c.city,c.country
           FROM eventdesk_jobs j LEFT JOIN eventdesk_customers c ON c.id=j.customer_id AND c.department_id=j.department_id
          WHERE j.id=$1 AND j.department_id=$2 FOR UPDATE OF j`, [request.params.id, departmentId]);
@@ -150,18 +150,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           client.query(`SELECT role,hours,hourly_rate_cents FROM eventdesk_job_crew WHERE job_id=$1 AND department_id=$2 AND status <> 'declined' ORDER BY role`, [job.id, departmentId]),
         ]);
         const days = Math.max(1, Math.ceil((new Date(job.ends_at).getTime() - new Date(job.starts_at).getTime()) / 86400000));
-        const lines = [
-          ...assetRows.rows.map((line) => ({ description: line.name, quantity: Number(line.quantity), unitCents: Number(line.daily_rate_cents), unitLabel: `day${days === 1 ? "" : "s"}`, lineTotalCents: Number(line.quantity) * Number(line.daily_rate_cents) * days })),
-          ...crewRows.rows.map((line) => ({ description: `${line.role} (crew)`, quantity: Number(line.hours), unitCents: Number(line.hourly_rate_cents), unitLabel: "hour", lineTotalCents: Math.round(Number(line.hours) * Number(line.hourly_rate_cents)) })),
-        ];
-        if (!lines.length) { await rollback(client); return reply.code(400).send({ error: "Add equipment or crew to the job before creating a document." }); }
-        const subtotal = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
+        const assetLines = assetRows.rows.map((line) => ({ description: line.name, quantity: Number(line.quantity), unitCents: request.body.kind === "delivery_note" ? 0 : Number(line.daily_rate_cents), unitLabel: `day${days === 1 ? "" : "s"}`, lineTotalCents: request.body.kind === "delivery_note" ? 0 : Number(line.quantity) * Number(line.daily_rate_cents) * days }));
+        const crewLines = crewRows.rows.map((line) => ({ description: `${line.role} (crew)`, quantity: Number(line.hours), unitCents: Number(line.hourly_rate_cents), unitLabel: "hour", lineTotalCents: Math.round(Number(line.hours) * Number(line.hourly_rate_cents)) }));
+        const lines = request.body.kind === "delivery_note" ? assetLines : [...assetLines, ...crewLines];
+        if (!lines.length) { await rollback(client); return reply.code(400).send({ error: request.body.kind === "delivery_note" ? "Add equipment to the job before creating a delivery note." : "Add equipment or crew to the job before creating this document." }); }
+        const subtotal = request.body.kind === "delivery_note" ? 0 : lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
         const taxRateBps = request.body.taxRateBps ?? 0;
         const tax = Math.round(subtotal * taxRateBps / 10000);
         const seq = await client.query(`INSERT INTO eventdesk_document_sequences (department_id,kind,last_number) VALUES ($1,$2,1)
           ON CONFLICT (department_id,kind) DO UPDATE SET last_number=eventdesk_document_sequences.last_number+1 RETURNING last_number`, [departmentId, request.body.kind]);
-        const number = `${request.body.kind === "quote" ? "Q" : "I"}-${new Date().getFullYear()}-${String(seq.rows[0].last_number).padStart(5, "0")}`;
-        const customer = { name: job.name ?? job.customer_name, kind: job.kind ?? null, contactPerson: job.contact_person ?? "", email: job.email ?? "", phone: job.phone ?? "", street: job.street ?? "", postalCode: job.postal_code ?? "", city: job.city ?? "", country: job.country ?? "", jobTitle: job.title, venue: job.venue };
+        const prefix = { quote: "Q", invoice: "I", contract: "C", delivery_note: "DN" }[request.body.kind];
+        const number = `${prefix}-${new Date().getFullYear()}-${String(seq.rows[0].last_number).padStart(5, "0")}`;
+        const customer = { name: job.name ?? job.customer_name, kind: job.kind ?? null, contactPerson: job.contact_person ?? "", email: job.email ?? "", phone: job.phone ?? "", street: job.street ?? "", postalCode: job.postal_code ?? "", city: job.city ?? "", country: job.country ?? "", jobTitle: job.title, venue: job.venue, startsAt: job.starts_at, endsAt: job.ends_at, jobNotes: job.notes };
         const inserted = await client.query(`INSERT INTO eventdesk_documents
           (id,department_id,job_id,kind,document_number,status,due_date,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents)
           VALUES ($1,$2,$3,$4,$5,'draft',$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12) RETURNING id`,
@@ -171,9 +171,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
-    routes.put<{ Params: { id: string }; Body: { status: "sent" | "accepted" | "rejected" | "cancelled" } }>("/api/eventdesk/documents/:id/status", { schema: {
+    routes.put<{ Params: { id: string }; Body: { status: "sent" | "accepted" | "signed" | "rejected" | "cancelled" | "returned" } }>("/api/eventdesk/documents/:id/status", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["sent", "accepted", "rejected", "cancelled"] } } },
+      body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["sent", "accepted", "signed", "rejected", "cancelled", "returned"] } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "finance_manage");
@@ -182,10 +182,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE id=$1 AND department_id=$2 AND (
           (status='draft' AND $3='sent') OR
           (kind='quote' AND status='sent' AND $3 IN ('accepted','rejected')) OR
+          (kind='contract' AND status='sent' AND $3 IN ('signed','rejected','cancelled')) OR
+          (kind='delivery_note' AND status='sent' AND $3='returned') OR
           (kind='invoice' AND status IN ('draft','sent') AND $3='cancelled')
         ) RETURNING id,job_id,kind`, [request.params.id, departmentId, request.body.status]);
       if (!result.rowCount) return reply.code(409).send({ error: "That document cannot move to the requested status." });
-      if (result.rows[0].kind === "quote" && request.body.status === "accepted") {
+      if ((result.rows[0].kind === "quote" && request.body.status === "accepted") || (result.rows[0].kind === "contract" && request.body.status === "signed")) {
         await pool!.query("UPDATE eventdesk_jobs SET status='confirmed',updated_at=now() WHERE id=$1 AND department_id=$2 AND status IN ('lead','quoted')", [result.rows[0].job_id, departmentId]);
       }
       return { id: request.params.id, status: request.body.status };

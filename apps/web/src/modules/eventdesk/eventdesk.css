@@ -92,10 +92,13 @@
 .eventdesk-document-top h2{margin:5px 0;font-size:24px}
 .eventdesk-document-top p,.eventdesk-document-address span{color:var(--muted)}
 .eventdesk-document-address{display:grid;gap:3px;margin:20px 0}
+.eventdesk-document-notes{margin:16px 0;padding:12px;border-left:3px solid var(--green);background:color-mix(in srgb,var(--green) 5%,var(--panel));white-space:pre-wrap}
 .eventdesk-document-lines{border-top:1px solid var(--line)}
 .eventdesk-document-line{display:grid;grid-template-columns:minmax(0,1fr) minmax(130px,.65fr) minmax(75px,.4fr);gap:10px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}
 .eventdesk-document-line>:last-child{text-align:right}
 .eventdesk-document-line-heading{color:var(--muted);font-size:11px}
+.eventdesk-document-line-no-price{grid-template-columns:minmax(0,1fr) auto}
+.eventdesk-document-line-no-price>:last-child{text-align:right}
 .eventdesk-document-totals{display:grid;gap:8px;max-width:310px;margin:16px 0 16px auto}
 .eventdesk-document-totals>div{display:flex;justify-content:space-between;gap:16px}
 .eventdesk-document-grand-total{padding-top:9px;border-top:1px solid var(--line);font-size:15px}
