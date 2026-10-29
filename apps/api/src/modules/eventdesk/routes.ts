@@ -630,7 +630,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } catch (error) { await rollback(client); if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A package with that name already exists." }); throw error; } finally { client.release(); }
     });
 
-    routes.put<{ Params: { id: string }; Body: { name: string; description?: string; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/packages/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: packageSchema.body }, async (request, reply) => {
+    routes.put<{ Params: { id: string }; Body: { name: string; description?: string; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/packages/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: packageSchema.body } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
