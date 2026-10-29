@@ -1,0 +1,6 @@
+{
+  "id": "eventdesk",
+  "name": "EventDesk",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts"
+}

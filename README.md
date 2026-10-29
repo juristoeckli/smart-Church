@@ -38,6 +38,8 @@ The Video & streaming module is a Steffisburg-specific custom module. Its API, w
 
 The optional **Remote desktop** module provides browser access to configured RDP, VNC, and SPICE destinations. It can be enabled per location. Apache Guacamole 1.6.0 (`guacamole` plus `guacd`) runs as a private gateway; the module owns its UI, settings, encrypted destination credentials, API routes, migrations, and terminal-manager integration. See [Remote desktop setup](apps/api/src/modules/remote-desktop/README.md). Keep its Guacamole signing key in `.env`; destination passwords are stored encrypted by the module.
 
+The **EventDesk** module handles customer jobs, equipment bookings, crew requests, and job estimates. It can run without linking jobs to Smart-Church events; event and people links are optional. See [EventDesk features and scope](docs/eventdesk.md).
+
 Presenter datasets are stored separately from the application and site database in `apps/api/data/presenter-datasets` by default; set `PRESENTER_DATASETS_DIR` to use another private storage location. To install the three built-in Singt datasets from a previous Smart-Church Presenter installation, run `node apps/api/scripts/import-singt-datasets.mjs --source "<path-to-old-project>/content/singt"` from the repository root. A Presenter administrator can export or import each dataset independently as `.scdataset.tar.gz`. Keep these packages in private backups; they are intentionally excluded from Git. Song content remains subject to its original license and usage terms.
 
 ## Principles

@@ -1,0 +1,146 @@
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { ArrowUpRight, BriefcaseBusiness, CalendarDays, Check, ChevronRight, Clock3, Package, Plus, Users } from "lucide-react";
+
+type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
+type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
+type CrewStatus = "requested" | "assigned" | "confirmed" | "declined";
+type Job = { id: string; title: string; customerName: string; linkedEventId: string | null; linkedEventTitle: string | null; startsAt: string; endsAt: string; venue: string; status: JobStatus; notes: string };
+type Asset = { id: string; name: string; category: string; quantity: number; dailyRateCents: number; active: boolean; notes: string };
+type Booking = { id: string; jobId: string; assetId: string; assetName: string; quantity: number; dailyRateCents: number; status: BookingStatus };
+type Crew = { id: string; jobId: string; role: string; contactId: string | null; contactName: string | null; hours: number; hourlyRateCents: number; status: CrewStatus; notes: string };
+type Contact = { id: string; name: string };
+type ChurchEvent = { id: string; title: string; eventDate: string; startTime: string };
+type State = { jobs: Job[]; assets: Asset[]; bookings: Booking[]; crew: Crew[]; contacts: Contact[]; events: ChurchEvent[]; permissions: { jobs: boolean; inventory: boolean; crew: boolean } };
+
+const statusLabels: Record<JobStatus, string> = { lead: "Lead", quoted: "Quoted", confirmed: "Confirmed", in_progress: "In progress", completed: "Completed", cancelled: "Cancelled" };
+const jobStatuses: JobStatus[] = ["lead", "quoted", "confirmed", "in_progress", "completed", "cancelled"];
+const money = (cents: number) => new Intl.NumberFormat("en-CH", { style: "currency", currency: "CHF", maximumFractionDigits: 2 }).format(cents / 100);
+const localInputDate = (date = new Date()) => { const offset = date.getTimezoneOffset() * 60_000; return new Date(date.getTime() - offset).toISOString().slice(0, 16); };
+const daysBetween = (start: string, end: string) => Math.max(1, Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / 86_400_000));
+const formatDate = (value: string) => new Intl.DateTimeFormat("en-CH", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+
+async function send<T>(url: string, departmentId: string, csrfToken: string, method = "GET", body?: unknown): Promise<T> {
+  const response = await fetch(url, { method, headers: { "x-department-id": departmentId, ...(method === "GET" ? {} : { "content-type": "application/json", "x-csrf-token": csrfToken }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const result = await response.json() as T | { error?: string };
+  if (!response.ok) throw new Error((result as { error?: string }).error || "EventDesk could not complete that action.");
+  return result as T;
+}
+
+export function EventDeskModule({ departmentId, csrfToken, canManageSite, section, onSectionChange }: { departmentId: string; csrfToken: string; canManageSite: boolean; section: string; onSectionChange: (state: string) => void }) {
+  const [state, setState] = useState<State>({ jobs: [], assets: [], bookings: [], crew: [], contacts: [], events: [], permissions: { jobs: false, inventory: false, crew: false } });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [selectedJobId, setSelectedJobId] = useState("");
+  const [showJobForm, setShowJobForm] = useState(false);
+  const [showAssetForm, setShowAssetForm] = useState(false);
+  const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [jobForm, setJobForm] = useState({ title: "", customerName: "", linkedEventId: "", startsAt: localInputDate(), endsAt: localInputDate(new Date(Date.now() + 3_600_000)), venue: "", notes: "" });
+  const [assetForm, setAssetForm] = useState({ name: "", category: "Audio", quantity: 1, dailyRate: "", notes: "" });
+  const [bookingForm, setBookingForm] = useState({ assetId: "", quantity: 1 });
+  const [crewForm, setCrewForm] = useState({ role: "", contactId: "", hours: "", hourlyRate: "" });
+
+  async function load() {
+    setLoading(true);
+    try {
+      const payload = await send<State>("/api/eventdesk/bootstrap", departmentId, csrfToken);
+      setState(payload);
+      setSelectedJobId((current) => payload.jobs.some((job) => job.id === current) ? current : payload.jobs[0]?.id ?? "");
+      setError("");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load EventDesk."); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { void load(); }, [departmentId]);
+
+  const canJobs = canManageSite || state.permissions.jobs;
+  const canInventory = canManageSite || state.permissions.inventory;
+  const canCrew = canManageSite || state.permissions.crew;
+  const selectedJob = state.jobs.find((job) => job.id === selectedJobId);
+  const visibleJobs = useMemo(() => [...state.jobs].sort((a, b) => a.startsAt.localeCompare(b.startsAt)), [state.jobs]);
+  const activeJobs = state.jobs.filter((job) => !["completed", "cancelled"].includes(job.status));
+  const jobBookings = selectedJob ? state.bookings.filter((booking) => booking.jobId === selectedJob.id) : [];
+  const jobCrew = selectedJob ? state.crew.filter((person) => person.jobId === selectedJob.id) : [];
+  const availableAssets = state.assets.filter((asset) => asset.active);
+
+  async function action(fn: () => Promise<unknown>) {
+    setBusy(true); setError("");
+    try { await fn(); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "EventDesk could not complete that action."); }
+    finally { setBusy(false); }
+  }
+
+  async function createJob(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await action(async () => {
+      const created = await send<{ id: string }>("/api/eventdesk/jobs", departmentId, csrfToken, "POST", { ...jobForm, startsAt: new Date(jobForm.startsAt).toISOString(), endsAt: new Date(jobForm.endsAt).toISOString(), linkedEventId: jobForm.linkedEventId || null });
+      setSelectedJobId(created.id); setShowJobForm(false);
+      setJobForm({ title: "", customerName: "", linkedEventId: "", startsAt: localInputDate(), endsAt: localInputDate(new Date(Date.now() + 3_600_000)), venue: "", notes: "" });
+    });
+  }
+
+  async function createAsset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await action(async () => {
+      const body = { ...assetForm, dailyRateCents: Math.round(Number(assetForm.dailyRate || 0) * 100), active: true };
+      if (editingAsset) await send(`/api/eventdesk/assets/${editingAsset.id}`, departmentId, csrfToken, "PUT", body);
+      else await send("/api/eventdesk/assets", departmentId, csrfToken, "POST", body);
+      setShowAssetForm(false); setEditingAsset(null); setAssetForm({ name: "", category: "Audio", quantity: 1, dailyRate: "", notes: "" });
+    });
+  }
+
+  function openAssetForm(asset?: Asset) {
+    setEditingAsset(asset ?? null);
+    setAssetForm(asset ? { name: asset.name, category: asset.category, quantity: asset.quantity, dailyRate: (asset.dailyRateCents / 100).toFixed(2), notes: asset.notes } : { name: "", category: "Audio", quantity: 1, dailyRate: "", notes: "" });
+    setShowAssetForm(true);
+  }
+
+  async function addBooking(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedJob) return;
+    await action(() => send(`/api/eventdesk/jobs/${selectedJob.id}/assets`, departmentId, csrfToken, "POST", { assetId: bookingForm.assetId, quantity: Number(bookingForm.quantity) }));
+  }
+
+  async function addCrew(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); if (!selectedJob) return;
+    await action(() => send(`/api/eventdesk/jobs/${selectedJob.id}/crew`, departmentId, csrfToken, "POST", { role: crewForm.role, contactId: crewForm.contactId || null, hours: Number(crewForm.hours || 0), hourlyRateCents: Math.round(Number(crewForm.hourlyRate || 0) * 100) }));
+    setCrewForm({ role: "", contactId: "", hours: "", hourlyRate: "" });
+  }
+
+  async function updateJobStatus(job: Job, status: JobStatus) {
+    await action(() => send(`/api/eventdesk/jobs/${job.id}/status`, departmentId, csrfToken, "PUT", { status }));
+  }
+
+  async function assignCrew(person: Crew, contactId: string) {
+    await action(() => send(`/api/eventdesk/crew/${person.id}`, departmentId, csrfToken, "PUT", { contactId: contactId || null, status: contactId ? "assigned" : "requested" }));
+  }
+
+  async function updateBooking(booking: Booking, status: BookingStatus) {
+    await action(() => send(`/api/eventdesk/bookings/${booking.id}/status`, departmentId, csrfToken, "PUT", { status }));
+  }
+
+  const estimate = (job: Job) => {
+    const days = daysBetween(job.startsAt, job.endsAt);
+    const equipment = state.bookings.filter((line) => line.jobId === job.id && line.status !== "cancelled").reduce((sum, line) => sum + line.quantity * line.dailyRateCents * days, 0);
+    const crew = state.crew.filter((line) => line.jobId === job.id && line.status !== "declined").reduce((sum, line) => sum + line.hours * line.hourlyRateCents, 0);
+    return equipment + crew;
+  };
+
+  return <div className="eventdesk-shell">
+    <div className={`eventdesk-notice ${error ? "eventdesk-notice-error" : ""}`}><span className="demo-dot" />{error || "Plan jobs, reserve equipment, and coordinate the crew in one workspace."}{error && <button className="eventdesk-text-button" type="button" onClick={() => void load()}>Retry</button>}</div>
+    <header className="eventdesk-heading"><div><span className="eyebrow">EVENT OPERATIONS</span><h1>{section === "Overview" ? "EventDesk" : section}</h1><p className="page-subtitle">{section === "Overview" ? "Keep projects, equipment, and people moving together." : `Manage ${section.toLocaleLowerCase()} for your location.`}</p></div><div className="eventdesk-heading-actions">{section === "Jobs" && canJobs && <button className="button button-primary" type="button" onClick={() => setShowJobForm(true)}><Plus size={16} /> New job</button>}{section === "Equipment" && canInventory && <button className="button button-primary" type="button" onClick={() => openAssetForm()}><Plus size={16} /> Add equipment</button>}</div></header>
+    {section === "Overview" && <>
+      <div className="eventdesk-stat-grid"><article className="eventdesk-stat"><span>Active jobs</span><strong>{activeJobs.length}</strong><BriefcaseBusiness size={19} /></article><article className="eventdesk-stat"><span>Equipment items</span><strong>{state.assets.filter((asset) => asset.active).length}</strong><Package size={19} /></article><article className="eventdesk-stat"><span>Crew positions</span><strong>{state.crew.filter((person) => person.status === "requested").length}</strong><Users size={19} /></article></div>
+      <section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Upcoming jobs</h2><p>Bookings and staffing across your next projects</p></div><button className="eventdesk-text-button" type="button" onClick={() => onSectionChange("Jobs")}>Open jobs <ArrowUpRight size={14} /></button></div>{visibleJobs.filter((job) => !["completed", "cancelled"].includes(job.status)).slice(0, 6).map((job) => <button className={`eventdesk-job-row ${selectedJobId === job.id ? "eventdesk-job-row-active" : ""}`} key={job.id} type="button" onClick={() => { setSelectedJobId(job.id); onSectionChange("Jobs"); }}><span className="eventdesk-job-icon"><CalendarDays size={17} /></span><span className="eventdesk-job-main"><strong>{job.title}</strong><small>{job.customerName || job.linkedEventTitle || "No client linked"} · {formatDate(job.startsAt)}</small></span><span className={`eventdesk-status eventdesk-status-${job.status}`}>{statusLabels[job.status]}</span><ChevronRight size={16} /></button>)}{!loading && !activeJobs.length && <p className="eventdesk-empty">No jobs yet. Start with a new job and add its equipment and crew.</p>}</section>
+      {selectedJob && <section className="eventdesk-panel eventdesk-selected-panel"><div className="eventdesk-panel-heading"><div><h2>{selectedJob.title}</h2><p>{selectedJob.customerName || "No client"} · {selectedJob.venue || "Venue not set"}</p></div><span className="eventdesk-estimate">Estimate <strong>{money(estimate(selectedJob))}</strong></span></div><div className="eventdesk-split"><div><h3>Equipment <span>{jobBookings.length}</span></h3>{jobBookings.length ? jobBookings.map((line) => <div className="eventdesk-compact-line" key={line.id}><span>{line.quantity} × {line.assetName}</span><small>{line.status.replace("_", " ")}</small></div>) : <p className="eventdesk-muted">No equipment booked.</p>}</div><div><h3>Crew <span>{jobCrew.length}</span></h3>{jobCrew.length ? jobCrew.map((person) => <div className="eventdesk-compact-line" key={person.id}><span>{person.contactName || "Unassigned"} · {person.role}</span><small>{person.status}</small></div>) : <p className="eventdesk-muted">No crew requested.</p>}</div></div></section>}
+    </>}
+    {section === "Jobs" && <div className="eventdesk-workspace"><section className="eventdesk-panel eventdesk-jobs-panel"><div className="eventdesk-panel-heading"><div><h2>Jobs & projects</h2><p>{state.jobs.length} total · select a job to manage its plan</p></div></div>{loading ? <p className="eventdesk-empty">Loading jobs…</p> : visibleJobs.map((job) => <button className={`eventdesk-job-row ${selectedJobId === job.id ? "eventdesk-job-row-active" : ""}`} key={job.id} type="button" onClick={() => setSelectedJobId(job.id)}><span className="eventdesk-job-icon"><CalendarDays size={17} /></span><span className="eventdesk-job-main"><strong>{job.title}</strong><small>{job.customerName || job.linkedEventTitle || "No client linked"} · {formatDate(job.startsAt)}</small></span><span className={`eventdesk-status eventdesk-status-${job.status}`}>{statusLabels[job.status]}</span></button>)}{!loading && !state.jobs.length && <p className="eventdesk-empty">No jobs yet. Create your first job to begin planning.</p>}</section>
+      {selectedJob ? <section className="eventdesk-panel eventdesk-detail-panel"><div className="eventdesk-panel-heading"><div><span className="eyebrow">JOB DETAILS</span><h2>{selectedJob.title}</h2><p>{selectedJob.customerName || selectedJob.linkedEventTitle || "Client not set"}</p></div>{canJobs && <select aria-label="Job status" className="eventdesk-status-select" value={selectedJob.status} onChange={(event) => void updateJobStatus(selectedJob, event.target.value as JobStatus)} disabled={busy}>{jobStatuses.map((status) => <option key={status} value={status}>{statusLabels[status]}</option>)}</select>}</div><div className="eventdesk-detail-meta"><span><Clock3 size={15} /> {formatDate(selectedJob.startsAt)} – {formatDate(selectedJob.endsAt)}</span><span><CalendarDays size={15} /> {selectedJob.venue || "Venue not set"}</span>{selectedJob.linkedEventTitle && <span>Linked event: {selectedJob.linkedEventTitle}</span>}</div><p className="eventdesk-job-notes">{selectedJob.notes || "No job notes."}</p><div className="eventdesk-estimate-row"><span>Estimated total</span><strong>{money(estimate(selectedJob))}</strong></div>
+        <div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Equipment plan</h3><span>{jobBookings.length} lines</span></div>{jobBookings.map((line) => <div className="eventdesk-booking-row" key={line.id}><div><strong>{line.quantity} × {line.assetName}</strong><small>{money(line.dailyRateCents)} per unit / day</small></div>{canInventory ? <select aria-label={`Booking status for ${line.assetName}`} value={line.status} disabled={busy} onChange={(event) => void updateBooking(line, event.target.value as BookingStatus)}><option value="reserved">Reserved</option><option value="checked_out">Checked out</option><option value="returned">Returned</option><option value="cancelled">Cancelled</option></select> : <small>{line.status.replace("_", " ")}</small>}</div>)}{canInventory && <form className="eventdesk-inline-form" onSubmit={addBooking}><select aria-label="Equipment item" required value={bookingForm.assetId} onChange={(event) => setBookingForm({ ...bookingForm, assetId: event.target.value })}><option value="">Choose equipment…</option>{availableAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · {asset.quantity} available · {money(asset.dailyRateCents)}/day</option>)}</select><input aria-label="Quantity" type="number" min="1" value={bookingForm.quantity} onChange={(event) => setBookingForm({ ...bookingForm, quantity: Number(event.target.value) })} /><button className="button button-secondary" disabled={busy || !bookingForm.assetId}><Plus size={14} /> Add</button></form>}{!jobBookings.length && <p className="eventdesk-muted">No equipment booked to this job.</p>}</div>
+        <div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Crew plan</h3><span>{jobCrew.length} positions</span></div>{jobCrew.map((person) => <div className="eventdesk-booking-row" key={person.id}><div><strong>{person.role}</strong><small>{person.hours ? `${person.hours} hours · ${money(person.hourlyRateCents)}/hr` : "Hours not estimated"}</small></div>{canCrew ? <select aria-label={`Assign ${person.role}`} value={person.contactId ?? ""} disabled={busy || person.status === "declined"} onChange={(event) => void assignCrew(person, event.target.value)}><option value="">Unassigned request</option>{state.contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}</select> : <small>{person.contactName || "Requested"}</small>}</div>)}{canCrew && <form className="eventdesk-inline-form eventdesk-crew-form" onSubmit={addCrew}><input required aria-label="Crew role" placeholder="Role (e.g. sound engineer)" value={crewForm.role} onChange={(event) => setCrewForm({ ...crewForm, role: event.target.value })} /><select aria-label="Assign person" value={crewForm.contactId} onChange={(event) => setCrewForm({ ...crewForm, contactId: event.target.value })}><option value="">Request, assign later…</option>{state.contacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.name}</option>)}</select><input aria-label="Hours" type="number" min="0" step="0.25" placeholder="Hours" value={crewForm.hours} onChange={(event) => setCrewForm({ ...crewForm, hours: event.target.value })} /><input aria-label="Hourly rate" type="number" min="0" step="0.01" placeholder="CHF/hr" value={crewForm.hourlyRate} onChange={(event) => setCrewForm({ ...crewForm, hourlyRate: event.target.value })} /><button className="button button-secondary" disabled={busy}><Plus size={14} /> Add</button></form>}{!jobCrew.length && <p className="eventdesk-muted">No crew requested for this job.</p>}</div>
+      </section> : <section className="eventdesk-panel eventdesk-empty-detail"><BriefcaseBusiness size={24} /><h2>Select a job</h2><p>Choose a project from the list or create a new one.</p></section>}</div>}
+    {section === "Equipment" && <section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Equipment catalog</h2><p>{state.assets.length} items · availability is checked against active job dates</p></div></div>{loading ? <p className="eventdesk-empty">Loading equipment…</p> : state.assets.map((asset) => <article className="eventdesk-asset-row" key={asset.id}><span className="eventdesk-job-icon"><Package size={17} /></span><div className="eventdesk-job-main"><strong>{asset.name}</strong><small>{asset.category} · stock {asset.quantity} · {money(asset.dailyRateCents)}/day</small></div><span className={`eventdesk-active-pill ${asset.active ? "" : "eventdesk-inactive"}`}>{asset.active ? "Active" : "Inactive"}</span>{canInventory && <button className="eventdesk-row-edit" type="button" onClick={() => openAssetForm(asset)}>Edit</button>}</article>)}{!state.assets.length && <p className="eventdesk-empty">The equipment catalog is empty. Add your first item to start reserving gear.</p>}</section>}
+    {section === "Crew" && <section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Crew schedule</h2><p>Requests and assignments for upcoming jobs</p></div></div>{state.crew.map((person) => { const job = state.jobs.find((item) => item.id === person.jobId); return <article className="eventdesk-asset-row" key={person.id}><span className="eventdesk-job-icon"><Users size={17} /></span><div className="eventdesk-job-main"><strong>{person.role} · {person.contactName || "Unassigned"}</strong><small>{job?.title ?? "Job"} · {job ? formatDate(job.startsAt) : ""}</small></div><span className={`eventdesk-status eventdesk-status-${person.status === "confirmed" ? "confirmed" : person.status === "requested" ? "lead" : person.status === "declined" ? "cancelled" : "quoted"}`}>{person.status}</span></article>; })}{!state.crew.length && <p className="eventdesk-empty">There are no crew requests yet. Add positions from a job plan.</p>}</section>}
+    {showJobForm && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowJobForm(false)}><section className="modal eventdesk-modal" role="dialog" aria-modal="true" aria-labelledby="eventdesk-job-title"><div className="modal-heading"><div><span className="eyebrow">PROJECT SETUP</span><h2 id="eventdesk-job-title">Create a job</h2><p>Plan one rental or production project.</p></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowJobForm(false)}>×</button></div><form onSubmit={createJob}><label>Job name<input autoFocus required maxLength={160} value={jobForm.title} onChange={(event) => setJobForm({ ...jobForm, title: event.target.value })} placeholder="Summer concert" /></label><label>Client or customer<input maxLength={160} value={jobForm.customerName} onChange={(event) => setJobForm({ ...jobForm, customerName: event.target.value })} placeholder="Customer name" /></label><label>Link Smart-Church event<select value={jobForm.linkedEventId} onChange={(event) => setJobForm({ ...jobForm, linkedEventId: event.target.value })}><option value="">No linked event</option>{state.events.map((event) => <option key={event.id} value={event.id}>{event.title} · {event.eventDate}</option>)}</select></label><div className="eventdesk-form-grid"><label>Start<input required type="datetime-local" value={jobForm.startsAt} onChange={(event) => setJobForm({ ...jobForm, startsAt: event.target.value })} /></label><label>End<input required type="datetime-local" value={jobForm.endsAt} onChange={(event) => setJobForm({ ...jobForm, endsAt: event.target.value })} /></label></div><label>Venue<input maxLength={240} value={jobForm.venue} onChange={(event) => setJobForm({ ...jobForm, venue: event.target.value })} placeholder="Venue or delivery address" /></label><label>Notes<textarea maxLength={4000} rows={3} value={jobForm.notes} onChange={(event) => setJobForm({ ...jobForm, notes: event.target.value })} /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setShowJobForm(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={busy || !jobForm.title.trim()}><Check size={15} /> Create job</button></div></form></section></div>}
+    {showAssetForm && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && (setShowAssetForm(false), setEditingAsset(null))}><section className="modal eventdesk-modal" role="dialog" aria-modal="true" aria-labelledby="eventdesk-asset-title"><div className="modal-heading"><div><span className="eyebrow">EQUIPMENT CATALOG</span><h2 id="eventdesk-asset-title">{editingAsset ? "Edit equipment" : "Add equipment"}</h2><p>{editingAsset ? "Update stock details and rental rates." : "Add stock and its daily rental rate."}</p></div><button className="icon-button" type="button" aria-label="Close" onClick={() => { setShowAssetForm(false); setEditingAsset(null); }}>×</button></div><form onSubmit={createAsset}><label>Item name<input autoFocus required maxLength={160} value={assetForm.name} onChange={(event) => setAssetForm({ ...assetForm, name: event.target.value })} placeholder="Wireless microphone" /></label><div className="eventdesk-form-grid"><label>Category<input required maxLength={80} value={assetForm.category} onChange={(event) => setAssetForm({ ...assetForm, category: event.target.value })} /></label><label>Quantity<input required type="number" min="1" value={assetForm.quantity} onChange={(event) => setAssetForm({ ...assetForm, quantity: Number(event.target.value) })} /></label></div><label>Daily rate (CHF)<input type="number" min="0" step="0.01" value={assetForm.dailyRate} onChange={(event) => setAssetForm({ ...assetForm, dailyRate: event.target.value })} /></label><label>Notes<input maxLength={1000} value={assetForm.notes} onChange={(event) => setAssetForm({ ...assetForm, notes: event.target.value })} /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => { setShowAssetForm(false); setEditingAsset(null); }}>Cancel</button><button className="button button-primary" type="submit" disabled={busy || !assetForm.name.trim()}><Check size={15} /> {editingAsset ? "Save changes" : "Save equipment"}</button></div></form></section></div>}
+  </div>;
+}
