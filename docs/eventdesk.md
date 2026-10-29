@@ -10,6 +10,9 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Create supplier rate cards with effective dates and category- or equipment-specific daily rates, then select a valid card when creating a job. Each booked rate is saved on the job so later card edits do not change its estimate or issued documents.
 - Maintain separate supplier and venue directories; link a supplier to equipment and select a saved venue for a job.
 - Maintain an equipment catalog with stock quantity and daily rental rates.
+- Register individual serialised units alongside count-based stock, assign them to warehouses, generate printable barcode labels, and scan their barcodes during checkout and return.
+- Define reusable cases with required equipment and quantities, check scanned contents for missing or extra items, and record each contents check for audit.
+- Track stock quantities per warehouse, choose a warehouse when reserving equipment, and record transfers through dispatch and receipt with timestamps and responsible users.
 - Create reusable rental packages from catalog equipment, set a package discount rule, then add a package to a job in one step. EventDesk expands it into normal component bookings, applies the rule to the saved component rates, and checks availability for every item before saving the entire package.
 - Create numbered quotes, rental contracts, delivery notes, regular invoices, and deposit invoices from a job plan; download branded PDFs, print them, or email them to a customer with the PDF attached.
 - Track every email delivery attempt by recipient, subject, provider response, and time; a draft moves to sent only after the email provider accepts it. Quote decisions, contract signatures, delivery returns, invoice due dates, and full or partial payments are also tracked.
@@ -48,6 +51,6 @@ EventDesk uses the shared [Resend email API](https://resend.com/docs/api-referen
 
 The document workflow is a first operational slice. These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
-- Delivery notes, serial-number-level stock, barcode label generation, packing/casing, multi-warehouse stock, and transfers.
-- Repair tickets with service history and recurring inspection reminders, sub-rentals, purchases, and multi-warehouse stock.
+- Delivery notes and repair tickets with recurring inspections.
+- Sub-rentals and purchases.
 - Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.

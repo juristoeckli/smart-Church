@@ -95,6 +95,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return Boolean(result.rowCount);
     }
 
+    async function ensureDefaultWarehouse(departmentId: string) {
+      await pool!.query(`INSERT INTO eventdesk_warehouses (id,department_id,name,is_default)
+        VALUES ($1,$2,'Main warehouse',true) ON CONFLICT (department_id,name) DO NOTHING`, [randomUUID(), departmentId]);
+      const result = await pool!.query("SELECT id FROM eventdesk_warehouses WHERE department_id=$1 AND is_default=true AND active=true LIMIT 1", [departmentId]);
+      const warehouseId = result.rows[0]?.id as string | undefined;
+      if (warehouseId) await pool!.query(`INSERT INTO eventdesk_asset_warehouse_stock (department_id,asset_id,warehouse_id,quantity)
+        SELECT a.department_id,a.id,$2,a.quantity FROM eventdesk_assets a WHERE a.department_id=$1
+        ON CONFLICT (department_id,asset_id,warehouse_id) DO NOTHING`, [departmentId, warehouseId]);
+      return warehouseId;
+    }
+
     async function rollback(client: PoolClient) { await client.query("ROLLBACK"); }
 
     async function rentalRate(client: PoolClient, departmentId: string, rateCardId: string | null, startsAt: Date | string, asset: { id: string; category: string; daily_rate_cents: number; supplier_id: string | null }) {
@@ -119,6 +130,152 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const status = paid >= total ? "paid" : paid + credited >= total ? "settled" : paid > 0 ? "partial" : "sent";
       await client.query("UPDATE eventdesk_documents SET status=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [invoiceId, departmentId, status]);
     }
+
+    routes.post<{ Body: { name: string; address?: string } }>("/api/eventdesk/warehouses", { schema: { body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, address: { type: "string", maxLength: 500 } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const created = await pool!.query(`INSERT INTO eventdesk_warehouses (id,department_id,name,address) VALUES ($1,$2,$3,$4) RETURNING id`, [randomUUID(), departmentId, request.body.name.trim(), request.body.address?.trim() ?? ""]);
+      return reply.code(201).send({ id: created.rows[0].id });
+    });
+
+    routes.put<{ Params: { id: string }; Body: { name: string; address?: string; active: boolean } }>("/api/eventdesk/warehouses/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["name", "active"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, address: { type: "string", maxLength: 500 }, active: { type: "boolean" } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query(`UPDATE eventdesk_warehouses SET name=$3,address=$4,active=$5,updated_at=now() WHERE id=$1 AND department_id=$2 AND (is_default OR $5) RETURNING id`, [request.params.id, departmentId, request.body.name.trim(), request.body.address?.trim() ?? "", request.body.active]);
+      return result.rowCount ? { id: request.params.id } : reply.code(409).send({ error: "Warehouse not found, or the default warehouse cannot be disabled." });
+    });
+
+    routes.post<{ Params: { id: string }; Body: { warehouseId?: string; serialNumber: string; barcode?: string; condition?: "good" | "worn" | "damaged" | "retired"; notes?: string } }>("/api/eventdesk/assets/:id/units", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["serialNumber"], properties: { warehouseId: { type: "string", format: "uuid" }, serialNumber: { type: "string", minLength: 1, maxLength: 120 }, barcode: { type: "string", maxLength: 120 }, condition: { type: "string", enum: ["good", "worn", "damaged", "retired"] }, notes: { type: "string", maxLength: 1000 } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const defaultWarehouseId = await ensureDefaultWarehouse(departmentId);
+      const warehouseId = request.body.warehouseId ?? defaultWarehouseId;
+      if (!warehouseId) return reply.code(409).send({ error: "Create an active warehouse first." });
+      const unitId = randomUUID();
+      const barcode = request.body.barcode?.trim() || `ED-${unitId.replaceAll("-", "").slice(0, 12).toUpperCase()}`;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const asset = await client.query("SELECT id,quantity FROM eventdesk_assets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!asset.rowCount) { await rollback(client); return reply.code(404).send({ error: "Equipment item not found." }); }
+        const warehouse = await client.query("SELECT 1 FROM eventdesk_warehouses WHERE id=$1 AND department_id=$2 AND active=true", [warehouseId, departmentId]);
+        if (!warehouse.rowCount) { await rollback(client); return reply.code(400).send({ error: "Choose an active warehouse from this location." }); }
+        const units = await client.query("SELECT count(*)::int AS count FROM eventdesk_asset_units WHERE asset_id=$1 AND department_id=$2 AND status<>'retired'", [request.params.id, departmentId]);
+        if (Number(units.rows[0].count) >= Number(asset.rows[0].quantity)) { await rollback(client); return reply.code(409).send({ error: "The serialised unit count cannot exceed the catalog quantity." }); }
+        await client.query(`INSERT INTO eventdesk_asset_units (id,department_id,asset_id,warehouse_id,serial_number,barcode,condition,status,notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [unitId, departmentId, request.params.id, warehouseId, request.body.serialNumber.trim(), barcode, request.body.condition ?? "good", request.body.condition === "retired" ? "retired" : "in_stock", request.body.notes?.trim() ?? ""]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id: unitId, barcode });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.post<{ Body: { name: string; barcode: string; warehouseId: string; items: { assetId: string; quantity: number }[] } }>("/api/eventdesk/asset-cases", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "barcode", "warehouseId", "items"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, barcode: { type: "string", minLength: 1, maxLength: 120 }, warehouseId: { type: "string", format: "uuid" }, items: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["assetId", "quantity"], properties: { assetId: { type: "string", format: "uuid" }, quantity: { type: "integer", minimum: 1, maximum: 100000 } } } } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const assetIds = request.body.items.map((item) => item.assetId);
+      if (new Set(assetIds).size !== assetIds.length) return reply.code(400).send({ error: "Each case item may appear once." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const warehouse = await client.query("SELECT 1 FROM eventdesk_warehouses WHERE id=$1 AND department_id=$2 AND active=true", [request.body.warehouseId, departmentId]);
+        const assets = await client.query("SELECT id FROM eventdesk_assets WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, assetIds]);
+        if (!warehouse.rowCount || assets.rowCount !== assetIds.length) { await rollback(client); return reply.code(400).send({ error: "Choose an active warehouse and equipment from this location." }); }
+        const id = randomUUID();
+        await client.query("INSERT INTO eventdesk_asset_cases (id,department_id,name,barcode,warehouse_id) VALUES ($1,$2,$3,$4,$5)", [id, departmentId, request.body.name.trim(), request.body.barcode.trim(), request.body.warehouseId]);
+        for (const item of request.body.items) await client.query("INSERT INTO eventdesk_asset_case_items (department_id,case_id,asset_id,quantity) VALUES ($1,$2,$3,$4)", [departmentId, id, item.assetId, item.quantity]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id });
+      } catch (error) { await rollback(client); if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A case with that barcode already exists." }); throw error; } finally { client.release(); }
+    });
+
+    routes.post<{ Params: { id: string }; Body: { scannedBarcodes: string[] } }>("/api/eventdesk/asset-cases/:id/check", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["scannedBarcodes"], properties: { scannedBarcodes: { type: "array", maxItems: 1000, items: { type: "string", minLength: 1, maxLength: 120 } } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      if (new Set(request.body.scannedBarcodes.map((barcode) => barcode.trim().toLowerCase())).size !== request.body.scannedBarcodes.length) return reply.code(400).send({ error: "Each barcode can only be scanned once per case check." });
+      const required = await pool!.query(`SELECT i.asset_id,a.name,i.quantity FROM eventdesk_asset_case_items i JOIN eventdesk_assets a ON a.id=i.asset_id AND a.department_id=i.department_id WHERE i.case_id=$1 AND i.department_id=$2`, [request.params.id, departmentId]);
+      if (!required.rowCount) return reply.code(404).send({ error: "Case not found or it has no required contents." });
+      const expected = new Map(required.rows.map((row) => [row.asset_id as string, { name: row.name as string, quantity: Number(row.quantity) }]));
+      const actual = new Map<string, { name: string; quantity: number }>();
+      for (const barcode of request.body.scannedBarcodes) {
+        const unit = await pool!.query("SELECT u.asset_id,a.name FROM eventdesk_asset_units u JOIN eventdesk_assets a ON a.id=u.asset_id AND a.department_id=u.department_id WHERE u.department_id=$1 AND lower(u.barcode)=lower($2)", [departmentId, barcode.trim()]);
+        const item = unit.rowCount ? unit.rows[0] : (await pool!.query("SELECT id AS asset_id,name FROM eventdesk_assets WHERE department_id=$1 AND lower(barcode)=lower($2)", [departmentId, barcode.trim()])).rows[0];
+        if (!item) return reply.code(400).send({ error: `Unknown equipment barcode: ${barcode.trim()}` });
+        const current = actual.get(item.asset_id) ?? { name: item.name, quantity: 0 };
+        current.quantity += 1; actual.set(item.asset_id, current);
+      }
+      const missingContents = [...expected].flatMap(([assetId, item]) => { const quantity = Math.max(0, item.quantity - (actual.get(assetId)?.quantity ?? 0)); return quantity ? [{ assetId, assetName: item.name, quantity }] : []; });
+      const substitutedContents = [...actual].flatMap(([assetId, item]) => { const quantity = Math.max(0, item.quantity - (expected.get(assetId)?.quantity ?? 0)); return quantity ? [{ assetId, assetName: item.name, quantity }] : []; });
+      await pool!.query(`INSERT INTO eventdesk_asset_case_checks (id,department_id,case_id,scanned_contents,missing_contents,substituted_contents,checked_by) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb,$6::jsonb,$7)`, [randomUUID(), departmentId, request.params.id, JSON.stringify([...actual].map(([assetId,item]) => ({ assetId, ...item }))), JSON.stringify(missingContents), JSON.stringify(substitutedContents), request.authenticatedUser?.id ?? null]);
+      return { complete: !missingContents.length && !substitutedContents.length, missingContents, substitutedContents };
+    });
+
+    routes.post<{ Body: { sourceWarehouseId: string; destinationWarehouseId: string; notes?: string; lines: { assetId: string; quantity: number }[] } }>("/api/eventdesk/warehouse-transfers", { schema: { body: { type: "object", additionalProperties: false, required: ["sourceWarehouseId", "destinationWarehouseId", "lines"], properties: { sourceWarehouseId: { type: "string", format: "uuid" }, destinationWarehouseId: { type: "string", format: "uuid" }, notes: { type: "string", maxLength: 1000 }, lines: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["assetId", "quantity"], properties: { assetId: { type: "string", format: "uuid" }, quantity: { type: "integer", minimum: 1, maximum: 100000 } } } } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      if (request.body.sourceWarehouseId === request.body.destinationWarehouseId || new Set(request.body.lines.map((line) => line.assetId)).size !== request.body.lines.length) return reply.code(400).send({ error: "Choose different warehouses and list each item only once." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const warehouses = await client.query("SELECT id FROM eventdesk_warehouses WHERE department_id=$1 AND id=ANY($2::uuid[]) AND active=true", [departmentId, [request.body.sourceWarehouseId, request.body.destinationWarehouseId]]);
+        if (warehouses.rowCount !== 2) { await rollback(client); return reply.code(400).send({ error: "Choose active warehouses from this location." }); }
+        const id = randomUUID();
+        await client.query("INSERT INTO eventdesk_warehouse_transfers (id,department_id,source_warehouse_id,destination_warehouse_id,notes,created_by) VALUES ($1,$2,$3,$4,$5,$6)", [id, departmentId, request.body.sourceWarehouseId, request.body.destinationWarehouseId, request.body.notes?.trim() ?? "", request.authenticatedUser?.id ?? null]);
+        for (const line of request.body.lines) {
+          const asset = await client.query("SELECT 1 FROM eventdesk_assets WHERE id=$1 AND department_id=$2", [line.assetId, departmentId]);
+          if (!asset.rowCount) { await rollback(client); return reply.code(400).send({ error: "All transfer items must belong to this location." }); }
+          await client.query("INSERT INTO eventdesk_warehouse_transfer_lines (id,department_id,transfer_id,asset_id,quantity) VALUES ($1,$2,$3,$4,$5)", [randomUUID(), departmentId, id, line.assetId, line.quantity]);
+        }
+        await client.query("COMMIT");
+        return reply.code(201).send({ id, status: "draft" });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { status: "in_transit" | "received" } }>("/api/eventdesk/warehouse-transfers/:id/status", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["in_transit", "received"] } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const transfer = await client.query("SELECT * FROM eventdesk_warehouse_transfers WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!transfer.rowCount) { await rollback(client); return reply.code(404).send({ error: "Transfer not found." }); }
+        const row = transfer.rows[0];
+        const lines = await client.query("SELECT * FROM eventdesk_warehouse_transfer_lines WHERE transfer_id=$1 AND department_id=$2 ORDER BY asset_id", [request.params.id, departmentId]);
+        if (request.body.status === "in_transit") {
+          if (row.status !== "draft") { await rollback(client); return reply.code(409).send({ error: "Only a draft transfer can be dispatched." }); }
+          for (const line of lines.rows) {
+            const availability = await client.query(`SELECT s.quantity
+                -coalesce((SELECT sum(b.quantity) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
+                  WHERE b.department_id=s.department_id AND b.asset_id=s.asset_id AND b.warehouse_id=s.warehouse_id AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.ends_at>now()),0)
+                -coalesce((SELECT sum(m.quantity) FROM eventdesk_asset_maintenance m WHERE m.department_id=s.department_id AND m.asset_id=s.asset_id AND m.status IN ('scheduled','in_progress') AND m.ends_at>now()),0)::int AS available
+              FROM eventdesk_asset_warehouse_stock s WHERE s.department_id=$1 AND s.asset_id=$2 AND s.warehouse_id=$3 FOR UPDATE`, [departmentId, line.asset_id, row.source_warehouse_id]);
+            if (!availability.rowCount || Number(availability.rows[0].available) < Number(line.quantity)) { await rollback(client); return reply.code(409).send({ error: "The transfer would take stock reserved for an active or future job." }); }
+            const stock = await client.query("UPDATE eventdesk_asset_warehouse_stock SET quantity=quantity-$4,updated_at=now() WHERE department_id=$1 AND asset_id=$2 AND warehouse_id=$3 AND quantity >= $4 RETURNING quantity", [departmentId, line.asset_id, row.source_warehouse_id, line.quantity]);
+            if (!stock.rowCount) { await rollback(client); return reply.code(409).send({ error: "There is not enough stock at the source warehouse." }); }
+            const units = await client.query("SELECT count(*)::int AS count FROM eventdesk_asset_units WHERE department_id=$1 AND asset_id=$2 AND warehouse_id=$3 AND status='in_stock'", [departmentId, line.asset_id, row.source_warehouse_id]);
+            if (Number(units.rows[0].count) >= Number(line.quantity)) await client.query(`WITH selected AS (SELECT id FROM eventdesk_asset_units WHERE department_id=$1 AND asset_id=$2 AND warehouse_id=$3 AND status='in_stock' ORDER BY serial_number LIMIT $4 FOR UPDATE SKIP LOCKED)
+              UPDATE eventdesk_asset_units u SET status='in_transit',transfer_id=$5,updated_at=now() FROM selected s WHERE u.id=s.id`, [departmentId, line.asset_id, row.source_warehouse_id, line.quantity, request.params.id]);
+          }
+          await client.query("UPDATE eventdesk_warehouse_transfers SET status='in_transit',dispatched_at=now(),dispatched_by=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, request.authenticatedUser?.id ?? null]);
+        } else {
+          if (row.status !== "in_transit") { await rollback(client); return reply.code(409).send({ error: "Only an in-transit transfer can be received." }); }
+          for (const line of lines.rows) {
+            await client.query(`INSERT INTO eventdesk_asset_warehouse_stock (department_id,asset_id,warehouse_id,quantity) VALUES ($1,$2,$3,$4)
+              ON CONFLICT (department_id,asset_id,warehouse_id) DO UPDATE SET quantity=eventdesk_asset_warehouse_stock.quantity+EXCLUDED.quantity,updated_at=now()`, [departmentId, line.asset_id, row.destination_warehouse_id, line.quantity]);
+            await client.query(`WITH moving AS (SELECT id FROM eventdesk_asset_units WHERE department_id=$1 AND asset_id=$2 AND transfer_id=$5 AND status='in_transit' ORDER BY serial_number LIMIT $3 FOR UPDATE SKIP LOCKED)
+              UPDATE eventdesk_asset_units u SET warehouse_id=$4,status='in_stock',transfer_id=NULL,updated_at=now() FROM moving m WHERE u.id=m.id`, [departmentId, line.asset_id, line.quantity, row.destination_warehouse_id, request.params.id]);
+          }
+          await client.query("UPDATE eventdesk_warehouse_transfers SET status='received',received_at=now(),received_by=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, request.authenticatedUser?.id ?? null]);
+        }
+        await client.query("COMMIT");
+        return { id: request.params.id, status: request.body.status };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
 
     routes.put<{ Body: { enabled: boolean; delayDays: number[]; maxAttempts: number } }>("/api/eventdesk/reminders/settings", { schema: {
       body: { type: "object", additionalProperties: false, required: ["enabled", "delayDays", "maxAttempts"], properties: {
@@ -169,8 +326,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get("/api/eventdesk/bootstrap", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
+      await ensureDefaultWarehouse(departmentId);
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
-      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
@@ -181,8 +339,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         pool!.query(`SELECT a.id, a.name, a.category, a.quantity, a.daily_rate_cents, a.active, a.notes, a.barcode, a.supplier_id, s.name AS supplier_name
                        FROM eventdesk_assets a LEFT JOIN eventdesk_partners s ON s.id=a.supplier_id AND s.department_id=a.department_id AND s.kind='supplier'
                       WHERE a.department_id=$1 ORDER BY a.active DESC, lower(a.category), lower(a.name)`, [departmentId]),
-        pool!.query(`SELECT b.id, b.job_id, b.asset_id, a.name AS asset_name, a.barcode, b.quantity, b.checked_out_quantity, b.daily_rate_cents, b.status
+        pool!.query(`SELECT b.id, b.job_id, b.asset_id, a.name AS asset_name, a.barcode, b.quantity, b.checked_out_quantity, b.daily_rate_cents, b.status,b.warehouse_id,w.name AS warehouse_name,
+                            coalesce((SELECT jsonb_agg(jsonb_build_object('serialNumber',u.serial_number,'barcode',u.barcode) ORDER BY u.serial_number) FROM eventdesk_job_asset_units ju JOIN eventdesk_asset_units u ON u.id=ju.unit_id AND u.department_id=ju.department_id WHERE ju.job_asset_id=b.id AND ju.department_id=b.department_id AND ju.returned_at IS NULL),'[]'::jsonb) AS serialised_units
                        FROM eventdesk_job_assets b JOIN eventdesk_assets a ON a.id=b.asset_id AND a.department_id=b.department_id
+                       LEFT JOIN eventdesk_warehouses w ON w.id=b.warehouse_id AND w.department_id=b.department_id
                       WHERE b.department_id=$1 ORDER BY a.name`, [departmentId]),
         pool!.query(`SELECT m.id,m.asset_id,m.starts_at,m.ends_at,m.quantity,m.status,m.notes,a.name AS asset_name
                        FROM eventdesk_asset_maintenance m JOIN eventdesk_assets a ON a.id=m.asset_id AND a.department_id=m.department_id
@@ -236,11 +396,31 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         pool!.query(`SELECT enabled,delay_days,max_attempts FROM eventdesk_reminder_settings WHERE department_id=$1 AND $2::boolean`, [departmentId, canFinance]),
         pool!.query(`SELECT id,document_id,attempt_no,delay_days,recipient_email,status,provider_message_id,error_summary,sent_at,created_at
                        FROM eventdesk_reminder_attempts WHERE department_id=$1 AND $2::boolean ORDER BY created_at DESC`, [departmentId, canFinance]),
+        pool!.query(`SELECT w.id,w.name,w.address,w.is_default,w.active,coalesce(sum(s.quantity),0)::int AS stock_units
+                       FROM eventdesk_warehouses w LEFT JOIN eventdesk_asset_warehouse_stock s ON s.warehouse_id=w.id AND s.department_id=w.department_id
+                      WHERE w.department_id=$1 AND $2::boolean GROUP BY w.id ORDER BY w.is_default DESC,lower(w.name)`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT u.id,u.asset_id,a.name AS asset_name,u.warehouse_id,w.name AS warehouse_name,u.serial_number,u.barcode,u.condition,u.status,u.notes
+                       FROM eventdesk_asset_units u JOIN eventdesk_assets a ON a.id=u.asset_id AND a.department_id=u.department_id
+                       JOIN eventdesk_warehouses w ON w.id=u.warehouse_id AND w.department_id=u.department_id
+                      WHERE u.department_id=$1 AND $2::boolean ORDER BY lower(a.name),u.serial_number`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT t.id,t.source_warehouse_id,src.name AS source_name,t.destination_warehouse_id,dst.name AS destination_name,t.status,t.notes,t.dispatched_at,t.received_at,t.created_at,
+                            coalesce(jsonb_agg(jsonb_build_object('assetId',l.asset_id,'assetName',a.name,'quantity',l.quantity) ORDER BY lower(a.name)) FILTER (WHERE l.id IS NOT NULL),'[]'::jsonb) AS lines
+                       FROM eventdesk_warehouse_transfers t JOIN eventdesk_warehouses src ON src.id=t.source_warehouse_id AND src.department_id=t.department_id
+                       JOIN eventdesk_warehouses dst ON dst.id=t.destination_warehouse_id AND dst.department_id=t.department_id
+                       LEFT JOIN eventdesk_warehouse_transfer_lines l ON l.transfer_id=t.id AND l.department_id=t.department_id
+                       LEFT JOIN eventdesk_assets a ON a.id=l.asset_id AND a.department_id=l.department_id
+                      WHERE t.department_id=$1 AND $2::boolean GROUP BY t.id,src.name,dst.name ORDER BY t.created_at DESC`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT c.id,c.name,c.barcode,c.warehouse_id,w.name AS warehouse_name,
+                            coalesce(jsonb_agg(jsonb_build_object('assetId',i.asset_id,'assetName',a.name,'quantity',i.quantity) ORDER BY lower(a.name)) FILTER (WHERE i.asset_id IS NOT NULL),'[]'::jsonb) AS items
+                       FROM eventdesk_asset_cases c JOIN eventdesk_warehouses w ON w.id=c.warehouse_id AND w.department_id=c.department_id
+                       LEFT JOIN eventdesk_asset_case_items i ON i.case_id=c.id AND i.department_id=c.department_id
+                       LEFT JOIN eventdesk_assets a ON a.id=i.asset_id AND a.department_id=i.department_id
+                      WHERE c.department_id=$1 AND $2::boolean GROUP BY c.id,w.name ORDER BY lower(c.name)`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, supplierRateCardId: row.supplier_rate_card_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
         assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes, barcode: row.barcode, supplierId: row.supplier_id, supplierName: row.supplier_name })),
-        bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
+        bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status, warehouseId: row.warehouse_id, warehouseName: row.warehouse_name, serialisedUnits: row.serialised_units })),
         maintenance: maintenance.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), quantity: row.quantity, status: row.status, notes: row.notes })),
         crew: crew.rows.map((row) => ({ id: row.id, jobId: row.job_id, role: row.role, contactId: row.contact_id, contactName: row.contact_name?.trim() || null, freelancerId: row.freelancer_id, freelancerName: row.freelancer_name, freelancerEmail: row.freelancer_email, inviteSentAt: row.invite_sent_at, inviteStatus: row.invite_status, inviteError: row.invite_error, hours: Number(row.hours), hourlyRateCents: row.hourly_rate_cents, status: row.status, notes: row.notes })),
         contacts: contacts.rows.map((row) => ({ id: row.id, name: `${row.first_name} ${row.last_name}`.trim() })),
@@ -255,6 +435,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         documentDeliveries: deliveries.rows.map((row) => ({ id: row.id, documentId: row.document_id, recipientEmail: row.recipient_email, subject: row.subject, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
         reminderSettings: reminderSettings.rows[0] ? { enabled: reminderSettings.rows[0].enabled, delayDays: reminderSettings.rows[0].delay_days, maxAttempts: reminderSettings.rows[0].max_attempts } : { enabled: false, delayDays: [3, 7, 14], maxAttempts: 3 },
         reminderAttempts: reminders.rows.map((row) => ({ id: row.id, documentId: row.document_id, attemptNo: row.attempt_no, delayDays: row.delay_days, recipientEmail: row.recipient_email, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
+        warehouses: warehouses.rows.map((row) => ({ id: row.id, name: row.name, address: row.address, isDefault: row.is_default, active: row.active, stockUnits: row.stock_units })),
+        assetUnits: assetUnits.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, warehouseId: row.warehouse_id, warehouseName: row.warehouse_name, serialNumber: row.serial_number, barcode: row.barcode, condition: row.condition, status: row.status, notes: row.notes })),
+        warehouseTransfers: transfers.rows.map((row) => ({ id: row.id, sourceWarehouseId: row.source_warehouse_id, sourceName: row.source_name, destinationWarehouseId: row.destination_warehouse_id, destinationName: row.destination_name, status: row.status, notes: row.notes, dispatchedAt: row.dispatched_at, receivedAt: row.received_at, createdAt: row.created_at, lines: row.lines })),
+        assetCases: cases.rows.map((row) => ({ id: row.id, name: row.name, barcode: row.barcode, warehouseId: row.warehouse_id, warehouseName: row.warehouse_name, items: row.items })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
         documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [] } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [] },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
@@ -714,10 +898,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
       const body = request.body;
+      const defaultWarehouseId = await ensureDefaultWarehouse(departmentId);
+      if (!defaultWarehouseId) return reply.code(409).send({ error: "Create an active warehouse first." });
       if (!await sameDepartmentRecord("eventdesk_partners", body.supplierId, departmentId)) return reply.code(400).send({ error: "Choose a supplier from this location." });
       if (body.supplierId && !(await pool!.query("SELECT 1 FROM eventdesk_partners WHERE id=$1 AND department_id=$2 AND kind='supplier'", [body.supplierId, departmentId])).rowCount) return reply.code(400).send({ error: "Choose a supplier, not a venue." });
       const result = await pool!.query(`INSERT INTO eventdesk_assets (id,department_id,name,category,quantity,daily_rate_cents,notes,barcode,supplier_id)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [randomUUID(), departmentId, body.name.trim(), body.category?.trim() || "General", body.quantity, body.dailyRateCents ?? 0, body.notes?.trim() ?? "", body.barcode?.trim() ?? "", body.supplierId ?? null]);
+      await pool!.query(`INSERT INTO eventdesk_asset_warehouse_stock (department_id,asset_id,warehouse_id,quantity) VALUES ($1,$2,$3,$4)`, [departmentId, result.rows[0].id, defaultWarehouseId, body.quantity]);
       return reply.code(201).send({ id: result.rows[0].id });
     });
 
@@ -801,6 +988,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
+      const defaultWarehouseId = await ensureDefaultWarehouse(departmentId);
+      if (!defaultWarehouseId) return reply.code(409).send({ error: "Create an active warehouse first." });
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
@@ -839,41 +1028,47 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           const asset = lockedById.get(item.asset_id)!;
           const baseRate = await rentalRate(client, departmentId, job.rows[0].supplier_rate_card_id, job.rows[0].starts_at, asset);
           const packageRate = Math.round(baseRate * (10000 - Number(packageResult.rows[0].discount_bps)) / 10000);
-          await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents)
-            VALUES ($1,$2,$3,$4,$5,$6)`, [randomUUID(), departmentId, request.params.id, item.asset_id, Number(item.quantity) * request.body.quantity, packageRate]);
+          await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents,warehouse_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)`, [randomUUID(), departmentId, request.params.id, item.asset_id, Number(item.quantity) * request.body.quantity, packageRate, defaultWarehouseId]);
         }
         await client.query("COMMIT");
         return reply.code(201).send({ packageName: packageResult.rows[0].name, itemCount: items.rowCount });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
-    routes.post<{ Params: { id: string }; Body: { assetId: string; quantity: number } }>("/api/eventdesk/jobs/:id/assets", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["assetId", "quantity"], properties: { assetId: { type: "string", format: "uuid" }, quantity: { type: "integer", minimum: 1, maximum: 100000 } } } } }, async (request, reply) => {
+    routes.post<{ Params: { id: string }; Body: { assetId: string; quantity: number; warehouseId?: string } }>("/api/eventdesk/jobs/:id/assets", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["assetId", "quantity"], properties: { assetId: { type: "string", format: "uuid" }, quantity: { type: "integer", minimum: 1, maximum: 100000 }, warehouseId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
+      const defaultWarehouseId = await ensureDefaultWarehouse(departmentId);
+      const warehouseId = request.body.warehouseId ?? defaultWarehouseId;
+      if (!warehouseId) return reply.code(409).send({ error: "Create an active warehouse first." });
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
         const job = await client.query("SELECT starts_at,ends_at,status,supplier_rate_card_id FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.params.id, departmentId]);
         if (!job.rowCount || ["cancelled", "completed"].includes(job.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "An active job is required for an equipment booking." }); }
+        const warehouse = await client.query("SELECT 1 FROM eventdesk_warehouses WHERE id=$1 AND department_id=$2 AND active=true", [warehouseId, departmentId]);
+        if (!warehouse.rowCount) { await rollback(client); return reply.code(400).send({ error: "Choose an active warehouse from this location." }); }
         const asset = await client.query("SELECT id,name,category,quantity,daily_rate_cents,active,supplier_id FROM eventdesk_assets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.body.assetId, departmentId]);
         if (!asset.rowCount || !asset.rows[0].active) { await rollback(client); return reply.code(404).send({ error: "Active equipment item not found." }); }
         const reserved = await client.query(`WITH points AS (
           SELECT $3::timestamptz AS moment
           UNION SELECT greatest(j.starts_at, $3::timestamptz) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
-           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at < $4 AND j.ends_at > $3
+           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND b.warehouse_id=$5 AND j.status NOT IN ('cancelled','completed') AND j.starts_at < $4 AND j.ends_at > $3
           UNION SELECT greatest(m.starts_at, $3::timestamptz) FROM eventdesk_asset_maintenance m
            WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at < $4 AND m.ends_at > $3
         ) SELECT coalesce(max(
           (SELECT coalesce(sum(b.quantity),0) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
-            WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at <= p.moment AND j.ends_at > p.moment)
+            WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND b.warehouse_id=$5 AND j.status NOT IN ('cancelled','completed') AND j.starts_at <= p.moment AND j.ends_at > p.moment)
           +(SELECT coalesce(sum(m.quantity),0) FROM eventdesk_asset_maintenance m WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at <= p.moment AND m.ends_at > p.moment)
-        ),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at]);
-        const available = asset.rows[0].quantity - Number(reserved.rows[0].quantity);
+        ),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at, warehouseId]);
+        const stock = await client.query("SELECT quantity FROM eventdesk_asset_warehouse_stock WHERE department_id=$1 AND asset_id=$2 AND warehouse_id=$3 FOR UPDATE", [departmentId, request.body.assetId, warehouseId]);
+        const available = Number(stock.rows[0]?.quantity ?? 0) - Number(reserved.rows[0].quantity);
         if (request.body.quantity > available) { await rollback(client); return reply.code(409).send({ error: `Only ${Math.max(0, available)} unit(s) are available for those dates.` }); }
         const dailyRate = await rentalRate(client, departmentId, job.rows[0].supplier_rate_card_id, job.rows[0].starts_at, asset.rows[0]);
-        const result = await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents)
-          VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`, [randomUUID(), departmentId, request.params.id, request.body.assetId, request.body.quantity, dailyRate]);
+        const result = await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents,warehouse_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [randomUUID(), departmentId, request.params.id, request.body.assetId, request.body.quantity, dailyRate, warehouseId]);
         await client.query("COMMIT");
         return reply.code(201).send({ id: result.rows[0].id });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
@@ -948,6 +1143,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("BEGIN");
         const job = await client.query("SELECT status FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR SHARE", [request.body.jobId, departmentId]);
         if (!job.rowCount || ["cancelled", "completed"].includes(job.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "An active job is required for warehouse scanning." }); }
+        const serial = await client.query(`SELECT u.id AS unit_id,u.asset_id,u.warehouse_id,u.status AS unit_status,a.name AS asset_name,
+              b.id AS booking_id,b.quantity,b.checked_out_quantity,b.status AS booking_status
+          FROM eventdesk_asset_units u JOIN eventdesk_assets a ON a.id=u.asset_id AND a.department_id=u.department_id
+          JOIN eventdesk_job_assets b ON b.asset_id=u.asset_id AND b.department_id=u.department_id AND b.job_id=$1
+         WHERE u.department_id=$2 AND lower(u.barcode)=lower($3) AND b.status IN ('reserved','checked_out')
+           AND (($4='out' AND u.status='in_stock' AND u.warehouse_id=coalesce(b.warehouse_id,u.warehouse_id) AND b.checked_out_quantity<b.quantity)
+             OR ($4='in' AND u.status='checked_out' AND EXISTS (SELECT 1 FROM eventdesk_job_asset_units ju WHERE ju.unit_id=u.id AND ju.job_asset_id=b.id AND ju.department_id=b.department_id AND ju.returned_at IS NULL)))
+         ORDER BY b.created_at LIMIT 1 FOR UPDATE OF u,b`, [request.body.jobId, departmentId, request.body.barcode.trim(), request.body.action]);
+        if (serial.rowCount) {
+          const unit = serial.rows[0];
+          const checkedOut = Number(unit.checked_out_quantity) + (request.body.action === "out" ? 1 : -1);
+          const bookingStatus = checkedOut > 0 ? "checked_out" : request.body.action === "in" ? "returned" : "reserved";
+          if (request.body.action === "out") {
+            await client.query("UPDATE eventdesk_asset_units SET status='checked_out',updated_at=now() WHERE id=$1 AND department_id=$2", [unit.unit_id, departmentId]);
+            await client.query("INSERT INTO eventdesk_job_asset_units (id,department_id,job_asset_id,unit_id) VALUES ($1,$2,$3,$4)", [randomUUID(), departmentId, unit.booking_id, unit.unit_id]);
+          } else {
+            await client.query("UPDATE eventdesk_asset_units SET status='in_stock',updated_at=now() WHERE id=$1 AND department_id=$2", [unit.unit_id, departmentId]);
+            await client.query("UPDATE eventdesk_job_asset_units SET returned_at=now() WHERE department_id=$1 AND job_asset_id=$2 AND unit_id=$3 AND returned_at IS NULL", [departmentId, unit.booking_id, unit.unit_id]);
+          }
+          await client.query("UPDATE eventdesk_job_assets SET checked_out_quantity=$3,status=$4 WHERE id=$1 AND department_id=$2", [unit.booking_id, departmentId, checkedOut, bookingStatus]);
+          await client.query("COMMIT");
+          return { id: unit.booking_id, assetName: unit.asset_name, checkedOutQuantity: checkedOut, quantity: Number(unit.quantity), status: bookingStatus, serialNumber: request.body.barcode.trim() };
+        }
         const current = await client.query(`SELECT b.id,b.quantity,b.checked_out_quantity,b.status,a.name AS asset_name
           FROM eventdesk_job_assets b JOIN eventdesk_assets a ON a.id=b.asset_id AND a.department_id=b.department_id
          WHERE b.job_id=$1 AND b.department_id=$2 AND lower(a.barcode)=lower($3)
