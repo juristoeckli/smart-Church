@@ -14,7 +14,16 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 
 Every job and resource is scoped to the selected Smart-Church location. A job does not need a linked church event. Crew assignments use the location's contacts. This first release runs inside Smart-Church and does not provide a separate freelancer portal or an independent sign-in.
 
-The SQL migration is applied during normal Smart-Church startup. Site administrators can grant EventDesk access in People & access. Existing locations have the module enabled by the migration.
+The SQL migrations are applied during normal Smart-Church startup. EventDesk is off by default for every location. A Server Administrator can enable it for a location with:
+
+```sql
+UPDATE departments
+   SET enabled_modules = array_append(enabled_modules, 'eventdesk')
+ WHERE id = '<location-uuid>'
+   AND NOT ('eventdesk' = ANY(enabled_modules));
+```
+
+After enabling it, a site administrator can grant EventDesk access levels in People & access.
 
 ## Planned product areas
 

@@ -70,7 +70,3 @@ CREATE TABLE IF NOT EXISTS eventdesk_job_crew (
 
 CREATE INDEX IF NOT EXISTS eventdesk_job_crew_job_idx ON eventdesk_job_crew (department_id, job_id, status);
 CREATE INDEX IF NOT EXISTS eventdesk_job_crew_contact_idx ON eventdesk_job_crew (department_id, contact_id);
-
-UPDATE departments
-   SET enabled_modules = array_append(enabled_modules, 'eventdesk')
- WHERE NOT ('eventdesk' = ANY(enabled_modules));

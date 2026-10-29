@@ -19,7 +19,6 @@ export const moduleRegistration: ModuleRegistration = {
   id: "eventdesk",
   name: "EventDesk",
   icon: CalendarDays,
-  enabledByDefault: true,
   initialState: "Overview",
   accessLabel: "EventDesk",
   accessLevels: [
@@ -28,7 +27,7 @@ export const moduleRegistration: ModuleRegistration = {
     { value: "inventory_manage", label: "Manage equipment", description: "Manage the equipment catalog and job bookings." },
     { value: "crew_manage", label: "Manage crew", description: "Request and assign personnel to jobs." },
   ],
-  isAvailable: ({ department, canManageSite }) => canManageSite || (department.modulePermissions?.eventdesk ?? []).length > 0,
+  isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("eventdesk") && (canManageSite || (department.modulePermissions?.eventdesk ?? []).length > 0),
   component: EventDesk,
   navigation: EventDeskNavigation,
   pageClassName: "page-wrap-eventdesk",

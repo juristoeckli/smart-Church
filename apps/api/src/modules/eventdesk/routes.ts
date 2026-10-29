@@ -37,6 +37,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const id = await resolveDepartmentId(request, reply);
       if (!id) return null;
+      const moduleState = await pool!.query("SELECT enabled_modules FROM departments WHERE id=$1", [id]);
+      if (!moduleState.rows[0]?.enabled_modules?.includes("eventdesk")) {
+        reply.code(404).send({ error: "EventDesk is not enabled for this location." });
+        return null;
+      }
       const grants = request.activeDepartmentModulePermissions?.eventdesk ?? [];
       const allowed = request.activeDepartmentRole === "site_admin" || grants.includes(permission)
         || (permission === "view" && grants.some((grant) => ["jobs_manage", "inventory_manage", "crew_manage"].includes(grant)));
