@@ -1,6 +1,7 @@
 import { lazy } from "react";
 import { RefreshCw } from "lucide-react";
 import type { ModuleRegistration, ModuleSettingsContext } from "../../module-registry";
+import { translationsForModule } from "../translations";
 import { SyncModule } from "./SyncModule";
 
 function SyncSettings({ departmentId }: ModuleSettingsContext) {
@@ -10,6 +11,7 @@ function SyncSettings({ departmentId }: ModuleSettingsContext) {
 export const moduleRegistration: ModuleRegistration = {
   id: "sync",
   name: "Sync",
+  translations: translationsForModule("sync"),
   icon: RefreshCw,
   adminOnly: true,
   enabledByDefault: true,

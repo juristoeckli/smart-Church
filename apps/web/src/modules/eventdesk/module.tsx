@@ -1,6 +1,7 @@
 import { lazy } from "react";
 import { CalendarDays } from "lucide-react";
 import type { ModuleContext, ModuleRegistration } from "../../module-registry";
+import { translationsForModule } from "../translations";
 import "./eventdesk.css";
 
 const EventDeskPage = lazy(() => import("./EventDeskModule").then(({ EventDeskModule }) => ({ default: EventDeskModule })));
@@ -18,6 +19,7 @@ function EventDeskNavigation({ context }: { context: ModuleContext }) {
 export const moduleRegistration: ModuleRegistration = {
   id: "eventdesk",
   name: "EventDesk",
+  translations: translationsForModule("eventdesk"),
   icon: CalendarDays,
   enabledByDefault: false,
   initialState: "Overview",

@@ -1,6 +1,7 @@
 import { lazy } from "react";
 import { Video } from "lucide-react";
 import type { ModuleContext, ModuleRegistration } from "../../module-registry";
+import { translationsForModule } from "../translations";
 import { VideoSettings } from "./VideoSettings";
 import { videoTabs, type VideoTab } from "./VideoModule";
 
@@ -36,6 +37,7 @@ function VideoNavigation({ context }: { context: ModuleContext }) {
 export const moduleRegistration: ModuleRegistration = {
   id: "video-steffisburg",
   name: "Video & streaming",
+  translations: translationsForModule("video-steffisburg"),
   icon: Video,
   initialState: "Overview",
   accessLabel: "Video & streaming",
