@@ -5,7 +5,7 @@ type Direction = "off" | "bidirectional" | "elvanto_to_smart_church" | "smart_ch
 type Area = "people" | "peopleFlows" | "groups" | "services" | "songs" | "calendar" | "financial";
 type Directions = Record<Area, Direction>;
 type ImportProgress = { page: number; total: number | null; created: number; updated: number; skipped: number; complete: boolean };
-type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null };
+type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
 type PermissionCheck = { area: Area; accessible: boolean; recordCount?: number; detail?: string };
 type PeoplePreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
@@ -23,6 +23,17 @@ type ServicesPreview = {
   createCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
   sample: Array<{ title: string; date: string; action: string }>;
 };
+type CalendarPreview = {
+  scannedCount: number; reportedTotal: number | null; complete: boolean; startDate: string; endDate: string;
+  createCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
+  sample: Array<{ title: string; date: string; action: string }>;
+};
+
+function shiftUtcYear(years: number) {
+  const date = new Date();
+  date.setUTCFullYear(date.getUTCFullYear() + years);
+  return date.toISOString().slice(0, 10);
+}
 
 const areas: Array<{ id: Area; label: string }> = [
   { id: "people", label: "People and volunteers" },
@@ -47,6 +58,9 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [peoplePreview, setPeoplePreview] = useState<PeoplePreview | null>(null);
   const [groupsPreview, setGroupsPreview] = useState<GroupsPreview | null>(null);
   const [servicesPreview, setServicesPreview] = useState<ServicesPreview | null>(null);
+  const [calendarStartDate, setCalendarStartDate] = useState(() => shiftUtcYear(-5));
+  const [calendarEndDate, setCalendarEndDate] = useState(() => shiftUtcYear(5));
+  const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
 
   async function load() {
     try {
@@ -176,9 +190,34 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     finally { setBusy(false); }
   }
 
+  async function previewCalendar() {
+    setBusy(true); setFeedback(""); setError(""); setCalendarPreview(null);
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/calendar-preview", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ startDate: calendarStartDate, endDate: calendarEndDate }) });
+      const result = await response.json() as CalendarPreview & { error?: string };
+      if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto calendar events.");
+      await load();
+      setCalendarPreview(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto calendar events."); }
+    finally { setBusy(false); }
+  }
+
+  async function importCalendar() {
+    if (!calendarPreview?.complete || calendarPreview.createCount + calendarPreview.alreadyLinkedCount <= 0) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/calendar-import", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, ...(status?.calendarImport?.complete ? { body: JSON.stringify({ restart: true }) } : {}) });
+      const result = await response.json() as { calendarImport?: ImportProgress & { startDate: string; endDate: string }; error?: string };
+      if (!response.ok || !result.calendarImport) throw new Error(result.error ?? "Could not import Elvanto calendar events.");
+      await load();
+      setFeedback(result.calendarImport.complete ? "Elvanto Calendar import is complete." : "Calendar batch complete. Continue the import to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import Elvanto calendar events."); }
+    finally { setBusy(false); }
+  }
+
   return <section className="directory-card sync-settings-card elvanto-settings-card">
     <div className="directory-heading"><div><h2>Elvanto</h2><p>{status?.configured ? "Connection verified" : "Connect this location to Elvanto."}</p></div>{status?.configured && <span className="event-kind event-kind-service">Connected</span>}</div>
-    <div className="demo-notice demo-notice-error"><span className="demo-dot" /><span>Read-only People, Groups, and Services previews with resumable Elvanto-to-Smart-Church imports are available.</span> <span>Other data areas, exports, and bidirectional sync are still under development.</span></div>
+    <div className="demo-notice demo-notice-error"><span className="demo-dot" /><span>Read-only People, Groups, Services, and Calendar previews with resumable Elvanto-to-Smart-Church imports are available.</span> <span>Other data areas, exports, and bidirectional sync are still under development.</span></div>
     <form className="sync-connection-form" onSubmit={(event) => void save(event)}>
       <label>Elvanto Secret API Key<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved key" : "Paste the Elvanto API key"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></label>
       <p className="sync-help">Find the key in Elvanto under Settings → Developers → API. It is encrypted on the server and never sent back to this screen. The connection check requires People read access.</p>
@@ -191,9 +230,11 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {status?.configured && directions.people !== "off" && directions.people !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewPeople()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview People import"}</button><span className="sync-help">Reads Elvanto people and compares them with this location. No records are written.</span></div>}
     {status?.configured && directions.groups !== "off" && directions.groups !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewGroups()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Groups import"}</button><span className="sync-help">Preview shows up to 50 groups. Existing Elvanto groups will refresh; only memberships for imported groups are replaced.</span></div>}
     {status?.configured && directions.services !== "off" && directions.services !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewServices()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Services import"}</button><span className="sync-help">Previews Elvanto services, service times, plans, and volunteer assignments. Same-title events on the same date are skipped for manual review.</span></div>}
+    {status?.configured && directions.calendar !== "off" && directions.calendar !== "smart_church_to_elvanto" && <div className="sync-connection-form"><div className="form-row"><label>Calendar start date<input type="date" value={calendarStartDate} max={calendarEndDate} onChange={(event) => { setCalendarStartDate(event.target.value); setCalendarPreview(null); }} /></label><label>Calendar end date<input type="date" value={calendarEndDate} min={calendarStartDate} onChange={(event) => { setCalendarEndDate(event.target.value); setCalendarPreview(null); }} /></label></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewCalendar()} disabled={busy || !calendarStartDate || !calendarEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Calendar import"}</button><span className="sync-help">Choose the date range to import. Elvanto calendar timestamps are returned in UTC.</span></div></div>}
     {status?.configured && status.peopleImport && <div className="sync-feedback" aria-live="polite"><strong>People import progress</strong><span>{status.peopleImport.complete ? "Complete" : <>Next Elvanto page: {status.peopleImport.page}</>}{status.peopleImport.total !== null && <> · {status.peopleImport.total} records</>} · {status.peopleImport.created} created · {status.peopleImport.updated} updated · {status.peopleImport.skipped} skipped</span></div>}
     {status?.configured && status.groupsImport && <div className="sync-feedback" aria-live="polite"><strong>Groups import progress</strong><span>{status.groupsImport.complete ? "Complete" : <>Next Elvanto page: {status.groupsImport.page}</>}{status.groupsImport.total !== null && <> · {status.groupsImport.total} groups</>} · {status.groupsImport.created} created · {status.groupsImport.updated} updated · {status.groupsImport.skipped} skipped</span></div>}
     {status?.configured && status.servicesImport && <div className="sync-feedback" aria-live="polite"><strong>Services import progress</strong><span>{status.servicesImport.complete ? "Complete" : <>Next Elvanto page: {status.servicesImport.page}</>}{status.servicesImport.total !== null && <> · {status.servicesImport.total} Elvanto services</>} · {status.servicesImport.created} events created · {status.servicesImport.updated} updated · {status.servicesImport.skipped} skipped</span></div>}
+    {status?.configured && status.calendarImport && <div className="sync-feedback" aria-live="polite"><strong>Calendar import progress</strong><span>{status.calendarImport.startDate && status.calendarImport.endDate ? `${status.calendarImport.startDate} – ${status.calendarImport.endDate} · ` : ""}{status.calendarImport.complete ? "Complete" : <>Next Elvanto page: {status.calendarImport.page}</>}{status.calendarImport.total !== null && <> · {status.calendarImport.total} events</>} · {status.calendarImport.created} created · {status.calendarImport.updated} updated · {status.calendarImport.skipped} skipped</span></div>}
     {permissionChecks && <div className="sync-connection-form" aria-live="polite">{permissionChecks.map((check) => <div className="sync-feedback" key={check.area}><span className={check.accessible ? "event-kind event-kind-service" : "event-kind event-kind-other"}>{check.accessible ? "Read access confirmed" : "Read access failed"}</span><strong>{areas.find(({ id }) => id === check.area)?.label}</strong>{typeof check.recordCount === "number" && <span>{check.recordCount} records</span>}{check.detail && <small>{check.detail}</small>}</div>)}</div>}
     {peoplePreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>People import preview</strong><span>{peoplePreview.scannedCount} scanned{peoplePreview.reportedTotal !== null && <> of {peoplePreview.reportedTotal} reported by Elvanto</>}{!peoplePreview.complete && <em> — preview is incomplete</em>}</span></div>
@@ -216,6 +257,13 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       {servicesPreview.sample.map((service, index) => <div className="sync-feedback" key={`${service.date}-${service.title}-${index}`}><strong>{service.title}</strong><span>{service.date} · {service.action === "already_linked" ? "Already linked" : service.action === "review_event_conflict" ? "Review event conflict" : service.action === "needs_review" ? "Needs review" : service.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New service"}</span></div>)}
       <small className="sync-help">Only complete previews can be imported. Each batch advances up to five Elvanto pages. Imported events are read-only and are not deleted when absent from Elvanto.</small>
       <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importServices()} disabled={busy || !servicesPreview.complete || servicesPreview.createCount + servicesPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.servicesImport?.complete ? "Refresh Services from Elvanto" : status?.servicesImport ? "Continue Services import" : "Import eligible services"}</button></div>
+    </div>}
+    {calendarPreview && <div className="sync-connection-form" aria-live="polite">
+      <div className="sync-feedback"><strong>Calendar import preview</strong><span>{calendarPreview.scannedCount} events scanned, {calendarPreview.startDate} – {calendarPreview.endDate}{!calendarPreview.complete && <em> — preview is incomplete</em>}</span></div>
+      <div className="sync-feedback"><span>{calendarPreview.createCount} new</span> · <span>{calendarPreview.alreadyLinkedCount} already linked</span> · <span>{calendarPreview.conflictCount} same-title/date conflicts</span> · <span>{calendarPreview.invalidCount} invalid or duplicate rows</span></div>
+      {calendarPreview.sample.map((event, index) => <div className="sync-feedback" key={`${event.date}-${event.title}-${index}`}><strong>{event.title}</strong><span>{event.date} · {event.action === "already_linked" ? "Already linked" : event.action === "review_event_conflict" ? "Review event conflict" : event.action === "needs_review" ? "Needs review" : event.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New event"}</span></div>)}
+      <small className="sync-help">Only the selected date range is imported. All-day items appear at midnight; the event schedule does not support multi-day calendar records.</small>
+      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importCalendar()} disabled={busy || !calendarPreview.complete || calendarPreview.createCount + calendarPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.calendarImport?.complete ? "Refresh Calendar from Elvanto" : status?.calendarImport ? "Continue Calendar import" : "Import eligible calendar events"}</button></div>
     </div>}
     {feedback && <p className="sync-feedback" role="status"><Link2 size={15} />{feedback}</p>}
     {error && <p className="sync-feedback sync-feedback-error" role="alert"><CircleAlert size={15} />{error}</p>}
