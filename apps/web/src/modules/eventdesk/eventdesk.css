@@ -1,0 +1,132 @@
+.page-wrap-eventdesk{max-width:1240px}
+.eventdesk-shell{display:grid;gap:18px;padding-bottom:26px}
+.eventdesk-notice{display:flex;align-items:center;gap:9px;min-height:36px;padding:8px 12px;border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--muted);font-size:12px}
+.eventdesk-notice .demo-dot{flex:0 0 7px}
+.eventdesk-notice-error{border-color:color-mix(in srgb,var(--danger,#c43d36) 30%,var(--line));color:var(--danger,#c43d36)}
+.eventdesk-text-button{display:inline-flex;align-items:center;gap:5px;border:0;background:transparent;color:var(--green);font:inherit;font-weight:650;cursor:pointer}
+.eventdesk-heading{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.eventdesk-heading h1{margin:4px 0 3px;font-size:30px;letter-spacing:-.035em}
+.eventdesk-heading-actions{display:flex;gap:8px}
+.eventdesk-stat-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.eventdesk-stat{position:relative;display:grid;gap:11px;min-height:96px;padding:16px 18px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.eventdesk-stat span{color:var(--muted);font-size:12px}
+.eventdesk-stat strong{font-size:28px;line-height:1}
+.eventdesk-stat svg{position:absolute;top:17px;right:17px;color:var(--green)}
+.eventdesk-panel{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.eventdesk-panel-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:17px 18px;border-bottom:1px solid var(--line)}
+.eventdesk-panel-heading h2{margin:0;font-size:16px}
+.eventdesk-panel-heading p{margin:4px 0 0;color:var(--muted);font-size:12px}
+.eventdesk-job-row{width:100%;display:flex;align-items:center;gap:12px;min-height:68px;padding:10px 18px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--ink);text-align:left;cursor:pointer}
+.eventdesk-job-row:last-child{border-bottom:0}
+.eventdesk-job-row:hover,.eventdesk-job-row-active{background:color-mix(in srgb,var(--green) 6%,var(--panel))}
+.eventdesk-job-icon{flex:0 0 36px;width:36px;height:36px;display:grid;place-items:center;border-radius:9px;background:color-mix(in srgb,var(--green) 10%,var(--panel));color:var(--green)}
+.eventdesk-job-main{flex:1;min-width:0;display:grid;gap:4px}
+.eventdesk-job-main strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}
+.eventdesk-job-main small,.eventdesk-asset-row small{color:var(--muted);font-size:11px}
+.eventdesk-status{flex:0 0 auto;padding:4px 8px;border-radius:999px;background:#edf0f5;color:#526071;font-size:10px;font-weight:650;text-transform:capitalize}
+.eventdesk-status-confirmed,.eventdesk-status-in_progress,.eventdesk-status-assigned{background:#e4f4ec;color:#28734a}
+.eventdesk-status-lead,.eventdesk-status-requested{background:#fff3d8;color:#8a6109}
+.eventdesk-status-quoted{background:#e8efff;color:#3657a0}
+.eventdesk-status-completed,.eventdesk-status-returned{background:#e8efff;color:#435e91}
+.eventdesk-status-cancelled,.eventdesk-status-declined{background:#fce9e8;color:#a63f3b}
+.eventdesk-selected-panel{padding-bottom:8px}
+.eventdesk-estimate{display:grid;gap:3px;color:var(--muted);font-size:11px;text-align:right}
+.eventdesk-estimate strong{color:var(--ink);font-size:18px}
+.eventdesk-split{display:grid;grid-template-columns:1fr 1fr;gap:22px;padding:14px 18px}
+.eventdesk-split h3,.eventdesk-section-title h3{display:flex;align-items:center;gap:8px;margin:0 0 9px;font-size:13px}
+.eventdesk-split h3 span,.eventdesk-section-title span{display:inline-grid;min-width:20px;height:20px;place-items:center;padding:0 5px;border-radius:99px;background:var(--surface,#f1f3f7);color:var(--muted);font-size:10px}
+.eventdesk-compact-line{display:flex;justify-content:space-between;gap:8px;padding:7px 0;border-top:1px solid var(--line);font-size:11px}
+.eventdesk-compact-line small,.eventdesk-muted{color:var(--muted);font-size:11px;text-transform:capitalize}
+.eventdesk-empty{margin:0;padding:24px;color:var(--muted);font-size:12px;text-align:center}
+.eventdesk-workspace{display:grid;grid-template-columns:minmax(280px,.82fr) minmax(400px,1.5fr);gap:14px;align-items:start}
+.eventdesk-jobs-panel{max-height:calc(100vh - 260px);overflow:auto}
+.eventdesk-detail-panel{padding-bottom:14px}
+.eventdesk-status-select{max-width:140px;height:34px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font-size:11px}
+.eventdesk-detail-meta{display:grid;gap:9px;padding:14px 18px;color:var(--muted);font-size:11px}
+.eventdesk-detail-meta span{display:flex;align-items:center;gap:7px}
+.eventdesk-job-notes{margin:0 18px 12px;color:var(--muted);font-size:12px;white-space:pre-wrap}
+.eventdesk-estimate-row{display:flex;justify-content:space-between;padding:12px 18px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:12px}
+.eventdesk-estimate-row strong{font-size:15px}
+.eventdesk-detail-section{padding:15px 18px 0}
+.eventdesk-section-title{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.eventdesk-booking-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:50px;border-top:1px solid var(--line)}
+.eventdesk-booking-row>div{display:grid;gap:4px;min-width:0}
+.eventdesk-booking-row strong{font-size:12px}
+.eventdesk-booking-row small{color:var(--muted);font-size:10px;text-transform:capitalize}
+.eventdesk-booking-row select,.eventdesk-inline-form select,.eventdesk-inline-form input{min-width:0;height:34px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:11px}
+.eventdesk-inline-form{display:flex;gap:7px;padding-top:9px}
+.eventdesk-inline-form select:first-child{flex:1}
+.eventdesk-inline-form input[type=number]{width:76px}
+.eventdesk-inline-form .button{min-height:34px;padding:0 10px;font-size:11px}
+.eventdesk-crew-form input:first-child{flex:1}
+.eventdesk-crew-form input[type=number]{width:80px}
+.eventdesk-empty-detail{min-height:240px;display:grid;place-content:center;justify-items:center;gap:9px;color:var(--muted);text-align:center}
+.eventdesk-empty-detail h2{margin:0;color:var(--ink);font-size:16px}
+.eventdesk-empty-detail p{margin:0;font-size:12px}
+.eventdesk-asset-row{display:flex;align-items:center;gap:12px;min-height:64px;padding:10px 18px;border-bottom:1px solid var(--line)}
+.eventdesk-asset-row:last-of-type{border-bottom:0}
+.eventdesk-customer-row{min-height:78px}
+.eventdesk-active-pill{padding:4px 8px;border-radius:999px;background:#e4f4ec;color:#28734a;font-size:10px;font-weight:650}
+.eventdesk-row-edit{padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--green);font:inherit;font-size:11px;font-weight:650;cursor:pointer}
+.eventdesk-inactive{background:#f0f0f0;color:#737373}
+.eventdesk-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.eventdesk-modal{max-height:min(88vh,780px);overflow:auto}
+.eventdesk-modal form{display:grid;gap:12px}
+.eventdesk-modal .form-actions{margin-top:4px}
+.eventdesk-modal label{display:grid;gap:5px;font-size:11px;font-weight:600}
+.eventdesk-modal input,.eventdesk-modal select,.eventdesk-modal textarea{width:100%;min-height:38px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.eventdesk-modal textarea{resize:vertical}
+.eventdesk-active-toggle{display:flex!important;grid-template-columns:auto 1fr;align-items:center;justify-content:flex-start;gap:9px}
+.eventdesk-active-toggle input{width:auto!important;min-height:0!important}
+@media(max-width:920px){.eventdesk-workspace{grid-template-columns:1fr}.eventdesk-jobs-panel{max-height:360px}.eventdesk-crew-form{flex-wrap:wrap}.eventdesk-crew-form input:first-child{min-width:180px}}
+@media(max-width:620px){.eventdesk-stat-grid{grid-template-columns:1fr}.eventdesk-heading{align-items:flex-start;flex-direction:column}.eventdesk-heading-actions{width:100%}.eventdesk-heading-actions .button{flex:1;justify-content:center}.eventdesk-split{grid-template-columns:1fr;gap:14px}.eventdesk-job-row{gap:8px;padding:9px 11px}.eventdesk-job-main small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.eventdesk-status{font-size:9px}.eventdesk-inline-form{flex-wrap:wrap}.eventdesk-inline-form select{flex:1 1 45%}.eventdesk-crew-form>*{flex:1 1 42%}.eventdesk-booking-row{align-items:flex-start;padding:9px 0}.eventdesk-booking-row select{max-width:145px}}
+:root[data-theme="dark"] .eventdesk-status{background:#303745;color:#c6ced8}
+:root[data-theme="dark"] .eventdesk-status-confirmed,:root[data-theme="dark"] .eventdesk-status-in_progress,:root[data-theme="dark"] .eventdesk-status-assigned{background:#1f4031;color:#9bd4b1}
+:root[data-theme="dark"] .eventdesk-status-lead,:root[data-theme="dark"] .eventdesk-status-requested{background:#493b1d;color:#e7c677}
+:root[data-theme="dark"] .eventdesk-status-quoted{background:#263858;color:#a8c0ff}
+:root[data-theme="dark"] .eventdesk-status-cancelled,:root[data-theme="dark"] .eventdesk-status-declined{background:#4c2929;color:#f0aaaa}
+.eventdesk-document-create{display:grid;gap:12px;padding-bottom:18px;margin-bottom:18px;border-bottom:1px solid var(--line)}
+.eventdesk-document-create h2{margin:0;font-size:16px}
+.eventdesk-branding-settings{padding:12px 0;border-bottom:1px solid var(--line)}
+.eventdesk-branding-settings summary{font-weight:650;cursor:pointer}
+.eventdesk-branding-settings form{padding-top:12px}
+.eventdesk-draft-editor{display:grid;gap:10px;padding:14px;margin-bottom:14px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--green) 3%,var(--panel))}
+.eventdesk-draft-line{display:grid;grid-template-columns:minmax(150px,1fr) 90px 110px 90px auto;gap:7px;align-items:center}
+.eventdesk-draft-line input,.eventdesk-document-create input,.eventdesk-document-create select,.eventdesk-document-create textarea{min-width:0;min-height:36px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.eventdesk-draft-line input:disabled{opacity:.6}
+.eventdesk-document-branding{display:grid;gap:3px;padding-bottom:12px;margin-bottom:16px;border-bottom:2px solid var(--green)}
+.eventdesk-document-branding strong{font-size:18px}
+.eventdesk-document-branding span,.eventdesk-document-terms p,.eventdesk-document-footer{color:var(--muted);font-size:12px;white-space:pre-wrap}
+.eventdesk-document-terms{margin-top:18px;font-size:12px}
+.eventdesk-document-terms p{margin:5px 0}
+.eventdesk-document-footer{padding-top:12px;margin-top:18px;border-top:1px solid var(--line)}
+.eventdesk-document-preview{padding:18px}
+.eventdesk-document-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.eventdesk-document-top h2{margin:5px 0;font-size:24px}
+.eventdesk-document-top p,.eventdesk-document-address span{color:var(--muted)}
+.eventdesk-document-address{display:grid;gap:3px;margin:20px 0}
+.eventdesk-document-notes{margin:16px 0;padding:12px;border-left:3px solid var(--green);background:color-mix(in srgb,var(--green) 5%,var(--panel));white-space:pre-wrap}
+.eventdesk-document-lines{border-top:1px solid var(--line)}
+.eventdesk-document-line{display:grid;grid-template-columns:minmax(0,1fr) minmax(130px,.65fr) minmax(75px,.4fr);gap:10px;padding:10px 0;border-bottom:1px solid var(--line);font-size:12px}
+.eventdesk-document-line>:last-child{text-align:right}
+.eventdesk-document-line-heading{color:var(--muted);font-size:11px}
+.eventdesk-document-line-no-price{grid-template-columns:minmax(0,1fr) auto}
+.eventdesk-document-line-no-price>:last-child{text-align:right}
+.eventdesk-document-totals{display:grid;gap:8px;max-width:310px;margin:16px 0 16px auto}
+.eventdesk-document-totals>div{display:flex;justify-content:space-between;gap:16px}
+.eventdesk-document-grand-total{padding-top:9px;border-top:1px solid var(--line);font-size:15px}
+.eventdesk-payment-form{margin-top:14px}
+@media print{body *{visibility:hidden!important}.eventdesk-document-preview,.eventdesk-document-preview *{visibility:visible!important}.eventdesk-document-preview{position:absolute;inset:0;width:100%;padding:1.5cm;color:#111;background:#fff}.eventdesk-document-preview button,.eventdesk-document-preview form{display:none!important}.eventdesk-document-line,.eventdesk-document-totals{border-color:#bbb}}
+.eventdesk-warehouse{display:grid;gap:16px}
+.eventdesk-warehouse-form{display:grid;grid-template-columns:1fr .7fr 1.3fr auto;align-items:end;gap:12px;padding:18px}
+.eventdesk-warehouse-form label{display:grid;gap:5px;font-size:11px;font-weight:600}
+.eventdesk-warehouse-form input,.eventdesk-warehouse-form select{width:100%;min-height:38px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.eventdesk-picklist-body{padding-bottom:4px}
+.eventdesk-payment-history{display:grid;gap:7px;max-width:420px;margin:14px 0 4px auto;font-size:12px}
+.eventdesk-payment-history>div{display:flex;justify-content:space-between;gap:12px;color:var(--muted)}
+.eventdesk-partner-actions{display:flex;align-items:center;gap:8px}
+.eventdesk-partner-actions select{min-height:36px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+@media print{body *{visibility:hidden!important}.eventdesk-document-preview,.eventdesk-document-preview *,.eventdesk-picklist,.eventdesk-picklist *{visibility:visible!important}.eventdesk-document-preview,.eventdesk-picklist{position:absolute;inset:0;width:100%;padding:1.5cm;color:#111;background:#fff}.eventdesk-document-preview button,.eventdesk-document-preview form,.eventdesk-picklist button,.eventdesk-warehouse-controls{display:none!important}.eventdesk-picklist-body{padding:0}.eventdesk-picklist .eventdesk-panel-heading{padding:0 0 16px;border-color:#bbb}.eventdesk-picklist .eventdesk-asset-row{border-color:#bbb}}
+@media(max-width:720px){.eventdesk-warehouse-form{grid-template-columns:1fr 1fr}.eventdesk-warehouse-form label:nth-child(3){grid-column:1/-1}}
+@media(max-width:720px){.eventdesk-draft-line{grid-template-columns:1fr 1fr}.eventdesk-draft-line input:first-child{grid-column:1/-1}.eventdesk-draft-line button{justify-self:start}}
+@media(max-width:620px){.eventdesk-partner-actions{width:100%;justify-content:flex-end}.eventdesk-panel-heading:has(.eventdesk-partner-actions){align-items:flex-start;flex-direction:column}}
