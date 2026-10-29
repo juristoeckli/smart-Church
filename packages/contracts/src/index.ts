@@ -17,6 +17,8 @@ export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 export interface ServicePosition {
   name: string;
   contactId?: string;
+  responseStatus?: "pending" | "accepted" | "declined";
+  canRespond?: boolean;
 }
 
 export interface ServicePlanItem {
@@ -39,10 +41,69 @@ export interface ServiceEvent {
   assetIds?: string[];
   positions?: ServicePosition[];
   timePlan?: ServicePlanItem[];
+  attendanceAdults?: number;
+  attendanceChildren?: number;
+  attendanceRecordedAt?: string;
+  registrationEnabled?: boolean;
+  registrationCapacity?: number;
+  registrationToken?: string;
+  registrationCount?: number;
+  seriesId?: string;
   importedFrom?: "churchtools";
 }
 
-export type CreateServiceEvent = Omit<ServiceEvent, "id">;
+export interface ServiceEventCheckIn {
+  contactId: string;
+  firstTimeVisitor: boolean;
+  followUpStatus: "not_needed" | "needed" | "done";
+  checkedInAt: string;
+}
+
+export interface VisitorFollowUp {
+  eventId: string;
+  contactId: string;
+  firstName: string;
+  lastName: string;
+  eventTitle: string;
+  eventDate: string;
+  status: "needed" | "done" | "not_needed";
+  assignedContactId?: string;
+  assignedFirstName?: string;
+  assignedLastName?: string;
+  dueDate?: string;
+  note: string;
+  checkedInAt: string;
+}
+
+export interface EventRecurrence {
+  interval: "weekly" | "biweekly" | "monthly";
+  endDate: string;
+}
+
+export type CreateServiceEvent = Omit<ServiceEvent, "id" | "seriesId" | "registrationToken" | "registrationCount"> & { recurrence?: EventRecurrence };
+
+export interface EventRegistration {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  status: "registered" | "waitlisted";
+  registeredAt: string;
+  checkedInAt?: string;
+}
+
+export interface PublicRegistrationEvent {
+  title: string;
+  eventDate: string;
+  startTime: string;
+  endTime?: string;
+  location: string;
+  description?: string;
+  capacity?: number;
+  registeredCount: number;
+  waitlistCount: number;
+  registrationOpen: boolean;
+}
 
 export interface ChurchGroup {
   id: string;
@@ -50,8 +111,16 @@ export interface ChurchGroup {
   description: string;
   memberCount: number;
   memberIds: string[];
+  memberDetails?: ChurchGroupMembership[];
   createdAt: string;
   importedFrom?: "churchtools";
+}
+
+export interface ChurchGroupMembership {
+  contactId: string;
+  role: string;
+  status: "active" | "paused" | "waitlist";
+  joinedOn?: string;
 }
 
 export interface CreateChurchGroup {

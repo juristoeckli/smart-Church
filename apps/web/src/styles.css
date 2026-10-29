@@ -118,8 +118,11 @@
 .settings-module-settings-button{display:grid;place-items:center;align-self:stretch;width:42px;flex:0 0 auto;border:1px solid var(--line);border-radius:9px;background:var(--panel);color:var(--muted);cursor:pointer}
 .settings-module-settings-button:hover,.settings-module-settings-button:focus-visible{border-color:var(--green);color:var(--green)}
 .module-settings-overlay{position:fixed;z-index:1200;inset:0;display:grid;place-items:center;padding:24px;background:rgb(8 10 16 / 72%)}
-.module-settings-dialog{display:flex;flex-direction:column;gap:16px;width:min(900px,100%);max-height:min(90vh,1000px);overflow:auto;padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:0 24px 80px rgb(0 0 0 / 40%)}
+.module-settings-dialog{display:flex;flex-direction:column;gap:16px;width:min(900px,100%);height:min(90vh,1000px);max-height:100%;overflow:hidden;padding:20px;border:1px solid var(--line);border-radius:14px;background:var(--panel);box-shadow:0 24px 80px rgb(0 0 0 / 40%)}
 .module-settings-dialog-header{position:sticky;top:-20px;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:-20px -20px 0;padding:16px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+.module-settings-dialog-content{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.sync-settings-panel-view{display:grid;gap:14px;min-width:0}
+.sync-settings-panel-view .sync-summary-grid{margin-bottom:0}
 .module-settings-dialog-header>div{display:flex;align-items:center;gap:10px;min-width:0}
 .module-settings-dialog-header>div>span{display:grid;gap:3px}
 .module-settings-dialog-header h3{margin:0;font-size:15px}

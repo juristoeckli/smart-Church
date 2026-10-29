@@ -41,6 +41,7 @@ export interface ModuleRegistration {
   icon: LucideIcon;
   adminOnly?: boolean;
   enabledByDefault?: boolean;
+  hiddenFromNavigation?: boolean;
   initialState?: string;
   accessLabel?: string;
   accessLevels?: Array<{ value: string; label: string; description?: string }>;

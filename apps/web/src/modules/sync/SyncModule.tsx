@@ -13,7 +13,7 @@ type SyncStatus = {
   resourceCount: number;
 };
 
-export function SyncModule({ departmentId }: { departmentId: string }) {
+export function SyncModule({ departmentId, settingsPanel = false }: { departmentId: string; settingsPanel?: boolean }) {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [instanceUrl, setInstanceUrl] = useState("");
   const [loginToken, setLoginToken] = useState("");
@@ -76,14 +76,14 @@ export function SyncModule({ departmentId }: { departmentId: string }) {
   }
 
   const totalImported = (status?.peopleCount ?? 0) + (status?.groupCount ?? 0) + (status?.serviceCount ?? 0) + (status?.resourceCount ?? 0);
-  return <>
+  return <div className={settingsPanel ? "sync-settings-panel-view" : undefined}>
     <div className={`demo-notice ${error || status?.lastSyncError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || status?.lastSyncError || "ChurchTools data is imported as read-only records."}</div>
-    <section className="page-heading"><div><div className="eyebrow">INTEGRATIONS</div><h1>ChurchTools sync</h1><p className="page-subtitle">Bring people, groups and their members, services, and bookable resources into this site. Imported records follow ChurchTools and cannot be edited here.</p></div>{status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={16} />{busy ? "Working…" : "Sync now"}</button>}</section>
+    {!settingsPanel && <section className="page-heading"><div><div className="eyebrow">INTEGRATIONS</div><h1>ChurchTools sync</h1><p className="page-subtitle">Bring people, groups and their members, services, and bookable resources into this site. Imported records follow ChurchTools and cannot be edited here.</p></div>{status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={16} />{busy ? "Working…" : "Sync now"}</button>}</section>}
     <section className="sync-summary-grid" aria-label="Imported data summary">
       {[ ["People", status?.peopleCount ?? 0], ["Groups", status?.groupCount ?? 0], ["Services & events", status?.serviceCount ?? 0], ["Resources", status?.resourceCount ?? 0] ].map(([label, count]) => <article className="stat-card" key={label}><div className="stat-icon stat-icon-blue"><Database size={18} /></div><div className="stat-content"><span>{label}</span><strong>{count}</strong><small>Imported from ChurchTools</small></div></article>)}
     </section>
     <section className="directory-card sync-settings-card">
-      <div className="directory-heading"><div><h2>Connection</h2><p>{status?.configured ? `Last sync: ${status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : "Not yet synced"}` : "Connect a ChurchTools cloud site using a Login token."}</p></div>{status?.configured && <span className={`event-kind ${status.enabled ? "event-kind-service" : "event-kind-other"}`}>{status.enabled ? "Enabled" : "Paused"}</span>}</div>
+      <div className="directory-heading"><div><h2>Connection</h2><p>{status?.configured ? `Last sync: ${status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : "Not yet synced"}` : "Connect a ChurchTools cloud site using a Login token."}</p></div><div className="community-inline-actions">{status?.configured && <span className={`event-kind ${status.enabled ? "event-kind-service" : "event-kind-other"}`}>{status.enabled ? "Enabled" : "Paused"}</span>}{settingsPanel && status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={15} />{busy ? "Working…" : "Sync now"}</button>}</div></div>
       <form className="sync-connection-form" onSubmit={save}>
         <label>ChurchTools site URL<input type="url" required placeholder="https://my-church.church.tools" value={instanceUrl} onChange={(event) => setInstanceUrl(event.target.value)} /></label>
         <label>ChurchTools Login token<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved token" : "Paste a Login token"} value={loginToken} onChange={(event) => setLoginToken(event.target.value)} /></label>
@@ -95,5 +95,5 @@ export function SyncModule({ departmentId }: { departmentId: string }) {
     </section>
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>Module controls</h2><p>Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? "Pause sync" : "Enable sync"}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />Remove sync and imported data</button></div></section>}
     <footer className="page-footer"><span>Automatically syncs every 15 minutes while enabled.</span><span>Only site administrators can manage this connection.</span></footer>
-  </>;
+  </div>;
 }

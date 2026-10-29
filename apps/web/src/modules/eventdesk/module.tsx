@@ -19,7 +19,7 @@ export const moduleRegistration: ModuleRegistration = {
   id: "eventdesk",
   name: "EventDesk",
   icon: CalendarDays,
-  enabledByDefault: true,
+  enabledByDefault: false,
   initialState: "Overview",
   accessLabel: "EventDesk",
   accessLevels: [

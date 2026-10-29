@@ -15,8 +15,9 @@ type BookingRow = {
   purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
 };
 
-function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; created_at: Date | string; source_system?: string | null }): ChurchGroup {
-  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], createdAt: new Date(row.created_at).toISOString(), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null }): ChurchGroup {
+  const memberDetails = (row.member_details ?? []).map((member) => ({ contactId: member.contactId, role: member.role, status: member.status, ...(member.joinedOn ? { joinedOn: String(member.joinedOn).slice(0, 10) } : {}) }));
+  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
 }
 
 function mapBookableResource(row: BookableResourceRow): BookableResource {
@@ -44,8 +45,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const result = await pool!.query(
         `SELECT g.id, g.name, g.description, g.created_at, g.source_system,
                 count(gm.contact_id)::int AS member_count,
-                COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids
-           FROM church_groups g LEFT JOIN group_members gm ON gm.group_id = g.id
+                COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids,
+                COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on) ORDER BY lower(c.last_name),lower(c.first_name)) FILTER (WHERE gm.contact_id IS NOT NULL), '[]'::json) AS member_details
+           FROM church_groups g LEFT JOIN group_members gm ON gm.group_id = g.id LEFT JOIN contacts c ON c.id=gm.contact_id
           WHERE g.department_id = $1 GROUP BY g.id ORDER BY lower(g.name), g.created_at`,
         [departmentId],
       );
@@ -89,7 +91,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           `UPDATE church_groups SET name = $3, description = $4, updated_at = now()
             WHERE id = $1 AND department_id = $2 RETURNING id, name, description, created_at, source_system,
               (SELECT count(*)::int FROM group_members WHERE group_id = church_groups.id) AS member_count,
-              (SELECT COALESCE(array_agg(contact_id), ARRAY[]::uuid[]) FROM group_members WHERE group_id = church_groups.id) AS member_ids`,
+              (SELECT COALESCE(array_agg(contact_id), ARRAY[]::uuid[]) FROM group_members WHERE group_id = church_groups.id) AS member_ids,
+              (SELECT COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on)), '[]'::json) FROM group_members gm WHERE gm.group_id=church_groups.id) AS member_details`,
           [request.params.id, departmentId, name, request.body.description?.trim() ?? ""],
         );
         if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
@@ -100,9 +103,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       }
     });
 
-    routes.put<{ Params: { id: string }; Body: { contactIds: string[] } }>("/api/groups/:id/members", { schema: {
+    routes.put<{ Params: { id: string }; Body: { members: { contactId: string; role: string; status: "active" | "paused" | "waitlist"; joinedOn?: string }[] } }>("/api/groups/:id/members", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["contactIds"], properties: { contactIds: { type: "array", maxItems: 2000, uniqueItems: true, items: { type: "string", format: "uuid" } } } },
+      body: { type: "object", additionalProperties: false, required: ["members"], properties: { members: { type: "array", maxItems: 2000, items: { type: "object", additionalProperties: false, required: ["contactId", "role", "status"], properties: { contactId: { type: "string", format: "uuid" }, role: { type: "string", minLength: 1, maxLength: 80 }, status: { type: "string", enum: ["active", "paused", "waitlist"] }, joinedOn: { type: "string", format: "date" } } } } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
@@ -112,14 +115,16 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const group = await client.query("SELECT id,source_system FROM church_groups WHERE id = $1 AND department_id = $2 FOR UPDATE", [request.params.id, departmentId]);
         if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
         if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by ChurchTools." }); }
-        if (request.body.contactIds.length) {
-          const people = await client.query("SELECT id FROM contacts WHERE department_id = $1 AND id = ANY($2::uuid[])", [departmentId, request.body.contactIds]);
-          if (people.rowCount !== request.body.contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "One or more selected people do not belong to this site." }); }
+        const contactIds = request.body.members.map((member) => member.contactId);
+        if (new Set(contactIds).size !== contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Each person can only appear once." }); }
+        if (contactIds.length) {
+          const people = await client.query("SELECT id FROM contacts WHERE department_id = $1 AND id = ANY($2::uuid[])", [departmentId, contactIds]);
+          if (people.rowCount !== contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "One or more selected people do not belong to this site." }); }
         }
         await client.query("DELETE FROM group_members WHERE group_id = $1", [request.params.id]);
-        if (request.body.contactIds.length) await client.query("INSERT INTO group_members (group_id, contact_id) SELECT $1, unnest($2::uuid[])", [request.params.id, request.body.contactIds]);
+        for (const member of request.body.members) await client.query("INSERT INTO group_members (group_id,contact_id,role,status,joined_on) VALUES ($1,$2,$3,$4,$5)", [request.params.id, member.contactId, member.role.trim(), member.status, member.joinedOn ?? null]);
         await client.query("COMMIT");
-        return { memberIds: request.body.contactIds };
+        return { memberIds: contactIds, memberDetails: request.body.members };
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
@@ -135,6 +140,96 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const result = await pool!.query("DELETE FROM church_groups WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
       return { deleted: true };
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/groups/:id/meetings", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query(
+        `SELECT m.id, m.meeting_date, m.title, m.created_at,
+                count(a.contact_id)::int AS attendee_count,
+                count(a.contact_id) FILTER (WHERE a.status='present')::int AS present_count
+           FROM group_meetings m LEFT JOIN group_meeting_attendance a ON a.meeting_id=m.id
+           JOIN church_groups g ON g.id=m.group_id
+          WHERE m.group_id=$1 AND m.department_id=$2 AND g.department_id=$2
+          GROUP BY m.id ORDER BY m.meeting_date DESC, m.created_at DESC`,
+        [request.params.id, departmentId],
+      );
+      return result.rows.map((row) => ({ id: row.id, date: String(row.meeting_date).slice(0, 10), title: row.title, attendeeCount: Number(row.attendee_count), presentCount: Number(row.present_count) }));
+    });
+
+    routes.post<{ Params: { id: string }; Body: { date: string; title?: string } }>("/api/groups/:id/meetings", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["date"], properties: { date: { type: "string", format: "date" }, title: { type: "string", maxLength: 160 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const group = await client.query("SELECT id,source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+        if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported group attendance is managed in ChurchTools." }); }
+        const inserted = await client.query(
+          `INSERT INTO group_meetings (id, department_id, group_id, meeting_date, title)
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (group_id,meeting_date,title) DO NOTHING
+           RETURNING id,meeting_date,title`,
+          [randomUUID(), departmentId, request.params.id, request.body.date, request.body.title?.trim() ?? ""],
+        );
+        let meeting = inserted.rows[0];
+        if (!meeting) {
+          meeting = (await client.query("SELECT id,meeting_date,title FROM group_meetings WHERE group_id=$1 AND meeting_date=$2 AND title=$3", [request.params.id, request.body.date, request.body.title?.trim() ?? ""])).rows[0];
+        } else {
+          await client.query(
+            `INSERT INTO group_meeting_attendance (meeting_id,contact_id)
+             SELECT $1,gm.contact_id FROM group_members gm JOIN contacts c ON c.id=gm.contact_id AND c.department_id=$2 WHERE gm.group_id=$3 AND gm.status='active'
+             ON CONFLICT (meeting_id,contact_id) DO NOTHING`,
+            [meeting.id, departmentId, request.params.id],
+          );
+        }
+        await client.query("COMMIT");
+        return reply.code(inserted.rowCount ? 201 : 200).send({ id: meeting.id, date: String(meeting.meeting_date).slice(0, 10), title: meeting.title });
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/group-meetings/:id/attendance", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query(
+        `SELECT a.contact_id, c.first_name, c.last_name, a.status
+           FROM group_meeting_attendance a JOIN contacts c ON c.id=a.contact_id
+           JOIN group_meetings m ON m.id=a.meeting_id
+          WHERE a.meeting_id=$1 AND m.department_id=$2 AND c.department_id=$2 ORDER BY lower(c.last_name),lower(c.first_name)`,
+        [request.params.id, departmentId],
+      );
+      return result.rows.map((row) => ({ contactId: row.contact_id, firstName: row.first_name, lastName: row.last_name, status: row.status }));
+    });
+
+    routes.put<{ Params: { id: string }; Body: { attendance: { contactId: string; status: "present" | "absent" | "excused" }[] } }>("/api/group-meetings/:id/attendance", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["attendance"], properties: { attendance: { type: "array", maxItems: 2000, items: { type: "object", additionalProperties: false, required: ["contactId", "status"], properties: { contactId: { type: "string", format: "uuid" }, status: { type: "string", enum: ["present", "absent", "excused"] } } } } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const meeting = await client.query("SELECT id FROM group_meetings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!meeting.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group meeting not found." }); }
+        const contactIds = request.body.attendance.map((item) => item.contactId);
+        if (new Set(contactIds).size !== contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Each person can only appear once." }); }
+        for (const item of request.body.attendance) {
+          const saved = await client.query(
+            `UPDATE group_meeting_attendance SET status=$3,updated_at=now() WHERE meeting_id=$1 AND contact_id=$2
+             RETURNING contact_id`, [request.params.id, item.contactId, item.status],
+          );
+          if (!saved.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Attendance includes someone who was not on this meeting's group roster." }); }
+        }
+        await client.query("COMMIT");
+        return { saved: true };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
     });
 
     const bookableResourceBodySchema = { type: "object", additionalProperties: false, required: ["name", "category", "requiresApproval", "active"], properties: {
