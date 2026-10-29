@@ -35,9 +35,9 @@ sync_deployment_files() {
     apps/api/src/modules/video-steffisburg/streaming.example.json
     apps/api/src/modules/video-steffisburg/.env.example
     apps/api/src/modules/video-steffisburg/README.md
-    apps/api/src/modules/system-laptop/compose.yaml
-    apps/api/src/modules/system-laptop/guacd-wave2.patch
-    deploy/build-system-laptop-guacd.sh
+    apps/api/src/modules/remote-desktop/compose.yaml
+    apps/api/src/modules/remote-desktop/guacd-wave2.patch
+    apps/api/src/modules/remote-desktop/build-guacd.sh
   )
   temp_dir="$(mktemp -d)"
   trap 'rm -rf "$temp_dir"' RETURN
@@ -166,8 +166,8 @@ fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi
-if [[ -f apps/api/src/modules/system-laptop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
-  compose_files+=(-f apps/api/src/modules/system-laptop/compose.yaml)
+if [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
+  compose_files+=(-f apps/api/src/modules/remote-desktop/compose.yaml)
 fi
 profile_args=()
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then profile_args+=(--profile bundled-proxy); fi
@@ -179,7 +179,7 @@ if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
   guacd_image="$(sed -n 's/^SYSTEM_LAPTOP_GUACD_IMAGE=//p' .env | tail -n 1)"
   if [[ "$guacd_image" == "smart-church/guacd:1.6.0-wave2" ]]; then
     docker image inspect "$guacd_image" >/dev/null 2>&1 || {
-      echo "The locally built Wave2 guacd image is missing. Rebuild it with: bash ./deploy/build-system-laptop-guacd.sh" >&2
+      echo "The locally built Wave2 guacd image is missing. Rebuild it with: bash ./apps/api/src/modules/remote-desktop/build-guacd.sh" >&2
       exit 1
     }
   else

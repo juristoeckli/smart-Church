@@ -2,6 +2,6 @@
   "id": "chat",
   "name": "Chat",
   "version": "0.1.0",
-  "description": "Location-scoped conversations for church members.",
+  "description": "Private one-to-one messages between church members and administrators.",
   "serverEntry": "./routes.ts"
 }

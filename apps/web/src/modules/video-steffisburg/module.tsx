@@ -1,6 +1,7 @@
 import { lazy } from "react";
 import { Video } from "lucide-react";
 import type { ModuleContext, ModuleRegistration } from "../../module-registry";
+import { VideoSettings } from "./VideoSettings";
 import { videoTabs, type VideoTab } from "./VideoModule";
 
 const VideoWorkspace = lazy(() => import("./VideoModule").then(({ VideoModule }) => ({ default: VideoModule })));
@@ -18,7 +19,7 @@ function capabilities(context: ModuleContext) {
 
 function VideoWorkspacePage(context: ModuleContext) {
   const tab = videoTabs.includes(context.state as VideoTab) ? context.state as VideoTab : "Overview";
-  return <VideoWorkspace departmentId={context.departmentId} csrfToken={context.csrfToken} capabilities={capabilities(context)} tab={tab} onTabChange={context.onStateChange} />;
+  return <VideoWorkspace departmentId={context.departmentId} csrfToken={context.csrfToken} realtime={context.realtime} capabilities={capabilities(context)} tab={tab} onTabChange={context.onStateChange} />;
 }
 
 function VideoNavigation({ context }: { context: ModuleContext }) {
@@ -49,4 +50,5 @@ export const moduleRegistration: ModuleRegistration = {
   isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("video-steffisburg") && (canManageSite || (department.videoPermissions ?? []).length > 0),
   component: VideoWorkspacePage,
   navigation: VideoNavigation,
+  settings: VideoSettings,
 };

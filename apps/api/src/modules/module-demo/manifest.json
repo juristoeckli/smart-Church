@@ -1,0 +1,6 @@
+{
+  "id": "module-demo",
+  "name": "Module Demo",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts"
+}

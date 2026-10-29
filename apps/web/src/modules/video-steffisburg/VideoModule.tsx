@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, LockKeyhole, Monitor, Play, Plus, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Trash2, Video } from "lucide-react";
+import type { ModuleRealtime } from "../../module-registry";
 import { BmdVolumeMenu } from "./BmdVolumeMenu";
+import { IpAddress } from "./IpAddress";
 import "./video.css";
 
 type Encoder = { id: string; name: string; ip?: string; model?: string; control?: string; state?: Record<string, unknown>; error?: string; streaming_settings?: Record<string, unknown> };
-type Device = { id: string; name: string; type?: string; ip?: string; port?: number; status_port?: number; ping?: string; receiver_status?: string; receiver_checked_at?: number; stream_state?: Record<string, string>; stream_checked_at?: number; power?: string; error?: string };
+type Device = { id: string; name: string; type?: string; ip?: string; port?: number; status_port?: number; ping?: string; receiver_status?: string; receiver_checked_at?: number; stream_state?: Record<string, string>; stream_checked_at?: number; power?: string; power_error?: string; error?: string };
 function bridgeStreamStatus(device: Device): "Live" | "Idle" | "Unavailable" {
   const state = device.stream_state ?? {};
   if (!Object.keys(state).length) return "Unavailable";
@@ -28,11 +30,51 @@ type EncoderPresetDetails = { platform: string; servers: { server: string; url: 
 type EncoderSettingsForm = { preset: string; server: string; quality: string; protocol: string; url: string; key: string; passphrase: string };
 type XmlService = { platform: string; customizable_url: boolean; servers: { server: string; url: string }[]; profiles: { profile: string }[] };
 type XmlPreflight = { filename?: string; services?: string[]; replaces_existing?: boolean };
+type PlannedEvent = { id: string; title: string; eventDate: string; startTime: string; endTime?: string; speaker: string; theme: string; source: string; startsAt: string; isCurrent: boolean; relation?: "previous" | "following" | "anchor" | "current" };
+type YoutubePlaylist = { id: string; title: string };
+type PlannedStream = { id: string; eventId?: string | null; title: string; description: string; speaker: string; theme: string; startsAt: string; privacyStatus: "private" | "unlisted" | "public"; youtubeBroadcastId?: string | null; youtubeStatus: "local" | "scheduled" | "error" | "recorded_unlisted"; youtubeError?: string | null; youtubePlaylistId?: string | null; youtubePlaylistTitle?: string | null; studioUrl: string };
+type PlannedStreamsState = { nextEvent: PlannedEvent | null; adjacentEvents: PlannedEvent[]; streams: PlannedStream[]; playlists: YoutubePlaylist[]; youtube: { configured: boolean; connected: boolean; channelTitle?: string } };
+type YoutubeStudioBroadcast = { id: string; title: string; startsAt: string | null; status: string; privacyStatus: "private" | "unlisted" | "public"; previewUrl: string | null; studioUrl: string };
+type YoutubeStudioSelection = YoutubeStudioBroadcast & {
+  broadcastId: string;
+  streamStatus: string;
+  streamQuality: { status: string | null; issues: Array<{ type: string; severity: string; reason: string; description: string }> };
+  concurrentViewers: number | null;
+  likeCount: number | null;
+};
+type YoutubePastStream = { id: string; title: string; startsAt: string | null; endedAt: string | null; thumbnailUrl: string | null; privacyStatus: "private" | "unlisted" | "public"; viewCount: number | null; likeCount: number | null; watchUrl: string; studioUrl: string };
+type StreamWizard = { step: "choose" | "settings"; service: PlannedEvent; streamId: string | null; title: string; speaker: string; theme: string; startsAt: string; privacyStatus: "private" | "unlisted" | "public"; playlistId: string };
+function eventSourceLabel(source: string) {
+  if (!source || source.toLowerCase() === "local") return "Local";
+  if (source.toLowerCase() === "churchtools") return "ChurchTools";
+  return source;
+}
+function youtubeBroadcastStatusLabel(status?: string) {
+  switch (status) {
+    case "live": return "Live";
+    case "liveStarting": return "Starting live";
+    case "testing": return "Preview";
+    case "testStarting": return "Starting preview";
+    case "ready": return "Scheduled";
+    case "complete": return "Ended";
+    case "revoked": return "Revoked";
+    default: return status ?? "Loading…";
+  }
+}
+function youtubeQualityLabel(status?: string | null) {
+  switch (status) {
+    case "good": return "Good";
+    case "ok": return "Warnings";
+    case "bad": return "Poor";
+    case "noData": return "No data";
+    default: return "Unavailable";
+  }
+}
 
 export const videoTabs = ["Overview", "Routing", "Names & locks", "Streaming", "XML tools"] as const;
 export type VideoTab = typeof videoTabs[number];
 const starterXml = `<?xml version="1.0" encoding="UTF-8"?>\n<streaming>\n  <service customizable-url="false">\n    <name>Service 1</name>\n    <servers>\n      <server>\n        <name>Primary</name>\n        <url>rtmp://example.com/live</url>\n      </server>\n    </servers>\n    <profiles default="Streaming High">\n      <profile>\n        <name>Streaming High</name>\n        <config resolution="1080p" fps="30" codec="H264">\n          <bitrate>6000000</bitrate>\n          <audio-bitrate>128000</audio-bitrate>\n        </config>\n      </profile>\n    </profiles>\n  </service>\n</streaming>`;
-export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabChange }: { departmentId: string; csrfToken: string; capabilities: { canOperateStreaming: boolean; canManageEncoders: boolean; canManageRouting: boolean; canAdminRouting: boolean }; tab: VideoTab; onTabChange: (tab: VideoTab) => void }) {
+export function VideoModule({ departmentId, csrfToken, realtime, capabilities, tab, onTabChange }: { departmentId: string; csrfToken: string; realtime?: ModuleRealtime; capabilities: { canOperateStreaming: boolean; canManageEncoders: boolean; canManageRouting: boolean; canAdminRouting: boolean }; tab: VideoTab; onTabChange: (tab: VideoTab) => void }) {
   const [snapshot, setSnapshot] = useState<ApiSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -67,18 +109,42 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [includeSecrets, setIncludeSecrets] = useState(false);
+  const [plannedStreamsState, setPlannedStreamsState] = useState<PlannedStreamsState | null>(null);
+  const [plannedStreamsLoading, setPlannedStreamsLoading] = useState(false);
+  const [plannedStreamsError, setPlannedStreamsError] = useState("");
+  const [nextServiceCollapsed, setNextServiceCollapsed] = useState(false);
+  const [remoteSitePowerCollapsed, setRemoteSitePowerCollapsed] = useState(true);
+  const [highlightedStreamId, setHighlightedStreamId] = useState("");
+  const [planningStream, setPlanningStream] = useState(false);
+  const [streamWizard, setStreamWizard] = useState<StreamWizard | null>(null);
+  const [streamWizardError, setStreamWizardError] = useState("");
+  const [connectingYoutube, setConnectingYoutube] = useState(false);
+  const [youtubeStudioBroadcasts, setYoutubeStudioBroadcasts] = useState<YoutubeStudioBroadcast[]>([]);
+  const [youtubeStudioActiveBroadcasts, setYoutubeStudioActiveBroadcasts] = useState<YoutubeStudioBroadcast[]>([]);
+  const [youtubeStudioBroadcastId, setYoutubeStudioBroadcastId] = useState("");
+  const [youtubeStudioSelection, setYoutubeStudioSelection] = useState<YoutubeStudioSelection | null>(null);
+  const [youtubeStudioLoading, setYoutubeStudioLoading] = useState(false);
+  const [youtubeStudioActionBusy, setYoutubeStudioActionBusy] = useState(false);
+  const [youtubeStudioError, setYoutubeStudioError] = useState("");
+  const [youtubeStudioNotice, setYoutubeStudioNotice] = useState("");
+  const [youtubePastStreams, setYoutubePastStreams] = useState<YoutubePastStream[]>([]);
+  const [youtubePastStreamsLoading, setYoutubePastStreamsLoading] = useState(false);
+  const [youtubePastStreamsError, setYoutubePastStreamsError] = useState("");
   const xmlFileInput = useRef<HTMLInputElement>(null);
 
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}): Promise<T> => {
     const headers = new Headers(options.headers);
     headers.set("x-department-id", departmentId);
     if (options.method && options.method !== "GET") {
-      headers.set("content-type", "application/json");
+      if (options.body !== undefined) headers.set("content-type", "application/json");
       headers.set("x-csrf-token", csrfToken);
     }
     const response = await fetch(path, { ...options, headers, cache: "no-store" });
-    const result = await response.json() as T & { error?: string };
-    if (!response.ok) throw new Error(result.error || `Video request failed (${response.status}).`);
+    const result = await response.json() as T & { error?: string; message?: string };
+    if (!response.ok) {
+      const validationMessage = result.error === "Bad Request" ? result.message : undefined;
+      throw new Error(validationMessage || result.error || result.message || `Video request failed (${response.status}).`);
+    }
     return result;
   }, [csrfToken, departmentId]);
 
@@ -101,9 +167,146 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
     setLoading(true);
     setSnapshot(null);
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 5000);
+    const unsubscribeStatus = realtime?.subscribe("module:video-steffisburg:status", () => { void refresh(); });
+    const unsubscribeChanged = realtime?.subscribe("module:video-steffisburg:changed", () => { void refresh(); });
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", () => { void refresh(); });
+    const statusRefresh = window.setInterval(() => { void refresh(); }, 15_000);
+    return () => { window.clearInterval(statusRefresh); unsubscribeStatus?.(); unsubscribeChanged?.(); unsubscribeConnected?.(); };
+  }, [realtime, refresh]);
+
+  const refreshPlannedStreams = useCallback(async () => {
+    setPlannedStreamsLoading(true);
+    try {
+      setPlannedStreamsState(await api<PlannedStreamsState>("/api/video/planned-streams"));
+      setPlannedStreamsError("");
+    } catch (error) {
+      setPlannedStreamsState((current) => current ? { ...current, streams: [], playlists: [] } : current);
+      setPlannedStreamsError(error instanceof Error ? error.message : "Could not load planned streams.");
+    } finally {
+      setPlannedStreamsLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (tab !== "Overview") return;
+    void refreshPlannedStreams();
+    const timer = window.setInterval(() => { void refreshPlannedStreams(); }, 60_000);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [tab, refreshPlannedStreams]);
+
+  const refreshYoutubeStudioBroadcasts = useCallback(async () => {
+    if (tab !== "Overview" || !plannedStreamsState?.youtube.connected) {
+      setYoutubeStudioBroadcasts([]);
+      setYoutubeStudioActiveBroadcasts([]);
+      setYoutubeStudioBroadcastId("");
+      setYoutubeStudioSelection(null);
+      return;
+    }
+    try {
+      const result = await api<{ broadcasts: YoutubeStudioBroadcast[]; activeBroadcasts: YoutubeStudioBroadcast[] }>("/api/video/youtube/studio-control");
+      setYoutubeStudioBroadcasts(result.broadcasts);
+      setYoutubeStudioActiveBroadcasts(result.activeBroadcasts);
+      setYoutubeStudioError("");
+      setYoutubeStudioBroadcastId((current) => {
+        if (result.activeBroadcasts.some((broadcast) => broadcast.id === current)) return current;
+        if (result.broadcasts.some((broadcast) => broadcast.id === current)) return current;
+        if (result.activeBroadcasts.length) return result.activeBroadcasts[0].id;
+        return result.broadcasts[0]?.id ?? "";
+      });
+    } catch (error) {
+      setYoutubeStudioBroadcasts([]);
+      setYoutubeStudioActiveBroadcasts([]);
+      setYoutubeStudioBroadcastId("");
+      setYoutubeStudioSelection(null);
+      setYoutubeStudioError(error instanceof Error ? error.message : "Could not load YouTube Studio broadcasts.");
+    }
+  }, [api, plannedStreamsState?.youtube.connected, tab, youtubeStudioSelection?.status]);
+
+  useEffect(() => {
+    void refreshYoutubeStudioBroadcasts();
+    if (tab !== "Overview" || !plannedStreamsState?.youtube.connected) return;
+    const timer = window.setInterval(() => { void refreshYoutubeStudioBroadcasts(); }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refreshYoutubeStudioBroadcasts, tab, plannedStreamsState?.youtube.connected]);
+
+  const refreshYoutubePastStreams = useCallback(async () => {
+    if (tab !== "Overview" || !plannedStreamsState?.youtube.connected) {
+      setYoutubePastStreams([]);
+      setYoutubePastStreamsError("");
+      return;
+    }
+    setYoutubePastStreamsLoading(true);
+    try {
+      const result = await api<{ streams: YoutubePastStream[] }>("/api/video/youtube/past-streams");
+      setYoutubePastStreams(result.streams);
+      setYoutubePastStreamsError("");
+    } catch (error) {
+      setYoutubePastStreamsError(error instanceof Error ? error.message : "Could not load past YouTube livestreams.");
+    } finally {
+      setYoutubePastStreamsLoading(false);
+    }
+  }, [api, plannedStreamsState?.youtube.connected, tab]);
+
+  useEffect(() => {
+    void refreshYoutubePastStreams();
+    if (tab !== "Overview" || !plannedStreamsState?.youtube.connected) return;
+    const timer = window.setInterval(() => { void refreshYoutubePastStreams(); }, 5 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [plannedStreamsState?.youtube.connected, refreshYoutubePastStreams, tab]);
+
+  useEffect(() => {
+    if (tab !== "Overview" || !plannedStreamsState?.youtube.connected || !youtubeStudioBroadcastId) {
+      setYoutubeStudioSelection(null);
+      setYoutubeStudioLoading(false);
+      return;
+    }
+    let active = true;
+    let firstLoad = true;
+    setYoutubeStudioLoading(true);
+    const refreshSelectedBroadcast = async () => {
+      try {
+        const result = await api<YoutubeStudioSelection>(`/api/video/youtube/studio-control?broadcastId=${encodeURIComponent(youtubeStudioBroadcastId)}`);
+        if (active) {
+          setYoutubeStudioSelection(result);
+          setYoutubeStudioError("");
+        }
+      } catch (error) {
+        if (active) setYoutubeStudioError(error instanceof Error ? error.message : "Could not load the YouTube stream preview.");
+      } finally {
+        if (active && firstLoad) {
+          firstLoad = false;
+          setYoutubeStudioLoading(false);
+        }
+      }
+    };
+    void refreshSelectedBroadcast();
+    const timer = window.setInterval(() => { void refreshSelectedBroadcast(); }, 30_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [api, plannedStreamsState?.youtube.connected, tab, youtubeStudioBroadcastId]);
+
+  async function transitionYoutubeStream(target: "testing" | "live" | "complete") {
+    if (!youtubeStudioBroadcastId) return;
+    setYoutubeStudioActionBusy(true);
+    setYoutubeStudioError("");
+    setYoutubeStudioNotice("");
+    try {
+      const result = await api<{ status: string }>(`/api/video/youtube/studio-control/${encodeURIComponent(youtubeStudioBroadcastId)}/transition`, {
+        method: "POST", body: JSON.stringify({ target }),
+      });
+      setYoutubeStudioNotice(target === "testing" ? "YouTube is starting the private preview." : target === "live" ? "YouTube is starting the live broadcast." : "YouTube is ending the live broadcast.");
+      setYoutubeStudioSelection((current) => current ? { ...current, status: result.status } : current);
+      if (target === "complete") {
+        setYoutubeStudioBroadcastId("");
+        setYoutubeStudioSelection(null);
+        await refreshYoutubeStudioBroadcasts();
+      }
+      await refreshPlannedStreams();
+    } catch (error) {
+      setYoutubeStudioError(error instanceof Error ? error.message : "YouTube could not change the broadcast status.");
+    } finally {
+      setYoutubeStudioActionBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -169,9 +372,11 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
     if (tab !== "Routing" || !hub) return;
     void loadHistory(hub.id, hub.site.id);
     if (!historyLive) return;
-    const timer = window.setInterval(() => void loadHistory(hub.id, hub.site.id), 15_000);
-    return () => window.clearInterval(timer);
-  }, [tab, hub?.key, historyLive]);
+    const refreshHistory = () => { void loadHistory(hub.id, hub.site.id); };
+    const unsubscribeStatus = realtime?.subscribe("module:video-steffisburg:status", refreshHistory);
+    const unsubscribeChanged = realtime?.subscribe("module:video-steffisburg:changed", refreshHistory);
+    return () => { unsubscribeStatus?.(); unsubscribeChanged?.(); };
+  }, [tab, hub?.key, historyLive, realtime]);
 
   async function send(operation: string, data: Record<string, unknown>, successMessage?: string) {
     setBusy(true);
@@ -185,6 +390,124 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
       return null;
     } finally {
       setBusy(false);
+    }
+  }
+
+  function openStreamWizard(service: PlannedEvent) {
+    setNextServiceCollapsed(false);
+    setStreamWizardError("");
+    setStreamWizard({ step: "choose", service, streamId: null, title: "", speaker: "", theme: "", startsAt: "", privacyStatus: "unlisted", playlistId: "" });
+  }
+
+  function createStreamFromService() {
+    if (!streamWizard) return;
+    const service = streamWizard.service;
+    const dateTime = new Date(service.startsAt);
+    const eventDateTime = Number.isNaN(dateTime.getTime()) ? "" : formatTimestamp(dateTime.toISOString());
+    const titleParts = service.speaker.trim()
+      ? [service.title, service.speaker.trim(), eventDateTime]
+      : [service.title, eventDateTime];
+    setStreamWizard({
+      step: "settings", service, streamId: null,
+      title: titleParts.filter(Boolean).join(" | ").slice(0, 100),
+      speaker: service.speaker, theme: service.theme,
+      startsAt: toDateTimeLocal(service.startsAt), privacyStatus: "unlisted",
+      playlistId: plannedStreamsState?.playlists.find((playlist) => playlist.title === "GfC Steffisburg Livestream")?.id ?? "",
+    });
+    setStreamWizardError("");
+  }
+
+  function selectExistingStream(stream: PlannedStream) {
+    if (!streamWizard) return;
+    const linkedService = [plannedStreamsState?.nextEvent, ...(plannedStreamsState?.adjacentEvents ?? [])].find((event) => event?.id === stream.eventId) ?? streamWizard.service;
+    setStreamWizard({
+      step: "settings", service: linkedService, streamId: stream.id,
+      title: stream.title, speaker: stream.speaker, theme: stream.theme,
+      startsAt: toDateTimeLocal(stream.startsAt), privacyStatus: stream.privacyStatus,
+      playlistId: stream.youtubePlaylistId ?? plannedStreamsState?.playlists.find((playlist) => playlist.title === "GfC Steffisburg Livestream")?.id ?? "",
+    });
+    setStreamWizardError("");
+  }
+
+  async function saveStreamWizard(event: FormEvent) {
+    event.preventDefault();
+    if (!streamWizard) return;
+    const startsAt = new Date(streamWizard.startsAt);
+    if (!streamWizard.title.trim() || Number.isNaN(startsAt.getTime())) {
+      setStreamWizardError("Enter a stream title and a valid start time.");
+      return;
+    }
+    setPlanningStream(true);
+    setStreamWizardError("");
+    const body = JSON.stringify({
+      title: streamWizard.title.trim(), speaker: streamWizard.speaker.trim(), theme: streamWizard.theme.trim(),
+      scheduledStartAt: startsAt.toISOString(), privacyStatus: streamWizard.privacyStatus,
+      playlistId: streamWizard.playlistId || null,
+      ...(!streamWizard.streamId ? { eventId: streamWizard.service.id } : {}),
+    });
+    try {
+      const saved = await api<{ id?: string; youtube_status?: string; youtube_error?: string }>(streamWizard.streamId ? `/api/video/planned-streams/${encodeURIComponent(streamWizard.streamId)}` : "/api/video/planned-streams", {
+        method: streamWizard.streamId ? "PUT" : "POST", body,
+      });
+      await refreshPlannedStreams();
+      const wasExisting = Boolean(streamWizard.streamId);
+      setStreamWizard(null);
+      setNextServiceCollapsed(true);
+      setHighlightedStreamId(saved.id ?? streamWizard.streamId ?? "");
+      setNotice(saved.youtube_status === "error" ? `The stream was saved locally, but YouTube scheduling failed: ${saved.youtube_error || "try again from the planned streams list."}` : wasExisting ? "The planned stream settings were saved." : plannedStreamsState?.youtube.connected ? "The stream was created and scheduled on YouTube." : "The stream was saved locally. Connect YouTube to schedule it on the channel.");
+    } catch (error) {
+      setStreamWizardError(error instanceof Error ? error.message : "Could not save the planned stream.");
+    } finally {
+      setPlanningStream(false);
+    }
+  }
+
+  async function connectYoutube() {
+    // Open synchronously from the button click so browsers do not block the
+    // OAuth tab after the API request completes.
+    const authorizationTab = window.open("about:blank", "_blank");
+    if (!authorizationTab) {
+      setPlannedStreamsError("Your browser blocked the YouTube sign-in tab. Allow pop-ups for this site and try again.");
+      return;
+    }
+    setConnectingYoutube(true);
+    setPlannedStreamsError("");
+    try {
+      const result = await api<{ authorizationUrl: string }>("/api/modules/video-steffisburg/youtube/connect", { method: "POST", body: "{}" });
+      authorizationTab.location.href = result.authorizationUrl;
+    } catch (error) {
+      authorizationTab.close();
+      setPlannedStreamsError(error instanceof Error ? error.message : "Could not start YouTube connection.");
+    } finally {
+      setConnectingYoutube(false);
+    }
+  }
+
+  async function syncYoutube() {
+    setPlanningStream(true);
+    setPlannedStreamsError("");
+    try {
+      const result = await api<{ total: number; created: number; updated: number }>("/api/video/planned-streams/sync-youtube", { method: "POST", body: "{}" });
+      await refreshPlannedStreams();
+      setNotice(result.total ? `YouTube sync complete: ${result.created} added, ${result.updated} updated.` : "YouTube sync complete. No upcoming broadcasts were found.");
+    } catch (error) {
+      setPlannedStreamsError(error instanceof Error ? error.message : "Could not sync planned streams from YouTube.");
+    } finally {
+      setPlanningStream(false);
+    }
+  }
+
+  async function deletePlannedStream(stream: PlannedStream) {
+    const target = stream.youtubeBroadcastId ? "the planned stream and its YouTube broadcast" : "the planned stream";
+    if (!window.confirm(`Delete ${target}: ${stream.title}?`)) return;
+    setPlanningStream(true);
+    try {
+      await api(`/api/video/planned-streams/${encodeURIComponent(stream.youtubeBroadcastId || stream.id)}`, { method: "DELETE" });
+      await refreshPlannedStreams();
+    } catch (error) {
+      setPlannedStreamsError(error instanceof Error ? error.message : "Could not delete this planned stream.");
+    } finally {
+      setPlanningStream(false);
     }
   }
 
@@ -566,6 +889,13 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
   const workerState = snapshot?.worker?.state ?? (loading ? "starting" : "unavailable");
   const primarySite = sites.find((site) => site.id === "gfc-steffisburg") ?? sites[0];
   const remoteSites = sites.filter((site) => site.id !== primarySite?.id);
+  const steffisburgSite = sites.find((site) => site.id === "gfc-steffisburg");
+  const activeRemoteEncoders = sites.filter((site) => ["main", "sonnenhof"].includes(site.id)).flatMap((site) => site.encoders.filter((encoder) => streamState(encoder).label === "LIVE").map((encoder) => ({ ...encoder, site })));
+  const remoteShellys = ["main", "sonnenhof"].flatMap((siteId) => {
+    const site = sites.find((candidate) => candidate.id === siteId);
+    const shelly = site?.devices.find((device) => device.id === "shelly");
+    return site && shelly ? [{ site, device: shelly }] : [];
+  });
 
   function renderSite(site: VideoSite, origin: boolean) {
     const gatewayStatus = site.router_status ?? "Status pending";
@@ -594,7 +924,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
     }
     return <section className={`video-site-card${origin ? " video-site-origin" : ""}`} key={site.id}>
       <header className="video-site-heading"><div><h2>{site.name}</h2><p>{origin ? "Streaming source" : "Remote location"} · {site.encoders.length + devices.length} connected assets</p></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus}</span></header>
-      <article className="video-gateway"><div className="video-equipment-icon"><Activity size={20} /></div><div className="video-equipment-copy"><strong>{site.router_model || "Network gateway"}</strong><small>{site.router_ip || "Gateway address not configured"}</small></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus === "Reachable" ? "Reachable" : gatewayStatus}</span></article>
+      <article className="video-gateway"><div className="video-equipment-icon"><Activity size={20} /></div><div className="video-equipment-copy"><strong>{site.router_model || "Network gateway"}</strong><small><IpAddress value={site.router_ip} fallback="Gateway address not configured" /></small></div><span className={`video-state ${gatewayStatus === "Reachable" ? "video-state-good" : ""}`}>{gatewayStatus === "Reachable" ? "Reachable" : gatewayStatus}</span></article>
       {site.encoders.map((encoder) => {
         const settings = encoder.streaming_settings ?? {};
         const control = encoder.control ?? "Unknown";
@@ -602,7 +932,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
         return <article className="video-encoder-card" key={`${site.id}|${encoder.id}`}>
           <EncoderHardware encoder={encoder} status={encoderState.label} />
           <div className="video-encoder-details">
-            <div className="video-encoder-info"><strong>{encoder.name}</strong><code>{encoder.ip || "Address not configured"}</code><span className={`video-state ${control === "Connected" ? "video-state-good" : ""}`}>{control === "Connected" ? "Reachable" : control}</span><span className={`video-state ${encoderState.ready ? "video-state-ready" : ""}`}>{encoderState.label}</span><small>Target: {stringValue(settings.server_name) || stringValue(settings.platform) || "Not reported"}</small><small>{stateMetric(encoder.state, "Duration")} · {stateBitrate(encoder.state)} · Buffer {stateMetric(encoder.state, "Cache Used")}</small><small>Control: {control}</small></div>
+            <div className="video-encoder-info"><strong>{encoder.name}</strong><IpAddress value={encoder.ip} /><span className={`video-state ${control === "Connected" ? "video-state-good" : ""}`}>{control === "Connected" ? "Reachable" : control}</span><span className={`video-state ${encoderState.ready ? "video-state-ready" : ""}`}>{encoderState.label}</span><small>Target: {stringValue(settings.server_name) || stringValue(settings.platform) || "Not reported"}</small><small>{stateMetric(encoder.state, "Duration")} · {stateBitrate(encoder.state)} · Buffer {stateMetric(encoder.state, "Cache Used")}</small><small>Control: {control}</small></div>
             <div className="video-encoder-info"><strong>Streaming profile</strong><small>Profile: {stringValue(settings.platform) || "Not reported"}</small><small>Server name: {stringValue(settings.server_name) || "Not reported"}</small><code>Server address: {stringValue(settings.server) || "Not reported"}</code><small>Key: {stringValue(settings.key_masked) || "Not reported"}</small><small>Quality: {stringValue(settings.quality) || "Not reported"}</small></div>
           </div>
           {!origin && <div className="video-remote-restriction"><Shield size={14} /> Nur für Übertragungen zwischen den Pflegeheimen</div>}
@@ -614,7 +944,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
         <div className="video-equipment-icon"><Settings2 size={19} /></div>
         <div className="video-equipment-copy">
           <strong>{device.name}</strong>
-          <small>{device.type === "converter" ? "USB over Silex" : `${device.type || "Equipment"} · ${device.ip || "Address not configured"}`}</small>
+          <small>{device.type === "converter" ? "USB over Silex" : <>{device.type || "Equipment"} · <IpAddress value={device.ip} /></>}</small>
           {device.power && <small>Power: {String(device.power)}</small>}
           {device.type === "streamingbridge" && <>
             <small>Video: {device.stream_state?.["Video Mode"] ?? "—"} · {device.stream_state?.["Video Bitrate"] ?? "—"} · Audio: {device.stream_state?.["Audio Bitrate"] ?? "—"}</small>
@@ -647,8 +977,76 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
     {!ready && !snapshot?.message && <div className="video-empty"><Video size={28} /><strong>{loading ? "Connecting to the video worker…" : "Video worker is unavailable"}</strong><p>{snapshot?.worker?.error ?? "The Core API starts this module in its own worker process."}</p></div>}
 
     {ready && tab === "Overview" && <>
-      <div className="video-summary-grid"><Summary label="Encoders" value={encoders.length} note="Across assigned sites" icon={<Radio size={17} />} /><Summary label="Locations" value={sites.length} note="Equipment groups" icon={<Route size={17} />} /><Summary label="Connected" value={encoders.filter((encoder) => encoder.control === "Connected").length} note={`of ${encoders.length} encoder controls`} icon={<Activity size={17} />} /></div>
-      <section className="video-panel"><div className="video-panel-heading"><div><h2>Equipment overview</h2><p>The equipment map, network links and streaming controls are in Streaming.</p></div><button className="video-small-button video-button-primary" type="button" onClick={() => onTabChange("Streaming")}><Radio size={14} /> Open Streaming</button></div></section>
+      {activeRemoteEncoders.length > 0 && <div className="video-remote-live-warning" role="alert"><AlertTriangle size={19} /><div><strong>Remote encoder active</strong><p>{activeRemoteEncoders.map((encoder) => `${encoder.site.name} · ${encoder.name}`).join(" · ")} is currently streaming. Check the remote stream before starting an encoder in Steffisburg.</p></div></div>}
+      <section className="video-panel video-overview-encoders"><div className="video-panel-heading"><div><h2>Steffisburg encoders</h2><p>Live status and quick start/stop controls.</p></div><button className="video-small-button" type="button" onClick={() => onTabChange("Streaming")}><Radio size={14} /> Full streaming view</button></div>
+        {steffisburgSite?.encoders.length ? <div className="video-overview-encoder-grid">{steffisburgSite.encoders.map((encoder) => {
+          const status = streamState(encoder);
+          const connected = encoder.control === "Connected";
+          return <article className="video-overview-encoder" key={encoder.id}><EncoderHardware encoder={encoder} status={status.label} /><div className="video-overview-encoder-top"><div><h3>{encoder.name}</h3><IpAddress value={encoder.ip} /></div><span className={`video-state ${status.label === "LIVE" ? "video-state-live" : status.ready ? "video-state-ready" : ""}`}>{status.label}</span></div><p>{connected ? "Control connection available" : encoder.control ?? "Status pending"}</p><div className="video-overview-actions"><button type="button" className="video-small-button video-button-primary" disabled={!capabilities.canOperateStreaming || busy || !connected || status.label === "LIVE"} onClick={() => void send("command", { site_id: steffisburgSite.id, encoder: encoder.id, action: "Start" }, `${encoder.name}: start requested.`)}><Play size={13} /> Start</button><button type="button" className="video-small-button" disabled={!capabilities.canOperateStreaming || busy || !connected || status.label !== "LIVE"} onClick={() => void send("command", { site_id: steffisburgSite.id, encoder: encoder.id, action: "Stop" }, `${encoder.name}: stop requested.`)}><Square size={12} /> Stop</button></div>{encoder.error && <small className="video-error-text">{encoder.error}</small>}</article>;
+        })}</div> : <Empty text="The three Steffisburg encoders are not available in the current equipment configuration." />}
+      </section>
+      <section className="video-panel video-overview-shelly video-next-service-panel">
+        <div className="video-panel-heading"><button type="button" className="video-collapse-toggle" aria-expanded={!remoteSitePowerCollapsed} aria-controls="video-remote-site-power-content" onClick={() => setRemoteSitePowerCollapsed((collapsed) => !collapsed)}><span><h2>Remote site power</h2><p>Shelly Pro 1 relay status and site power-cycle controls.</p></span><ChevronDown className={remoteSitePowerCollapsed ? "video-collapse-icon video-collapse-icon-closed" : "video-collapse-icon"} size={16} /></button></div>
+        {!remoteSitePowerCollapsed && <div id="video-remote-site-power-content">{remoteShellys.length ? <div className="video-overview-shelly-grid">{remoteShellys.map(({ site, device }) => <article className="video-overview-shelly-card" key={site.id}><ShellyProHardware power={device.power} reachable={device.ping === "Reachable"} /><div className="video-overview-shelly-copy"><h3>{site.name}</h3><IpAddress value={device.ip} /><p>Shelly Pro 1 · Power {device.power ?? "unknown"}{device.power_error ? ` · ${device.power_error}` : ""}</p><button type="button" className="video-small-button video-button-danger" disabled={!capabilities.canOperateStreaming || busy || device.ping !== "Reachable"} onClick={() => { if (window.confirm(`Power-cycle the ${site.name} site? This can interrupt streaming equipment.`)) void send("restart-site", { site_id: site.id, confirmed: true }, `Power-cycle requested for ${site.name}.`); }}><RefreshCw size={13} /> Power-cycle site</button></div></article>)}</div> : <Empty text="Seewinkel and Sonnenhof Shelly relays are not available in the current equipment configuration." />}</div>}
+      </section>
+      <section className="video-panel video-next-service-panel"><div className="video-panel-heading"><button type="button" className="video-collapse-toggle" aria-expanded={!nextServiceCollapsed} aria-controls="video-next-service-content" onClick={() => setNextServiceCollapsed((collapsed) => !collapsed)}><span><h2>Next Service</h2><p>Event details currently loaded from local service data.</p></span><ChevronDown className={nextServiceCollapsed ? "video-collapse-icon video-collapse-icon-closed" : "video-collapse-icon"} size={16} /></button><span className="video-youtube-connection">Local Data</span></div>
+        {!nextServiceCollapsed && <div id="video-next-service-content">{plannedStreamsState?.nextEvent ? <div className="video-next-service-list">{[
+          ...plannedStreamsState.adjacentEvents.filter((event) => event.relation === "previous"),
+          { ...plannedStreamsState.nextEvent, relation: plannedStreamsState.nextEvent.isCurrent ? "current" as const : "anchor" as const },
+          ...plannedStreamsState.adjacentEvents.filter((event) => event.relation === "following"),
+        ].map((event) => {
+          const relationLabel = event.relation === "previous" ? "PREVIOUS SERVICE" : event.relation === "following" ? (plannedStreamsState.nextEvent?.isCurrent ? "NEXT SERVICE" : "FOLLOWING SERVICE") : event.relation === "current" ? "CURRENT SERVICE" : "NEXT SERVICE";
+          return <article className="video-next-service" key={event.id}><div className="video-next-service-top"><span className="video-eyebrow">{relationLabel}</span><span className="video-source-label">{eventSourceLabel(event.source)}</span></div><h3>{event.title}</h3><p>{formatTimestamp(event.startsAt)}{event.endTime ? ` · ends ${event.endTime}` : ""}</p><dl><div><dt>Service name</dt><dd>{event.title}</dd></div><div><dt>Preacher</dt><dd>{event.speaker || "Not assigned"}</dd></div><div><dt>Service title / theme</dt><dd>{event.theme || "Not listed"}</dd></div><div><dt>Data source</dt><dd>{eventSourceLabel(event.source)}</dd></div></dl><button type="button" className="video-small-button video-button-primary video-create-stream-button" disabled={!capabilities.canManageEncoders || planningStream} onClick={() => openStreamWizard(event)}><Plus size={13} /> Create Stream</button></article>;
+        })}</div> : <div className="video-next-service video-next-service-empty">{plannedStreamsLoading ? "Looking for the current or next service…" : "No current or upcoming service is scheduled."}</div>}</div>}
+      </section>
+      <section className="video-panel video-planned-streams"><div className="video-panel-heading"><div><h2>YouTube streaming</h2><p>Plan broadcasts and view upcoming streams directly from YouTube Studio.</p></div><span className={`video-youtube-connection ${plannedStreamsState?.youtube.connected ? "video-youtube-connected" : ""}`}>{plannedStreamsState?.youtube.connected ? `Connected · ${plannedStreamsState.youtube.channelTitle}` : "YouTube not connected"}</span></div>
+        {plannedStreamsError && <p className="video-youtube-error" role="alert">{plannedStreamsError}</p>}
+        <div className="video-planned-create-row"><div className="video-planned-create-controls">{plannedStreamsState?.nextEvent && <button type="button" className="video-small-button video-button-primary" disabled={!capabilities.canManageEncoders || planningStream} onClick={() => openStreamWizard(plannedStreamsState.nextEvent!)}><Plus size={14} /> Create Stream</button>}{plannedStreamsState?.youtube.connected ? <><button type="button" className="video-small-button" disabled={!capabilities.canManageEncoders || planningStream} onClick={() => void syncYoutube()}><RefreshCw size={13} /> {planningStream ? "Syncing…" : "Sync YouTube"}</button><button type="button" className="video-small-button" onClick={() => window.open("https://studio.youtube.com/", "_blank", "noopener,noreferrer")}>Open YouTube Studio</button></> : plannedStreamsState?.youtube.configured ? <button type="button" className="video-small-button" disabled={!capabilities.canManageEncoders || connectingYoutube} onClick={() => void connectYoutube()}>{connectingYoutube ? "Connecting…" : "Connect YouTube"}</button> : <small>Live scheduling needs YouTube OAuth credentials in this module’s environment.</small>}</div>
+        </div>
+        <div className="video-planned-list-heading"><h3>Planned YouTube streams</h3>{plannedStreamsLoading && <small>Refreshing…</small>}</div>
+        {plannedStreamsState?.streams.length ? <div className="video-planned-list">{plannedStreamsState.streams.map((stream) => <article className={`video-planned-row${stream.id === highlightedStreamId ? " video-planned-row-highlighted" : ""}`} key={stream.id}><div className="video-planned-main"><div><h4>{stream.title}</h4><p>{formatTimestamp(stream.startsAt)} · {stream.privacyStatus}</p></div><span className="video-state video-state-good">Planned in YouTube Studio</span>{stream.youtubeError && <small className="video-youtube-error">{stream.youtubeError}</small>}</div><div className="video-planned-actions"><a className="video-small-button" href={stream.studioUrl} target="_blank" rel="noreferrer">Control in Studio</a>{capabilities.canManageEncoders && <button type="button" className="video-small-button video-button-danger" disabled={planningStream} onClick={() => void deletePlannedStream(stream)}><Trash2 size={13} /> Delete</button>}</div></article>)}</div> : !plannedStreamsLoading && <Empty text={plannedStreamsState?.youtube.connected ? "No planned streams in YouTube Studio." : "Connect YouTube to view planned streams from Studio."} />}
+        {!capabilities.canManageEncoders && <p className="video-settings-help">Stream planning requires stream administrator access.</p>}
+      </section>
+      <section className="video-panel video-youtube-studio" aria-labelledby="video-youtube-studio-title">
+        <div className="video-panel-heading"><div><h2 id="video-youtube-studio-title">YouTube Studio</h2><p>Monitor active broadcasts or select a planned stream to preview and control it.</p></div><a className="video-small-button" href={youtubeStudioSelection?.studioUrl ?? "https://studio.youtube.com/"} target="_blank" rel="noreferrer">Open in Studio</a></div>
+        {youtubeStudioError && <p className="video-youtube-error" role="alert">{youtubeStudioError}</p>}
+        {!plannedStreamsState?.youtube.connected ? <Empty text="Connect YouTube to preview and control broadcasts." /> : youtubeStudioBroadcasts.length === 0 && youtubeStudioActiveBroadcasts.length === 0 && !youtubeStudioLoading && !youtubeStudioSelection ? <Empty text="No planned or active YouTube streams are available." /> : <>
+          <div className="video-youtube-studio-toolbar">
+            <label htmlFor="video-youtube-broadcast">Broadcast</label>
+            <select id="video-youtube-broadcast" value={youtubeStudioBroadcasts.some((broadcast) => broadcast.id === youtubeStudioBroadcastId) ? youtubeStudioBroadcastId : ""} onChange={(event) => { setYoutubeStudioBroadcastId(event.target.value); setYoutubeStudioSelection(null); setYoutubeStudioNotice(""); }} disabled={youtubeStudioLoading || youtubeStudioBroadcasts.length === 0}>
+              {!youtubeStudioBroadcasts.some((broadcast) => broadcast.id === youtubeStudioBroadcastId) && <option value="">{youtubeStudioActiveBroadcasts.some((broadcast) => broadcast.id === youtubeStudioBroadcastId) ? `Monitoring active stream: ${youtubeStudioSelection?.title ?? youtubeStudioActiveBroadcasts.find((broadcast) => broadcast.id === youtubeStudioBroadcastId)?.title ?? "Live stream"}` : "Select a planned stream"}</option>}
+              {youtubeStudioBroadcasts.map((broadcast) => <option key={broadcast.id} value={broadcast.id}>{broadcast.title} · {broadcast.status}{broadcast.startsAt ? ` · ${formatTimestamp(broadcast.startsAt)}` : ""}</option>)}
+            </select>
+            <span className={`video-state${youtubeStudioSelection?.status === "live" ? " video-state-live" : ""}`}>{youtubeBroadcastStatusLabel(youtubeStudioSelection?.status ?? (youtubeStudioLoading ? "Loading…" : undefined))}</span>
+          </div>
+          <div className="video-youtube-metrics" aria-label="YouTube streaming status">
+            <article className={`video-youtube-metric video-youtube-quality-${youtubeStudioSelection?.streamQuality.status ?? "unknown"}`}><span>Stream quality</span><strong>{youtubeQualityLabel(youtubeStudioSelection?.streamQuality.status)}</strong><small>{youtubeStudioSelection?.streamQuality.issues.length ? youtubeStudioSelection.streamQuality.issues[0].reason : youtubeStudioSelection?.streamQuality.status === "good" ? "No quality issues reported" : "YouTube quality data"}</small></article>
+            <article className="video-youtube-metric"><span>Current viewers</span><strong>{youtubeStudioSelection?.concurrentViewers == null ? "—" : new Intl.NumberFormat().format(youtubeStudioSelection.concurrentViewers)}</strong><small>{youtubeStudioSelection?.status === "live" ? "Live audience" : "Reported while the broadcast is live"}</small></article>
+            <article className="video-youtube-metric"><span>Likes</span><strong>{youtubeStudioSelection?.likeCount == null ? "—" : new Intl.NumberFormat().format(youtubeStudioSelection.likeCount)}</strong><small>YouTube video likes</small></article>
+          </div>
+          {youtubeStudioSelection?.streamQuality.issues.length ? <ul className="video-youtube-quality-issues">{youtubeStudioSelection.streamQuality.issues.slice(0, 3).map((issue, index) => <li className={`video-youtube-quality-issue video-youtube-quality-issue-${issue.severity}`} key={`${issue.type}-${index}`} title={issue.description || issue.reason}>{issue.reason}{issue.description ? ` · ${issue.description}` : ""}</li>)}</ul> : null}
+          <div className="video-youtube-studio-layout">
+            <div className="video-youtube-preview" aria-label="YouTube stream preview">
+              {youtubeStudioSelection?.previewUrl && youtubeStudioSelection.streamStatus === "active" && ["testing", "testStarting", "live", "liveStarting"].includes(youtubeStudioSelection.status) ? <iframe src={youtubeStudioSelection.previewUrl} title={`YouTube preview: ${youtubeStudioSelection.title}`} allow="autoplay; encrypted-media; picture-in-picture" allowFullScreen referrerPolicy="strict-origin-when-cross-origin" /> : <div className="video-youtube-preview-placeholder"><Video size={30} /><strong>{youtubeStudioLoading ? "Loading stream preview…" : "Preview unavailable"}</strong><p>{youtubeStudioSelection?.streamStatus !== "active" ? "Start the encoder and wait for YouTube to receive its signal." : youtubeStudioSelection?.status === "ready" ? "The encoder signal is active. Start the private preview before going live." : "YouTube's monitor preview is not available for this broadcast yet."}</p>{youtubeStudioSelection && <a className="video-small-button video-button-primary" href={youtubeStudioSelection.studioUrl} target="_blank" rel="noreferrer"><Video size={13} /> Preview in YouTube Studio</a>}</div>}
+            </div>
+            <div className="video-youtube-studio-controls">
+              <div><strong>{youtubeStudioSelection?.title ?? "Select a YouTube broadcast"}</strong><span>{youtubeStudioSelection?.startsAt ? formatTimestamp(youtubeStudioSelection.startsAt) : ""}</span><span>{youtubeStudioSelection ? `Encoder signal: ${youtubeStudioSelection.streamStatus}` : ""}</span><small>Starting or ending the YouTube broadcast does not start or stop the encoder.</small></div>
+              <div className="video-overview-actions">
+                {youtubeStudioSelection?.status === "ready" && <button type="button" className="video-small-button" disabled={!capabilities.canOperateStreaming || youtubeStudioActionBusy || youtubeStudioSelection.streamStatus !== "active"} onClick={() => void transitionYoutubeStream("testing")}><Video size={13} /> {youtubeStudioActionBusy ? "Working…" : "Start preview"}</button>}
+                <button type="button" className="video-small-button video-button-primary" disabled={!capabilities.canOperateStreaming || youtubeStudioActionBusy || !youtubeStudioSelection || !["testing"].includes(youtubeStudioSelection.status) || youtubeStudioSelection.streamStatus !== "active"} onClick={() => void transitionYoutubeStream("live")}><Play size={13} /> {youtubeStudioActionBusy ? "Working…" : "Go live"}</button>
+                <button type="button" className="video-small-button video-button-danger" disabled={!capabilities.canOperateStreaming || youtubeStudioActionBusy || !youtubeStudioSelection || !["live", "liveStarting", "testing", "testStarting"].includes(youtubeStudioSelection.status)} onClick={() => void transitionYoutubeStream("complete")}><Square size={12} /> End stream</button>
+              </div>
+              {!capabilities.canOperateStreaming && <small className="video-settings-help">You need streaming operator access to control a broadcast.</small>}
+            </div>
+          </div>
+        </>}
+        {youtubeStudioNotice && <p className="video-youtube-notice" role="status">{youtubeStudioNotice}</p>}
+      </section>
+      <section className="video-panel video-youtube-past-streams" aria-labelledby="video-youtube-past-title">
+        <div className="video-panel-heading"><div><h2 id="video-youtube-past-title">Last 6 past livestreams</h2><p>Recently completed broadcasts from the connected YouTube channel.</p></div><button type="button" className="video-small-button" disabled={!plannedStreamsState?.youtube.connected || youtubePastStreamsLoading} onClick={() => void refreshYoutubePastStreams()}><RefreshCw size={13} className={youtubePastStreamsLoading ? "video-refresh-spinning" : ""} /> Refresh</button></div>
+        {youtubePastStreamsError && <p className="video-youtube-error" role="alert">{youtubePastStreamsError}</p>}
+        {youtubePastStreams.length ? <div className="video-youtube-past-list">{youtubePastStreams.map((stream) => <article className="video-youtube-past-row" key={stream.id}>{stream.thumbnailUrl ? <a className="video-youtube-past-thumbnail" href={stream.watchUrl} target="_blank" rel="noreferrer" aria-label={`Watch ${stream.title}`}><img src={stream.thumbnailUrl} alt="" loading="lazy" /></a> : <div className="video-youtube-past-thumbnail video-youtube-past-thumbnail-empty"><Video size={24} /></div>}<div className="video-youtube-past-content"><div className="video-youtube-past-main"><h3>{stream.title}</h3><p>{stream.endedAt ? `Ended ${formatTimestamp(stream.endedAt)}` : stream.startsAt ? formatTimestamp(stream.startsAt) : "Completed livestream"} · {stream.privacyStatus}</p><div className="video-youtube-past-stats"><span>{stream.viewCount == null ? "Views unavailable" : `${new Intl.NumberFormat().format(stream.viewCount)} views`}</span><span>{stream.likeCount == null ? "Likes unavailable" : `${new Intl.NumberFormat().format(stream.likeCount)} likes`}</span></div></div><div className="video-planned-actions"><a className="video-small-button" href={stream.watchUrl} target="_blank" rel="noreferrer">Watch</a><a className="video-small-button" href={stream.studioUrl} target="_blank" rel="noreferrer">Open in Studio</a></div></div></article>)}</div> : !youtubePastStreamsLoading && <Empty text={plannedStreamsState?.youtube.connected ? "No completed livestreams were found on this channel." : "Connect YouTube to view past livestreams."} />}
+      </section>
     </>}
 
     {ready && tab === "Streaming" && <>
@@ -658,7 +1056,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
     </>}
 
     {ready && tab === "Routing" && <div className="video-routing-layout video-routing-page"><section className="video-panel video-routing-matrix-panel">
-        {hubs.length ? <><div className="video-routing-device-row">{hub && <><div className="video-routing-device-info"><strong>{hub.site.name} · {hub.name}</strong><code>{hub.ip || "Address not configured"}</code><span className={`video-state ${matrix?.connected ? "video-state-good" : ""}`}>{matrix?.connected ? "Connected" : "Disconnected"}</span>{matrix?.inputs && matrix.outputs && <small>{matrix.inputs.length} inputs · {matrix.outputs.length} outputs</small>}</div><div className={`video-preset-menu-anchor${presetsOpen ? " video-preset-menu-anchor-open" : ""}`} ref={presetsMenuRef}>
+        {hubs.length ? <><div className="video-routing-device-row">{hub && <><div className="video-routing-device-info"><strong>{hub.site.name} · {hub.name}</strong><IpAddress value={hub.ip} /><span className={`video-state ${matrix?.connected ? "video-state-good" : ""}`}>{matrix?.connected ? "Connected" : "Disconnected"}</span>{matrix?.inputs && matrix.outputs && <small>{matrix.inputs.length} inputs · {matrix.outputs.length} outputs</small>}</div><div className={`video-preset-menu-anchor${presetsOpen ? " video-preset-menu-anchor-open" : ""}`} ref={presetsMenuRef}>
           <button className="video-small-button" type="button" aria-haspopup="dialog" aria-expanded={presetsOpen} aria-controls="video-routing-presets" disabled={busy} onClick={() => { const opening = !presetsOpen; setPresetsOpen(opening); if (opening) void loadPresets(hub.id, hub.site.id); else { setPresetNameOpen(false); setPresetName(""); setPendingPresetAction(null); } }}><ChevronDown size={14} /> Presets</button>
           {presetsOpen && <div className="video-preset-menu" id="video-routing-presets" role="dialog" aria-label="Routing presets">
             <div className="video-preset-menu-heading"><strong>Routing presets</strong>{!presetNameOpen && !pendingPresetAction && <button className="video-small-button" type="button" disabled={busy || !matrix?.connected || !capabilities.canManageRouting} onClick={() => { setPresetName(""); setPresetNameOpen(true); }}><Save size={12} /> Save current</button>}</div>
@@ -724,8 +1122,8 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
     {ready && tab === "XML tools" && <section className="video-panel video-settings-panel">
       <div className="video-panel-heading"><div><h2>Streaming profile XML tools</h2><p>Create, validate, import, export and distribute encoder profiles.</p></div><button type="button" className="video-small-button" disabled={busy || !xmlEncoder || !capabilities.canManageEncoders} onClick={() => void exportXml(includeSecrets)}><Download size={14} /> Export active XML</button></div>
       {!xmlEncoder ? <Empty text="No streaming encoder is configured for this location." /> : <>
-        <label className="video-field">Encoder<select value={xmlEncoder.key} onChange={(event) => { setSelectedEncoder(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}><option value="">Select encoder</option>{encoders.map((encoder) => <option value={encoder.key} key={encoder.key}>{encoder.site.name} · {encoder.name} · {encoder.ip || "No address"}</option>)}</select></label>
-        <div className="video-settings-identity"><strong>{xmlEncoder.site.name} · {xmlEncoder.name}</strong><code>{xmlEncoder.ip || "Address not configured"}</code><button type="button" className="video-small-button" disabled={!capabilities.canManageEncoders} onClick={newXmlFile}><Plus size={13} /> New XML</button></div>
+        <label className="video-field">Encoder<select value={xmlEncoder.key} onChange={(event) => { setSelectedEncoder(event.target.value); setXmlPreview(null); setXmlPlan(null); setReviewedXml(""); }}><option value="">Select encoder</option>{encoders.map((encoder) => <option value={encoder.key} key={encoder.key}>{encoder.site.name} · {encoder.name}</option>)}</select></label>
+        <div className="video-settings-identity"><strong>{xmlEncoder.site.name} · {xmlEncoder.name}</strong><IpAddress value={xmlEncoder.ip} /><button type="button" className="video-small-button" disabled={!capabilities.canManageEncoders} onClick={newXmlFile}><Plus size={13} /> New XML</button></div>
         <fieldset className="video-settings-box"><legend>Import / Export</legend>
           <input ref={xmlFileInput} className="video-hidden-file" type="file" accept=".xml,text/xml,application/xml" onChange={(event) => { const file = event.currentTarget.files?.[0]; event.currentTarget.value = ""; if (!file) return; if (file.size > 262144) return setNotice("Choose an XML file smaller than 256 KB."); void file.text().then((source) => void previewXml(source)).catch(() => setNotice("Could not read that XML file.")); }} />
           <div className="video-settings-toolbar"><button type="button" className="video-small-button" disabled={busy || !capabilities.canManageEncoders} onClick={() => xmlFileInput.current?.click()}>Import XML…</button><button type="button" className="video-small-button" disabled={busy || !capabilities.canManageEncoders} onClick={() => void exportXml(includeSecrets)}>Export XML…</button></div>
@@ -777,7 +1175,7 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
 
     {settingsOpen && <div className="video-settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setSettingsOpen(false); } }}>
       <section className="video-settings-modal" role="dialog" aria-modal="true" aria-labelledby="video-settings-title">
-        <header className="video-settings-modal-heading"><div><span className="video-eyebrow">ENCODER STREAMING</span><h2 id="video-settings-title">Encoder settings</h2><p>{xmlEncoder ? `${xmlEncoder.site.name} · ${xmlEncoder.name} · ${xmlEncoder.ip || "Address not configured"}` : "Loading encoder…"}</p></div><button type="button" className="video-settings-close" aria-label="Close settings" onClick={() => { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setSettingsOpen(false); }}>×</button></header>
+        <header className="video-settings-modal-heading"><div><span className="video-eyebrow">ENCODER STREAMING</span><h2 id="video-settings-title">Encoder settings</h2><p>{xmlEncoder ? `${xmlEncoder.site.name} · ${xmlEncoder.name}` : "Loading encoder…"}</p>{xmlEncoder && <IpAddress value={xmlEncoder.ip} />}</div><button type="button" className="video-settings-close" aria-label="Close settings" onClick={() => { setSettingsForm((current) => ({ ...current, key: "", passphrase: "" })); setSettingsOpen(false); }}>×</button></header>
         {notice && <p className="video-settings-modal-notice" role="status">{notice}</p>}
         {settingsLoading && !encoderSettings ? <Empty text="Loading presets and settings from the encoder…" /> : !encoderSettings ? <Empty text="Could not load settings from this encoder." /> : <div className="video-settings-panel">
           <div className="video-settings-identity"><span className={`video-state ${encoderSettings.status === "Idle" ? "video-state-good" : ""}`}>Stream: {encoderSettings.status}</span></div>
@@ -804,6 +1202,27 @@ export function VideoModule({ departmentId, csrfToken, capabilities, tab, onTabC
       </section>
     </div>}
 
+    {streamWizard && <div className="video-settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !planningStream) { setStreamWizard(null); setStreamWizardError(""); } }}>
+      <section className="video-settings-modal video-stream-wizard" role="dialog" aria-modal="true" aria-labelledby="video-stream-wizard-title">
+        <header className="video-settings-modal-heading"><div><span className="video-eyebrow">YOUTUBE STREAMING</span><h2 id="video-stream-wizard-title">{streamWizard.step === "choose" ? "Create Stream" : "Stream settings"}</h2><p>{streamWizard.service.title} · {formatTimestamp(streamWizard.service.startsAt)}</p></div><button type="button" className="video-settings-close" aria-label="Close stream wizard" disabled={planningStream} onClick={() => { setStreamWizard(null); setStreamWizardError(""); }}>×</button></header>
+        {streamWizardError && <p className="video-settings-modal-notice video-stream-wizard-error" role="alert">{streamWizardError}</p>}
+        {streamWizard.step === "choose" ? <div className="video-stream-choice">
+          <div><h3>Planned YouTube events</h3><p>Select an existing YouTube event to edit its settings, or create a new event from this service.</p></div>
+          {plannedStreamsState?.streams.some((stream) => Boolean(stream.youtubeBroadcastId)) ? <div className="video-stream-choice-list">{plannedStreamsState.streams.filter((stream) => Boolean(stream.youtubeBroadcastId)).map((stream) => <button type="button" className="video-stream-choice-item" key={stream.id} onClick={() => selectExistingStream(stream)}><span><strong>{stream.title}</strong><small>{formatTimestamp(stream.startsAt)} · {stream.privacyStatus === "unlisted" ? "Unlisted" : stream.privacyStatus === "private" ? "Private" : "Public"}</small></span>{stream.youtubeStatus === "error" && <span className="video-state">Needs attention</span>}</button>)}</div> : <p className="video-stream-choice-empty">There are no planned events on YouTube yet.</p>}
+          <div className="video-settings-actions"><button type="button" className="video-small-button" disabled={planningStream} onClick={() => setStreamWizard(null)}>Cancel</button><button type="button" className="video-small-button video-button-primary" onClick={createStreamFromService}><Plus size={14} /> NEW EVENT</button></div>
+        </div> : <form className="video-stream-settings" onSubmit={(event) => void saveStreamWizard(event)}>
+          <div className="video-stream-settings-summary"><strong>{streamWizard.streamId ? "Editing an existing planned event" : "New stream from service data"}</strong><span>{streamWizard.service.title}{streamWizard.service.speaker ? ` · ${streamWizard.service.speaker}` : ""}</span></div>
+          <label className="video-field">Stream title<input required maxLength={100} value={streamWizard.title} onChange={(event) => setStreamWizard((current) => current ? { ...current, title: event.target.value } : current)} /></label>
+          <div className="video-stream-settings-grid"><label className="video-field">Start time<input required type="datetime-local" value={streamWizard.startsAt} onChange={(event) => setStreamWizard((current) => current ? { ...current, startsAt: event.target.value } : current)} /></label><label className="video-field">Visibility<select value={streamWizard.privacyStatus} onChange={(event) => setStreamWizard((current) => current ? { ...current, privacyStatus: event.target.value as StreamWizard["privacyStatus"] } : current)}><option value="unlisted">Nicht gelistet</option><option value="private">Privat</option><option value="public">Öffentlich</option></select></label></div>
+          <div className="video-stream-settings-details"><span><small>Speaker</small><strong>{streamWizard.speaker || "Not assigned"}</strong></span><span><small>Service title / theme</small><strong>{streamWizard.theme || "Not listed"}</strong></span></div>
+          <label className="video-field">Add recording to playlist<select value={streamWizard.playlistId} onChange={(event) => setStreamWizard((current) => current ? { ...current, playlistId: event.target.value } : current)}><option value="">Do not add to a playlist</option>{plannedStreamsState?.playlists.map((playlist) => <option key={playlist.id} value={playlist.id}>{playlist.title}{playlist.title === "GfC Steffisburg Livestream" ? " (default)" : ""}</option>)}</select></label>
+          <p className="video-settings-help">The recording is added after YouTube finishes processing the stream.{!plannedStreamsState?.playlists.some((playlist) => playlist.title === "GfC Steffisburg Livestream") && plannedStreamsState?.youtube.connected ? " Create a playlist named GfC Steffisburg Livestream in YouTube first to use the default." : ""}</p>
+          <p className="video-settings-help">{!plannedStreamsState?.youtube.connected ? "This stream will be saved locally. Connect YouTube to schedule it on the channel." : !streamWizard.streamId ? "Saving this new event will schedule it on YouTube." : plannedStreamsState.streams.find((stream) => stream.id === streamWizard.streamId)?.youtubeBroadcastId ? "Saving will update this event’s YouTube broadcast." : "This planned event will be updated locally. You can schedule it on YouTube afterward."}</p>
+          <div className="video-settings-actions"><button type="button" className="video-small-button" disabled={planningStream} onClick={() => { setStreamWizard((current) => current ? { ...current, step: "choose" } : current); setStreamWizardError(""); }}>Back</button><button type="submit" className="video-small-button video-button-primary" disabled={planningStream || !streamWizard.title.trim() || !streamWizard.startsAt}>{planningStream ? "Saving…" : streamWizard.streamId ? "Save stream" : "Create stream"}</button></div>
+        </form>}
+      </section>
+    </div>}
+
   </section>;
 }
 
@@ -813,6 +1232,7 @@ function Summary({ label, value, note, icon }: { label: string; value: number; n
 
 function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string }) {
   const connected = encoder.control === "Connected";
+  const showUltraHdBranding = encoder.id === "encoder-3";
   const ready = status === "BEREIT";
   const live = status === "LIVE";
   const reportedStatus = stateValue(encoder.state, "Status");
@@ -822,12 +1242,14 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
   const onAirTextClass = live ? `video-onair-lit${streamProblem ? " video-onair-flash" : ""}` : undefined;
   const statusColor = live ? "#f51d34" : ready ? "#edf1f4" : "#f0b64c";
   const telemetryLed = !connected ? "#e9a536" : live ? "#f51d34" : "#64db86";
-  return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || "Blackmagic Web Presenter Ultra HD"} illustrated front panel, ${status}`}>
+  return <svg className="video-encoder-hardware" viewBox="0 0 1500 500" role="img" aria-label={`${encoder.model || `Blackmagic Web Presenter${showUltraHdBranding ? " Ultra HD" : ""}`} illustrated front panel, ${status}`}>
     <rect x="3" y="5" width="1494" height="490" rx="20" fill="#111214" stroke="#08090a" strokeWidth="5" />
     <rect x="8" y="10" width="1484" height="480" rx="16" fill="#1c1e21" stroke="#45484d" strokeWidth="3" />
     <path d="M20 24h1460M20 476h1460" stroke="#292c30" strokeWidth="2" opacity=".8" />
-    <text x="37" y="107" fill="#f4f4f5" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">ULTRA</text>
-    <text x="163" y="107" fill="#ff9e14" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">HD</text>
+    {showUltraHdBranding && <>
+      <text x="37" y="107" fill="#f4f4f5" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">ULTRA</text>
+      <text x="163" y="107" fill="#ff9e14" fontFamily="Arial, sans-serif" fontSize="38" fontStyle="italic" fontWeight="700">HD</text>
+    </>}
     <path d="M40 220h190a18 18 0 0 1 18 18v187a18 18 0 0 1-18 18H40a18 18 0 0 1-18-18V238a18 18 0 0 1 18-18Z" fill="#17191b" stroke="#0c0d0e" strokeWidth="5" />
     <path d="M72 317h130m-100-29-29 29 29 29m70-58 29 29-29 29m-70-39h54l21 20" fill="none" stroke="#090b0d" strokeWidth="10" strokeLinecap="round" strokeLinejoin="round" />
     <path d="M72 317h130m-100-29-29 29 29 29m70-58 29 29-29 29m-70-39h54l21 20" fill="none" stroke="#24272a" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
@@ -851,7 +1273,7 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
     <circle cx="948" cy="297" r="31" fill="#1e3e50" stroke="#426a80" strokeWidth="3" />
     <path d="M937 280v34l27-17z" fill="#8ab8ce" />
     <text x="948" y="358" fill="#a8c5d4" fontFamily="Arial, sans-serif" fontSize="24" textAnchor="middle">{live ? "STREAMING" : ready ? "VIDEO PREVIEW" : "ENCODER STATUS"}</text>
-    <text x="948" y="387" fill="#7693a2" fontFamily="Arial, sans-serif" fontSize="17" textAnchor="middle">{stringValue(encoder.ip) || "STATUS MONITOR"}</text>
+    <text x="948" y="387" fill="#7693a2" fontFamily="Arial, sans-serif" fontSize="17" textAnchor="middle">STATUS MONITOR</text>
     <text x="1237" y="105" fill="#e0e2e5" fontFamily="Arial, sans-serif" fontSize="23" fontWeight="700" letterSpacing="-.6">Blackmagic<tspan fill="#c5c8cc" fontWeight="400">design</tspan></text>
     <circle cx="1379" cy="272" r="99" fill="#0b0c0e" stroke="#181a1c" strokeWidth="7" />
     <circle cx="1379" cy="272" r="80" fill="#2d3034" stroke="#55585d" strokeWidth="5" />
@@ -860,6 +1282,35 @@ function EncoderHardware({ encoder, status }: { encoder: Encoder; status: string
   </svg>;
 }
 
+
+function ShellyProHardware({ power, reachable }: { power?: string; reachable: boolean }) {
+  const isOn = /^(?:on|true|1)$/i.test(power?.trim() ?? "");
+  const known = Boolean(power && !/^(?:unknown|unavailable)$/i.test(power));
+  const led = (label: string) => label === "Out" && known ? (isOn ? "#49e680" : "#778899") : reachable ? "#6ba4d8" : "#f2b548";
+  return <svg className="video-shelly-hardware" viewBox="0 0 590 180" role="img" aria-label={`Blue Shelly 1 Pro DIN-rail relay, output ${known ? isOn ? "on" : "off" : "status unknown"}`}>
+    <g transform="translate(0 180) rotate(-90)">
+    <ellipse cx="90" cy="574" rx="54" ry="9" fill="#05080b" opacity=".42" />
+    <path d="M39 23h102l7 24v500l-8 28H40l-8-28V47z" fill="#0758d2" stroke="#0646a9" strokeWidth="3" />
+    <path d="M39 28h102v42H39z" fill="#39b944" stroke="#178626" strokeWidth="2" />
+    <path d="M30 71h120v48H30z" fill="#0b4cb3" stroke="#073e99" strokeWidth="2" />
+    {[51, 90, 129].map((x) => <g key={x}><circle cx={x} cy="52" r="14" fill="#aeb6bc" stroke="#747c85" strokeWidth="3"/><path d={`M${x - 9} 58l18-12`} stroke="#555d66" strokeWidth="3" strokeLinecap="round"/><circle cx={x} cy="52" r="3" fill="#d4d8dc"/></g>)}
+    <path d="M29 118h122v25H29z" fill="#d6dbe0" stroke="#9da5ad" strokeWidth="2" />
+    <path d="M28 143h124v73H28z" fill="#0860df" stroke="#034cac" strokeWidth="2" />
+    <path d="M19 216h142v300H19z" fill="#0860df" stroke="#0349a7" strokeWidth="3" />
+    <rect x="25" y="224" width="130" height="280" rx="8" fill="#0861df" stroke="#064aa9" strokeWidth="2" />
+    {(["Power", "Wi-Fi", "LAN", "Out"] as const).map((label, index) => {
+      const y = 258 + index * 38;
+      return <g key={label}><text x="44" y={y + 8} fill="#e7f0ff" fontFamily="Arial,sans-serif" fontSize="17" fontWeight="700">{label}</text><circle cx="127" cy={y} r="6" fill="#082d65" stroke="#07428e" strokeWidth="2"/><circle cx="127" cy={y} r="3" fill={led(label)} /></g>;
+    })}
+    <text x="90" y="459" fill="#deebff" fontFamily="Arial,sans-serif" fontSize="21" fontStyle="italic" fontWeight="700" textAnchor="middle">Shelly</text>
+    <circle cx="90" cy="493" r="29" fill="#0755c6" stroke="#0649ab" strokeWidth="3" />
+    <circle cx="90" cy="493" r="22" fill="#0860d8" stroke="#126de4" strokeWidth="2" />
+    <text x="90" y="535" fill="#dce9ff" fontFamily="Arial,sans-serif" fontSize="13" fontWeight="700" textAnchor="middle">Reset</text>
+    <path d="M34 542h112v42H34z" fill="#0572d8" stroke="#034ba6" strokeWidth="2" />
+    {[52, 90, 128].map((x) => <g key={`bottom-${x}`}><circle cx={x} cy="554" r="9" fill="#b7bdc3" stroke="#6e7780" strokeWidth="2"/><path d={`M${x - 6} 558l12-9`} stroke="#4c555e" strokeWidth="2.5" strokeLinecap="round"/><circle cx={x} cy="575" r="8" fill="#aeb6be" stroke="#626d77" strokeWidth="2"/><path d={`M${x - 5} 579l10-8`} stroke="#4c555e" strokeWidth="2" strokeLinecap="round"/></g>)}
+    </g>
+  </svg>;
+}
 
 function Empty({ text }: { text: string }) { return <div className="video-empty video-empty-small"><Video size={20} /><p>{text}</p></div>; }
 function parseStreamingXml(source: string): Document | null {
@@ -922,16 +1373,30 @@ function stateBitrate(state: Record<string, unknown> | undefined) {
 function streamState(encoder: Encoder) {
   const status = stateValue(encoder.state, "Status");
   if (encoder.control !== "Connected") return { label: "OFFLINE", ready: false };
-  if (/stream|live|on.?air/i.test(status)) return { label: "LIVE", ready: false };
+  if (encoderIsLive(encoder)) return { label: "LIVE", ready: false };
   if (!status || /idle|stop|ready/i.test(status)) return { label: "BEREIT", ready: true };
   return { label: status.toLocaleUpperCase(), ready: false };
+}
+function encoderIsLive(encoder: Encoder) {
+  const streaming = stateValue(encoder.state, "Streaming").trim().toLowerCase();
+  if (["true", "yes", "1", "active", "live", "streaming"].includes(streaming)) return true;
+  if (["false", "no", "0", "inactive", "idle", "stopped"].includes(streaming)) return false;
+  const status = stateValue(encoder.state, "Status").trim().toLowerCase();
+  if (/\b(?:not|no)\s+(?:currently\s+)?(?:streaming|live)\b|\b(?:stopped|idle|ready|inactive|standby|offline)\b/.test(status)) return false;
+  return /\b(?:streaming|live|on[ -]?air|broadcasting)\b/.test(status);
 }
 function readState(state: Record<string, unknown> | undefined) {
   if (!state) return "Unknown";
   return Object.entries(state).map(([key, value]) => `${key}: ${String(value)}`).join(" · ") || "Unknown";
 }
 function formatTimestamp(value: unknown) {
-  if (typeof value === "number") return new Date(value > 1e12 ? value : value * 1000).toLocaleString();
-  if (typeof value === "string" && value) return new Date(value).toLocaleString();
-  return "Time unavailable";
+  const date = typeof value === "number" ? new Date(value > 1e12 ? value : value * 1000) : typeof value === "string" && value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "Time unavailable";
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+function toDateTimeLocal(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }

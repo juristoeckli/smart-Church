@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-patch_file="$root/apps/api/src/modules/system-laptop/guacd-wave2.patch"
+module_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+patch_file="$module_root/guacd-wave2.patch"
 image_tag="smart-church/guacd:1.6.0-wave2"
 
 command -v git >/dev/null || { echo "Install git to build the optional Wave2 guacd image." >&2; exit 1; }

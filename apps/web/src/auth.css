@@ -31,3 +31,4 @@
 @keyframes auth-word-travel{from{transform:translate3d(0,0,0)}to{transform:translate3d(var(--travel-x),var(--travel-y),0)}}
 @keyframes auth-word-color{from{filter:hue-rotate(-12deg)}to{filter:hue-rotate(35deg)}}
 @media(prefers-reduced-motion:reduce){.auth-page::after{animation:none}}
+.auth-brand{gap:12px;font-size:17px;letter-spacing:-.45px}.auth-brand img{width:48px;height:48px}.auth-brand-name{font-size:18px;font-weight:750;letter-spacing:-.65px;color:var(--ink)}.auth-brand-name>span{color:var(--green)}

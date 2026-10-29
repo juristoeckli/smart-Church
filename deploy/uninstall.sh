@@ -48,8 +48,8 @@ fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env 2>/dev/null; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi
-if [[ -f apps/api/src/modules/system-laptop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env 2>/dev/null; then
-  compose_files+=(-f apps/api/src/modules/system-laptop/compose.yaml)
+if [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env 2>/dev/null; then
+  compose_files+=(-f apps/api/src/modules/remote-desktop/compose.yaml)
 fi
 profile_args=(--profile bundled-proxy)
 if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env 2>/dev/null; then

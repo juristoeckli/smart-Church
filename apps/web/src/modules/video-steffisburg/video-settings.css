@@ -1,0 +1,71 @@
+.video-settings {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.video-settings-sites {
+  display: grid;
+  gap: .8rem;
+}
+
+.video-settings-site {
+  border: 1px solid var(--border, #3a3d4b);
+  border-radius: 10px;
+  padding: 1rem;
+  background: var(--surface, #20222b);
+}
+
+.video-settings-site h4 {
+  margin: 0 0 .8rem;
+  font-size: .95rem;
+}
+
+.video-settings-address-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: .75rem;
+}
+
+.video-settings-address-grid label {
+  display: grid;
+  gap: .35rem;
+  font-weight: 600;
+}
+
+.video-settings-address-grid label span {
+  color: var(--muted, #aeb1bf);
+  font-size: .78rem;
+  font-weight: 400;
+}
+
+.video-settings-address-grid input {
+  width: 100%;
+}
+
+.video-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: .6rem;
+}
+
+.video-settings-actions .button {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+}
+
+.video-settings-message,
+.video-settings-feedback {
+  margin: 0;
+  color: var(--muted, #aeb1bf);
+}
+
+.video-settings-feedback:not(.is-error) {
+  color: var(--success, #72d1a7);
+}
+
+.video-settings-feedback.is-error {
+  color: var(--danger, #f08f9a);
+}

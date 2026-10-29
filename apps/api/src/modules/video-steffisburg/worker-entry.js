@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-const operations = new Set(["status", "command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets", "videohub-history"]);
+const operations = new Set(["status", "command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets", "videohub-history", "set-device-addresses"]);
 const coreUrl = process.env.SMART_CHURCH_CORE_WS_URL;
 const token = process.env.SMART_CHURCH_WORKER_TOKEN;
 if (!coreUrl || !token) process.exit(1);
@@ -28,14 +29,39 @@ const python = spawn(pythonCommand, pythonArgs, {
 
 const pending = new Set();
 let pythonReady = false;
+let pythonStartedAt = null;
 let websocketOpen = false;
 let shuttingDown = false;
 const socket = new WebSocket(coreUrl);
 const lines = createInterface({ input: python.stdout });
 
+python.once("spawn", () => { pythonStartedAt = Date.now(); });
+
+async function reportWorkerStats() {
+  const memory = process.memoryUsage();
+  let pythonRssBytes = null;
+  if (process.platform === "linux" && python.pid) {
+    try {
+      const status = await readFile(`/proc/${python.pid}/status`, "utf8");
+      const match = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status);
+      if (match) pythonRssBytes = Number(match[1]) * 1024;
+    } catch { /* The Python process may not have started or may have exited. */ }
+  }
+  process.send?.({
+    type: "worker-stats",
+    uptimeSeconds: process.uptime(),
+    memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal },
+    python: { uptimeSeconds: pythonStartedAt === null ? null : Math.floor((Date.now() - pythonStartedAt) / 1000), rssBytes: pythonRssBytes },
+  });
+}
+const statsTimer = setInterval(() => { void reportWorkerStats(); }, 10_000);
+statsTimer.unref();
+void reportWorkerStats();
+
 function stop(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(statsTimer);
   try { socket.close(1001, "worker stopping"); } catch { /* connection already closed */ }
   if (python.exitCode === null && !python.killed) {
     python.kill("SIGTERM");

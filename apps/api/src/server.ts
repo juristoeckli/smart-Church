@@ -1,6 +1,6 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
@@ -9,6 +9,8 @@ import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, Create
 import { closeDatabase, departmentId, departmentName, initializeDatabase, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { registerServerModules } from "./modules/module-sdk.js";
+import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
+import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 
 if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
   delete process.env.STREAMING_CONFIG_FILE;
@@ -30,9 +32,21 @@ const webContentTypes = new Map([
   [".png", "image/png"], [".svg", "image/svg+xml"], [".webp", "image/webp"],
   [".woff", "font/woff"], [".woff2", "font/woff2"],
 ]);
+const runtimeLogStream = {
+  write(line: string) {
+    process.stdout.write(line);
+    try {
+      const entry = JSON.parse(line) as { level?: number; time?: number; msg?: unknown; module?: unknown };
+      const levels: Record<number, RuntimeLogLevel> = { 10: "trace", 20: "debug", 30: "info", 40: "warn", 50: "error", 60: "fatal" };
+      const source = typeof entry.module === "string" ? `api/${entry.module}` : "api";
+      if (typeof entry.msg === "string") recordRuntimeLog(source, levels[entry.level ?? 30] ?? "info", entry.msg, entry.time ?? Date.now());
+    } catch { /* Keep normal stdout logs even if a future logger format changes. */ }
+  },
+};
 const app = Fastify({
   logger: {
     redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken"],
+    stream: runtimeLogStream,
   },
   bodyLimit: 3 * 1024 * 1024,
   disableRequestLogging: true,
@@ -207,13 +221,24 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
     reply.code(403).send({ error: "The module request origin is not valid." });
     return false;
   }
+  const localDevPort = Number(origin.port);
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+  const normalizeHost = (hostname: string) => hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const originHost = normalizeHost(origin.hostname);
+  const apiHost = normalizeHost(requestHost.hostname);
+  const sameLocalMachine = originHost === apiHost || (loopbackHosts.has(originHost) && loopbackHosts.has(apiHost));
   const allowedOrigin = isAllowedWebOrigin(request, origin.origin)
-    || (!process.env.SMART_CHURCH_WEB_ORIGIN && origin.hostname === requestHost.hostname && origin.protocol === "http:" &&
-      new Set([requestHost.port, "5173"]).has(origin.port));
+    || (process.env.NODE_ENV !== "production" && !process.env.SMART_CHURCH_WEB_ORIGIN &&
+      sameLocalMachine && origin.protocol === "http:" &&
+      (origin.port === requestHost.port || (localDevPort >= 5173 && localDevPort <= 5199)));
+  if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site") {
+    reply.code(403).send({ error: "The module request origin is not allowed. Open Smart-Church from its configured web address." });
+    return false;
+  }
   const expected = Buffer.from(moduleCsrfToken(sessionToken));
   const actual = Buffer.from(csrfHeader);
-  if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-    reply.code(403).send({ error: "The module request origin or session token is not valid." });
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    reply.code(403).send({ error: "The module session token is out of date. Refresh the page and try again." });
     return false;
   }
   return true;
@@ -222,6 +247,7 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
 function isAllowedWebOrigin(request: FastifyRequest, origin: string) {
   const expectedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN;
   if (!expectedOrigin) return false;
+  if (process.env.NODE_ENV !== "production" && origin === expectedOrigin) return true;
   if (directHttpMode || request.protocol === "https") return origin === expectedOrigin;
   if (!allowHttpFallback || request.protocol !== "http") return false;
   try {
@@ -237,6 +263,24 @@ function isAllowedWebOrigin(request: FastifyRequest, origin: string) {
     return false;
   }
 }
+
+const realtime = new RealtimeHub(
+  app.server,
+  async (request) => {
+    const protocol = websocketRequestProtocol(request);
+    const cookieName = allowHttpFallback && protocol === "http" ? `${sessionCookieName}_http` : sessionCookieName;
+    const user = await currentUser(cookieValue(request.headers.cookie, cookieName));
+    return user && !user.mustChangePassword ? { id: user.id, role: user.role } : null;
+  },
+  async (identity, selectedDepartmentId) => {
+    if (!pool || !databaseReady) return false;
+    const result = identity.role === "server_admin"
+      ? await pool.query("SELECT 1 FROM departments WHERE id = $1", [selectedDepartmentId])
+      : await pool.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, identity.id]);
+    return (result.rowCount ?? 0) > 0;
+  },
+  (request, origin) => Boolean(origin && isAllowedWebOrigin({ protocol: websocketRequestProtocol(request) } as FastifyRequest, origin)),
+);
 
 app.addHook("onRequest", async (request, reply) => {
   const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
@@ -277,6 +321,39 @@ app.addHook("preHandler", async (request, reply) => {
   reply.header("Cache-Control", "no-store");
   if (user.mustChangePassword) return reply.code(403).send({ error: "Change your password before continuing." });
 });
+
+function realtimeTopicForPath(pathname: string) {
+  if (pathname.startsWith("/api/files")) return "module:file-storage:changed";
+  if (pathname.startsWith("/api/modules/")) {
+    const moduleId = pathname.split("/")[3];
+    if (moduleId === "chat") {
+      if (pathname.includes("/presence")) return "module:chat:presence";
+      if (pathname.includes("/typing")) return "module:chat:typing";
+      return "module:chat:changed";
+    }
+    return moduleId ? `module:${moduleId}:changed` : "core:data:changed";
+  }
+  if (pathname.startsWith("/api/presenter/")) return "module:presenter:changed";
+  if (pathname.startsWith("/api/video/")) return "module:video-steffisburg:changed";
+  if (pathname.startsWith("/api/contacts")) return "core:contacts:changed";
+  if (pathname.startsWith("/api/groups")) return "core:groups:changed";
+  if (pathname.startsWith("/api/services")) return "core:services:changed";
+  if (pathname.startsWith("/api/resources")) return "core:resources:changed";
+  return "core:data:changed";
+}
+
+app.addHook("onResponse", async (request, reply) => {
+  if (!request.authenticatedUser || reply.statusCode >= 400 || !new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase())) return;
+  let pathname: string;
+  try { pathname = new URL(request.url, "http://localhost").pathname; }
+  catch { return; }
+  if (pathname.startsWith("/api/auth/") || pathname === "/api/health") return;
+  const departmentHeader = request.headers["x-department-id"];
+  const selectedDepartmentId = typeof departmentHeader === "string" ? departmentHeader : departmentId;
+  realtime.publish(realtimeTopicForPath(pathname), selectedDepartmentId, { path: pathname, method: request.method.toUpperCase() });
+});
+
+app.addHook("onClose", async () => { realtime.close(); });
 
 type ServiceEventRow = {
   id: string;
@@ -360,7 +437,47 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
   return null;
 }
 
-app.get("/api/health", async () => ({ status: databaseReady ? "ok" : "database_unavailable" }));
+app.get("/api/health", async () => ({
+  status: databaseReady ? "ok" : "database_unavailable",
+  services: { api: "ok", database: databaseReady ? "ok" : "unavailable" },
+}));
+
+async function readContainerMemory() {
+  try {
+    const [usage, limit] = await Promise.all([
+      readFile("/sys/fs/cgroup/memory.current", "utf8"),
+      readFile("/sys/fs/cgroup/memory.max", "utf8"),
+    ]);
+    return { usageBytes: Number(usage.trim()), limitBytes: limit.trim() === "max" ? null : Number(limit.trim()) };
+  } catch {
+    try {
+      const [usage, limit] = await Promise.all([
+        readFile("/sys/fs/cgroup/memory/memory.usage_in_bytes", "utf8"),
+        readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes", "utf8"),
+      ]);
+      return { usageBytes: Number(usage.trim()), limitBytes: Number(limit.trim()) };
+    } catch { return null; }
+  }
+}
+
+app.get("/api/admin/diagnostics", async (request, reply) => {
+  if (request.authenticatedUser?.role !== "server_admin") {
+    const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+    if (!selectedDepartmentId) return reply;
+  }
+  const memory = process.memoryUsage();
+  const containerMemory = await readContainerMemory();
+  return {
+    capturedAt: new Date().toISOString(),
+    runtime: {
+      uptimeSeconds: Math.floor(process.uptime()),
+      memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external },
+      containerMemory,
+    },
+    workers: runtimeWorkerDiagnostics(),
+    logs: recentRuntimeLogs(),
+  };
+});
 
 app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error: string }> => {
   reply.header("Cache-Control", "no-store");
@@ -834,6 +951,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
     const user = await client.query(
       `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city)
        VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11)
@@ -874,7 +992,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"] } }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -888,6 +1006,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         streetNumber: { type: "string", maxLength: 24 },
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
+        accountRole: { type: "string", enum: ["server_admin", "user"] },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
         memberships: {
@@ -933,13 +1052,27 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
+    const current = await client.query("SELECT role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    if (!current.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    const accountRole = request.body.accountRole ?? current.rows[0].role;
+    if (current.rows[0].role === "server_admin" && accountRole !== "server_admin") {
+      const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
+      if (admins.rows[0].total <= 1) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The last Server Administrator account cannot be removed." });
+      }
+    }
     const updated = await client.query(
       `UPDATE app_users SET email = $2, username = $3, display_name = $4, birthday = $5::date,
-              street = $6, street_number = $7, postal_code = $8, city = $9
+              street = $6, street_number = $7, postal_code = $8, city = $9, role = $10
         WHERE id = $1
         RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
                   street, street_number, postal_code, city, role`,
-      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city],
+      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -1075,6 +1208,26 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
+app.put<{ Params: { id: string }; Body: { moduleIds: string[] } }>("/api/departments/:id/modules", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: {
+      type: "object", additionalProperties: false, required: ["moduleIds"],
+      properties: { moduleIds: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]*$", maxLength: 80 } } },
+    },
+  },
+}, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  const result = await pool.query(
+    "UPDATE departments SET enabled_modules = $2, updated_at = now() WHERE id = $1 RETURNING id, name, time_zone, enabled_modules",
+    [request.params.id, request.body.moduleIds],
+  );
+  const row = result.rows[0];
+  if (!row) return reply.code(404).send({ error: "This site could not be found." });
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "unassigned", enabledModules: row.enabled_modules };
+});
+
 app.post<{ Body: CreateDepartment }>("/api/departments", {
   schema: {
     body: {
@@ -1123,18 +1276,28 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
 
 app.get("/api/department", async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
-  if (!selectedDepartmentId) return reply;
+  let selectedDepartmentId: string | null;
+  if (request.authenticatedUser?.role === "server_admin") {
+    const header = request.headers["x-department-id"];
+    selectedDepartmentId = typeof header === "string" ? header : departmentId;
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedDepartmentId)) {
+      return reply.code(400).send({ error: "Choose a valid location." });
+    }
+  } else {
+    selectedDepartmentId = await activeDepartmentId(request, reply);
+    if (!selectedDepartmentId) return reply;
+  }
   const result = await pool.query(
-    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
+    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role,
+            m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
        FROM departments d
-       JOIN department_memberships m ON m.department_id = d.id
-      WHERE d.id = $1 AND m.user_id = $2`,
-    [selectedDepartmentId, request.authenticatedUser?.id],
+       LEFT JOIN department_memberships m ON m.department_id = d.id AND m.user_id = $2
+      WHERE d.id = $1 AND ($3::boolean OR m.user_id IS NOT NULL)`,
+    [selectedDepartmentId, request.authenticatedUser?.id, request.authenticatedUser?.role === "server_admin"],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole!, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
 });
 
 app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
@@ -1546,6 +1709,11 @@ try {
   }
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
   await registerServerModules(app, {
+    realtime: {
+      publish: (topic, selectedDepartmentId, payload) => realtime.publish(topic, selectedDepartmentId, payload),
+      onMessage: (topic, handler) => realtime.onMessage(topic, handler),
+    },
+    workers: { register: (id, name, getDiagnostics) => registerRuntimeWorker(id, name, getDiagnostics) },
     pool: pool ?? null,
     isDatabaseReady: () => databaseReady,
     getDefaultDepartmentId: () => departmentId,
@@ -1580,7 +1748,8 @@ try {
   const shutdown = () => { void app.close().catch((error) => { app.log.error({ err: error }, "Server shutdown failed."); process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
-  videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE));
+  videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE), (message) => recordRuntimeLog("api/video-steffisburg", "error", message));
+  registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null });
   videoWorker.start();
 } catch (error) {
   app.log.error(error);
