@@ -6,6 +6,7 @@ export const moduleRegistration: ModuleRegistration = {
   id: "notifications",
   name: "Notifications",
   icon: BellRing,
+  required: true,
   enabledByDefault: true,
   component: lazy(() => import("./NotificationsModule").then(({ NotificationsModule }) => ({ default: NotificationsModule }))),
 };

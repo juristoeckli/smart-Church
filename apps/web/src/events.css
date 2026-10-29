@@ -46,6 +46,7 @@
 .public-registration-page { min-height: 100vh; display: grid; place-items: center; padding: 2rem 1rem; background: var(--page-background, #f4f6f4); color: var(--foreground, #1c2621); }
 .public-registration-card { width: min(100%, 620px); padding: clamp(1.5rem, 5vw, 2.75rem); border: 1px solid var(--border, #e1e7e2); border-radius: 20px; background: var(--surface, #fff); box-shadow: 0 24px 80px #17231a12; }
 .public-registration-card > h1 { margin: 0.7rem 0 1.15rem; font-size: clamp(1.8rem, 5vw, 2.5rem); line-height: 1.1; }
+.public-registration-group-icon { display: grid; width: 48px; height: 48px; margin-top: 1rem; place-items: center; border-radius: 14px; color: var(--accent); background: var(--accent-soft, #edf6ef); }
 .public-registration-details { display: grid; gap: 0.65rem; padding: 1rem; border-radius: 12px; background: var(--surface-muted, #f5f7f5); }
 .public-registration-details > span { display: flex; align-items: center; gap: 0.65rem; color: var(--muted-foreground, #66716a); }
 .public-registration-description { margin: 1rem 0; white-space: pre-wrap; }

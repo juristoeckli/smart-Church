@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { CircleAlert, MessageCircle, Pencil, Plus, Search, Send, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
+import { formatUserDate } from "../../date-format";
 import "./chat.css";
 
 type PresenceStatus = "offline" | "online" | "away";
@@ -22,7 +23,7 @@ type ChatMessage = { id: string; userId: string; author: string; body: string; c
 type ConversationsResponse = { conversations: Conversation[]; currentUserId: string; canModerate: boolean };
 
 function timeLabel(value: string) {
-  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+  return formatUserDate(value, true);
 }
 
 function presenceStatus(person: Contact): PresenceStatus {

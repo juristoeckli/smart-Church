@@ -151,17 +151,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       reply.code(503).send({ error: "The account database is unavailable." });
       return null;
     }
-    const selectedId = request.headers["x-department-id"];
-    if (typeof selectedId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedId)) {
-      reply.code(400).send({ error: "Choose a valid location." });
-      return null;
-    }
-    const result = await pool.query("SELECT id FROM departments WHERE id=$1", [selectedId]);
-    if (!result.rowCount) {
-      reply.code(404).send({ error: "Location not found." });
-      return null;
-    }
-    return selectedId;
+    return resolveDepartmentId(request, reply, true);
   }
 
   async function youtubeOAuthSettings() {

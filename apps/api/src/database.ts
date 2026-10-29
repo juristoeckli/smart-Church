@@ -8,6 +8,7 @@ const migrationDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../
 const connectionString = process.env.DATABASE_URL;
 export const departmentId = process.env.SMART_CHURCH_DEPARTMENT_ID ?? "00000000-0000-4000-8000-000000000001";
 export const departmentName = process.env.SMART_CHURCH_DEPARTMENT_NAME ?? "Location not configured";
+export let installationId: string | undefined;
 export const pool = connectionString
   ? new Pool({ connectionString, connectionTimeoutMillis: 5_000, max: 10 })
   : undefined;
@@ -37,11 +38,14 @@ export async function initializeDatabase() {
         throw error;
       }
     }
+    const installation = await client.query<{ id: string }>("SELECT id FROM installations WHERE is_current = TRUE");
+    if (!installation.rows[0]) throw new Error("The installation identity could not be loaded.");
+    installationId = installation.rows[0].id;
     await client.query(
-      `INSERT INTO departments (id, name, enabled_modules)
-       VALUES ($1, $2, CASE WHEN lower($2) = 'steffisburg' THEN ARRAY['video-steffisburg']::TEXT[] ELSE '{}'::TEXT[] END)
+      `INSERT INTO departments (id, installation_id, name, enabled_modules)
+       VALUES ($1, $2, $3, ARRAY['file-storage', 'notifications']::TEXT[] || CASE WHEN lower($3) = 'steffisburg' THEN ARRAY['video-steffisburg']::TEXT[] ELSE '{}'::TEXT[] END)
        ON CONFLICT (id) DO NOTHING`,
-      [departmentId, departmentName],
+      [departmentId, installationId, departmentName],
     );
   } finally {
     client.release();

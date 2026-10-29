@@ -3,7 +3,18 @@
   "name": "Remote desktop",
   "version": "0.1.0",
   "description": "Embedded shared remote desktop with one site administrator controlling and other location members watching.",
-  "permissions": ["location:member:watch", "location:admin:control"],
+  "permissions": [
+    "location:member:watch",
+    "location:admin:control"
+  ],
   "serverEntry": "./routes.ts",
-  "dependencies": ["Apache Guacamole 1.6.0 with guacd and JSON authentication"]
+  "runtimeDependencies": [
+    "Apache Guacamole 1.6.0 with guacd and JSON authentication"
+  ],
+  "required": false,
+  "enabledByDefault": false,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
 }

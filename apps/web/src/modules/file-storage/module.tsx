@@ -13,6 +13,7 @@ export const moduleRegistration: ModuleRegistration = {
   id: "file-storage",
   name: "File storage",
   icon: FolderOpen,
+  required: true,
   enabledByDefault: true,
   accessLabel: "File storage",
   accessLevels: [{ value: "manage", label: "Manage files", description: "Upload, rename and delete shared files." }],

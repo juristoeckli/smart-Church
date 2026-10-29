@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, RefreshCw, Server, Terminal } from "lucide-react";
+import { formatUserDate } from "./date-format";
 import "./runtime-diagnostics.css";
 
 type Memory = { rssBytes: number; heapUsedBytes: number; heapTotalBytes: number };
@@ -18,6 +19,9 @@ type RuntimeDiagnostics = {
     uptimeSeconds: number;
     memory: Memory & { externalBytes: number };
     containerMemory: { usageBytes: number; limitBytes: number | null } | null;
+    systemMemory: { totalBytes: number; availableBytes: number; usedBytes: number };
+    cpuPercent: number | null;
+    applicationDisk: { path: string; totalBytes: number; usedBytes: number; availableBytes: number } | null;
   };
   workers: WorkerDiagnostic[];
   logs: Array<{ timestamp: string; level: string; source: string; message: string }>;
@@ -27,6 +31,12 @@ function formatBytes(bytes: number | null | undefined) {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "—";
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KiB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function formatDiskBytes(bytes: number | null | undefined) {
+  if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "—";
+  const gibibytes = bytes / (1024 ** 3);
+  return `${gibibytes >= 10 ? gibibytes.toFixed(0) : gibibytes.toFixed(1)} GiB`;
 }
 
 function formatUptime(seconds: number | null | undefined) {
@@ -41,7 +51,7 @@ function formatUptime(seconds: number | null | undefined) {
 
 function formatTime(value: string) {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" }).format(date) : value;
+  return Number.isFinite(date.getTime()) ? formatUserDate(date, true) : value;
 }
 
 export function RuntimeDiagnosticsPanel({ departmentId }: { departmentId: string }) {
@@ -77,7 +87,11 @@ export function RuntimeDiagnosticsPanel({ departmentId }: { departmentId: string
       <div className="runtime-diagnostics-grid">
         <article className="runtime-diagnostic-card">
           <div className="runtime-diagnostic-title"><Server size={16} /><h4>API container</h4></div>
-          <dl><div><dt>Container memory</dt><dd>{diagnostics.runtime.containerMemory ? `${formatBytes(diagnostics.runtime.containerMemory.usageBytes)}${diagnostics.runtime.containerMemory.limitBytes ? ` / ${formatBytes(diagnostics.runtime.containerMemory.limitBytes)}` : ""}` : "Unavailable"}</dd></div><div><dt>API process RSS</dt><dd>{formatBytes(diagnostics.runtime.memory.rssBytes)}</dd></div><div><dt>Heap used / total</dt><dd>{formatBytes(diagnostics.runtime.memory.heapUsedBytes)} / {formatBytes(diagnostics.runtime.memory.heapTotalBytes)}</dd></div><div><dt>Uptime</dt><dd>{formatUptime(diagnostics.runtime.uptimeSeconds)}</dd></div></dl>
+          <dl><div><dt>System RAM used / total</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.usedBytes)} / {formatBytes(diagnostics.runtime.systemMemory.totalBytes)}</dd></div><div><dt>System RAM available</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.availableBytes)}</dd></div><div><dt>Container memory</dt><dd>{diagnostics.runtime.containerMemory ? `${formatBytes(diagnostics.runtime.containerMemory.usageBytes)}${diagnostics.runtime.containerMemory.limitBytes ? ` / ${formatBytes(diagnostics.runtime.containerMemory.limitBytes)}` : ""}` : "Unavailable"}</dd></div><div><dt>System CPU</dt><dd>{diagnostics.runtime.cpuPercent === null ? "Sampling…" : `${diagnostics.runtime.cpuPercent}%`}</dd></div><div><dt>API process RSS</dt><dd>{formatBytes(diagnostics.runtime.memory.rssBytes)}</dd></div><div><dt>Heap used / total</dt><dd>{formatBytes(diagnostics.runtime.memory.heapUsedBytes)} / {formatBytes(diagnostics.runtime.memory.heapTotalBytes)}</dd></div><div><dt>Uptime</dt><dd>{formatUptime(diagnostics.runtime.uptimeSeconds)}</dd></div></dl>
+        </article>
+        <article className="runtime-diagnostic-card">
+          <div className="runtime-diagnostic-title"><Server size={16} /><h4>Application disk</h4></div>
+          {diagnostics.runtime.applicationDisk ? <dl><div><dt>Used / total</dt><dd>{formatDiskBytes(diagnostics.runtime.applicationDisk.usedBytes)} / {formatDiskBytes(diagnostics.runtime.applicationDisk.totalBytes)}</dd></div><div><dt>Available</dt><dd>{formatDiskBytes(diagnostics.runtime.applicationDisk.availableBytes)}</dd></div><div><dt>Path</dt><dd title={diagnostics.runtime.applicationDisk.path}>{diagnostics.runtime.applicationDisk.path}</dd></div></dl> : <p className="runtime-diagnostics-empty">Disk usage is unavailable on this host.</p>}
         </article>
         {diagnostics.workers.map((worker) => {
           const ready = worker.status === "ready";

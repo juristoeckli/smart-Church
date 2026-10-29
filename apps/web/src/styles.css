@@ -79,6 +79,7 @@
 .settings-page .user-access-form .form-actions{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px}
 @media(max-width:760px){.settings-page .user-access-layout{grid-template-columns:1fr}.settings-page .user-access-form{grid-template-columns:1fr}.settings-page .user-access-form .form-row{grid-template-columns:1fr}.settings-page .user-access-list{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-page .user-add-button{grid-column:1/-1}}
 .system-notification-settings{margin-top:12px}
+.personal-format-controls{display:grid;justify-items:start;gap:7px}.personal-format-select select{min-width:190px}.date-time-format-preview{color:var(--muted);font-size:10px}
 .system-notification-feedback{display:block;margin-top:7px;color:#a33c32;font-size:10px;line-height:1.45}
 .system-notification-toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:10px;font-weight:600;cursor:pointer}
 .system-notification-toggle input{width:16px;height:16px;margin:0;accent-color:var(--green)}
@@ -129,3 +130,14 @@
 .module-settings-dialog-header small{color:var(--muted);font-size:10px}
 @media(max-width:600px){.module-settings-overlay{padding:0}.module-settings-dialog{width:100%;height:100%;max-height:100%;padding:16px;border:0;border-radius:0}.module-settings-dialog-header{top:-16px;margin:-16px -16px 0;padding:14px 16px}}
 @media(max-width:480px){.module-site-picker{grid-template-columns:1fr;gap:6px}}
+
+.auth-sessions-section { align-items: flex-start; }
+.auth-session-list { display: grid; flex: 1; gap: 10px; min-width: 0; }
+.auth-session-toolbar { display: flex; justify-content: flex-end; }
+.auth-session-card { align-items: center; background: var(--surface, #fff); border: 1px solid var(--line-subtle, #e2e5e9); border-radius: 12px; display: flex; gap: 16px; justify-content: space-between; min-width: 0; padding: 14px; }
+.auth-session-details { display: grid; gap: 4px; min-width: 0; }
+.auth-session-details strong { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; overflow-wrap: anywhere; }
+.auth-session-details small { color: var(--text-muted, #697386); }
+.auth-session-current { background: var(--accent-soft, #edf4f4); border-radius: 999px; color: var(--accent-strong, #355f61); font-size: 11px; font-weight: 650; padding: 3px 8px; }
+.auth-session-revoke { flex: 0 0 auto; }
+@media (max-width: 640px) { .auth-session-card { align-items: flex-start; flex-direction: column; } }

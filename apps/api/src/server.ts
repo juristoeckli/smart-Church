@@ -1,14 +1,15 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, statfs } from "node:fs/promises";
+import { cpus, freemem, totalmem } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
-import { closeDatabase, departmentId, departmentName, initializeDatabase, pool } from "./database.js";
+import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
-import { registerServerModules } from "./modules/module-sdk.js";
+import { getRequiredModuleDependencies, getRequiredServerModuleIds, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 
@@ -62,6 +63,7 @@ const sessionLifetimeSeconds = 24 * 60 * 60;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
 const maxFailedLoginBuckets = 10_000;
 let videoWorker: VideoWorkerSupervisor | null = null;
+let removeVideoActivationListener: (() => void) | null = null;
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -132,13 +134,17 @@ function clearSessionCookie(reply: { header: (name: string, value: string) => un
 async function currentUser(token: string | undefined): Promise<AuthenticatedUser | null> {
   if (!pool || !token || !/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password
-       FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
-      WHERE s.token_hash = $1 AND s.expires_at > now()`,
+    `WITH active_session AS (
+       UPDATE auth_sessions SET last_seen_at = now()
+        WHERE token_hash = $1 AND expires_at > now()
+        RETURNING user_id
+     )
+     SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password, u.date_time_format, u.language
+       FROM active_session s JOIN app_users u ON u.id = s.user_id`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -192,10 +198,11 @@ function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
 
 async function createSession(userId: string, request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, secure: boolean) {
   const token = randomBytes(32).toString("base64url");
+  const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"].slice(0, 512) : "Unknown browser";
   await pool!.query(
-    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at)
-     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'))`,
-    [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds],
+    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, user_agent, last_seen_at)
+     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5, now())`,
+    [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds, userAgent],
   );
   setSessionCookie(reply, token, secure, sessionCookieNameFor(request));
 }
@@ -274,9 +281,7 @@ const realtime = new RealtimeHub(
   },
   async (identity, selectedDepartmentId) => {
     if (!pool || !databaseReady) return false;
-    const result = identity.role === "server_admin"
-      ? await pool.query("SELECT 1 FROM departments WHERE id = $1", [selectedDepartmentId])
-      : await pool.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, identity.id]);
+    const result = await pool.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, identity.id]);
     return (result.rowCount ?? 0) > 0;
   },
   (request, origin) => Boolean(origin && isAllowedWebOrigin({ protocol: websocketRequestProtocol(request) } as FastifyRequest, origin)),
@@ -313,7 +318,7 @@ app.addHook("preHandler", async (request, reply) => {
   // on port 81. Keep static page and asset requests public so the login UI can
   // load; protect application data and actions under /api/ below.
   if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
-  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url.startsWith("/api/public/event-registrations/")) return;
+  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
@@ -531,6 +536,37 @@ async function readContainerMemory() {
   }
 }
 
+async function readApplicationDisk() {
+  const dataPath = process.env.SMART_CHURCH_DATA_DIR || "/var/lib/smart-church";
+  for (const path of [dataPath, process.cwd()]) {
+    try {
+      const filesystem = await statfs(path);
+      const blockSize = Number(filesystem.bsize);
+      const totalBytes = Number(filesystem.blocks) * blockSize;
+      const availableBytes = Number(filesystem.bavail) * blockSize;
+      return { path, totalBytes, usedBytes: Math.max(0, totalBytes - Number(filesystem.bfree) * blockSize), availableBytes };
+    } catch { /* Try the application directory when the persistent data volume is not mounted. */ }
+  }
+  return null;
+}
+
+let previousSystemCpuSample: { idle: number; total: number } | null = null;
+function readSystemCpuPercent() {
+  const current = cpus().reduce((totals, cpu) => {
+    const times = cpu.times;
+    totals.idle += times.idle;
+    totals.total += times.user + times.nice + times.sys + times.idle + times.irq;
+    return totals;
+  }, { idle: 0, total: 0 });
+  const previous = previousSystemCpuSample;
+  previousSystemCpuSample = current;
+  if (!previous) return null;
+  const elapsedTotal = current.total - previous.total;
+  if (elapsedTotal <= 0) return null;
+  const idleDelta = current.idle - previous.idle;
+  return Math.max(0, Math.min(100, Math.round((elapsedTotal - idleDelta) / elapsedTotal * 100)));
+}
+
 app.get("/api/admin/diagnostics", async (request, reply) => {
   if (request.authenticatedUser?.role !== "server_admin") {
     const selectedDepartmentId = await activeDepartmentId(request, reply, true);
@@ -538,12 +574,18 @@ app.get("/api/admin/diagnostics", async (request, reply) => {
   }
   const memory = process.memoryUsage();
   const containerMemory = await readContainerMemory();
+  const applicationDisk = await readApplicationDisk();
+  const systemMemoryTotalBytes = totalmem();
+  const systemMemoryAvailableBytes = freemem();
   return {
     capturedAt: new Date().toISOString(),
     runtime: {
       uptimeSeconds: Math.floor(process.uptime()),
       memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external },
       containerMemory,
+      systemMemory: { totalBytes: systemMemoryTotalBytes, availableBytes: systemMemoryAvailableBytes, usedBytes: Math.max(0, systemMemoryTotalBytes - systemMemoryAvailableBytes) },
+      cpuPercent: readSystemCpuPercent(),
+      applicationDisk,
     },
     workers: runtimeWorkerDiagnostics(),
     logs: recentRuntimeLogs(),
@@ -621,11 +663,11 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     if (!department.rowCount) throw new Error("The configured department could not be found.");
     const result = await client.query(
       `INSERT INTO app_users (id, email, username, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5, 'server_admin') RETURNING id, email, username, display_name, role`,
+       VALUES ($1, $2, $3, $4, $5, 'server_admin') RETURNING id, email, username, display_name, role, date_time_format, language`,
       [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
-    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false };
+    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language };
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [user.id, departmentId],
@@ -666,7 +708,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, display_name, password_hash, role FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, display_name, password_hash, role, must_change_password, date_time_format, language FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
@@ -685,7 +727,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   for (const key of buckets) failedLogins.delete(key);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language };
   await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
@@ -708,14 +750,78 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   const result = await pool.query(
-    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role",
+    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, date_time_format, language",
     [user.id, hashPassword(request.body.password)],
   );
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
   await createSession(user.id, request, reply, request.protocol === "https");
-  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false } };
+  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language } };
+});
+
+app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage } }>("/api/auth/preferences", {
+  schema: {
+    body: {
+      type: "object", additionalProperties: false, minProperties: 1,
+      properties: {
+        dateTimeFormat: { type: "string", enum: ["DD.MM.YYYY HH:MM", "DD/MM/YYYY HH:MM", "MM/DD/YYYY h:mm AM/PM", "YYYY-MM-DD HH:MM"] },
+        language: { type: "string", enum: ["en", "de", "fr", "it"] },
+      },
+    },
+  },
+}, async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!validModuleMutation(request, reply)) return;
+  await pool.query(
+    "UPDATE app_users SET date_time_format = COALESCE($2, date_time_format), language = COALESCE($3, language) WHERE id = $1",
+    [user.id, request.body.dateTimeFormat ?? null, request.body.language ?? null],
+  );
+  return { dateTimeFormat: request.body.dateTimeFormat ?? user.dateTimeFormat, language: request.body.language ?? user.language };
+});
+
+app.get("/api/auth/sessions", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const token = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
+  const user = await currentUser(token);
+  if (!user || !token) return reply.code(401).send({ error: "Sign in to continue." });
+  const result = await pool.query(
+    `SELECT id, user_agent, created_at, last_seen_at, expires_at, token_hash
+       FROM auth_sessions WHERE user_id = $1 AND expires_at > now()
+       ORDER BY last_seen_at DESC LIMIT 100`,
+    [user.id],
+  );
+  const currentHash = hashToken(token);
+  return { sessions: result.rows.map((row) => ({
+    id: row.id,
+    userAgent: row.user_agent,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
+    expiresAt: row.expires_at,
+    current: row.token_hash === currentHash,
+  })) };
+});
+
+app.delete<{ Params: { id: string } }>("/api/auth/sessions/:id", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const token = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
+  const user = await currentUser(token);
+  if (!user || !token) return reply.code(401).send({ error: "Sign in to continue." });
+  const revoked = await pool.query(
+    "DELETE FROM auth_sessions WHERE id = $1 AND user_id = $2 RETURNING token_hash",
+    [request.params.id, user.id],
+  );
+  if (!revoked.rowCount) return reply.code(404).send({ error: "This sign-in session could not be found." });
+  const current = revoked.rows[0].token_hash === hashToken(token);
+  if (current) clearSessionCookie(reply, request.protocol === "https", sessionCookieNameFor(request));
+  return { revoked: true, current };
 });
 
 const modulePermissionsSchema = { type: "object", maxProperties: 100, propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,63}$" }, additionalProperties: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 80 } } };
@@ -1279,24 +1385,84 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
-app.put<{ Params: { id: string }; Body: { moduleIds: string[] } }>("/api/departments/:id/modules", {
+app.put<{ Body: { moduleIds: string[] } }>("/api/installation/modules", {
   schema: {
-    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
       type: "object", additionalProperties: false, required: ["moduleIds"],
       properties: { moduleIds: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]*$", maxLength: 80 } } },
     },
   },
-}, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
+}, async (request, reply): Promise<{ enabledModules: string[] } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerAdmin(request, reply)) return reply;
-  const result = await pool.query(
-    "UPDATE departments SET enabled_modules = $2, updated_at = now() WHERE id = $1 RETURNING id, name, time_zone, enabled_modules",
-    [request.params.id, request.body.moduleIds],
-  );
-  const row = result.rows[0];
-  if (!row) return reply.code(404).send({ error: "This site could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "unassigned", enabledModules: row.enabled_modules };
+  if (!installationId) return reply.code(503).send({ error: "The installation identity is unavailable." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM installations WHERE id=$1 FOR UPDATE", [installationId]);
+    const catalogResult = await client.query<{ module_id: string; required: boolean; client_managed: boolean; enabled: boolean }>(
+      "SELECT module_id,required,client_managed,enabled FROM installation_modules WHERE installation_id=$1",
+      [installationId],
+    );
+    const clientCatalog = new Map(catalogResult.rows.filter((module) => module.client_managed).map((module) => [module.module_id, module]));
+    const unknown = request.body.moduleIds.filter((id) => !clientCatalog.has(id));
+    if (unknown.length) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: `These modules are not installed for the client: ${unknown.join(", ")}.` });
+    }
+    const requiredIds = new Set([
+      ...getRequiredServerModuleIds().filter((id) => clientCatalog.has(id)),
+      ...catalogResult.rows.filter((module) => module.required && module.client_managed).map((module) => module.module_id),
+    ]);
+    const disabledRequired = [...requiredIds].filter((id) => !request.body.moduleIds.includes(id));
+    if (disabledRequired.length) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: `Required modules cannot be disabled: ${disabledRequired.join(", ")}.` });
+    }
+    const requiredDependencies = getRequiredModuleDependencies();
+    const missingDependencies = request.body.moduleIds.flatMap((id) => (requiredDependencies[id] ?? [])
+      .filter((dependencyId) => {
+        const dependency = catalogResult.rows.find((module) => module.module_id === dependencyId);
+        return dependency?.client_managed ? !request.body.moduleIds.includes(dependencyId) : !dependency?.enabled;
+      })
+      .map((dependencyId) => `${id} requires ${dependencyId}`));
+    if (missingDependencies.length) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: `Enable required module dependencies first: ${missingDependencies.join("; ")}.` });
+    }
+    await client.query(
+      `UPDATE installation_modules
+          SET enabled=(module_id=ANY($2::TEXT[])),updated_at=now()
+        WHERE installation_id=$1 AND client_managed=TRUE AND required=FALSE`,
+      [installationId, request.body.moduleIds],
+    );
+    await client.query(
+      `UPDATE departments AS department
+          SET enabled_modules=COALESCE((
+                SELECT array_agg(module.module_id ORDER BY module.module_id)
+                  FROM installation_modules AS module
+                 WHERE module.installation_id=department.installation_id
+                   AND module.client_managed=TRUE AND module.enabled=TRUE
+              ), ARRAY['file-storage','notifications']::TEXT[]),
+              updated_at=now()
+        WHERE department.installation_id=$1`,
+      [installationId],
+    );
+    const result = await client.query<{ module_id: string }>(
+      "SELECT module_id FROM installation_modules WHERE installation_id=$1 AND client_managed=TRUE AND enabled=TRUE ORDER BY module_id",
+      [installationId],
+    );
+    await client.query("COMMIT");
+    for (const module of catalogResult.rows.filter((item) => item.client_managed)) {
+      setServerModuleEnabled(module.module_id, module.required || request.body.moduleIds.includes(module.module_id));
+    }
+    return { enabledModules: result.rows.map((row) => row.module_id) };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 app.post<{ Body: CreateDepartment }>("/api/departments", {
@@ -1314,6 +1480,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
 }, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to create locations." });
   if (!requireServerAdmin(request, reply)) return reply;
+  if (!installationId) return reply.code(503).send({ error: "The installation identity is unavailable." });
   const location = request.body.location.trim();
   const timeZone = request.body.timeZone.trim();
   if (!location || !timeZone) return reply.code(400).send({ error: "Location and time zone are required." });
@@ -1327,8 +1494,15 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   try {
     await client.query("BEGIN");
     const result = await client.query(
-      "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone, enabled_modules",
-      [id, location, timeZone],
+      `INSERT INTO departments (id, installation_id, name, time_zone, enabled_modules)
+       SELECT $1,installation.id,$3,$4,COALESCE(array_agg(module.module_id ORDER BY module.module_id) FILTER (WHERE module.module_id IS NOT NULL), ARRAY['file-storage','notifications']::TEXT[])
+         FROM installations AS installation
+         LEFT JOIN installation_modules AS module
+           ON module.installation_id=installation.id AND module.client_managed=TRUE AND module.enabled=TRUE
+        WHERE installation.id=$2
+        GROUP BY installation.id
+       RETURNING id,name,time_zone,enabled_modules`,
+      [id, installationId, location, timeZone],
     );
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
@@ -2101,6 +2275,8 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
 });
 
 app.addHook("onClose", async () => {
+  removeVideoActivationListener?.();
+  removeVideoActivationListener = null;
   await videoWorker?.close();
   await closeDatabase();
 });
@@ -2186,7 +2362,12 @@ try {
   process.once("SIGINT", shutdown);
   videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE), (message) => recordRuntimeLog("api/video-steffisburg", "error", message));
   registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null });
-  videoWorker.start();
+  removeVideoActivationListener = onServerModuleActivationChange("video-steffisburg", (enabled) => {
+    if (enabled) videoWorker?.start();
+    else videoWorker?.stop();
+  });
+  if (isServerModuleEnabled("video-steffisburg")) videoWorker.start();
+  else videoWorker.stop();
 } catch (error) {
   app.log.error(error);
   await closeDatabase();

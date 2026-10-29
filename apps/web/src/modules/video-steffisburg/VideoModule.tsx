@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { createPortal } from "react-dom";
 import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, LockKeyhole, Monitor, Play, Plus, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Trash2, Video } from "lucide-react";
 import type { ModuleRealtime } from "../../module-registry";
+import { formatUserDate } from "../../date-format";
 import { BmdVolumeMenu } from "./BmdVolumeMenu";
 import { IpAddress } from "./IpAddress";
 import "./video.css";
@@ -1093,7 +1094,7 @@ export function VideoModule({ departmentId, csrfToken, realtime, capabilities, t
               ? value === "L" ? "Locked" : value === "U" ? "Unlocked" : String(value ?? "—")
               : String(value ?? "—");
             const timelineTime = (value: unknown) => typeof value === "number"
-              ? new Intl.DateTimeFormat("de-CH", { dateStyle: "short", timeStyle: "medium" }).format(new Date(value * 1000))
+              ? formatUserDate(new Date(value * 1000), true)
               : formatTimestamp(value);
             return <article className="video-timeline-event" key={String(entry.id ?? index)}>
               <span className={`video-timeline-marker ${entry.kind === "change" ? "video-timeline-marker-change" : ""}`} aria-hidden="true" />
@@ -1392,8 +1393,7 @@ function readState(state: Record<string, unknown> | undefined) {
 function formatTimestamp(value: unknown) {
   const date = typeof value === "number" ? new Date(value > 1e12 ? value : value * 1000) : typeof value === "string" && value ? new Date(value) : null;
   if (!date || Number.isNaN(date.getTime())) return "Time unavailable";
-  const pad = (part: number) => String(part).padStart(2, "0");
-  return `${pad(date.getDate())}.${pad(date.getMonth() + 1)}.${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return formatUserDate(date, true);
 }
 function toDateTimeLocal(value: string) {
   const date = new Date(value);

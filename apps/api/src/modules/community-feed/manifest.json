@@ -1,0 +1,13 @@
+{
+  "id": "community-feed",
+  "name": "Community feed",
+  "version": "0.1.0",
+  "description": "Share church news and updates in a department-scoped feed.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
+}

@@ -39,6 +39,7 @@ export interface ModuleRegistration {
   id: string;
   name: string;
   icon: LucideIcon;
+  required?: boolean;
   adminOnly?: boolean;
   enabledByDefault?: boolean;
   hiddenFromNavigation?: boolean;

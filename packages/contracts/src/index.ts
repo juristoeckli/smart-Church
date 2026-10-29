@@ -113,6 +113,8 @@ export interface ChurchGroup {
   memberIds: string[];
   memberDetails?: ChurchGroupMembership[];
   createdAt: string;
+  publicSignupEnabled?: boolean;
+  publicSignupToken?: string;
   importedFrom?: "churchtools";
 }
 
@@ -205,7 +207,12 @@ export interface AuthenticatedUser {
   displayName: string;
   role: "server_admin" | "user";
   mustChangePassword: boolean;
+  dateTimeFormat: DateTimeFormat;
+  language: UserLanguage;
 }
+
+export type DateTimeFormat = "DD.MM.YYYY HH:MM" | "DD/MM/YYYY HH:MM" | "MM/DD/YYYY h:mm AM/PM" | "YYYY-MM-DD HH:MM";
+export type UserLanguage = "en" | "de" | "fr" | "it";
 
 export interface SiteUser {
   id: string;

@@ -6,6 +6,8 @@ type DemoMessage = { message?: unknown };
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const worker = new ModuleDemoWorker((message) => app.log.error({ module: "module-demo" }, message));
+  worker.setEnabled(context.activation.isEnabled());
+  const removeActivationListener = context.activation.onChange((enabled) => worker.setEnabled(enabled));
   const unregisterWorker = context.workers.register("server-clock", () => worker.diagnostics);
   const stop = context.realtime.onMessage("module:module-demo:send", async ({ departmentId }, payload) => {
     if (!context.pool || !context.isDatabaseReady() || !payload || typeof payload !== "object") return;
@@ -32,5 +34,5 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : "The demo worker is unavailable." }); }
   });
 
-  app.addHook("onClose", async () => { stop(); unregisterWorker(); await worker.close(); });
+  app.addHook("onClose", async () => { removeActivationListener(); stop(); unregisterWorker(); await worker.close(); });
 }

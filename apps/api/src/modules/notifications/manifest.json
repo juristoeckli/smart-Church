@@ -3,5 +3,11 @@
   "name": "Notifications",
   "version": "0.1.0",
   "description": "In-app notifications, event reminders, and location announcements.",
-  "serverEntry": "./routes.ts"
+  "serverEntry": "./routes.ts",
+  "required": true,
+  "enabledByDefault": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
 }

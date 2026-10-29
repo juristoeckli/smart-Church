@@ -58,7 +58,7 @@ const groupMemberRoleSchema = {
 };
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
-  const { pool, isDatabaseReady, resolveDepartmentId, getDefaultDepartmentId, validateMutation, realtime } = context;
+  const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
   let storageReady = false;
 
   app.register(async (routes) => {
@@ -216,27 +216,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         reply.code(503).send({ error: "Chat is temporarily unavailable because its storage could not be initialized." });
         return null;
       }
-      if (request.authenticatedUser?.role !== "server_admin") return resolveDepartmentId(request, reply);
-      const requestedId = request.headers["x-department-id"] ?? getDefaultDepartmentId();
-      if (typeof requestedId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(requestedId)) {
-        reply.code(400).send({ error: "Choose a valid location." });
-        return null;
-      }
-      const access = await pool.query(
-        `SELECT d.id, m.role, m.permissions, m.module_permissions
-           FROM departments d
-           LEFT JOIN department_memberships m ON m.department_id = d.id AND m.user_id = $2
-          WHERE d.id = $1`,
-        [requestedId, request.authenticatedUser.id],
-      );
-      if (!access.rows[0]) {
-        reply.code(404).send({ error: "Location not found." });
-        return null;
-      }
-      request.activeDepartmentRole = access.rows[0].role ?? null;
-      request.activeDepartmentPermissions = access.rows[0].permissions ?? [];
-      request.activeDepartmentModulePermissions = access.rows[0].module_permissions ?? {};
-      return access.rows[0].id;
+      return resolveDepartmentId(request, reply);
     }
 
     async function isConversationMember(conversationId: string, departmentId: string, userId: string) {
@@ -318,7 +298,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               WHERE p.department_id = $1 AND p.user_id = u.id
                 AND p.last_seen_at > now() - interval '55 seconds'
            ) presence ON true
-          WHERE u.id <> $2 AND (m.user_id IS NOT NULL OR u.role = 'server_admin')
+          WHERE u.id <> $2 AND m.user_id IS NOT NULL
           ORDER BY u.display_name, u.id`,
         [departmentId, request.authenticatedUser!.id],
       );
@@ -486,7 +466,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           updatedAt: new Date(row.last_message_at ?? row.created_at).toISOString(),
         })),
         currentUserId: request.authenticatedUser!.id,
-        canModerate: request.activeDepartmentRole === "site_admin" || request.authenticatedUser?.role === "server_admin",
+        canModerate: request.activeDepartmentRole === "site_admin",
       };
     });
 
@@ -499,10 +479,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const contacts = await pool!.query(
         `SELECT u.id FROM app_users u
           LEFT JOIN department_memberships m ON m.department_id = $1 AND m.user_id = u.id
-         WHERE u.id = ANY($2::uuid[]) AND (m.user_id IS NOT NULL OR u.role = 'server_admin')`,
+         WHERE u.id = ANY($2::uuid[]) AND m.user_id IS NOT NULL`,
         [departmentId, request.body.userIds],
       );
-      if (contacts.rowCount !== request.body.userIds.length) return reply.code(400).send({ error: "Choose members of this location or Server Administrators." });
+      if (contacts.rowCount !== request.body.userIds.length) return reply.code(400).send({ error: "Choose members of this location." });
 
       const isDirect = request.body.userIds.length === 1;
       const directKey = isDirect ? [currentUserId, request.body.userIds[0]].sort().join(":") : null;
@@ -582,10 +562,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const contact = await pool!.query(
         `SELECT u.id FROM app_users u
           LEFT JOIN department_memberships membership ON membership.department_id = $1 AND membership.user_id = u.id
-         WHERE u.id = $2 AND (membership.user_id IS NOT NULL OR u.role = 'server_admin')`,
+         WHERE u.id = $2 AND membership.user_id IS NOT NULL`,
         [departmentId, request.body.userId],
       );
-      if (!contact.rowCount) return reply.code(400).send({ error: "Choose a member of this location or a Server Administrator." });
+      if (!contact.rowCount) return reply.code(400).send({ error: "Choose a member of this location." });
       await pool!.query(
         `INSERT INTO module_chat_conversation_members (conversation_id, department_id, user_id, member_role)
          VALUES ($1, $2, $3, 'member') ON CONFLICT (conversation_id, user_id) DO NOTHING`,
@@ -741,7 +721,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHERE id = $1 AND conversation_id = $2 AND department_id = $3
             AND (user_id = $4 OR $5 = true)
           RETURNING id`,
-        [request.params.messageId, request.params.id, departmentId, userId, request.activeDepartmentRole === "site_admin" || request.authenticatedUser?.role === "server_admin"],
+        [request.params.messageId, request.params.id, departmentId, userId, request.activeDepartmentRole === "site_admin"],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "Message not found or you cannot delete it." });
       return { deleted: true };

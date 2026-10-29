@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Building2, CalendarDays, Check, Clock3, Plus, Trash2 } from "lucide-react";
 import type { BookableResource, ResourceBooking } from "@smart-church/contracts";
+import { formatUserDate } from "./date-format";
 
 type Draft = { name: string; category: BookableResource["category"]; description: string; location: string; capacity: string; requiresApproval: boolean; active: boolean };
 const emptyDraft: Draft = { name: "", category: "room", description: "", location: "", capacity: "", requiresApproval: true, active: true };
 function localDateTime(value: string) { const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
-function displayDate(value: string) { return new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value)); }
+function displayDate(value: string) { return formatUserDate(value, true); }
 
 export function BookableResources({ departmentId, userId, canManage }: { departmentId: string; userId: string; canManage: boolean }) {
   const [resources, setResources] = useState<BookableResource[]>([]);

@@ -86,6 +86,7 @@ export class VideoWorkerSupervisor {
   private stateValue: WorkerState;
   private errorValue: string | null = null;
   private closing = false;
+  private enabled = false;
   private nextRestartAt = 0;
   private childStartedAt: number | null = null;
   private workerMetrics: WorkerMetrics | null = null;
@@ -108,11 +109,29 @@ export class VideoWorkerSupervisor {
   }
 
   start() {
+    if (this.closing) return;
+    this.enabled = true;
     if (this.configured) this.launch();
+  }
+
+  stop() {
+    this.enabled = false;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    const child = this.child;
+    this.child = null;
+    this.connection?.socket.destroy();
+    this.connection = null;
+    child?.kill();
+    this.childStartedAt = null;
+    this.workerMetrics = null;
+    this.rejectAll("The Video module is disabled for this installation.");
+    this.stateValue = this.configured ? "stopped" : "unconfigured";
   }
 
   private onUpgrade = (request: IncomingMessage, socket: import("node:net").Socket, head: Buffer) => {
     if (request.url !== "/internal/workers/video" || !loopback(socket.remoteAddress)) return;
+    if (!this.enabled || this.closing) return socket.destroy();
     const key = request.headers["sec-websocket-key"];
     if (typeof key !== "string" || request.headers.upgrade?.toLowerCase() !== "websocket") return socket.destroy();
     const accept = createHash("sha1").update(key + websocketGuid).digest("base64");
@@ -169,7 +188,7 @@ export class VideoWorkerSupervisor {
   };
 
   private launch() {
-    if (this.closing || this.child || !this.configured) return;
+    if (this.closing || !this.enabled || this.child || !this.configured) return;
     this.stateValue = "starting";
     let child: ChildProcess;
     try {
@@ -209,7 +228,7 @@ export class VideoWorkerSupervisor {
       this.connection?.socket.destroy();
       this.connection = null;
       this.rejectAll("Video worker stopped before completing this request.");
-      if (!this.closing) this.scheduleRestart(`Video worker exited (${signal ?? code ?? "unknown"}).`);
+      if (!this.closing && this.enabled) this.scheduleRestart(`Video worker exited (${signal ?? code ?? "unknown"}).`);
     });
     child.on("message", (message) => {
       if (!message || typeof message !== "object") return;
@@ -287,12 +306,7 @@ export class VideoWorkerSupervisor {
   async close() {
     this.closing = true;
     this.server.off("upgrade", this.onUpgrade);
-    if (this.restartTimer) clearTimeout(this.restartTimer);
-    this.connection?.socket.destroy();
-    this.child?.kill();
-    this.child = null;
-    this.childStartedAt = null;
-    this.workerMetrics = null;
+    this.stop();
     this.rejectAll("The API server is shutting down.");
     this.stateValue = "stopped";
   }

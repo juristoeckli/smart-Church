@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Check, CircleAlert, Database, RefreshCw, Trash2 } from "lucide-react";
+import { formatUserDate } from "../../date-format";
 
 type SyncStatus = {
   configured: boolean;
@@ -83,7 +84,7 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
       {[ ["People", status?.peopleCount ?? 0], ["Groups", status?.groupCount ?? 0], ["Services & events", status?.serviceCount ?? 0], ["Resources", status?.resourceCount ?? 0] ].map(([label, count]) => <article className="stat-card" key={label}><div className="stat-icon stat-icon-blue"><Database size={18} /></div><div className="stat-content"><span>{label}</span><strong>{count}</strong><small>Imported from ChurchTools</small></div></article>)}
     </section>
     <section className="directory-card sync-settings-card">
-      <div className="directory-heading"><div><h2>Connection</h2><p>{status?.configured ? `Last sync: ${status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : "Not yet synced"}` : "Connect a ChurchTools cloud site using a Login token."}</p></div><div className="community-inline-actions">{status?.configured && <span className={`event-kind ${status.enabled ? "event-kind-service" : "event-kind-other"}`}>{status.enabled ? "Enabled" : "Paused"}</span>}{settingsPanel && status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={15} />{busy ? "Working…" : "Sync now"}</button>}</div></div>
+      <div className="directory-heading"><div><h2>Connection</h2><p>{status?.configured ? `Last sync: ${status.lastSyncAt ? formatUserDate(status.lastSyncAt, true) : "Not yet synced"}` : "Connect a ChurchTools cloud site using a Login token."}</p></div><div className="community-inline-actions">{status?.configured && <span className={`event-kind ${status.enabled ? "event-kind-service" : "event-kind-other"}`}>{status.enabled ? "Enabled" : "Paused"}</span>}{settingsPanel && status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={15} />{busy ? "Working…" : "Sync now"}</button>}</div></div>
       <form className="sync-connection-form" onSubmit={save}>
         <label>ChurchTools site URL<input type="url" required placeholder="https://my-church.church.tools" value={instanceUrl} onChange={(event) => setInstanceUrl(event.target.value)} /></label>
         <label>ChurchTools Login token<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved token" : "Paste a Login token"} value={loginToken} onChange={(event) => setLoginToken(event.target.value)} /></label>

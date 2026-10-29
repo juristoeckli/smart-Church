@@ -120,18 +120,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     return { department, role: access.role as "site_admin" | "member" };
   }
 
-  function managementDepartment(request: FastifyRequest, reply: FastifyReply) {
+  async function managementDepartment(request: FastifyRequest, reply: FastifyReply) {
     if (request.authenticatedUser?.role !== "server_admin") {
       reply.code(403).send({ error: "Server administrator access is required." });
       return null;
     }
-    const value = request.headers["x-department-id"];
-    const departmentId = typeof value === "string" ? value : "";
-    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) {
-      reply.code(400).send({ error: "Choose a valid site." });
-      return null;
-    }
-    return departmentId;
+    return resolveDepartmentId(request, reply, true);
   }
 
   async function listDestinationRows(departmentId: string) {
@@ -189,7 +183,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     if (!isDatabaseReady() || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
     let departmentId: string;
     if (request.authenticatedUser?.role === "server_admin") {
-      const selected = managementDepartment(request, reply);
+      const selected = await managementDepartment(request, reply);
       if (!selected) return reply;
       departmentId = selected;
     } else {
@@ -206,7 +200,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   }, async (request, reply) => {
     if (!isDatabaseReady() || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
     if (!validateMutation(request, reply)) return reply;
-    const departmentId = managementDepartment(request, reply);
+    const departmentId = await managementDepartment(request, reply);
     if (!departmentId) return reply;
     const name = request.body.name.trim();
     const host = request.body.host.trim();
@@ -235,7 +229,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   }, async (request, reply) => {
     if (!isDatabaseReady() || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
     if (!validateMutation(request, reply)) return reply;
-    const departmentId = managementDepartment(request, reply);
+    const departmentId = await managementDepartment(request, reply);
     if (!departmentId) return reply;
     const name = request.body.name.trim();
     const host = request.body.host.trim();
@@ -267,7 +261,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   }, async (request, reply) => {
     if (!isDatabaseReady() || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
     if (!validateMutation(request, reply)) return reply;
-    const departmentId = managementDepartment(request, reply);
+    const departmentId = await managementDepartment(request, reply);
     if (!departmentId) return reply;
     const result = await pool.query("DELETE FROM remote_desktop_destinations WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
     if (!result.rowCount) return reply.code(404).send({ error: "This destination could not be found." });

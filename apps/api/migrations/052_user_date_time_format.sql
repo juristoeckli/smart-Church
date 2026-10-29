@@ -1,0 +1,3 @@
+ALTER TABLE app_users
+  ADD COLUMN IF NOT EXISTS date_time_format TEXT NOT NULL DEFAULT 'DD.MM.YYYY HH:MM'
+    CHECK (date_time_format IN ('DD.MM.YYYY HH:MM', 'DD/MM/YYYY HH:MM', 'MM/DD/YYYY h:mm AM/PM', 'YYYY-MM-DD HH:MM'));

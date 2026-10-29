@@ -15,9 +15,9 @@ type BookingRow = {
   purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
 };
 
-function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null }): ChurchGroup {
+function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null; public_signup_enabled?: boolean; public_signup_token?: string | null }): ChurchGroup {
   const memberDetails = (row.member_details ?? []).map((member) => ({ contactId: member.contactId, role: member.role, status: member.status, ...(member.joinedOn ? { joinedOn: String(member.joinedOn).slice(0, 10) } : {}) }));
-  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
 }
 
 function mapBookableResource(row: BookableResourceRow): BookableResource {
@@ -29,7 +29,7 @@ function mapBooking(row: BookingRow): ResourceBooking {
 }
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
-  const { pool, isDatabaseReady, resolveDepartmentId } = dependencies;
+  const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = dependencies;
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, permission?: LocationPermission) {
       if (!isDatabaseReady() || !pool) {
@@ -43,7 +43,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT g.id, g.name, g.description, g.created_at, g.source_system,
+        `SELECT g.id, g.name, g.description, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token,
                 count(gm.contact_id)::int AS member_count,
                 COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids,
                 COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on) ORDER BY lower(c.last_name),lower(c.first_name)) FILTER (WHERE gm.contact_id IS NOT NULL), '[]'::json) AS member_details
@@ -51,7 +51,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           WHERE g.department_id = $1 GROUP BY g.id ORDER BY lower(g.name), g.created_at`,
         [departmentId],
       );
-      return result.rows.map(mapGroup);
+      const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
+      return result.rows.map((row) => {
+        const group = mapGroup(row);
+        return canManageGroups ? group : (({ publicSignupToken: _token, ...safeGroup }) => safeGroup)(group);
+      });
     });
 
     routes.post<{ Body: { name: string; description?: string } }>("/api/groups", { schema: {
@@ -89,7 +93,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       try {
         const result = await pool!.query(
           `UPDATE church_groups SET name = $3, description = $4, updated_at = now()
-            WHERE id = $1 AND department_id = $2 RETURNING id, name, description, created_at, source_system,
+            WHERE id = $1 AND department_id = $2 RETURNING id, name, description, created_at, source_system, public_signup_enabled, public_signup_token,
               (SELECT count(*)::int FROM group_members WHERE group_id = church_groups.id) AS member_count,
               (SELECT COALESCE(array_agg(contact_id), ARRAY[]::uuid[]) FROM group_members WHERE group_id = church_groups.id) AS member_ids,
               (SELECT COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on)), '[]'::json) FROM group_members gm WHERE gm.group_id=church_groups.id) AS member_details`,
@@ -140,6 +144,132 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const result = await pool!.query("DELETE FROM church_groups WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
       return { deleted: true };
+    });
+
+    routes.put<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/groups/:id/public-signup", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["enabled"], properties: { enabled: { type: "boolean" } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const existing = await pool!.query<{ source_system: string | null }>("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
+      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This group is managed by ChurchTools." });
+      const result = await pool!.query<{ public_signup_enabled: boolean; public_signup_token: string | null }>(
+        `UPDATE church_groups SET public_signup_enabled=$3,
+           public_signup_token=CASE WHEN $3 THEN COALESCE(public_signup_token,$4::uuid) ELSE NULL END, updated_at=now()
+         WHERE id=$1 AND department_id=$2 RETURNING public_signup_enabled,public_signup_token`,
+        [request.params.id, departmentId, request.body.enabled, randomUUID()],
+      );
+      return { enabled: result.rows[0].public_signup_enabled, ...(result.rows[0].public_signup_token ? { token: result.rows[0].public_signup_token } : {}) };
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/groups/:id/join-requests", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query(
+        `SELECT id,group_id AS "groupId",first_name AS "firstName",last_name AS "lastName",email,status,created_at AS "createdAt"
+           FROM group_join_requests WHERE group_id=$1 AND department_id=$2 AND status='pending'
+          ORDER BY created_at,id`,
+        [request.params.id, departmentId],
+      );
+      return result.rows;
+    });
+
+    routes.put<{ Params: { id: string; requestId: string }; Body: { decision: "approved" | "declined"; contactId?: string } }>("/api/groups/:id/join-requests/:requestId", { schema: {
+      params: { type: "object", required: ["id", "requestId"], properties: { id: { type: "string", format: "uuid" }, requestId: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["decision"], properties: { decision: { type: "string", enum: ["approved", "declined"] }, contactId: { type: "string", format: "uuid" } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const group = await client.query<{ id: string; source_system: string | null }>("SELECT id,source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+        if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by ChurchTools." }); }
+        const joinRequest = await client.query<{ id: string; first_name: string; last_name: string; email: string }>(
+          "SELECT id,first_name,last_name,email FROM group_join_requests WHERE id=$1 AND group_id=$2 AND department_id=$3 AND status='pending' FOR UPDATE",
+          [request.params.requestId, request.params.id, departmentId],
+        );
+        if (!joinRequest.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This join request is no longer pending." }); }
+        let contactId: string | null = null;
+        if (request.body.decision === "approved") {
+          if (request.body.contactId) {
+            const selected = await client.query<{ id: string }>("SELECT id FROM contacts WHERE id=$1 AND department_id=$2 AND lower(email)=lower($3)", [request.body.contactId, departmentId, joinRequest.rows[0].email]);
+            if (!selected.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a directory person with the same email address, or leave this blank to create a visitor record." }); }
+            contactId = selected.rows[0].id;
+          } else {
+            const matching = await client.query<{ id: string }>("SELECT id FROM contacts WHERE department_id=$1 AND lower(email)=lower($2) ORDER BY id LIMIT 2", [departmentId, joinRequest.rows[0].email]);
+            if (matching.rows.length > 1) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "More than one person uses this email. Select the matching person explicitly before approving." }); }
+            contactId = matching.rows[0]?.id ?? null;
+            if (!contactId) {
+              const created = await client.query<{ id: string }>(
+                `INSERT INTO contacts (id,department_id,first_name,last_name,email,status) VALUES ($1,$2,$3,$4,$5,'visitor') RETURNING id`,
+                [randomUUID(), departmentId, joinRequest.rows[0].first_name, joinRequest.rows[0].last_name, joinRequest.rows[0].email],
+              );
+              contactId = created.rows[0].id;
+            }
+          }
+          await client.query("INSERT INTO group_members (group_id,contact_id,role,status,joined_on) VALUES ($1,$2,'Member','active',CURRENT_DATE) ON CONFLICT (group_id,contact_id) DO NOTHING", [request.params.id, contactId]);
+        }
+        await client.query(
+          "UPDATE group_join_requests SET status=$3,contact_id=$4,reviewed_at=now(),reviewed_by=$5 WHERE id=$1 AND department_id=$2",
+          [request.params.requestId, departmentId, request.body.decision, contactId, request.authenticatedUser!.id],
+        );
+        await client.query("COMMIT");
+        realtime.publish("core:groups:changed", departmentId, { groupId: request.params.id, requestId: request.params.requestId, action: request.body.decision });
+        return { status: request.body.decision, ...(contactId ? { contactId } : {}) };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+
+    routes.get<{ Params: { token: string } }>("/api/public/group-signups/:token", { schema: {
+      params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
+    } }, async (request, reply) => {
+      if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
+      const result = await pool!.query<{ name: string; description: string }>(
+        "SELECT name,description FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS DISTINCT FROM 'churchtools'",
+        [request.params.token],
+      );
+      if (!result.rowCount) return reply.code(404).send({ error: "This group registration link is unavailable." });
+      return { name: result.rows[0].name, description: result.rows[0].description };
+    });
+
+    routes.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string } }>("/api/public/group-signups/:token", { schema: {
+      params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email"], properties: { firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" } } },
+    } }, async (request, reply) => {
+      if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
+      const firstName = request.body.firstName.trim();
+      const lastName = request.body.lastName.trim();
+      const email = request.body.email.trim().toLocaleLowerCase();
+      if (!firstName || !lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
+      const group = await pool!.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS DISTINCT FROM 'churchtools'", [request.params.token]);
+      if (!group.rowCount) return reply.code(404).send({ error: "Registration is closed for this group." });
+      const existing = await pool!.query("SELECT 1 FROM group_join_requests WHERE group_id=$1 AND lower(email)=lower($2) AND status='pending'", [group.rows[0].id, email]);
+      if (existing.rowCount) return reply.code(409).send({ error: "A request from this email is already waiting for review." });
+      const member = await pool!.query(
+        `SELECT 1 FROM group_members membership JOIN contacts person ON person.id=membership.contact_id
+          WHERE membership.group_id=$1 AND lower(person.email)=lower($2) AND membership.status='active'`,
+        [group.rows[0].id, email],
+      );
+      if (member.rowCount) return reply.code(409).send({ error: "This email is already connected to an active group member." });
+      try {
+        await pool!.query(
+          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email) VALUES ($1,$2,$3,$4,$5,$6)",
+          [randomUUID(), group.rows[0].department_id, group.rows[0].id, firstName, lastName, email],
+        );
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A request from this email is already waiting for review." });
+        throw error;
+      }
+      realtime.publish("core:groups:changed", group.rows[0].department_id, { groupId: group.rows[0].id, action: "join-requested" });
+      return reply.code(201).send({ status: "pending" as const });
     });
 
     routes.get<{ Params: { id: string } }>("/api/groups/:id/meetings", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
