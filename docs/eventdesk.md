@@ -25,6 +25,8 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Track reserved, checked-out, and returned quantities. The Warehouse section provides printable job pick lists and barcode scanning for each unit checked out or returned.
 - Schedule workshop maintenance for all or part of an equipment item's quantity; overlapping job bookings and maintenance windows share the same availability check.
 - Open repair and inspection tickets for catalog items or individual serialised units, assign a staff owner, record diagnosis, parts, work, labour and parts costs, and attach service documents. Active tickets remove stock from availability. Recurring inspection schedules generate tickets when due, show overdue dates, and can email the assigned schedule owner a reminder during the week before the due date.
+- Create supplier purchase requests linked to a job or general stock, route orders through finance approval, track line-level ordered/received/cancelled quantities and delivery dates, and receive catalog equipment into the default warehouse. Attach supplier documents and review the status audit trail.
+- Reserve external equipment from a supplier against a job and catalog item, allocate it to bookings when owned warehouse stock is short, and track dispatch, partial returns, late supplier charges, and return notes. Sub-rental and purchase commitments contribute to the job's projected supply cost without silently increasing owned stock.
 - Open repair and inspection tickets for catalog items or individual serialised units, assign a staff owner, track diagnosis, parts, work, labour and parts costs, and attach service documents. Open tickets remove stock from availability; completing or cancelling a ticket releases its maintenance hold. Recurring inspection schedules generate service tickets when due and keep a service history.
 - Request crew positions, optionally assign a person from the location's people directory, and prevent overlapping assignments.
 - Maintain separate freelancer profiles with skills, contact details, and default rates. Record unavailable periods; EventDesk rejects assignments that overlap an unavailable period or another assigned job.
@@ -44,5 +46,4 @@ EventDesk uses the shared [Resend email API](https://resend.com/docs/api-referen
 
 These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
-- Sub-rentals and purchases.
 - Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.

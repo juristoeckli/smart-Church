@@ -5,6 +5,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions } from "./documents.js";
 import { startEventDeskReminderWorker } from "./reminders.js";
 import { startEventDeskInspectionWorker } from "./inspections.js";
+import { registerEventDeskSupplyRoutes } from "./supply.js";
 
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
@@ -29,6 +30,26 @@ const jobSchema = {
 const jobStatuses = ["lead", "quoted", "confirmed", "in_progress", "completed", "cancelled"] as const;
 const bookingStatuses = ["reserved", "checked_out", "returned", "cancelled"] as const;
 const crewStatuses = ["requested", "assigned", "invited", "confirmed", "declined"] as const;
+
+type SubrentalAllocation = { subrentalId: string; quantity: number };
+async function planSubrentalCoverage(client: PoolClient, departmentId: string, jobId: string, assetId: string, startsAt: Date | string, endsAt: Date | string, needed: number): Promise<SubrentalAllocation[] | null> {
+  if (needed <= 0) return [];
+  const sources = await client.query("SELECT id,quantity,quantity_returned FROM eventdesk_subrentals WHERE department_id=$1 AND job_id=$2 AND asset_id=$3 AND status IN ('reserved','checked_out','partially_returned') AND starts_at<=$4 AND ends_at>=$5 ORDER BY starts_at,id FOR UPDATE", [departmentId, jobId, assetId, startsAt, endsAt]);
+  let remaining = needed;
+  const plan: SubrentalAllocation[] = [];
+  for (const source of sources.rows) {
+    const allocated = await client.query("SELECT coalesce(sum(quantity),0)::int AS quantity FROM eventdesk_subrental_allocations WHERE department_id=$1 AND subrental_id=$2", [departmentId, source.id]);
+    const available = Math.max(0, Number(source.quantity) - Number(source.quantity_returned) - Number(allocated.rows[0].quantity));
+    const take = Math.min(remaining, available);
+    if (take > 0) plan.push({ subrentalId: source.id, quantity: take });
+    remaining -= take;
+    if (remaining === 0) return plan;
+  }
+  return null;
+}
+async function saveSubrentalCoverage(client: PoolClient, departmentId: string, jobAssetId: string, plan: SubrentalAllocation[]) {
+  for (const allocation of plan) await client.query("INSERT INTO eventdesk_subrental_allocations (id,department_id,subrental_id,job_asset_id,quantity) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (department_id,subrental_id,job_asset_id) DO UPDATE SET quantity=eventdesk_subrental_allocations.quantity+EXCLUDED.quantity", [randomUUID(), departmentId, allocation.subrentalId, jobAssetId, allocation.quantity]);
+}
 const customerSchema = {
   body: { type: "object", additionalProperties: false, required: ["kind", "name"], properties: {
     kind: { type: "string", enum: ["company", "person"] }, name: { type: "string", minLength: 1, maxLength: 160 },
@@ -65,6 +86,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   startEventDeskReminderWorker(app, pool);
   startEventDeskInspectionWorker(app, pool);
+  registerEventDeskSupplyRoutes(app, context);
   const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
   const emailFrom = () => process.env.SMART_CHURCH_EMAIL_FROM?.trim() || process.env.EVENTDESK_EMAIL_FROM?.trim() || "";
 
@@ -1016,39 +1038,47 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!job.rowCount || ["cancelled", "completed"].includes(job.rows[0].status)) { await rollback(client); return reply.code(404).send({ error: "An active job is required for an equipment booking." }); }
         const packageResult = await client.query("SELECT id,name,discount_bps FROM eventdesk_packages WHERE id=$1 AND department_id=$2 FOR SHARE", [request.body.packageId, departmentId]);
         if (!packageResult.rowCount) { await rollback(client); return reply.code(404).send({ error: "Package not found." }); }
-        const items = await client.query(`SELECT i.asset_id,i.quantity
+        const items = await client.query(`SELECT i.asset_id,i.quantity,coalesce(s.quantity,0)::int AS stock_quantity
           FROM eventdesk_package_items i JOIN eventdesk_assets a ON a.id=i.asset_id AND a.department_id=i.department_id
-          WHERE i.package_id=$1 AND i.department_id=$2 ORDER BY i.asset_id`, [request.body.packageId, departmentId]);
+          LEFT JOIN eventdesk_asset_warehouse_stock s ON s.department_id=i.department_id AND s.asset_id=i.asset_id AND s.warehouse_id=$3
+          WHERE i.package_id=$1 AND i.department_id=$2 ORDER BY i.asset_id`, [request.body.packageId, departmentId, defaultWarehouseId]);
         if (!items.rowCount) { await rollback(client); return reply.code(409).send({ error: "This package has no equipment items." }); }
         const assetIds = items.rows.map((item) => item.asset_id);
         const lockedAssets = await client.query("SELECT id,active,quantity,daily_rate_cents,name,category,supplier_id FROM eventdesk_assets WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE", [departmentId, assetIds]);
         if (lockedAssets.rowCount !== items.rowCount) { await rollback(client); return reply.code(409).send({ error: "A package item is no longer available in this location." }); }
         const lockedById = new Map(lockedAssets.rows.map((asset) => [asset.id, asset]));
+        const coveragePlans = new Map<string, SubrentalAllocation[]>();
         for (const item of items.rows) {
           const asset = lockedById.get(item.asset_id)!;
           const required = Number(item.quantity) * request.body.quantity;
           if (!asset.active) { await rollback(client); return reply.code(409).send({ error: `${asset.name} is inactive. Edit the package before using it.` }); }
-          if (required > Number(asset.quantity) || required > 100000) { await rollback(client); return reply.code(409).send({ error: `${asset.name} requires ${required} units, which exceeds its available stock limit.` }); }
+          if (required > 100000) { await rollback(client); return reply.code(409).send({ error: `${asset.name} requires too many units for one package booking.` }); }
           const reserved = await client.query(`WITH points AS (
             SELECT $3::timestamptz AS moment
             UNION SELECT greatest(j.starts_at,$3::timestamptz) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
-             WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at<$4 AND j.ends_at>$3
+             WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND b.warehouse_id=$5 AND j.status NOT IN ('cancelled','completed') AND j.starts_at<$4 AND j.ends_at>$3
             UNION SELECT greatest(m.starts_at,$3::timestamptz) FROM eventdesk_asset_maintenance m
              WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at<$4 AND m.ends_at>$3
           ) SELECT coalesce(max(
             (SELECT coalesce(sum(b.quantity),0) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
-              WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at<=p.moment AND j.ends_at>p.moment)
+              WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND b.warehouse_id=$5 AND j.status NOT IN ('cancelled','completed') AND j.starts_at<=p.moment AND j.ends_at>p.moment)
             +(SELECT coalesce(sum(m.quantity),0) FROM eventdesk_asset_maintenance m WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at<=p.moment AND m.ends_at>p.moment)
-          ),0)::int AS quantity FROM points p`, [departmentId, item.asset_id, job.rows[0].starts_at, job.rows[0].ends_at]);
+          ),0)::int AS quantity FROM points p`, [departmentId, item.asset_id, job.rows[0].starts_at, job.rows[0].ends_at, defaultWarehouseId]);
           const available = Number(item.stock_quantity) - Number(reserved.rows[0].quantity);
-          if (required > available) { await rollback(client); return reply.code(409).send({ error: `${asset.name}: only ${Math.max(0, available)} unit(s) are available for those dates; package requires ${required}.` }); }
+          if (required > available) {
+            const plan = await planSubrentalCoverage(client, departmentId, request.params.id, item.asset_id, job.rows[0].starts_at, job.rows[0].ends_at, required - Math.max(0, available));
+            if (!plan) { await rollback(client); return reply.code(409).send({ error: `${asset.name}: owned stock and reserved sub-rental equipment cannot cover the ${required} unit(s) required for those dates.` }); }
+            coveragePlans.set(item.asset_id, plan);
+          }
         }
         for (const item of items.rows) {
           const asset = lockedById.get(item.asset_id)!;
           const baseRate = await rentalRate(client, departmentId, job.rows[0].supplier_rate_card_id, job.rows[0].starts_at, asset);
           const packageRate = Math.round(baseRate * (10000 - Number(packageResult.rows[0].discount_bps)) / 10000);
+          const jobAssetId = randomUUID();
           await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents,warehouse_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)`, [randomUUID(), departmentId, request.params.id, item.asset_id, Number(item.quantity) * request.body.quantity, packageRate, defaultWarehouseId]);
+            VALUES ($1,$2,$3,$4,$5,$6,$7)`, [jobAssetId, departmentId, request.params.id, item.asset_id, Number(item.quantity) * request.body.quantity, packageRate, defaultWarehouseId]);
+          await saveSubrentalCoverage(client, departmentId, jobAssetId, coveragePlans.get(item.asset_id) ?? []);
         }
         await client.query("COMMIT");
         return reply.code(201).send({ packageName: packageResult.rows[0].name, itemCount: items.rowCount });
@@ -1084,10 +1114,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at, warehouseId]);
         const stock = await client.query("SELECT quantity FROM eventdesk_asset_warehouse_stock WHERE department_id=$1 AND asset_id=$2 AND warehouse_id=$3 FOR UPDATE", [departmentId, request.body.assetId, warehouseId]);
         const available = Number(stock.rows[0]?.quantity ?? 0) - Number(reserved.rows[0].quantity);
-        if (request.body.quantity > available) { await rollback(client); return reply.code(409).send({ error: `Only ${Math.max(0, available)} unit(s) are available for those dates.` }); }
+        let coveragePlan: SubrentalAllocation[] = [];
+        if (request.body.quantity > available) {
+          const plan = await planSubrentalCoverage(client, departmentId, request.params.id, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at, request.body.quantity - Math.max(0, available));
+          if (!plan) { await rollback(client); return reply.code(409).send({ error: `Only ${Math.max(0, available)} owned unit(s) and the unallocated sub-rental equipment are available for those dates.` }); }
+          coveragePlan = plan;
+        }
         const dailyRate = await rentalRate(client, departmentId, job.rows[0].supplier_rate_card_id, job.rows[0].starts_at, asset.rows[0]);
         const result = await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents,warehouse_id)
           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [randomUUID(), departmentId, request.params.id, request.body.assetId, request.body.quantity, dailyRate, warehouseId]);
+        await saveSubrentalCoverage(client, departmentId, result.rows[0].id, coveragePlan);
         await client.query("COMMIT");
         return reply.code(201).send({ id: result.rows[0].id });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
@@ -1221,10 +1257,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "inventory_manage");
       if (!departmentId) return reply;
-      const result = await pool!.query(`UPDATE eventdesk_job_assets SET status=$3,
-        checked_out_quantity=CASE WHEN $3='checked_out' THEN quantity WHEN $3 IN ('returned','cancelled','reserved') THEN 0 ELSE checked_out_quantity END
-        WHERE id=$1 AND department_id=$2 AND NOT ($3='cancelled' AND checked_out_quantity>0) RETURNING id`, [request.params.id, departmentId, request.body.status]);
-      return result.rowCount ? { id: request.params.id, status: request.body.status } : reply.code(409).send({ error: "Equipment booking not found or checked-out units must be checked in first." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query(`UPDATE eventdesk_job_assets SET status=$3,
+          checked_out_quantity=CASE WHEN $3='checked_out' THEN quantity WHEN $3 IN ('returned','cancelled','reserved') THEN 0 ELSE checked_out_quantity END
+          WHERE id=$1 AND department_id=$2 AND NOT ($3='cancelled' AND checked_out_quantity>0) RETURNING id`, [request.params.id, departmentId, request.body.status]);
+        if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Equipment booking not found or checked-out units must be checked in first." }); }
+        if (["returned", "cancelled"].includes(request.body.status)) await client.query("DELETE FROM eventdesk_subrental_allocations WHERE department_id=$1 AND job_asset_id=$2", [departmentId, request.params.id]);
+        await client.query("COMMIT");
+        return { id: request.params.id, status: request.body.status };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Body: { jobId: string; barcode: string; action: "out" | "in" } }>("/api/eventdesk/warehouse/scan", { schema: { body: {
