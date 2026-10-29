@@ -17,3 +17,29 @@ with the module-prefixed variables in `.env.example`.
 
 The generic `streaming.example.json` remains available as a template for other
 sites. This module's settings are specific to the Steffisburg deployment.
+
+Server administrators can edit router, encoder, and device IP addresses for a
+location under Settings → Modules → Video & streaming. The first time the
+settings are opened, the module captures the existing private configuration
+addresses as that location's defaults. Saved address overrides are kept in the
+module's database table and applied to worker requests; selecting **Reset to
+defaults** restores the captured values.
+
+The Video overview shows the three Steffisburg encoders, warns when a remote
+encoder is live, and provides power-cycle controls for the Seewinkel and
+Sonnenhof Shelly Pro 1 relays. Planned streams are stored by this module and
+use the current or next service's title, speaker, theme, and time.
+
+YouTube scheduling is optional. To enable it, create an OAuth 2.0 web client in
+Google Cloud and enable the YouTube Data API v3. Enter the OAuth Client ID,
+Client Secret, and redirect URL in Settings → Modules → Video & streaming, then
+register the exact URL shown there as an authorized redirect URI in Google Cloud.
+The module suggests the callback URL based on the current Smart-Church origin.
+The module generates a random token encryption key on first start and stores it
+in the API's protected persistent data volume. No separate encryption key setup
+is required. The module encrypts the client secret and channel refresh token
+before storing them. A user with stream administrator access can then connect the channel from
+Video → Overview. Creating a planned
+stream schedules a YouTube broadcast with the selected visibility; **Control
+in Studio** opens that broadcast directly. The module does not change an
+encoder's stream key or start the broadcast.

@@ -6,7 +6,7 @@ import "./file-storage.css";
 const FileStoragePage = lazy(() => import("./FileStorageModule").then(({ FileStorageModule }) => ({ default: FileStorageModule })));
 
 function FileStorageModule(context: ModuleContext) {
-  return <FileStoragePage departmentId={context.departmentId} csrfToken={context.csrfToken} canManage={context.canManageSite || (context.department.modulePermissions?.["file-storage"] ?? []).includes("manage")} />;
+  return <FileStoragePage departmentId={context.departmentId} csrfToken={context.csrfToken} canManage={context.canManageSite || (context.department.modulePermissions?.["file-storage"] ?? []).includes("manage")} realtime={context.realtime} />;
 }
 
 export const moduleRegistration: ModuleRegistration = {

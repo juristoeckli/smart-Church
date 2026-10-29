@@ -52,6 +52,8 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
+  const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
+  const emailFrom = () => process.env.SMART_CHURCH_EMAIL_FROM?.trim() || process.env.EVENTDESK_EMAIL_FROM?.trim() || "";
 
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, permission: Permission = "view") {
@@ -173,7 +175,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         packages: packages.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, items: row.items })),
         documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, relatedDocumentId: row.related_document_id, relatedDocumentNumber: row.related_document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, creditedCents: row.credited_cents, pendingCreditCents: row.pending_credit_cents, payments: row.payments })),
         documentDeliveries: deliveries.rows.map((row) => ({ id: row.id, documentId: row.document_id, recipientEmail: row.recipient_email, subject: row.subject, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
-        emailDelivery: { configured: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.EVENTDESK_EMAIL_FROM?.trim()), from: process.env.EVENTDESK_EMAIL_FROM?.trim() ?? "" },
+        emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
         documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "" },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
       };
@@ -375,9 +377,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "finance_manage");
       if (!departmentId) return reply;
-      const apiKey = process.env.RESEND_API_KEY?.trim();
-      const from = process.env.EVENTDESK_EMAIL_FROM?.trim();
-      if (!apiKey || !from) return reply.code(503).send({ error: "Email delivery is not configured. Set RESEND_API_KEY and EVENTDESK_EMAIL_FROM on the Smart-Church server." });
+      const apiKey = resendApiKey();
+      const from = emailFrom();
+      if (!apiKey || !from) return reply.code(503).send({ error: "Email delivery is not configured. Set SMART_CHURCH_RESEND_API_KEY and SMART_CHURCH_EMAIL_FROM on the Smart-Church server." });
       const recipientEmail = request.body.recipientEmail.trim().toLocaleLowerCase("en-US");
       const subject = request.body.subject.trim();
       if (!subject) return reply.code(400).send({ error: "Enter an email subject." });
@@ -929,9 +931,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "crew_manage");
       if (!departmentId) return reply;
-      const apiKey = process.env.RESEND_API_KEY?.trim();
-      const from = process.env.EVENTDESK_EMAIL_FROM?.trim();
-      if (!apiKey || !from) return reply.code(503).send({ error: "Email delivery is not configured. Set RESEND_API_KEY and EVENTDESK_EMAIL_FROM on the Smart-Church server." });
+      const apiKey = resendApiKey();
+      const from = emailFrom();
+      if (!apiKey || !from) return reply.code(503).send({ error: "Email delivery is not configured. Set SMART_CHURCH_RESEND_API_KEY and SMART_CHURCH_EMAIL_FROM on the Smart-Church server." });
       const data = await pool!.query(`SELECT c.id,c.status,c.freelancer_id,f.name,f.email,f.active,j.title,j.starts_at,j.ends_at,j.venue,j.status AS job_status
         FROM eventdesk_job_crew c JOIN eventdesk_freelancers f ON f.id=c.freelancer_id AND f.department_id=c.department_id
         JOIN eventdesk_jobs j ON j.id=c.job_id AND j.department_id=c.department_id

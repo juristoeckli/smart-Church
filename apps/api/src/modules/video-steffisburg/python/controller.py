@@ -1,5 +1,7 @@
 """Local livestream controller. Python 3.10+, standard library only."""
 import concurrent.futures
+import copy
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -19,11 +21,65 @@ from videohub import mutate as videohub_mutate, request as videohub_request
 import routing_presets
 from routing_history import RoutingHistory, EXTERNAL
 
+DEVICE_ADDRESS_OVERRIDES = {}
+DEVICE_ADDRESS_OVERRIDES_LOCK = threading.Lock()
+
+def set_device_address_overrides(department_id, addresses):
+    if not isinstance(addresses, list) or len(addresses) > 500:
+        raise ValueError('Invalid device address settings')
+    normalized = []
+    seen = set()
+    for item in addresses:
+        if not isinstance(item, dict):
+            raise ValueError('Invalid device address setting')
+        site_id = item.get('siteId')
+        target_type = item.get('targetType')
+        target_id = item.get('targetId', '')
+        address = item.get('ip')
+        if (not isinstance(site_id, str) or not site_id or len(site_id) > 80 or
+                target_type not in ('router', 'encoder', 'device') or
+                not isinstance(target_id, str) or len(target_id) > 80 or
+                not isinstance(address, str) or len(address) > 45):
+            raise ValueError('Invalid device address setting')
+        if address:
+            try:
+                ipaddress.ip_address(address)
+            except ValueError:
+                raise ValueError('Enter a valid IP address') from None
+        key = (site_id, target_type, target_id)
+        if key in seen:
+            raise ValueError('Duplicate device address setting')
+        seen.add(key)
+        normalized.append({'siteId': site_id, 'targetType': target_type, 'targetId': target_id, 'ip': address})
+    with DEVICE_ADDRESS_OVERRIDES_LOCK:
+        DEVICE_ADDRESS_OVERRIDES[department_id] = normalized
+
+def apply_device_address_overrides(config):
+    with DEVICE_ADDRESS_OVERRIDES_LOCK:
+        overrides = copy.deepcopy(DEVICE_ADDRESS_OVERRIDES)
+    for site in config.get('sites', []):
+        department_id = site.get('department_id')
+        if department_id not in overrides:
+            continue
+        for item in overrides[department_id]:
+            if item['siteId'] != site.get('id'):
+                continue
+            if item['targetType'] == 'router' and not item['targetId']:
+                site['router_ip'] = item['ip']
+                continue
+            collection = 'encoders' if item['targetType'] == 'encoder' else 'devices'
+            target = next((entry for entry in site.get(collection, []) if entry.get('id') == item['targetId']), None)
+            if target:
+                target['ip'] = item['ip']
+
 def load_config():
     config = json.loads(Path(os.environ['STREAMING_CONFIG_FILE']).read_text(encoding='utf-8-sig'))
     for site in config.get('sites', []):
         if site.get('department_id') == '$SMART_CHURCH_DEPARTMENT_ID':
             site['department_id'] = os.environ.get('SMART_CHURCH_DEPARTMENT_ID', '00000000-0000-4000-8000-000000000001')
+    apply_device_address_overrides(config)
+    site_order = {'gfc-steffisburg': 0, 'main': 1, 'sonnenhof': 2}
+    config.get('sites', []).sort(key=lambda site: (site_order.get(site.get('id'), len(site_order)), (site.get('name') or '').casefold()))
     for key, default, minimum, maximum in [('poll_interval_seconds', 5, 1, 300), ('timeout_seconds', 2, .2, 30)]:
         value = config.setdefault(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum:

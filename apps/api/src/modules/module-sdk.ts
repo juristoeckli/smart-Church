@@ -1,8 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { LocationPermission } from "@smart-church/contracts";
+import type { ManagedWorkerDiagnostics } from "../runtime-diagnostics.js";
 
 export interface ModuleServerContext {
+  realtime: {
+    publish: (topic: string, departmentId: string, payload?: unknown) => void;
+    onMessage: (topic: string, handler: (context: { userId: string; departmentId: string }, payload: unknown) => void | Promise<void>) => () => void;
+  };
+  workers: {
+    register: (name: string, getDiagnostics: () => ManagedWorkerDiagnostics) => () => void;
+  };
   pool: Pool | null;
   isDatabaseReady: () => boolean;
   getDefaultDepartmentId: () => string;
@@ -14,8 +22,15 @@ export interface ModuleServerContext {
   } | null;
 }
 
+export interface ModuleLoaderContext extends Omit<ModuleServerContext, "workers"> {
+  workers: {
+    register: (id: string, name: string, getDiagnostics: () => ManagedWorkerDiagnostics) => () => void;
+  };
+}
+
 export interface ServerModuleManifest {
   id: string;
+  name?: string;
   serverEntry?: string;
 }
 
@@ -60,7 +75,7 @@ function isolateOptionalModule(instance: FastifyInstance, moduleId: string): Fas
   });
 }
 
-export async function registerServerModules(app: FastifyInstance, context: ModuleServerContext) {
+export async function registerServerModules(app: FastifyInstance, context: ModuleLoaderContext) {
   const { readdir, readFile } = await import("node:fs/promises");
   const { dirname, join, resolve, sep } = await import("node:path");
   const { fileURLToPath, pathToFileURL } = await import("node:url");
@@ -74,12 +89,44 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
       const manifest = JSON.parse(await readFile(join(moduleRoot, "manifest.json"), "utf8")) as ServerModuleManifest;
       if (!manifest.serverEntry) continue;
       if (manifest.id !== directory.name || !/^[a-z0-9][a-z0-9-]*$/.test(manifest.id)) throw new Error("The module ID must match its folder name and use lowercase letters, numbers, and hyphens.");
+      if (context.pool && context.isDatabaseReady()) {
+        const migrationsRoot = join(moduleRoot, "migrations");
+        let migrationFiles: string[] = [];
+        try {
+          migrationFiles = (await readdir(migrationsRoot)).filter((file) => /^\d+_[a-z0-9_-]+\.sql$/.test(file)).sort();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+        for (const file of migrationFiles) {
+          const version = `${manifest.id}:${file}`;
+          const client = await context.pool.connect();
+          try {
+            await client.query("BEGIN");
+            await client.query("SELECT pg_advisory_xact_lock(hashtext('smart-church-module-migrations'))");
+            const applied = await client.query("SELECT version FROM schema_migrations WHERE version = $1", [version]);
+            if (!applied.rowCount) {
+              await client.query(await readFile(join(migrationsRoot, file), "utf8"));
+              await client.query("INSERT INTO schema_migrations (version) VALUES ($1)", [version]);
+            }
+            await client.query("COMMIT");
+          } catch (error) {
+            await client.query("ROLLBACK");
+            throw error;
+          } finally { client.release(); }
+        }
+      }
       if (manifest.serverEntry.includes("..") || !/^\.\/[-a-zA-Z0-9._]+\.ts$/.test(manifest.serverEntry)) throw new Error("The server entry must be a module-local TypeScript file.");
       const entry = resolve(moduleRoot, manifest.serverEntry.slice(2));
       if (!entry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The server entry must stay inside its module folder.");
       const loaded = await import(pathToFileURL(entry).href) as { registerModuleRoutes?: (app: FastifyInstance, context: ModuleServerContext) => void };
       if (typeof loaded.registerModuleRoutes !== "function") throw new Error("The server entry must export registerModuleRoutes(app, context).");
-      loaded.registerModuleRoutes(isolateOptionalModule(app, manifest.id), context);
+      const moduleContext: ModuleServerContext = {
+        ...context,
+        workers: {
+          register: (name, getDiagnostics) => context.workers.register(`${manifest.id}:${name}`, `${manifest.name ?? manifest.id} · ${name}`, getDiagnostics),
+        },
+      };
+      loaded.registerModuleRoutes(isolateOptionalModule(app, manifest.id), moduleContext);
       app.log.info({ module: manifest.id }, "Optional server module registered.");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;

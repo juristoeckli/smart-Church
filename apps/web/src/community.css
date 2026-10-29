@@ -58,6 +58,25 @@
 .community-member-row>span:last-child{display:flex;flex-direction:column;gap:3px}
 .community-member-row strong{color:var(--ink);font-size:10px}
 .community-member-row small{color:var(--muted);font-size:9px}
+.group-member-details-row{cursor:default;display:grid;grid-template-columns:14px 30px minmax(120px,1fr) minmax(170px,auto);align-items:center}
+.group-member-details-row>.community-member-avatar{display:grid;grid-column:2}
+.group-member-details-row>.group-member-person{grid-column:3}
+.group-member-person{display:flex;flex-direction:column;gap:3px;min-width:0}
+.group-membership-controls{display:flex;align-items:center;gap:6px;grid-column:4}
+.group-membership-controls input,.group-membership-controls select{min-width:86px;max-width:130px;min-height:30px;padding:5px 7px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:9px}
+.group-membership-controls small{white-space:nowrap}
+.group-attendance-section{border-top:1px solid var(--line)}
+.group-meeting-form{display:grid;grid-template-columns:1fr 1.4fr auto;align-items:end;gap:10px;padding:12px 20px}
+.group-meeting-form label,.group-meeting-picker{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:10px}
+.group-meeting-form input,.group-meeting-picker select,.group-attendance-list select{min-height:34px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit}
+.group-meeting-form .button{height:34px}
+.group-meeting-help{grid-column:1/-1;color:var(--muted);font-size:9px}
+.group-meeting-picker{padding:0 20px 10px}
+.group-attendance-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 20px;color:var(--muted);font-size:10px}
+.group-attendance-heading .button{height:30px;padding:0 9px;font-size:9px}
+.group-attendance-list{max-height:360px;overflow:auto;padding:0 12px 12px}
+.group-attendance-list .community-member-row>span:nth-child(2){flex:1}
+.group-attendance-list select{min-width:110px;min-height:30px;padding:5px 7px;font-size:10px}
 .community-new-group{max-width:480px;margin:24px auto;padding:20px;display:flex;flex-direction:column;gap:13px}
 .community-new-group>.community-group-icon{width:42px;height:42px}
 .community-new-group h2{font-size:17px;color:var(--ink)}
@@ -104,7 +123,7 @@
 .community-row-action{width:32px;height:32px;display:grid;place-items:center;flex:0 0 auto;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted)}
 .community-row-action:hover{border-color:var(--line);background:var(--green-soft);color:var(--green)}
 .community-row-delete:hover{border-color:#e4b8bc;background:#fff0f1;color:#9b4a50}
-@media(max-width:800px){.community-groups-layout,.community-resources-layout{grid-template-columns:1fr}.community-group-options{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.community-group-form{grid-template-columns:1fr}.community-upcoming-item{grid-template-columns:85px minmax(0,1fr);gap:9px;padding:8px 0}.community-upcoming-item .event-kind{grid-column:2}.community-booking-form{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:800px){.community-groups-layout,.community-resources-layout{grid-template-columns:1fr}.community-group-options{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.community-group-form{grid-template-columns:1fr}.group-meeting-form{grid-template-columns:1fr}.group-member-details-row{grid-template-columns:14px 30px minmax(100px,1fr)}.group-membership-controls{grid-column:3;grid-row:2;flex-wrap:wrap}.community-upcoming-item{grid-template-columns:85px minmax(0,1fr);gap:9px;padding:8px 0}.community-upcoming-item .event-kind{grid-column:2}.community-booking-form{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:520px){.community-upcoming-list{padding-left:13px;padding-right:13px}.community-upcoming-item{grid-template-columns:70px minmax(0,1fr)}.community-upcoming-item .event-kind{display:none}.community-inline-actions{flex-wrap:wrap}}
 :root[data-theme="dark"] .community-group-form input,
 :root[data-theme="dark"] .community-group-form textarea,

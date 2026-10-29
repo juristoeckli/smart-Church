@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
 import { AudioLines, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Eye, EyeOff, FileMusic, FileUp, Folder, FolderPlus, GripVertical, ListMusic, Monitor, Music2, Pause, Play, Plus, Search, Settings2, SlidersHorizontal, Trash2, Upload, WandSparkles, X } from "lucide-react";
+import type { ModuleRealtime } from "../../module-registry";
 import "./presenter.css";
 
 type Dataset = { id: string; name: string; description: string; songCount: number; slideCount: number; builtIn: boolean };
@@ -51,7 +52,7 @@ const defaultLibraries = [
   { id: "singt-lower-third", name: "Singt lower third", icon: FileMusic },
 ];
 
-export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { canEdit: true, canPresent: true, canManageLayouts: true } }: { departmentId: string; csrfToken: string; capabilities?: { canEdit: boolean; canPresent: boolean; canManageLayouts: boolean } }) {
+export function PresenterWorkspace({ departmentId, csrfToken, realtime, capabilities = { canEdit: true, canPresent: true, canManageLayouts: true } }: { departmentId: string; csrfToken: string; realtime?: ModuleRealtime; capabilities?: { canEdit: boolean; canPresent: boolean; canManageLayouts: boolean } }) {
   const [datasetId, setDatasetId] = useState(defaultLibraries[0].id);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [sessions, setSessions] = useState<PresenterSession[]>([]);
@@ -196,9 +197,10 @@ export function PresenterWorkspace({ departmentId, csrfToken, capabilities = { c
       } catch (error) { if (!controller.signal.aborted) setNotice(error instanceof Error ? error.message : "Could not load Presenter sessions."); }
     };
     void refreshSessions();
-    const timer = window.setInterval(() => void refreshSessions(), 2000);
-    return () => { controller.abort(); window.clearInterval(timer); };
-  }, [requestHeaders]);
+    const unsubscribeChanged = realtime?.subscribe("module:presenter:changed", () => { void refreshSessions(); });
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", () => { void refreshSessions(); });
+    return () => { controller.abort(); unsubscribeChanged?.(); unsubscribeConnected?.(); };
+  }, [requestHeaders, realtime]);
 
   useEffect(() => {
     const controller = new AbortController();

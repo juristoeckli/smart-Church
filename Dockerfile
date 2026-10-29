@@ -10,13 +10,13 @@ COPY . .
 RUN pnpm --filter @smart-church/web build
 
 FROM build AS dev
-RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates iputils-ping \
   && rm -rf /var/lib/apt/lists/*
 ENV PYTHON_BINARY=python3
 
 FROM node:24-bookworm-slim AS api
 WORKDIR /workspace
-RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates iputils-ping \
   && rm -rf /var/lib/apt/lists/* \
   && corepack enable && corepack prepare pnpm@11.25.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

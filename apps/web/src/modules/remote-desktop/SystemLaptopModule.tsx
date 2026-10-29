@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Expand, Laptop, LoaderCircle, LogOut, MonitorUp, Volume2, VolumeX, WifiOff } from "lucide-react";
+import type { ModuleRealtime } from "../../module-registry";
 import "./system-laptop.css";
 
 interface GuacMouseState {}
@@ -19,6 +20,10 @@ interface GuacAudioContextFactory {
 interface GuacAudioPlayer {
   getSupportedTypes(): string[];
 }
+interface GuacInputStream { index: number; onblob: ((data: string) => void) | null; onend: (() => void) | null; sendAck(message: string, code: number): void; }
+interface GuacOutputStream { index: number; }
+interface GuacStringReader { ontext: ((text: string) => void) | null; onend: (() => void) | null; }
+interface GuacStringWriter { sendText(text: string): void; sendEnd(): void; }
 interface GuacDisplay {
   getElement(): HTMLElement;
   getWidth(): number;
@@ -33,6 +38,10 @@ interface GuacClient {
   sendSize(width: number, height: number): void;
   sendMouseState(state: GuacMouseState): void;
   sendKeyEvent(pressed: number, keysym: number): void;
+  createClipboardStream(mimetype: string): GuacOutputStream;
+  sendBlob(index: number, data: string): void;
+  endStream(index: number): void;
+  onclipboard: ((stream: GuacInputStream, mimetype: string) => void) | null;
   onaudio: ((stream: unknown, mimetype: string) => null) | null;
   onstatechange: ((state: number) => void) | null;
   onerror: ((status: { message?: string }) => void) | null;
@@ -48,6 +57,7 @@ interface GuacSession {
   tunnelUrl: string;
   libraryUrl: string;
 }
+interface RemoteDesktopDestination { id: string; name: string; host: string; port: number; protocol: "rdp" | "vnc" | "spice"; username: string; autologin: boolean; passwordConfigured: boolean; }
 declare global {
   interface Window {
     Guacamole?: {
@@ -57,6 +67,8 @@ declare global {
       Keyboard: new (element: HTMLElement) => GuacKeyboard;
       AudioContextFactory?: GuacAudioContextFactory;
       AudioPlayer: GuacAudioPlayer;
+      StringReader: new (stream: GuacInputStream) => GuacStringReader;
+      StringWriter: new (stream: GuacOutputStream) => GuacStringWriter;
     };
   }
 }
@@ -133,7 +145,7 @@ async function readApiResponse<T>(response: Response, fallback: string): Promise
   return result;
 }
 
-export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: string; csrfToken: string }) {
+export function SystemLaptopModule({ departmentId, csrfToken, realtime }: { departmentId: string; csrfToken: string; realtime?: ModuleRealtime }) {
   const displayRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GuacClient | null>(null);
@@ -141,6 +153,8 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
   const resizeTimerRef = useRef<number | null>(null);
   const lastSizeRef = useRef<{ width: number; height: number } | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const [destinations, setDestinations] = useState<RemoteDesktopDestination[]>([]);
+  const [selectedDestinationId, setSelectedDestinationId] = useState("");
   const [canControl, setCanControl] = useState(false);
   const [canTakeOver, setCanTakeOver] = useState(false);
   const [controllerActive, setControllerActive] = useState(false);
@@ -152,6 +166,12 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
   const [connecting, setConnecting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState("");
+  const [remoteClipboard, setRemoteClipboard] = useState("");
+  const [clipboardMessage, setClipboardMessage] = useState("");
+  const [autoClipboardSync, setAutoClipboardSync] = useState(false);
+  const lastClipboardSync = useRef("");
+  const autoClipboardSyncRef = useRef(false);
+  const selectedDestination = destinations.find((destination) => destination.id === selectedDestinationId);
 
   const disconnect = useCallback(() => {
     resizeObserverRef.current?.disconnect();
@@ -164,14 +184,56 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
     if (displayRef.current) displayRef.current.replaceChildren();
     setConnected(false);
     setConnecting(false);
+    setAutoClipboardSync(false);
   }, []);
+
+  useEffect(() => { autoClipboardSyncRef.current = autoClipboardSync; }, [autoClipboardSync]);
+
+  const sendClipboardToRemote = useCallback((text: string) => {
+    const client = clientRef.current;
+    const guac = window.Guacamole;
+    if (!client || !guac || !text) return;
+    const stream = client.createClipboardStream("text/plain");
+    const writer = new guac.StringWriter(stream);
+    writer.sendText(text);
+    writer.sendEnd();
+    lastClipboardSync.current = text;
+  }, []);
+
+  useEffect(() => {
+    if (!connected || !autoClipboardSync) return;
+    if (!navigator.clipboard?.readText) {
+      setClipboardMessage("This browser does not allow clipboard reading here.");
+      setAutoClipboardSync(false);
+      return;
+    }
+    let denied = false;
+    const syncLocalClipboard = async () => {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && text !== lastClipboardSync.current) sendClipboardToRemote(text);
+      } catch {
+        if (!denied) setClipboardMessage("Allow clipboard access in your browser to use automatic sync.");
+        denied = true;
+      }
+    };
+    void syncLocalClipboard();
+    const timer = window.setInterval(() => void syncLocalClipboard(), 1500);
+    return () => window.clearInterval(timer);
+  }, [connected, autoClipboardSync, sendClipboardToRemote]);
 
   useEffect(() => {
     const controller = new AbortController();
     const refresh = async () => {
       try {
-        const response = await fetch("/api/modules/system-laptop/status", { headers: { "x-department-id": departmentId }, signal: controller.signal });
-        const result = await readApiResponse<{ configured?: boolean; canControl?: boolean; canTakeOver?: boolean; controllerActive?: boolean; controllerStarting?: boolean; controllerBusy?: boolean }>(response, "Could not check System Laptop configuration.");
+        const statusUrl = new URL("/api/modules/remote-desktop/status", window.location.href);
+        if (selectedDestinationId) statusUrl.searchParams.set("destinationId", selectedDestinationId);
+        const response = await fetch(statusUrl, { headers: { "x-department-id": departmentId }, signal: controller.signal });
+        const result = await readApiResponse<{ configured?: boolean; canControl?: boolean; canTakeOver?: boolean; controllerActive?: boolean; controllerStarting?: boolean; controllerBusy?: boolean; destinations?: RemoteDesktopDestination[] }>(response, "Could not check Remote desktop configuration.");
+        const nextDestinations = result.destinations ?? [];
+        setDestinations(nextDestinations);
+        if (!selectedDestinationId && nextDestinations[0]) setSelectedDestinationId(nextDestinations[0].id);
+        if (selectedDestinationId && !nextDestinations.some((destination) => destination.id === selectedDestinationId)) setSelectedDestinationId(nextDestinations[0]?.id ?? "");
         setConfigured(Boolean(result.configured));
         setCanControl(Boolean(result.canControl));
         setCanTakeOver(Boolean(result.canTakeOver));
@@ -181,17 +243,19 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
       } catch (reason) {
         if (!controller.signal.aborted) {
           setConfigured(false);
-          setError(reason instanceof Error ? reason.message : "Could not check System Laptop configuration.");
+          setError(reason instanceof Error ? reason.message : "Could not check Remote desktop configuration.");
         }
       }
     };
     void refresh();
-    const interval = window.setInterval(() => { void refresh(); }, 5000);
+    const unsubscribeChanged = realtime?.subscribe("module:remote-desktop:changed", () => { void refresh(); });
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", () => { void refresh(); });
     return () => {
       controller.abort();
-      window.clearInterval(interval);
+      unsubscribeChanged?.();
+      unsubscribeConnected?.();
     };
-  }, [departmentId]);
+  }, [departmentId, realtime, selectedDestinationId]);
 
   useEffect(() => () => {
     resizeObserverRef.current?.disconnect();
@@ -206,12 +270,12 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
     setError("");
     setConnecting(true);
     try {
-      const response = await fetch("/api/modules/system-laptop/session", {
+      const response = await fetch("/api/modules/remote-desktop/session", {
         method: "POST",
         headers: requestHeaders(departmentId, csrfToken),
-        body: JSON.stringify({ ...currentDisplaySize(screenRef.current), ...(takeover ? { takeover: true } : {}) }),
+        body: JSON.stringify({ destinationId: selectedDestinationId, ...currentDisplaySize(screenRef.current), ...(takeover ? { takeover: true } : {}) }),
       });
-      const result = await readApiResponse<GuacSession>(response, "Could not open the System Laptop session.");
+      const result = await readApiResponse<GuacSession>(response, "Could not open the Remote desktop session.");
       setRole(result.role);
       await loadGuacamoleClient(result.libraryUrl);
       const guac = window.Guacamole;
@@ -227,6 +291,21 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
       const tunnel = new guac.WebSocketTunnel(tunnelUrl.toString());
       const client = new guac.Client(tunnel);
       clientRef.current = client;
+      client.onclipboard = (stream, mimetype) => {
+        if (mimetype !== "text/plain") {
+          stream.sendAck("Text clipboard only", 0x0100);
+          return;
+        }
+        const reader = new guac.StringReader(stream);
+        let text = "";
+        reader.ontext = (chunk) => { text += chunk; };
+        reader.onend = () => {
+          setRemoteClipboard(text);
+          if (autoClipboardSyncRef.current && navigator.clipboard?.writeText) {
+            void navigator.clipboard.writeText(text).then(() => { lastClipboardSync.current = text; }).catch(() => setClipboardMessage("Allow clipboard access in your browser to use automatic sync."));
+          }
+        };
+      };
       setAudioStreamStatus("");
       client.onaudio = (stream, mimetype) => {
         void stream;
@@ -272,7 +351,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
                   if (lastSizeRef.current?.width === size.width && lastSizeRef.current.height === size.height) return;
                   lastSizeRef.current = size;
                   client.sendSize(size.width, size.height);
-                  void fetch("/api/modules/system-laptop/size", {
+                  void fetch("/api/modules/remote-desktop/size", {
                     method: "POST",
                     headers: requestHeaders(departmentId, csrfToken),
                     body: JSON.stringify({ ...size, proxyTicket: result.proxyTicket }),
@@ -309,7 +388,7 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
       client.connect(query.toString());
     } catch (reason) {
       disconnect();
-      setError(reason instanceof Error ? reason.message : "Could not connect to the System Laptop.");
+      setError(reason instanceof Error ? reason.message : "Could not connect to the Remote desktop.");
     }
   };
 
@@ -318,17 +397,36 @@ export function SystemLaptopModule({ departmentId, csrfToken }: { departmentId: 
     if (target?.requestFullscreen) void target.requestFullscreen();
   };
 
+  async function copyRemoteClipboard() {
+    if (!navigator.clipboard?.writeText) { setClipboardMessage("Clipboard writing is not available in this browser."); return; }
+    try {
+      await navigator.clipboard.writeText(remoteClipboard);
+      setClipboardMessage("Remote text copied to your clipboard.");
+    } catch { setClipboardMessage("Allow clipboard access in your browser, then try again."); }
+  }
+
+  async function pasteLocalClipboard() {
+    if (!navigator.clipboard?.readText) { setClipboardMessage("Clipboard reading is not available in this browser."); return; }
+    try {
+      const text = await navigator.clipboard.readText();
+      setRemoteClipboard(text);
+      sendClipboardToRemote(text);
+      setClipboardMessage("Your clipboard was sent to the remote computer.");
+    } catch { setClipboardMessage("Allow clipboard access in your browser, then try again."); }
+  }
+
   return <section className="system-laptop-module">
     {error && <div className="system-laptop-error" role="alert"><WifiOff size={17} /><span>{error}</span></div>}
-    {configured === false && !error && <div className="system-laptop-setup"><Laptop size={30} /><strong>Remote desktop is not configured</strong><p>Ask the server administrator to configure the System Laptop gateway and private RDP connection settings.</p></div>}
+    {configured === false && !error && <div className="system-laptop-setup"><Laptop size={30} /><strong>{destinations.length ? "Choose a remote destination" : "Remote desktop is not configured"}</strong><p>{destinations.length ? "Select a destination to connect." : "Ask a server administrator to add a destination in Settings → Modules → Remote desktop destinations."}</p></div>}
 
-    <section className="system-laptop-screen" aria-label="System Laptop remote desktop">
-      <div className="system-laptop-toolbar"><div className="system-laptop-toolbar-title"><MonitorUp size={16} /><strong className="system-laptop-title">System Laptop</strong><span>AV control computer · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="system-laptop-toolbar-actions"><div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label={audioEnabled ? "Mute remote audio" : "Unmute remote audio"} aria-pressed={audioEnabled} title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "RDP audio playback"} onClick={() => void setRemoteAudioPlayback(!audioEnabled).then(setAudioEnabled)}>{audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />} {audioEnabled ? "Audio on" : "Audio off"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
+    <section className="system-laptop-screen" aria-label="Remote desktop">
+      <div className="system-laptop-toolbar"><div className="system-laptop-toolbar-title"><MonitorUp size={16} /><strong className="system-laptop-title">Remote desktop</strong>{destinations.length > 0 && <select className="remote-desktop-destination-picker" aria-label="Remote desktop destination" value={selectedDestinationId} disabled={connected || connecting} onChange={(event) => { disconnect(); setSelectedDestinationId(event.target.value); }}><option value="">Choose destination</option>{destinations.map((destination) => <option key={destination.id} value={destination.id}>{destination.name}</option>)}</select>}<span>{selectedDestination?.host ?? "Choose a destination"} · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="system-laptop-toolbar-actions"><div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label={audioEnabled ? "Mute remote audio" : "Unmute remote audio"} aria-pressed={audioEnabled} title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "Remote audio playback"} onClick={() => void setRemoteAudioPlayback(!audioEnabled).then(setAudioEnabled)}>{audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />} {audioEnabled ? "Audio on" : "Audio off"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
+      {connected && <section className="remote-desktop-clipboard" aria-label="Clipboard"><textarea value={remoteClipboard} onChange={(event) => setRemoteClipboard(event.target.value)} aria-label="Remote clipboard text" placeholder="Remote clipboard text appears here" /><div className="remote-desktop-clipboard-actions"><button className="button button-secondary" type="button" onClick={() => void copyRemoteClipboard()}>Copy from remote</button><button className="button button-secondary" type="button" onClick={() => void pasteLocalClipboard()}>Paste to remote</button><label><input type="checkbox" checked={autoClipboardSync} onChange={(event) => { setClipboardMessage(""); setAutoClipboardSync(event.target.checked); }} /> Auto-sync this session</label></div>{clipboardMessage && <small role="status">{clipboardMessage}</small>}</section>}
       <div ref={screenRef} className={`system-laptop-display ${connected ? "system-laptop-display-live" : ""} ${connected && role === "viewer" ? "system-laptop-display-viewer" : ""}`}>
         <div className="system-laptop-guac-mount" ref={displayRef} />
-        {configured && !connected && !connecting && <div className="system-laptop-launch"><span className="system-laptop-launch-icon"><Laptop size={25} /></span><strong>{controllerActive ? "Active remote session" : controllerStarting ? "Controller is connecting" : controllerBusy ? "Remote desktop is in use" : canControl ? "Connect to the System Laptop" : "Waiting for a controller"}</strong><p>{controllerActive ? "Watch in view-only mode, or take control and disconnect the current controller." : controllerStarting ? "The site administrator's session is starting. Try again shortly." : controllerBusy ? "The single remote desktop is currently controlled from another location." : canControl ? "Open Dante Controller on the AV computer to view or change routes." : "A site administrator must start the remote desktop. You can watch once the session is active."}</p>{controllerActive && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Watch session</button>}{controllerActive && canTakeOver && <button className="button button-secondary" type="button" onClick={() => void connect(true)}><MonitorUp size={15} /> Take control</button>}{!controllerActive && canControl && !controllerStarting && !controllerBusy && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Start remote session</button>}<small>{controllerActive ? "Taking control disconnects the current controller; viewers stay read-only." : controllerStarting ? "This module checks for the session automatically." : controllerBusy ? "Only one location can use the remote desktop at a time." : canControl ? "Keyboard and mouse input go to the remote computer." : "This module checks for an active session automatically."}</small></div>}
+        {configured && !connected && !connecting && selectedDestination && <div className="system-laptop-launch"><span className="system-laptop-launch-icon"><Laptop size={25} /></span><strong>{controllerActive ? `Active session · ${selectedDestination.name}` : controllerStarting ? "Controller is connecting" : controllerBusy ? "Another destination is in use" : canControl ? `Connect to ${selectedDestination.name}` : "Waiting for a controller"}</strong><p>{controllerActive ? "Watch in view-only mode, or take control and disconnect the current controller." : controllerStarting ? "The site administrator's session is starting. Try again shortly." : controllerBusy ? "Another remote desktop destination is currently being used." : canControl ? `Connect to ${selectedDestination.host} over ${selectedDestination.protocol.toUpperCase()}.` : "A site administrator must start this remote desktop. You can watch once the session is active."}</p>{controllerActive && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Watch session</button>}{controllerActive && canTakeOver && <button className="button button-secondary" type="button" onClick={() => void connect(true)}><MonitorUp size={15} /> Take control</button>}{!controllerActive && canControl && !controllerStarting && !controllerBusy && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Start remote session</button>}<small>{controllerActive ? "Taking control disconnects the current controller; viewers stay read-only." : controllerStarting ? "This module checks for the session automatically." : controllerBusy ? "Another destination is currently active." : canControl ? "Keyboard and mouse input go to the remote computer." : "This module checks for an active session automatically."}</small></div>}
         {connecting && <div className="system-laptop-launch"><LoaderCircle className="system-laptop-spinner" size={29} /><strong>Connecting to the AV computer…</strong><p>Remote sessions can take a few seconds to start.</p></div>}
-        {connected && <div className="system-laptop-connected-label" aria-hidden="true">{role === "viewer" ? "Watching System Laptop" : "Controlling System Laptop"}</div>}
+        {connected && <div className="system-laptop-connected-label" aria-hidden="true">{role === "viewer" ? "Watching Remote desktop" : "Controlling Remote desktop"}</div>}
       </div>
     </section>
   </section>;

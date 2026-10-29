@@ -39,14 +39,7 @@ After enabling it, a site administrator can grant EventDesk access levels in Peo
 
 ### Email delivery setup
 
-EventDesk uses the [Resend email API](https://resend.com/docs/api-reference/emails/send-email). Configure a Resend API key and a verified sender address on the Smart-Church server. For Docker deployments, add these values to the protected `.env` file; for local development, add them to `.env`:
-
-```dotenv
-RESEND_API_KEY=re_...
-EVENTDESK_EMAIL_FROM=Church Rentals <rentals@example.org>
-```
-
-Restart the API after changing environment values. Finance users can then download a branded PDF or email it from the document preview. Email delivery is optional; PDF download and browser printing work without a provider.
+EventDesk uses the shared [Resend email API](https://resend.com/docs/api-reference/emails/send-email). Configure `SMART_CHURCH_RESEND_API_KEY` and `SMART_CHURCH_EMAIL_FROM` on the Smart-Church server, using a verified sender address. The legacy `RESEND_API_KEY` and `EVENTDESK_EMAIL_FROM` names remain supported for existing deployments. Email delivery is optional; PDF download and browser printing work without a provider.
 
 ## Planned product areas
 

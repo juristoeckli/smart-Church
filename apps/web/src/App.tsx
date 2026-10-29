@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   Bell,
   Building2,
@@ -14,6 +14,7 @@ import {
   Link2,
   LogOut,
   Menu,
+  MessageCircle,
   Moon,
   Plus,
   Pencil,
@@ -29,12 +30,15 @@ import {
 import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, LocationPermission, PresenterPermission, SiteUser, UserPhoneLabel, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VideoPermission } from "@smart-church/contracts";
 import { Authentication, PasswordChangeRequired } from "./Authentication";
 import { ServicesEvents } from "./ServicesEvents";
+import { PublicEventRegistration } from "./PublicEventRegistration";
 import { Overview } from "./Overview";
 import { Groups } from "./Groups";
 import { BookableResources } from "./BookableResources";
-import { ModuleHost, ModuleIconHost, ModuleNavigationHost, moduleRegistryReady, registeredModules } from "./module-registry";
+import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, moduleRegistryReady, registeredModules } from "./module-registry";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
+import { RuntimeDiagnosticsPanel } from "./RuntimeDiagnosticsPanel";
+import { configureRealtime, isRealtimeConnected, sendRealtime, subscribeRealtime } from "./realtime";
 
 const navigation = [
   { label: "Overview", icon: LayoutDashboard },
@@ -74,6 +78,8 @@ function departmentFetch(input: RequestInfo | URL, init: RequestInit = {}, depar
 }
 
 type WorkspacePage = "Overview" | "People" | "Services & events" | "Groups" | "Resources" | "Settings" | `module:${string}`;
+type ChatNotification = { id: string; conversationId: string; author: string; body: string; receivedAt: number };
+const SYSTEM_NOTIFICATIONS_STORAGE_KEY = "smart-church-system-notifications";
 const modulePage = (id: string) => `module:${id}` as WorkspacePage;
 const moduleForPage = (page: WorkspacePage) => page.startsWith("module:") ? registeredModules.find((module) => module.id === page.slice("module:".length)) : undefined;
 function moduleAvailable(module: (typeof registeredModules)[number], department: DepartmentProfile, canManageSite: boolean) {
@@ -103,9 +109,9 @@ const workspacePageHashes: Record<WorkspacePage, string> = {
 function workspacePageFromHash(hash: string): WorkspacePage | null {
   const entry = Object.entries(workspacePageHashes).find(([, route]) => route === hash);
   if (entry) return entry[0] as WorkspacePage;
-  const oldModuleHash = { "#video-streaming": "video-steffisburg", "#module-video": "video-steffisburg", "#presenter": "presenter", "#sync": "sync", "#system-laptop": "system-laptop", "#file-storage": "file-storage" }[hash as "#video-streaming" | "#module-video" | "#presenter" | "#sync" | "#system-laptop" | "#file-storage"];
+  const oldModuleHash = { "#video-streaming": "video-steffisburg", "#module-video": "video-steffisburg", "#presenter": "presenter", "#sync": "sync", "#system-laptop": "remote-desktop", "#file-storage": "file-storage" }[hash as "#video-streaming" | "#module-video" | "#presenter" | "#sync" | "#system-laptop" | "#file-storage"];
   const parsedModuleId = hash.match(/^#module-([a-z0-9][a-z0-9-]*)$/)?.[1];
-  const moduleId = (parsedModuleId === "video" ? "video-steffisburg" : parsedModuleId) ?? oldModuleHash;
+  const moduleId = ({ video: "video-steffisburg", "system-laptop": "remote-desktop" } as Record<string, string>)[parsedModuleId ?? ""] ?? parsedModuleId ?? oldModuleHash;
   return moduleId && registeredModules.some((module) => module.id === moduleId) ? modulePage(moduleId) : null;
 }
 function workspacePageHash(page: WorkspacePage) {
@@ -119,7 +125,7 @@ function savedWorkspacePage(): WorkspacePage {
     if (saved === "File storage") return modulePage("file-storage");
     if (saved === "module:video") return modulePage("video-steffisburg");
     if (saved?.startsWith("module:") && registeredModules.some((module) => module.id === saved.slice("module:".length))) return saved as WorkspacePage;
-    const legacyModuleIds = { "Video & streaming": "video-steffisburg", Presenter: "presenter", Sync: "sync", "System Laptop": "system-laptop" } as Record<string, string>;
+    const legacyModuleIds = { "Video & streaming": "video-steffisburg", Presenter: "presenter", Sync: "sync", "System Laptop": "remote-desktop", "system-laptop": "remote-desktop", "module:system-laptop": "remote-desktop" } as Record<string, string>;
     if (saved && registeredModules.some((module) => module.id === legacyModuleIds[saved])) return modulePage(legacyModuleIds[saved]);
   } catch { /* Use the default page when local storage is unavailable. */ }
   return "People";
@@ -182,7 +188,7 @@ function generateInitialPassword() {
   return password.join("");
 }
 
-function App() {
+function WorkspaceApp() {
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     try {
       return localStorage.getItem("smart-church-theme") === "dark" ? "dark" : "light";
@@ -190,6 +196,14 @@ function App() {
       return "light";
     }
   });
+  const [systemNotificationsEnabled, setSystemNotificationsEnabled] = useState(() => {
+    try { return localStorage.getItem(SYSTEM_NOTIFICATIONS_STORAGE_KEY) === "true" && typeof Notification !== "undefined" && Notification.permission === "granted"; }
+    catch { return false; }
+  });
+  const [systemNotificationPermission, setSystemNotificationPermission] = useState<NotificationPermission>(() =>
+    typeof Notification === "undefined" ? "denied" : Notification.permission,
+  );
+  const [systemNotificationFeedback, setSystemNotificationFeedback] = useState("");
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -198,6 +212,15 @@ function App() {
   const [statusFilter, setStatusFilter] = useState<"all" | ContactStatus>("all");
   const [contactSort, setContactSort] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState<WorkspacePage>(() => workspacePageFromHash(window.location.hash) ?? savedWorkspacePage());
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [requestedChatConversationId, setRequestedChatConversationId] = useState<string | null>(null);
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
+  const [chatNotifications, setChatNotifications] = useState<ChatNotification[]>([]);
+  const deliveredSystemChatNotifications = useRef(new Set<string>());
+  const activeChatIdRef = useRef<string | null>(null);
+  const pageRef = useRef<WorkspacePage>(page);
+  activeChatIdRef.current = activeChatId;
+  pageRef.current = page;
   const [modulesReady, setModulesReady] = useState(false);
   const [moduleState, setModuleState] = useState<{ moduleId: string; departmentId: string; value: string }>({ moduleId: "", departmentId: "", value: "" });
   const [compactNavigation, setCompactNavigation] = useState(() => window.innerHeight < 900);
@@ -212,7 +235,13 @@ function App() {
   const [isBrandingOpen, setIsBrandingOpen] = useState(false);
   const [brandingDraft, setBrandingDraft] = useState<string | null>(null);
   const [isBrandingSaving, setIsBrandingSaving] = useState(false);
-  const [serverSettingsTab, setServerSettingsTab] = useState<"personal" | "location" | "switch" | "sites" | "users">("personal");
+  const [serverSettingsTab, setServerSettingsTab] = useState<"overview" | "personal" | "location" | "switch" | "sites" | "users" | "modules">("personal");
+  const [serviceStatus, setServiceStatus] = useState<{ api: "ok" | "unavailable"; database: "ok" | "unavailable" } | null>(null);
+  const [moduleManagementSiteId, setModuleManagementSiteId] = useState("");
+  const [moduleDraftIds, setModuleDraftIds] = useState<string[]>([]);
+  const [selectedModuleSettingsId, setSelectedModuleSettingsId] = useState("");
+  const [isModuleSaving, setIsModuleSaving] = useState(false);
+  const [moduleManagementFeedback, setModuleManagementFeedback] = useState("");
   const [department, setDepartment] = useState<DepartmentProfile>(defaultDepartment);
   const [departments, setDepartments] = useState<DepartmentProfile[]>([]);
   const [departmentDraft, setDepartmentDraft] = useState(defaultDepartment);
@@ -243,8 +272,135 @@ function App() {
   const [setupLocation, setSetupLocation] = useState("");
   const [authUnavailableMessage, setAuthUnavailableMessage] = useState("");
 
+  useEffect(() => {
+    configureRealtime(department.id, Boolean(authUser && !authUser.mustChangePassword));
+    return () => configureRealtime("", false);
+  }, [authUser?.id, authUser?.mustChangePassword, department.id]);
+
+  const moduleRealtime = useMemo(() => ({ subscribe: subscribeRealtime, isConnected: isRealtimeConnected, send: sendRealtime }), []);
+
+  const onActiveChatChange = useCallback((conversationId: string | null) => setActiveChatId(conversationId), []);
+  const onChatConversationOpened = useCallback((conversationId: string) => {
+    setRequestedChatConversationId((current) => current === conversationId ? null : current);
+  }, []);
+  const refreshCsrfToken = useCallback(async () => {
+    const response = await fetch("/api/auth/status", { cache: "no-store" });
+    const result = await response.json() as AuthStatus | { error?: string };
+    if (!response.ok || !("authenticated" in result) || !result.authenticated || !result.csrfToken || result.user?.id !== authUser?.id) {
+      throw new Error("Your sign-in expired. Refresh the page and sign in again.");
+    }
+    setCsrfToken(result.csrfToken);
+    return result.csrfToken;
+  }, [authUser?.id]);
+
   const logoSrc = logoDataUrl || defaultLogoUrl;
   const activeNavSection = page.startsWith("module:") ? "modules" : "core";
+
+  useEffect(() => {
+    if (!authUser || !department.id) {
+      setUnreadChatCount(0);
+      setChatNotifications([]);
+      return;
+    }
+    let cancelled = false;
+    let initialized = false;
+    const seenUnreadIds = new Set<string>();
+    async function refreshChatNotifications() {
+      try {
+        const response = await fetch("/api/modules/chat/conversations", { headers: { "x-department-id": department.id } });
+        const result = await response.json() as { conversations?: Array<{ id: string; unreadCount: number; latestUnreadMessage?: { id: string; body: string; author: string } | null }> };
+        if (!response.ok || !Array.isArray(result.conversations) || cancelled) return;
+        const conversations = result.conversations;
+        setUnreadChatCount(conversations.reduce((count, conversation) => count + conversation.unreadCount, 0));
+        const unread = conversations.flatMap((conversation) => conversation.latestUnreadMessage
+          ? [{ conversationId: conversation.id, ...conversation.latestUnreadMessage }]
+          : []);
+        if (!initialized) {
+          unread.forEach((message) => seenUnreadIds.add(message.id));
+          initialized = true;
+          return;
+        }
+        const notifications = unread.filter((message) => !seenUnreadIds.has(message.id)).map((message) => {
+          seenUnreadIds.add(message.id);
+          return { ...message, receivedAt: Date.now() };
+        }).filter((message) => !(pageRef.current === "module:chat" && activeChatIdRef.current === message.conversationId));
+        if (seenUnreadIds.size > 500) {
+          const recentIds = unread.map((message) => message.id);
+          seenUnreadIds.clear();
+          recentIds.forEach((id) => seenUnreadIds.add(id));
+        }
+        if (notifications.length) setChatNotifications((current) => [...current, ...notifications].slice(-3));
+      } catch { /* Chat alerts are best effort; the sidebar count refreshes when the API is available. */ }
+    }
+    void refreshChatNotifications();
+    const unsubscribeChanged = subscribeRealtime("module:chat:changed", () => { void refreshChatNotifications(); });
+    const unsubscribeConnected = subscribeRealtime("realtime:connected", () => { void refreshChatNotifications(); });
+    return () => { cancelled = true; unsubscribeChanged(); unsubscribeConnected(); };
+  }, [authUser?.id, csrfToken, department.id]);
+
+  useEffect(() => {
+    if (!chatNotifications.length) return;
+    const timer = window.setInterval(() => {
+      setChatNotifications((current) => current.filter((notification) => Date.now() - notification.receivedAt < 9000));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [chatNotifications.length > 0]);
+
+  useEffect(() => {
+    if (!systemNotificationsEnabled || systemNotificationPermission !== "granted" || !chatNotifications.length) return;
+    const deliveredIds: string[] = [];
+    for (const notification of chatNotifications) {
+      if (deliveredSystemChatNotifications.current.has(notification.id)) {
+        deliveredIds.push(notification.id);
+        continue;
+      }
+      try {
+        const systemNotification = new Notification(notification.author, {
+          body: notification.body,
+          tag: `smart-church-chat-${notification.id}`,
+        });
+        deliveredSystemChatNotifications.current.add(notification.id);
+        deliveredIds.push(notification.id);
+        systemNotification.onclick = () => {
+          window.focus();
+          setRequestedChatConversationId(notification.conversationId);
+          setPage(modulePage("chat"));
+          systemNotification.close();
+        };
+      } catch { /* Keep the in-app alert if the browser cannot display a system notification. */ }
+    }
+    if (deliveredIds.length) {
+      setChatNotifications((current) => current.filter((notification) => !deliveredIds.includes(notification.id)));
+    }
+    if (deliveredSystemChatNotifications.current.size > 500) deliveredSystemChatNotifications.current.clear();
+  }, [chatNotifications, systemNotificationPermission, systemNotificationsEnabled]);
+
+  async function updateSystemNotifications(enabled: boolean) {
+    setSystemNotificationFeedback("");
+    if (!enabled) {
+      setSystemNotificationsEnabled(false);
+      try { localStorage.setItem(SYSTEM_NOTIFICATIONS_STORAGE_KEY, "false"); } catch { /* The setting remains off until this page closes. */ }
+      return;
+    }
+    if (typeof Notification === "undefined" || !window.isSecureContext) {
+      setSystemNotificationFeedback("System notifications are not supported in this browser or connection.");
+      return;
+    }
+    let permission = Notification.permission;
+    if (permission === "default") {
+      try { permission = await Notification.requestPermission(); }
+      catch { permission = "denied"; }
+    }
+    setSystemNotificationPermission(permission);
+    if (permission !== "granted") {
+      setSystemNotificationsEnabled(false);
+      setSystemNotificationFeedback("Allow notifications for this site in your browser settings, then turn this on again.");
+      return;
+    }
+    setSystemNotificationsEnabled(true);
+    try { localStorage.setItem(SYSTEM_NOTIFICATIONS_STORAGE_KEY, "true"); }
+    catch { setSystemNotificationFeedback("System notifications are on for this session, but this browser could not save the preference."); }
+  }
 
   useEffect(() => {
     let active = true;
@@ -278,6 +434,23 @@ function App() {
       // The theme remains usable when storage is disabled.
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (page !== "Settings" || serverSettingsTab !== "overview") return;
+    let cancelled = false;
+    const refreshStatus = async () => {
+      try {
+        const response = await fetch("/api/health", { cache: "no-store" });
+        const result = await response.json() as { services?: { api?: string; database?: string } };
+        if (!cancelled) setServiceStatus({ api: response.ok ? "ok" : "unavailable", database: result.services?.database === "ok" ? "ok" : "unavailable" });
+      } catch {
+        if (!cancelled) setServiceStatus({ api: "unavailable", database: "unavailable" });
+      }
+    };
+    void refreshStatus();
+    const timer = window.setInterval(() => void refreshStatus(), 30000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [page, serverSettingsTab]);
 
   useEffect(() => {
     try { localStorage.setItem("smart-church-page", page); } catch { /* Keep the current page for this session. */ }
@@ -341,15 +514,22 @@ function App() {
     setIsLoading(true);
     setContacts([]);
     setLoadError("");
-    departmentFetch("/api/contacts", { signal: controller.signal }, department.id)
-      .then(async (response) => {
+    const refreshContacts = async () => {
+      try {
+        const response = await departmentFetch("/api/contacts", { signal: controller.signal }, department.id);
         const result = await response.json();
         if (!response.ok) throw new Error(result.error ?? "Could not load contacts.");
         setContacts(result as Contact[]);
-      })
-      .catch((error: unknown) => { if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : "Could not load contacts."); })
-      .finally(() => { if (!controller.signal.aborted) setIsLoading(false); });
-    return () => controller.abort();
+      } catch (error) {
+        if (!controller.signal.aborted) setLoadError(error instanceof Error ? error.message : "Could not load contacts.");
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
+    };
+    void refreshContacts();
+    const unsubscribe = subscribeRealtime("core:contacts:changed", () => { void refreshContacts(); });
+    const unsubscribeConnected = subscribeRealtime("realtime:connected", () => { void refreshContacts(); });
+    return () => { controller.abort(); unsubscribe(); unsubscribeConnected(); };
   }, [authUser, department.id]);
 
   useEffect(() => {
@@ -375,7 +555,7 @@ function App() {
         setDepartments(availableDepartments);
         let selectedId = "";
         try { selectedId = localStorage.getItem("smart-church-location") ?? ""; } catch { /* Use the first location when storage is unavailable. */ }
-        const accessibleDepartments = availableDepartments.filter((item) => item.role !== "unassigned");
+        const accessibleDepartments = availableDepartments.filter((item) => item.role !== "unassigned" || authUser.role === "server_admin");
         const selected = accessibleDepartments.find((item) => item.id === selectedId) ?? accessibleDepartments[0];
         if (selected) setDepartment(selected);
         else setDepartment(defaultDepartment);
@@ -509,7 +689,7 @@ function App() {
 
   function switchDepartment(id: string) {
     const selected = departments.find((item) => item.id === id);
-    if (!selected || selected.role === "unassigned") return;
+    if (!selected || (selected.role === "unassigned" && authUser?.role !== "server_admin")) return;
     setDepartment(selected);
     setDepartmentDraft(selected);
     setContacts([]);
@@ -565,6 +745,46 @@ function App() {
       setNotice(error instanceof Error ? error.message : "Could not add this location.");
     } finally {
       setIsDepartmentSaving(false);
+    }
+  }
+
+  function openModuleManagement() {
+    const site = departments.find((item) => item.id === department.id) ?? departments[0];
+    setModuleManagementSiteId(site?.id ?? "");
+    setModuleDraftIds(site?.enabledModules ?? []);
+    setModuleManagementFeedback("");
+    setSelectedModuleSettingsId("");
+    setServerSettingsTab("modules");
+  }
+
+  function changeModuleManagementSite(siteId: string) {
+    const site = departments.find((item) => item.id === siteId);
+    setModuleManagementSiteId(siteId);
+    setModuleDraftIds(site?.enabledModules ?? []);
+    setModuleManagementFeedback("");
+    setSelectedModuleSettingsId("");
+  }
+
+  async function saveModuleManagement() {
+    if (!moduleManagementSiteId) return;
+    setIsModuleSaving(true);
+    setModuleManagementFeedback("");
+    try {
+      const response = await fetch(`/api/departments/${encodeURIComponent(moduleManagementSiteId)}/modules`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ moduleIds: moduleDraftIds }),
+      });
+      const result = await response.json() as { id?: string; enabledModules?: string[]; error?: string };
+      if (!response.ok || !result.id) throw new Error(result.error ?? "Could not save module settings.");
+      setDepartments((current) => current.map((site) => site.id === result.id ? { ...site, enabledModules: result.enabledModules ?? [] } : site));
+      setDepartment((current) => current.id === result.id ? { ...current, enabledModules: result.enabledModules ?? [] } : current);
+      setModuleDraftIds(result.enabledModules ?? []);
+      setModuleManagementFeedback("Module settings saved.");
+    } catch (error) {
+      setModuleManagementFeedback(error instanceof Error ? error.message : "Could not save module settings.");
+    } finally {
+      setIsModuleSaving(false);
     }
   }
 
@@ -639,7 +859,8 @@ function App() {
       phoneNumbers: userPhoneNumbers.filter((phone) => phone.number.trim()).map((phone) => ({ ...phone, number: phone.number.trim() })),
       relationships: userRelationships.filter((relationship) => relationship.relatedUserId),
       memberships,
-      ...(!editingUserId ? { password: generatedPassword, accountRole: newAccountRole } : {}),
+      ...(!editingUserId ? { password: generatedPassword } : {}),
+      accountRole: newAccountRole,
     } as CreateSiteUser;
     if (!editingUserId && generatedPassword.length < 12) {
       setUserAccessFeedback({ message: "Generate a password with at least 12 characters.", isError: true });
@@ -659,6 +880,10 @@ function App() {
       setSiteUsers((current) => editingUserId
         ? current.map((user) => user.id === result.id ? result : user)
         : [...current, result].sort((a, b) => a.displayName.localeCompare(b.displayName)));
+      if (editingUserId === authUser?.id && result.accountRole !== authUser.role) {
+        setAuthUser((current) => current ? { ...current, role: result.accountRole } : current);
+        if (result.accountRole !== "server_admin") setServerSettingsTab("personal");
+      }
       if (editingUserId === authUser?.id) {
         const membershipByDepartment = new Map(memberships.map((membership) => [membership.departmentId, membership]));
         setDepartments((current) => current.map((site) => {
@@ -787,14 +1012,21 @@ function App() {
   const canManageEvents = hasLocationPermission("events_manage");
   const canManageGroups = hasLocationPermission("groups_manage");
   const canManageResources = hasLocationPermission("resources_manage");
-  const enabledDynamicModules = registeredModules.filter((module) => moduleAvailable(module, department, canManageSite));
+  const enabledDynamicModules = registeredModules.filter((module) => !module.hiddenFromNavigation && moduleAvailable(module, department, canManageSite));
+  const selectedModuleSettings = registeredModules.find((module) => module.id === selectedModuleSettingsId && module.settings);
   const moduleContext = {
     department,
     departmentId: department.id,
     csrfToken,
+    realtime: moduleRealtime,
+    systemNotificationsEnabled: systemNotificationsEnabled && systemNotificationPermission === "granted",
     canManageSite,
     state: activeModuleState,
     onStateChange: (value: string) => activeModuleForState && setModuleState({ moduleId: activeModuleForState.id, departmentId: department.id, value }),
+    requestedChatConversationId,
+    onChatConversationOpened,
+    onActiveChatChange,
+    refreshCsrfToken,
   };
   const renderNavigationItem = ({ label, icon: Icon }: typeof navigation[number]) => {
     const registered = registeredModules.find((module) => module.name === label);
@@ -807,7 +1039,7 @@ function App() {
         setMenuOpen(false);
       } else setNotice(`${label} will be added in a later step.`);
     }}>
-      {registered ? <ModuleIconHost module={registered} /> : <Icon size={18} strokeWidth={1.8} />}<span>{label}</span>{active && <span className="nav-indicator" />}
+      {registered ? <ModuleIconHost module={registered} /> : <Icon size={18} strokeWidth={1.8} />}<span>{label}</span>{registered?.id === "chat" && unreadChatCount > 0 && <span className="nav-unread-badge" aria-label={`${unreadChatCount} unread ${unreadChatCount === 1 ? "message" : "messages"}`}>{unreadChatCount > 99 ? "99+" : unreadChatCount}</span>}{active && <span className="nav-indicator" />}
     </button>;
   };
   const editingUser = siteUsers.find((user) => user.id === editingUserId) ?? null;
@@ -852,9 +1084,9 @@ function App() {
         </header>
 
         <div className={`page-wrap${moduleForPage(page)?.pageClassName ? ` ${moduleForPage(page)?.pageClassName}` : ""}${moduleForPage(page)?.id === "video-steffisburg" && ["Routing", "Names & locks"].includes(activeModuleState) ? " page-wrap-video-routing" : ""}`}>
-          {page === "Settings" ? <div className="settings-page"><div className="settings-page-header"><div><span className="eyebrow">PREFERENCES &amp; ACCESS</span><h1 id="server-settings-title">Settings</h1><p>Personal preferences and the access you manage for this site or server.</p></div><button className="button button-secondary settings-back-button" type="button" onClick={() => setPage("People")}>Back to People</button></div><div className="server-admin-tabs" role="tablist" aria-label="Settings sections"><button type="button" role="tab" id="server-tab-personal" aria-selected={serverSettingsTab === "personal"} aria-controls="server-panel-personal" className={serverSettingsTab === "personal" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("personal")}>Personal</button>{department.role === "site_admin" && <button type="button" role="tab" id="server-tab-location" aria-selected={serverSettingsTab === "location"} aria-controls="server-panel-location" className={serverSettingsTab === "location" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("location")}>People &amp; access</button>}<button type="button" role="tab" id="server-tab-switch" aria-selected={serverSettingsTab === "switch"} aria-controls="server-panel-switch" className={serverSettingsTab === "switch" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("switch")}>Switch site</button>{authUser.role === "server_admin" && <button type="button" role="tab" id="server-tab-sites" aria-selected={serverSettingsTab === "sites"} aria-controls="server-panel-sites" className={serverSettingsTab === "sites" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => { setDepartmentDraft(department); setIsAddingLocation(false); setServerSettingsTab("sites"); }}>Manage sites</button>}{authUser.role === "server_admin" && <button type="button" role="tab" id="server-tab-users" aria-selected={serverSettingsTab === "users"} aria-controls="server-panel-users" className={serverSettingsTab === "users" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => { setServerSettingsTab("users"); void openUserAccess(); }}>Users</button>}</div>{serverSettingsTab === "personal" && <div role="tabpanel" id="server-panel-personal" aria-labelledby="server-tab-personal"><section className="my-settings-section" aria-labelledby="appearance-title"><div><h3 id="appearance-title">Appearance</h3><p>Choose light or dark mode for this browser.</p></div><div className="theme-options" role="group" aria-label="Color theme"><button className={`theme-option ${theme === "light" ? "theme-option-active" : ""}`} type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}><Sun size={17} />Light</button><button className={`theme-option ${theme === "dark" ? "theme-option-active" : ""}`} type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}><Moon size={17} />Dark</button></div></section><p className="modal-demo-footnote">Preferences are saved on this device.</p></div>}{serverSettingsTab === "location" && department.role === "site_admin" && <div role="tabpanel" id="server-panel-location" aria-labelledby="server-tab-location"><LocationAccess department={department} csrfToken={csrfToken} onClose={() => setPage("People")} embedded /></div>}{serverSettingsTab === "switch" && <div role="tabpanel" id="server-panel-switch" aria-labelledby="server-tab-switch"><div className="server-site-list" role="group" aria-label="Sites on this server">{departments.map((site) => <button className={`server-site-choice ${site.id === department.id ? "server-site-choice-active" : ""}`} type="button" disabled={site.role === "unassigned"} aria-current={site.id === department.id ? "true" : undefined} key={site.id} onClick={() => { switchDepartment(site.id); setPage("People"); }}><span className="server-settings-icon"><Server size={18} /></span><span className="server-site-details"><strong>{site.location}</strong><small>{site.timeZone}{site.role === "unassigned" ? " · Assign yourself in Users tab first" : ""}</small></span><span className="server-site-state">{site.id === department.id ? "Current site" : site.role === "unassigned" ? "No access" : "Switch"}</span></button>)}{departments.length === 0 && <p className="server-settings-empty">No sites are configured on this server yet.</p>}</div><p className="modal-demo-footnote">Signed in as {authUser.displayName}</p></div>}{serverSettingsTab === "sites" && authUser.role === "server_admin" && <div role="tabpanel" id="server-panel-sites" aria-labelledby="server-tab-sites"><div className="server-admin-panel-heading"><h3>Manage locations</h3><p>Update the active location or add another location hosted by this server.</p></div>{isAddingLocation ? <form onSubmit={addLocation}><label>Location<input name="location" autoFocus required maxLength={120} placeholder="Enter the location name" /></label><label>Time zone<input name="timeZone" required maxLength={80} defaultValue="Europe/Zurich" placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddingLocation(false)}>Back</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Adding…" : "Add location"}</button></div></form>
+          {page === "Settings" ? <div className="settings-page"><div className="settings-page-header"><div><span className="eyebrow">PREFERENCES &amp; ACCESS</span><h1 id="server-settings-title">Settings</h1><p>Personal preferences and the access you manage for this site or server.</p></div><button className="button button-secondary settings-back-button" type="button" onClick={() => setPage("People")}>Back to People</button></div><div className="server-admin-tabs" role="tablist" aria-label="Settings sections"><button type="button" role="tab" id="server-tab-overview" aria-selected={serverSettingsTab === "overview"} aria-controls="server-panel-overview" className={serverSettingsTab === "overview" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("overview")}>Overview</button><button type="button" role="tab" id="server-tab-personal" aria-selected={serverSettingsTab === "personal"} aria-controls="server-panel-personal" className={serverSettingsTab === "personal" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("personal")}>Personal</button>{department.role === "site_admin" && <button type="button" role="tab" id="server-tab-location" aria-selected={serverSettingsTab === "location"} aria-controls="server-panel-location" className={serverSettingsTab === "location" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("location")}>People &amp; access</button>}<button type="button" role="tab" id="server-tab-switch" aria-selected={serverSettingsTab === "switch"} aria-controls="server-panel-switch" className={serverSettingsTab === "switch" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => setServerSettingsTab("switch")}>Switch site</button>{authUser.role === "server_admin" && <button type="button" role="tab" id="server-tab-sites" aria-selected={serverSettingsTab === "sites"} aria-controls="server-panel-sites" className={serverSettingsTab === "sites" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => { setDepartmentDraft(department); setIsAddingLocation(false); setServerSettingsTab("sites"); }}>Manage sites</button>}{authUser.role === "server_admin" && <button type="button" role="tab" id="server-tab-users" aria-selected={serverSettingsTab === "users"} aria-controls="server-panel-users" className={serverSettingsTab === "users" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={() => { setServerSettingsTab("users"); void openUserAccess(); }}>Users</button>}{(authUser.role === "server_admin" || department.role === "site_admin") && <button type="button" role="tab" id="server-tab-modules" aria-selected={serverSettingsTab === "modules"} aria-controls="server-panel-modules" className={serverSettingsTab === "modules" ? "server-admin-tab server-admin-tab-active" : "server-admin-tab"} onClick={openModuleManagement}>Modules</button>}</div>{serverSettingsTab === "overview" && <div role="tabpanel" id="server-panel-overview" aria-labelledby="server-tab-overview"><div className="server-admin-panel-heading"><h3>Service status</h3><p>Current connection and database health for this Smart-Church server.</p></div><div className="service-status-grid"><article className="service-status-card"><span className="service-status-indicator service-status-ok" /><div><strong>Web app</strong><small>Running in this browser</small></div><b>Online</b></article><article className="service-status-card"><span className={`service-status-indicator ${serviceStatus?.api === "ok" ? "service-status-ok" : serviceStatus ? "service-status-down" : "service-status-pending"}`} /><div><strong>API</strong><small>Application server</small></div><b>{serviceStatus ? serviceStatus.api === "ok" ? "Online" : "Unavailable" : "Checking…"}</b></article><article className="service-status-card"><span className={`service-status-indicator ${serviceStatus?.database === "ok" ? "service-status-ok" : serviceStatus ? "service-status-down" : "service-status-pending"}`} /><div><strong>Database</strong><small>Account and site data</small></div><b>{serviceStatus ? serviceStatus.database === "ok" ? "Online" : "Unavailable" : "Checking…"}</b></article></div>{(authUser.role === "server_admin" || department.role === "site_admin") && <RuntimeDiagnosticsPanel departmentId={department.id} />}</div>}{serverSettingsTab === "personal" && <div role="tabpanel" id="server-panel-personal" aria-labelledby="server-tab-personal"><section className="my-settings-section" aria-labelledby="appearance-title"><div><h3 id="appearance-title">Appearance</h3><p>Choose light or dark mode for this browser.</p></div><div className="theme-options" role="group" aria-label="Color theme"><button className={`theme-option ${theme === "light" ? "theme-option-active" : ""}`} type="button" aria-pressed={theme === "light"} onClick={() => setTheme("light")}><Sun size={17} />Light</button><button className={`theme-option ${theme === "dark" ? "theme-option-active" : ""}`} type="button" aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}><Moon size={17} />Dark</button></div></section><section className="my-settings-section system-notification-settings" aria-labelledby="system-notifications-title"><div><h3 id="system-notifications-title">System notifications</h3><p>Show new chat messages as operating-system notifications instead of in-app pop-ups.</p>{systemNotificationFeedback && <small className="system-notification-feedback" role="status">{systemNotificationFeedback}</small>}</div><label className="system-notification-toggle"><input type="checkbox" checked={systemNotificationsEnabled} onChange={(event) => void updateSystemNotifications(event.target.checked)} /><span>{systemNotificationsEnabled ? "On" : "Off"}</span></label></section><p className="modal-demo-footnote">Preferences are saved on this device.</p></div>}{serverSettingsTab === "location" && department.role === "site_admin" && <div role="tabpanel" id="server-panel-location" aria-labelledby="server-tab-location"><LocationAccess department={department} csrfToken={csrfToken} onClose={() => setPage("People")} embedded /></div>}{serverSettingsTab === "switch" && <div role="tabpanel" id="server-panel-switch" aria-labelledby="server-tab-switch"><div className="server-site-list" role="group" aria-label="Sites on this server">{departments.map((site) => <button className={`server-site-choice ${site.id === department.id ? "server-site-choice-active" : ""}`} type="button" disabled={site.role === "unassigned"} aria-current={site.id === department.id ? "true" : undefined} key={site.id} onClick={() => { switchDepartment(site.id); setPage("People"); }}><span className="server-settings-icon"><Server size={18} /></span><span className="server-site-details"><strong>{site.location}</strong><small>{site.timeZone}{site.role === "unassigned" ? " · Assign yourself in Users tab first" : ""}</small></span><span className="server-site-state">{site.id === department.id ? "Current site" : site.role === "unassigned" ? "No access" : "Switch"}</span></button>)}{departments.length === 0 && <p className="server-settings-empty">No sites are configured on this server yet.</p>}</div><p className="modal-demo-footnote">Signed in as {authUser.displayName}</p></div>}{serverSettingsTab === "sites" && authUser.role === "server_admin" && <div role="tabpanel" id="server-panel-sites" aria-labelledby="server-tab-sites"><div className="server-admin-panel-heading"><h3>Manage locations</h3><p>Update the active location or add another location hosted by this server.</p></div>{isAddingLocation ? <form onSubmit={addLocation}><label>Location<input name="location" autoFocus required maxLength={120} placeholder="Enter the location name" /></label><label>Time zone<input name="timeZone" required maxLength={80} defaultValue="Europe/Zurich" placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setIsAddingLocation(false)}>Back</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Adding…" : "Add location"}</button></div></form>
           : <><form onSubmit={saveDepartmentSettings}><label>Location<input autoFocus required maxLength={120} value={departmentDraft.location} onChange={(event) => setDepartmentDraft((current) => ({ ...current, location: event.target.value }))} placeholder="Enter your location" /></label><label>Time zone<input required maxLength={80} value={departmentDraft.timeZone} onChange={(event) => setDepartmentDraft((current) => ({ ...current, timeZone: event.target.value }))} placeholder="Europe/Zurich" /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setPage("People")}>Cancel</button><button className="button button-primary" type="submit" disabled={isDepartmentSaving}>{isDepartmentSaving ? "Saving…" : "Save location"}</button></div></form><button className="button button-secondary location-add-button" type="button" onClick={() => setIsAddingLocation(true)}><Plus size={16} /> Add another location</button></>}
-</div>}{serverSettingsTab === "users" && authUser.role === "server_admin" && <div role="tabpanel" id="server-panel-users" aria-labelledby="server-tab-users"><div className="user-access-layout"><aside className="user-access-list"><button className="button button-secondary user-add-button" type="button" onClick={startNewSiteUser}><Plus size={16} /> Add user</button>{isUsersLoading ? <p className="user-access-empty">Loading accounts…</p> : siteUsers.length === 0 ? <p className="user-access-empty">No local users yet.</p> : siteUsers.map((user) => <button className={`user-access-item ${editingUserId === user.id ? "user-access-item-active" : ""}`} type="button" key={user.id} onClick={() => editSiteUser(user)}><strong>{user.displayName}</strong><small>@{user.username} · {user.email ?? "No email address"}</small><span>{user.accountRole === "server_admin" ? "Server Administrator" : "Local user"} · {user.memberships.length} {user.memberships.length === 1 ? "site" : "sites"}</span></button>)}</aside><form className="user-access-form" onSubmit={saveSiteUser}><div className="user-access-form-heading"><h3>{editingUserId ? "Edit user access" : "Create account"}</h3><p>Assign separate core-area rights at each location. Site administrators inherit all core rights; enabled modules keep their own access levels. Link each site membership to the matching person, including read-only ChurchTools records. Users sign in with their username; email is optional.</p></div>{editingUser && editingUser.id !== authUser.id && <section className="password-reset-panel" aria-label="Reset user password"><div className="password-reset-heading"><KeyRound size={15} /><strong>Reset password</strong></div>{!isResettingPassword ? <><p>Set a new password for this user. Their current sessions will be signed out.</p><button className="button button-secondary" type="button" onClick={() => { setResetPassword(generateInitialPassword()); setForcePasswordChange(true); setResetPasswordSaved(false); setIsResettingPassword(true); setUserAccessFeedback(null); }}>Reset password</button></> : <><label>Temporary password<div className="generated-password-row"><input value={resetPassword} readOnly={resetPasswordSaved} onChange={(event) => setResetPassword(event.target.value)} autoComplete="off" minLength={12} maxLength={128} aria-label="Temporary password" />{!resetPasswordSaved && <button className="button button-secondary" type="button" onClick={() => setResetPassword(generateInitialPassword())}>Generate</button>}<button className="button button-secondary generated-copy-button" type="button" onClick={() => void copyResetPassword()}><Copy size={15} />Copy</button></div></label>{!resetPasswordSaved && <label className="global-admin-option"><input type="checkbox" checked={forcePasswordChange} onChange={(event) => setForcePasswordChange(event.target.checked)} /><span><strong>Require password change at next sign-in</strong><small>Checked by default. The user must choose a new password before using the app.</small></span></label>}<div className="password-reset-actions">{!resetPasswordSaved && <button className="button button-primary" type="button" onClick={() => void resetSiteUserPassword()} disabled={isPasswordResetting || resetPassword.length < 12}><KeyRound size={15} />{isPasswordResetting ? "Resetting…" : "Confirm reset"}</button>}<button className="button button-secondary" type="button" onClick={() => { setIsResettingPassword(false); setResetPassword(""); setResetPasswordSaved(false); }}> {resetPasswordSaved ? "Close" : "Cancel"}</button></div></>}</section>}<label>Full name<input key={`name-${editingUserId ?? "new"}`} name="displayName" defaultValue={editingUser?.displayName ?? ""} required maxLength={100} /></label><label>Username<input key={`username-${editingUserId ?? "new"}`} name="username" defaultValue={editingUser?.username ?? ""} required minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}" autoComplete="username" /></label><label>Email address <span className="optional-label">Optional</span><input key={`email-${editingUserId ?? "new"}`} name="email" type="email" defaultValue={editingUser?.email ?? ""} maxLength={254} autoComplete="email" /></label><label>Birthday <span className="optional-label">Optional · DD:MM:YYYY</span><input key={`birthday-${editingUserId ?? "new"}`} name="birthday" defaultValue={editingUser?.birthday ?? ""} placeholder="DD:MM:YYYY" inputMode="numeric" pattern="\d{2}:\d{2}:\d{4}" maxLength={10} /></label><div className="form-row user-address-row"><label>Street / road <span className="optional-label">Optional</span><input key={`street-${editingUserId ?? "new"}`} name="street" defaultValue={editingUser?.street ?? ""} maxLength={160} autoComplete="street-address" /></label><label>Number<input key={`street-number-${editingUserId ?? "new"}`} name="streetNumber" defaultValue={editingUser?.streetNumber ?? ""} maxLength={24} /></label></div><div className="form-row user-address-row"><label>PLZ / postal code<input key={`postal-code-${editingUserId ?? "new"}`} name="postalCode" defaultValue={editingUser?.postalCode ?? ""} maxLength={20} autoComplete="postal-code" /></label><label>City<input key={`city-${editingUserId ?? "new"}`} name="city" defaultValue={editingUser?.city ?? ""} maxLength={100} autoComplete="address-level2" /></label></div><section className="user-phone-section" aria-labelledby="user-phone-heading"><div className="user-profile-section-heading"><strong id="user-phone-heading">Phone numbers</strong><span className="optional-label">Optional</span></div>{userPhoneNumbers.map((phone, index) => <div className="user-phone-row" key={index}><select aria-label={`Phone number ${index + 1} label`} value={phone.label} onChange={(event) => setUserPhoneNumbers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value as UserPhoneLabel } : item))}><option value="home">Home</option><option value="mobile">Mobile</option><option value="work">Work</option><option value="work_mobile">Work mobile</option></select><input type="tel" aria-label={`Phone number ${index + 1}`} value={phone.number} maxLength={32} placeholder="+41 …" onChange={(event) => setUserPhoneNumbers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, number: event.target.value } : item))} /><button className="icon-button user-phone-remove" type="button" aria-label={`Remove phone number ${index + 1}`} onClick={() => setUserPhoneNumbers((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>)}<button className="button button-secondary user-profile-add-button" type="button" onClick={() => setUserPhoneNumbers((current) => [...current, { label: "mobile", number: "" }])}><Plus size={15} /> Add phone number</button></section><section className="user-phone-section" aria-labelledby="user-relationships-heading"><div className="user-profile-section-heading"><strong id="user-relationships-heading">Relationships</strong><span className="optional-label">Optional</span></div>{userRelationships.map((relationship, index) => <div className="user-relationship-row" key={index}><select aria-label={`Related user ${index + 1}`} value={relationship.relatedUserId} onChange={(event) => setUserRelationships((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, relatedUserId: event.target.value } : item))}><option value="">Choose a user</option>{siteUsers.filter((user) => user.id !== editingUserId).map((user) => <option key={user.id} value={user.id} disabled={userRelationships.some((item, itemIndex) => itemIndex !== index && item.relatedUserId === user.id)}>{user.displayName} (@{user.username})</option>)}</select><select aria-label={`Relationship type ${index + 1}`} value={relationship.relationship} onChange={(event) => setUserRelationships((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, relationship: event.target.value as UserRelationshipKind } : item))}><option value="spouse">Spouse</option><option value="parent">Parent of</option><option value="child">Child of</option><option value="sibling">Sibling</option><option value="guardian">Guardian of</option><option value="ward">Ward of</option><option value="other">Other</option></select><button className="icon-button user-phone-remove" type="button" aria-label={`Remove relationship ${index + 1}`} onClick={() => setUserRelationships((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>)}<button className="button button-secondary user-profile-add-button" type="button" onClick={() => setUserRelationships((current) => [...current, { relatedUserId: "", relationship: "spouse" }])} disabled={siteUsers.filter((user) => user.id !== editingUserId).length === 0}><Plus size={15} /> Add relationship</button><small className="user-access-hint">Relationships are reciprocal. For example, marking someone as a parent shows them as your child.</small></section>{(!editingUserId || (isPasswordSaved && generatedPassword)) && <label>{isPasswordSaved ? "Initial password (copy it now)" : "Suggested password"}<div className="generated-password-row"><input value={generatedPassword} readOnly={isPasswordSaved} onChange={(event) => setGeneratedPassword(event.target.value)} autoComplete="off" aria-label="Initial password" minLength={12} maxLength={128} />{!isPasswordSaved && <button className="button button-secondary" type="button" onClick={() => setGeneratedPassword(generateInitialPassword())}>Generate</button>}<button className="button button-secondary generated-copy-button" type="button" onClick={() => void copyGeneratedPassword()} aria-label="Copy generated password"><Copy size={15} />Copy</button></div><small className="user-access-hint">{isPasswordSaved ? "It is stored as a hash and cannot be shown again after you close this screen." : "Suggested securely. Edit it or generate another. Use at least 12 characters, then give it to the user directly."}</small></label>}<fieldset className="user-membership-fieldset"><legend>Site memberships</legend>{departments.map((site) => <div className="user-membership-row user-membership-row-expanded" key={site.id}><label className="user-membership-check"><input type="checkbox" checked={Boolean(userMemberships[site.id])} onChange={(event) => setUserMemberships((current) => { const next = { ...current }; if (event.target.checked) next[site.id] = { role: "member", permissions: [], videoPermissions: [], presenterPermissions: [] }; else delete next[site.id]; return next; })} /><span><strong>{site.location}</strong><small>{site.timeZone}</small></span></label>{userMemberships[site.id] && <><select aria-label={`${site.location} role`} value={userMemberships[site.id].role} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: { ...current[site.id], role: event.target.value as "site_admin" | "member" } }))}><option value="member">Member</option><option value="site_admin">Site administrator</option></select><label className="user-membership-person-link"><span>Linked person</span><select aria-label={`Person linked to ${site.location}`} value={userMemberships[site.id].contactId ?? ""} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: { ...current[site.id], contactId: event.target.value || undefined } }))}><option value="">No linked person</option>{peopleOptions.filter((person) => person.departmentId === site.id).map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}{person.importedFrom === "churchtools" ? " · ChurchTools" : ""}{person.email ? ` · ${person.email}` : ""}</option>)}</select></label><fieldset className="module-rights-fieldset"><legend>Location rights</legend>{userMemberships[site.id].role === "site_admin" ? <small>Site administrators inherit all location rights.</small> : locationPermissionOptions.map(({ value, label, description }) => <label className="module-right-option" key={value}><input type="checkbox" checked={userMemberships[site.id].permissions.includes(value)} onChange={(event) => setUserMemberships((current) => { const member = current[site.id]; const permissions = event.target.checked ? [...new Set([...member.permissions, value])] : member.permissions.filter((item) => item !== value); return { ...current, [site.id]: { ...member, permissions } }; })} /><span><strong>{label}</strong><small>{description}</small></span></label>)}</fieldset>{site.enabledModules?.includes("video-steffisburg") && <fieldset className="module-rights-fieldset"><legend>Video rights</legend>{userMemberships[site.id].role === "site_admin" ? <small>Site administrators inherit all Video rights.</small> : videoPermissionOptions.map(({ value, label, description }) => <label className="module-right-option" key={value}><input type="checkbox" checked={userMemberships[site.id].videoPermissions.includes(value)} onChange={(event) => setUserMemberships((current) => { const member = current[site.id]; const permissions = event.target.checked ? [...new Set([...member.videoPermissions, value])] : member.videoPermissions.filter((item) => item !== value); return { ...current, [site.id]: { ...member, videoPermissions: permissions } }; })} /><span><strong>{label}</strong><small>{description}</small></span></label>)}</fieldset>}{site.enabledModules?.includes("presenter") && <PresenterRightsFieldset permissions={userMemberships[site.id].presenterPermissions} isSiteAdmin={userMemberships[site.id].role === "site_admin"} onChange={(presenterPermissions) => setUserMemberships((current) => ({ ...current, [site.id]: { ...current[site.id], presenterPermissions } }))} />}</>}</div>)}</fieldset>{!editingUserId && authUser.role === "server_admin" && <label className="global-admin-option"><input type="checkbox" checked={newAccountRole === "server_admin"} onChange={(event) => setNewAccountRole(event.target.checked ? "server_admin" : "user")} /><span><strong>Grant Server Administrator access</strong><small>Only server administrators can grant this role. Site data still needs separate memberships.</small></span></label>}{userAccessFeedback && <p className={`user-access-feedback ${userAccessFeedback.isError ? "user-access-feedback-error" : ""}`} role={userAccessFeedback.isError ? "alert" : "status"} aria-live="polite">{userAccessFeedback.message}</p>}<div className="form-actions">{editingUser && <button className="button button-danger" type="button" onClick={() => void deleteSiteUser()} disabled={isUserSaving || isUserDeleting || editingUser.id === authUser.id} title={editingUser.id === authUser.id ? "You cannot delete your own account." : undefined}><Trash2 size={15} />{isUserDeleting ? "Deleting…" : "Delete user"}</button>}<button className="button button-secondary" type="button" onClick={() => setPage("People")}>Close</button><button className="button button-primary" type="submit" disabled={isUserSaving || isUsersLoading || (departments.length === 0 && newAccountRole !== "server_admin")}><Check size={16} />{isUserSaving ? "Saving…" : editingUserId ? "Save access" : "Create user"}</button></div><p className="modal-demo-footnote">Membership changes take effect on the next request.</p></form></div></div>}</div> : moduleForPage(page) ? <ModuleHost module={moduleForPage(page)!} context={moduleContext} /> : page === "Overview" ? <Overview departmentId={department.id} departmentLocation={department.location} timeZone={department.timeZone} contacts={contacts} onNavigate={setPage} /> : page === "Groups" ? <Groups departmentId={department.id} contacts={contacts} canManage={canManageGroups} /> : page === "Resources" ? <BookableResources departmentId={department.id} userId={authUser.id} canManage={canManageResources} /> : page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} contacts={contacts} canManage={canManageEvents} onNotice={setNotice} /> : <>
+</div>}{serverSettingsTab === "users" && authUser.role === "server_admin" && <div role="tabpanel" id="server-panel-users" aria-labelledby="server-tab-users"><div className="user-access-layout"><aside className="user-access-list"><button className="button button-secondary user-add-button" type="button" onClick={startNewSiteUser}><Plus size={16} /> Add user</button>{isUsersLoading ? <p className="user-access-empty">Loading accounts…</p> : siteUsers.length === 0 ? <p className="user-access-empty">No local users yet.</p> : siteUsers.map((user) => <button className={`user-access-item ${editingUserId === user.id ? "user-access-item-active" : ""}`} type="button" key={user.id} onClick={() => editSiteUser(user)}><strong>{user.displayName}</strong><small>@{user.username} · {user.email ?? "No email address"}</small><span>{user.accountRole === "server_admin" ? "Server Administrator" : "Local user"} · {user.memberships.length} {user.memberships.length === 1 ? "site" : "sites"}</span></button>)}</aside><form className="user-access-form" onSubmit={saveSiteUser}><div className="user-access-form-heading"><h3>{editingUserId ? "Edit user access" : "Create account"}</h3><p>Assign separate core-area rights at each location. Site administrators inherit all core rights; enabled modules keep their own access levels. Link each site membership to the matching person, including read-only ChurchTools records. Users sign in with their username; email is optional.</p></div>{editingUser && editingUser.id !== authUser.id && <section className="password-reset-panel" aria-label="Reset user password"><div className="password-reset-heading"><KeyRound size={15} /><strong>Reset password</strong></div>{!isResettingPassword ? <><p>Set a new password for this user. Their current sessions will be signed out.</p><button className="button button-secondary" type="button" onClick={() => { setResetPassword(generateInitialPassword()); setForcePasswordChange(true); setResetPasswordSaved(false); setIsResettingPassword(true); setUserAccessFeedback(null); }}>Reset password</button></> : <><label>Temporary password<div className="generated-password-row"><input value={resetPassword} readOnly={resetPasswordSaved} onChange={(event) => setResetPassword(event.target.value)} autoComplete="off" minLength={12} maxLength={128} aria-label="Temporary password" />{!resetPasswordSaved && <button className="button button-secondary" type="button" onClick={() => setResetPassword(generateInitialPassword())}>Generate</button>}<button className="button button-secondary generated-copy-button" type="button" onClick={() => void copyResetPassword()}><Copy size={15} />Copy</button></div></label>{!resetPasswordSaved && <label className="global-admin-option"><input type="checkbox" checked={forcePasswordChange} onChange={(event) => setForcePasswordChange(event.target.checked)} /><span><strong>Require password change at next sign-in</strong><small>Checked by default. The user must choose a new password before using the app.</small></span></label>}<div className="password-reset-actions">{!resetPasswordSaved && <button className="button button-primary" type="button" onClick={() => void resetSiteUserPassword()} disabled={isPasswordResetting || resetPassword.length < 12}><KeyRound size={15} />{isPasswordResetting ? "Resetting…" : "Confirm reset"}</button>}<button className="button button-secondary" type="button" onClick={() => { setIsResettingPassword(false); setResetPassword(""); setResetPasswordSaved(false); }}> {resetPasswordSaved ? "Close" : "Cancel"}</button></div></>}</section>}<label>Full name<input key={`name-${editingUserId ?? "new"}`} name="displayName" defaultValue={editingUser?.displayName ?? ""} required maxLength={100} /></label><label>Username<input key={`username-${editingUserId ?? "new"}`} name="username" defaultValue={editingUser?.username ?? ""} required minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9._-]{2,31}" autoComplete="username" /></label><label>Email address <span className="optional-label">Optional</span><input key={`email-${editingUserId ?? "new"}`} name="email" type="email" defaultValue={editingUser?.email ?? ""} maxLength={254} autoComplete="email" /></label><label>Birthday <span className="optional-label">Optional · DD:MM:YYYY</span><input key={`birthday-${editingUserId ?? "new"}`} name="birthday" defaultValue={editingUser?.birthday ?? ""} placeholder="DD:MM:YYYY" inputMode="numeric" pattern="\d{2}:\d{2}:\d{4}" maxLength={10} /></label><div className="form-row user-address-row"><label>Street / road <span className="optional-label">Optional</span><input key={`street-${editingUserId ?? "new"}`} name="street" defaultValue={editingUser?.street ?? ""} maxLength={160} autoComplete="street-address" /></label><label>Number<input key={`street-number-${editingUserId ?? "new"}`} name="streetNumber" defaultValue={editingUser?.streetNumber ?? ""} maxLength={24} /></label></div><div className="form-row user-address-row"><label>PLZ / postal code<input key={`postal-code-${editingUserId ?? "new"}`} name="postalCode" defaultValue={editingUser?.postalCode ?? ""} maxLength={20} autoComplete="postal-code" /></label><label>City<input key={`city-${editingUserId ?? "new"}`} name="city" defaultValue={editingUser?.city ?? ""} maxLength={100} autoComplete="address-level2" /></label></div><section className="user-phone-section" aria-labelledby="user-phone-heading"><div className="user-profile-section-heading"><strong id="user-phone-heading">Phone numbers</strong><span className="optional-label">Optional</span></div>{userPhoneNumbers.map((phone, index) => <div className="user-phone-row" key={index}><select aria-label={`Phone number ${index + 1} label`} value={phone.label} onChange={(event) => setUserPhoneNumbers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value as UserPhoneLabel } : item))}><option value="home">Home</option><option value="mobile">Mobile</option><option value="work">Work</option><option value="work_mobile">Work mobile</option></select><input type="tel" aria-label={`Phone number ${index + 1}`} value={phone.number} maxLength={32} placeholder="+41 …" onChange={(event) => setUserPhoneNumbers((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, number: event.target.value } : item))} /><button className="icon-button user-phone-remove" type="button" aria-label={`Remove phone number ${index + 1}`} onClick={() => setUserPhoneNumbers((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>)}<button className="button button-secondary user-profile-add-button" type="button" onClick={() => setUserPhoneNumbers((current) => [...current, { label: "mobile", number: "" }])}><Plus size={15} /> Add phone number</button></section><section className="user-phone-section" aria-labelledby="user-relationships-heading"><div className="user-profile-section-heading"><strong id="user-relationships-heading">Relationships</strong><span className="optional-label">Optional</span></div>{userRelationships.map((relationship, index) => <div className="user-relationship-row" key={index}><select aria-label={`Related user ${index + 1}`} value={relationship.relatedUserId} onChange={(event) => setUserRelationships((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, relatedUserId: event.target.value } : item))}><option value="">Choose a user</option>{siteUsers.filter((user) => user.id !== editingUserId).map((user) => <option key={user.id} value={user.id} disabled={userRelationships.some((item, itemIndex) => itemIndex !== index && item.relatedUserId === user.id)}>{user.displayName} (@{user.username})</option>)}</select><select aria-label={`Relationship type ${index + 1}`} value={relationship.relationship} onChange={(event) => setUserRelationships((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, relationship: event.target.value as UserRelationshipKind } : item))}><option value="spouse">Spouse</option><option value="parent">Parent of</option><option value="child">Child of</option><option value="sibling">Sibling</option><option value="guardian">Guardian of</option><option value="ward">Ward of</option><option value="other">Other</option></select><button className="icon-button user-phone-remove" type="button" aria-label={`Remove relationship ${index + 1}`} onClick={() => setUserRelationships((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>)}<button className="button button-secondary user-profile-add-button" type="button" onClick={() => setUserRelationships((current) => [...current, { relatedUserId: "", relationship: "spouse" }])} disabled={siteUsers.filter((user) => user.id !== editingUserId).length === 0}><Plus size={15} /> Add relationship</button><small className="user-access-hint">Relationships are reciprocal. For example, marking someone as a parent shows them as your child.</small></section>{(!editingUserId || (isPasswordSaved && generatedPassword)) && <label>{isPasswordSaved ? "Initial password (copy it now)" : "Suggested password"}<div className="generated-password-row"><input value={generatedPassword} readOnly={isPasswordSaved} onChange={(event) => setGeneratedPassword(event.target.value)} autoComplete="off" aria-label="Initial password" minLength={12} maxLength={128} />{!isPasswordSaved && <button className="button button-secondary" type="button" onClick={() => setGeneratedPassword(generateInitialPassword())}>Generate</button>}<button className="button button-secondary generated-copy-button" type="button" onClick={() => void copyGeneratedPassword()} aria-label="Copy generated password"><Copy size={15} />Copy</button></div><small className="user-access-hint">{isPasswordSaved ? "It is stored as a hash and cannot be shown again after you close this screen." : "Suggested securely. Edit it or generate another. Use at least 12 characters, then give it to the user directly."}</small></label>}<fieldset className="user-membership-fieldset"><legend>Site memberships</legend>{departments.map((site) => <div className="user-membership-row user-membership-row-expanded" key={site.id}><label className="user-membership-check"><input type="checkbox" checked={Boolean(userMemberships[site.id])} onChange={(event) => setUserMemberships((current) => { const next = { ...current }; if (event.target.checked) next[site.id] = { role: "member", permissions: [], videoPermissions: [], presenterPermissions: [] }; else delete next[site.id]; return next; })} /><span><strong>{site.location}</strong><small>{site.timeZone}</small></span></label>{userMemberships[site.id] && <><select aria-label={`${site.location} role`} value={userMemberships[site.id].role} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: { ...current[site.id], role: event.target.value as "site_admin" | "member" } }))}><option value="member">Member</option><option value="site_admin">Site administrator</option></select><label className="user-membership-person-link"><span>Linked person</span><select aria-label={`Person linked to ${site.location}`} value={userMemberships[site.id].contactId ?? ""} onChange={(event) => setUserMemberships((current) => ({ ...current, [site.id]: { ...current[site.id], contactId: event.target.value || undefined } }))}><option value="">No linked person</option>{peopleOptions.filter((person) => person.departmentId === site.id).map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}{person.importedFrom === "churchtools" ? " · ChurchTools" : ""}{person.email ? ` · ${person.email}` : ""}</option>)}</select></label><fieldset className="module-rights-fieldset"><legend>Location rights</legend>{userMemberships[site.id].role === "site_admin" ? <small>Site administrators inherit all location rights.</small> : locationPermissionOptions.map(({ value, label, description }) => <label className="module-right-option" key={value}><input type="checkbox" checked={userMemberships[site.id].permissions.includes(value)} onChange={(event) => setUserMemberships((current) => { const member = current[site.id]; const permissions = event.target.checked ? [...new Set([...member.permissions, value])] : member.permissions.filter((item) => item !== value); return { ...current, [site.id]: { ...member, permissions } }; })} /><span><strong>{label}</strong><small>{description}</small></span></label>)}</fieldset>{site.enabledModules?.includes("video-steffisburg") && <fieldset className="module-rights-fieldset"><legend>Video rights</legend>{userMemberships[site.id].role === "site_admin" ? <small>Site administrators inherit all Video rights.</small> : videoPermissionOptions.map(({ value, label, description }) => <label className="module-right-option" key={value}><input type="checkbox" checked={userMemberships[site.id].videoPermissions.includes(value)} onChange={(event) => setUserMemberships((current) => { const member = current[site.id]; const permissions = event.target.checked ? [...new Set([...member.videoPermissions, value])] : member.videoPermissions.filter((item) => item !== value); return { ...current, [site.id]: { ...member, videoPermissions: permissions } }; })} /><span><strong>{label}</strong><small>{description}</small></span></label>)}</fieldset>}{site.enabledModules?.includes("presenter") && <PresenterRightsFieldset permissions={userMemberships[site.id].presenterPermissions} isSiteAdmin={userMemberships[site.id].role === "site_admin"} onChange={(presenterPermissions) => setUserMemberships((current) => ({ ...current, [site.id]: { ...current[site.id], presenterPermissions } }))} />}</>}</div>)}</fieldset>{authUser.role === "server_admin" && <label className="global-admin-option"><input type="checkbox" checked={newAccountRole === "server_admin"} onChange={(event) => setNewAccountRole(event.target.checked ? "server_admin" : "user")} /><span><strong>{newAccountRole === "server_admin" ? "Server Administrator access" : "Grant Server Administrator access"}</strong><small>Only server administrators can change this server-wide role. Site data still needs separate memberships.</small></span></label>}{userAccessFeedback && <p className={`user-access-feedback ${userAccessFeedback.isError ? "user-access-feedback-error" : ""}`} role={userAccessFeedback.isError ? "alert" : "status"} aria-live="polite">{userAccessFeedback.message}</p>}<div className="form-actions">{editingUser && <button className="button button-danger" type="button" onClick={() => void deleteSiteUser()} disabled={isUserSaving || isUserDeleting || editingUser.id === authUser.id} title={editingUser.id === authUser.id ? "You cannot delete your own account." : undefined}><Trash2 size={15} />{isUserDeleting ? "Deleting…" : "Delete user"}</button>}<button className="button button-secondary" type="button" onClick={() => setPage("People")}>Close</button><button className="button button-primary" type="submit" disabled={isUserSaving || isUsersLoading || (departments.length === 0 && newAccountRole !== "server_admin")}><Check size={16} />{isUserSaving ? "Saving…" : editingUserId ? "Save access" : "Create user"}</button></div><p className="modal-demo-footnote">Membership changes take effect on the next request.</p></form></div></div>}{serverSettingsTab === "modules" && (authUser.role === "server_admin" || department.role === "site_admin") && <div role="tabpanel" id="server-panel-modules" aria-labelledby="server-tab-modules"><div className="server-admin-panel-heading"><h3>Module management</h3><p>{authUser.role === "server_admin" ? "Choose which optional modules are available at each site. Modules enabled by default are always on." : "Configure modules enabled for this site."}</p></div>{authUser.role === "server_admin" && <label className="module-site-picker">Site<select value={moduleManagementSiteId} onChange={(event) => changeModuleManagementSite(event.target.value)}>{departments.map((site) => <option key={site.id} value={site.id}>{site.location}</option>)}</select></label>}{departments.length === 0 ? <p className="server-settings-empty">No sites are configured on this server yet.</p> : <><div className="settings-module-list">{registeredModules.filter((module) => authUser.role === "server_admin" || module.enabledByDefault || moduleDraftIds.includes(module.id)).map((module) => { const alwaysEnabled = Boolean(module.enabledByDefault); const checked = alwaysEnabled || moduleDraftIds.includes(module.id); return <article className="settings-module-card" key={module.id}><label className="settings-module-option"><input type="checkbox" checked={checked} disabled={authUser.role !== "server_admin" || alwaysEnabled} onChange={(event) => setModuleDraftIds((current) => event.target.checked ? [...new Set([...current, module.id])] : current.filter((id) => id !== module.id))} /><span><strong>{module.name}</strong><small>{module.id} · {alwaysEnabled ? "Enabled by default" : module.accessLabel ?? "Optional module"}</small></span></label>{module.settings && <button className="settings-module-settings-button" type="button" aria-label={`Open ${module.name} settings`} title={`Open ${module.name} settings`} onClick={() => setSelectedModuleSettingsId(module.id)}><Settings2 size={16} /></button>}</article>; })}</div>{authUser.role === "server_admin" && <div className="form-actions"><button className="button button-primary" type="button" onClick={() => void saveModuleManagement()} disabled={isModuleSaving || !moduleManagementSiteId}><Check size={16} />{isModuleSaving ? "Saving…" : "Save modules"}</button></div>}{moduleManagementFeedback && <p className="user-access-feedback" role="status">{moduleManagementFeedback}</p>}{selectedModuleSettings && <div className="module-settings-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedModuleSettingsId(""); }}><section className="module-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="selected-module-settings-title"><header className="module-settings-dialog-header"><div><ModuleIconHost module={selectedModuleSettings} /><span><h3 id="selected-module-settings-title">{selectedModuleSettings.name} settings</h3><small>{selectedModuleSettings.id} · {departments.find((site) => site.id === moduleManagementSiteId)?.location ?? "Select a site"}</small></span></div><button className="icon-button" type="button" aria-label="Close module settings" onClick={() => setSelectedModuleSettingsId("")}><X size={17} /></button></header><div className="module-settings-dialog-content"><ModuleSettingsHost module={selectedModuleSettings} context={{ departmentId: moduleManagementSiteId, csrfToken, departments }} /></div></section></div>}</>}</div>}</div> : moduleForPage(page) ? <ModuleHost module={moduleForPage(page)!} context={moduleContext} /> : page === "Overview" ? <Overview departmentId={department.id} departmentLocation={department.location} timeZone={department.timeZone} contacts={contacts} onNavigate={setPage} /> : page === "Groups" ? <Groups departmentId={department.id} contacts={contacts} canManage={canManageGroups} /> : page === "Resources" ? <BookableResources departmentId={department.id} userId={authUser.id} canManage={canManageResources} /> : page === "Services & events" ? <ServicesEvents departmentId={department.id} departmentLocation={department.location} departmentTimeZone={department.timeZone} contacts={contacts} canManage={canManageEvents} onNotice={setNotice} /> : <>
           <input ref={contactImportInput} className="sr-only" type="file" accept=".csv,text/csv" onChange={(event) => void importContactsCsv(event.currentTarget.files?.[0])} />
           <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{loadError ? `Workspace unavailable · ${loadError}` : `People are saved for ${department.location}`}</div>
 
@@ -892,6 +1124,14 @@ function App() {
 
       {notice && <div className="toast" role="status"><Check size={17} />{notice}<button className="toast-close" type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
 
+      {!(systemNotificationsEnabled && systemNotificationPermission === "granted") && chatNotifications.length > 0 && <section className="chat-notification-stack" aria-label="New chat messages" aria-live="polite">{chatNotifications.map((notification) => <article className="chat-notification" key={notification.id}>
+        <button className="chat-notification-open" type="button" onClick={() => { setRequestedChatConversationId(notification.conversationId); setPage(modulePage("chat")); setChatNotifications((current) => current.filter((item) => item.id !== notification.id)); }}>
+          <span className="chat-notification-icon"><MessageCircle size={17} /></span>
+          <span className="chat-notification-copy"><strong>{notification.author}</strong><span>{notification.body}</span></span>
+        </button>
+        <button className="chat-notification-dismiss" type="button" aria-label="Dismiss new message notification" onClick={() => setChatNotifications((current) => current.filter((item) => item.id !== notification.id))}><X size={14} /></button>
+      </article>)}</section>}
+
 
 
 
@@ -904,6 +1144,11 @@ function App() {
 
     </div>
   );
+}
+
+function App() {
+  const registrationRoute = window.location.pathname.match(/^\/register\/([0-9a-f-]{36})\/?$/i);
+  return registrationRoute ? <PublicEventRegistration token={registrationRoute[1]} /> : <WorkspaceApp />;
 }
 
 export { App };

@@ -9,6 +9,8 @@ const websocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const maxMessageBytes = 1_000_000;
 
 type WorkerState = "unconfigured" | "starting" | "ready" | "backoff" | "failed" | "stopped";
+type WorkerMemory = { rssBytes: number; heapUsedBytes: number; heapTotalBytes: number };
+type WorkerMetrics = { uptimeSeconds: number; memory: WorkerMemory; python: { uptimeSeconds: number | null; rssBytes: number | null } };
 type PendingRequest = { resolve: (value: unknown) => void; reject: (error: Error & { code?: string }) => void; timer: NodeJS.Timeout };
 type WorkerSocket = { socket: import("node:net").Socket; buffer: Buffer; registered: boolean; closed: boolean; child?: ChildProcess };
 
@@ -85,13 +87,25 @@ export class VideoWorkerSupervisor {
   private errorValue: string | null = null;
   private closing = false;
   private nextRestartAt = 0;
+  private childStartedAt: number | null = null;
+  private workerMetrics: WorkerMetrics | null = null;
 
-  constructor(private readonly server: Server, private readonly port: number, private readonly configured: boolean) {
+  constructor(private readonly server: Server, private readonly port: number, private readonly configured: boolean, private readonly onWorkerLog: (message: string) => void = () => undefined) {
     this.stateValue = configured ? "starting" : "unconfigured";
     this.server.on("upgrade", this.onUpgrade);
   }
 
   get state() { return { state: this.stateValue, error: this.errorValue }; }
+
+  get diagnostics() {
+    return {
+      status: this.stateValue,
+      error: this.errorValue,
+      uptimeSeconds: this.child && this.childStartedAt !== null ? Math.floor((Date.now() - this.childStartedAt) / 1000) : null,
+      memory: this.child ? this.workerMetrics?.memory ?? null : null,
+      processes: this.child && this.workerMetrics?.python ? [{ name: "Python process", ...this.workerMetrics.python }] : [],
+    };
+  }
 
   start() {
     if (this.configured) this.launch();
@@ -162,7 +176,7 @@ export class VideoWorkerSupervisor {
       child = fork(workerPath, [], {
         cwd: resolve(process.cwd()),
         env: { ...process.env, SMART_CHURCH_CORE_WS_URL: `ws://127.0.0.1:${this.port}/internal/workers/video`, SMART_CHURCH_WORKER_TOKEN: this.token },
-        stdio: ["ignore", "inherit", "inherit", "ipc"],
+        stdio: ["ignore", "inherit", "pipe", "ipc"],
         execArgv: [],
         windowsHide: true,
       });
@@ -171,17 +185,50 @@ export class VideoWorkerSupervisor {
       return;
     }
     this.child = child;
+    this.childStartedAt = Date.now();
+    this.workerMetrics = null;
+    if (child.stderr) {
+      child.stderr.setEncoding("utf8");
+      let pending = "";
+      child.stderr.on("data", (chunk: string) => {
+        process.stderr.write(chunk);
+        pending += chunk;
+        const lines = pending.split(/\r?\n/);
+        pending = lines.pop() ?? "";
+        for (const line of lines) if (line.trim()) this.onWorkerLog(line.trim());
+        if (pending.length > 2000) { this.onWorkerLog(pending.slice(0, 2000)); pending = ""; }
+      });
+      child.stderr.on("end", () => { if (pending.trim()) this.onWorkerLog(pending.trim()); });
+    }
     child.on("error", (error) => { this.errorValue = error.message; });
     child.on("exit", (code, signal) => {
       if (this.child !== child) return;
       this.child = null;
+      this.childStartedAt = null;
+      this.workerMetrics = null;
       this.connection?.socket.destroy();
       this.connection = null;
       this.rejectAll("Video worker stopped before completing this request.");
       if (!this.closing) this.scheduleRestart(`Video worker exited (${signal ?? code ?? "unknown"}).`);
     });
     child.on("message", (message) => {
-      if (message && typeof message === "object" && (message as { type?: string }).type === "worker-ready") {
+      if (!message || typeof message !== "object") return;
+      const candidate = message as { type?: string; uptimeSeconds?: unknown; memory?: unknown; python?: unknown };
+      if (candidate.type === "worker-stats" && typeof candidate.uptimeSeconds === "number" && Number.isFinite(candidate.uptimeSeconds)
+        && candidate.memory && typeof candidate.memory === "object" && candidate.python && typeof candidate.python === "object") {
+        const memory = candidate.memory as Record<string, unknown>;
+        const python = candidate.python as Record<string, unknown>;
+        if ([memory.rssBytes, memory.heapUsedBytes, memory.heapTotalBytes].every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0)
+          && (python.uptimeSeconds === null || (typeof python.uptimeSeconds === "number" && Number.isFinite(python.uptimeSeconds) && python.uptimeSeconds >= 0))
+          && (python.rssBytes === null || (typeof python.rssBytes === "number" && Number.isFinite(python.rssBytes) && python.rssBytes >= 0))) {
+          this.workerMetrics = {
+            uptimeSeconds: candidate.uptimeSeconds,
+            memory: { rssBytes: memory.rssBytes as number, heapUsedBytes: memory.heapUsedBytes as number, heapTotalBytes: memory.heapTotalBytes as number },
+            python: { uptimeSeconds: python.uptimeSeconds as number | null, rssBytes: python.rssBytes as number | null },
+          };
+        }
+      }
+      if (candidate.type === "worker-ready") {
         this.errorValue = null;
       }
     });
@@ -244,6 +291,8 @@ export class VideoWorkerSupervisor {
     this.connection?.socket.destroy();
     this.child?.kill();
     this.child = null;
+    this.childStartedAt = null;
+    this.workerMetrics = null;
     this.rejectAll("The API server is shutting down.");
     this.stateValue = "stopped";
   }

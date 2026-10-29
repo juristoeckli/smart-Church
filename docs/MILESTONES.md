@@ -1,6 +1,6 @@
 # Delivery plan
 
-Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC locations/logo, local sign-in, explicit location memberships, and server-enforced access checks are in place. Core location rights cover private people details and management of people, events, groups, and bookable resources. File Storage manages its own access rights and shared files; the Notifications module provides an in-app inbox, location announcements and event reminders. Worker management, full account lifecycle, email delivery/templates and remaining Milestone 1 modules are still outstanding.
+Status: implementation started. The TypeScript workspace, shared contracts, PostgreSQL-backed People directory and Services & events schedule, configurable GfC locations/logo, local sign-in, explicit location memberships, and server-enforced access checks are in place. Core location rights cover private people details and management of people, events, groups, and bookable resources. Groups have dated attendance records, and Services & events support headcounts, individual check-ins, first-time visitor markers, an assigned follow-up queue, and public event registration with capacities, waitlists, shareable signup links, and registrant check-in. Notifications provides an in-app inbox, location and selected-group announcements, event reminders, volunteer service-position requests, and visitor follow-up assignment and due-date reminders, plus opt-in Resend email delivery with retries, signed delivery webhooks, suppression handling, and per-message status. Rich email templates, worker management, full account lifecycle, and remaining Milestone 1 modules are still outstanding.
 
 ## Milestone 1 — foundation
 
@@ -11,7 +11,7 @@ Agreed scope: Core, departments, local login, permissions, worker management, re
 - [ ] [M1: Implement local authentication and scoped permissions](https://github.com/juristoeckli/smart-Church/issues/3) — local users can be assigned to locations as members or site administrators; core location rights are enforced by the API, while account lifecycle work and permissions for remaining capabilities are still outstanding.
 - [ ] [M1: Implement module SDK and worker supervision](https://github.com/juristoeckli/smart-Church/issues/4)
 - [ ] [M1: Build shared React shell and example module](https://github.com/juristoeckli/smart-Church/issues/5)
-- [ ] [M1: Add required Notifications module](https://github.com/juristoeckli/smart-Church/issues/6) — the in-app inbox, site-admin announcements, read state and one-day event reminders are in place; email delivery/templates remain outstanding.
+- [ ] [M1: Add required Notifications module](https://github.com/juristoeckli/smart-Church/issues/6) — the in-app inbox, site-admin announcements, read state, one-day event reminders and volunteer service-position requests are in place; email delivery/templates remain outstanding.
 - [ ] [M1: Add required System Management module](https://github.com/juristoeckli/smart-Church/issues/7)
 - [ ] [M1: Verify end-to-end isolation and failure recovery](https://github.com/juristoeckli/smart-Church/issues/8)
 
