@@ -24,6 +24,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
 - Track reserved, checked-out, and returned quantities. The Warehouse section provides printable job pick lists and barcode scanning for each unit checked out or returned.
 - Schedule workshop maintenance for all or part of an equipment item's quantity; overlapping job bookings and maintenance windows share the same availability check.
+- Open repair and inspection tickets for catalog items or individual serialised units, assign a staff owner, track diagnosis, parts, work, labour and parts costs, and attach service documents. Open tickets remove stock from availability; completing or cancelling a ticket releases its maintenance hold. Recurring inspection schedules generate service tickets when due and keep a service history.
 - Request crew positions, optionally assign a person from the location's people directory, and prevent overlapping assignments.
 - Maintain separate freelancer profiles with skills, contact details, and default rates. Record unavailable periods; EventDesk rejects assignments that overlap an unavailable period or another assigned job.
 - Email a job request to an assigned freelancer, keep a delivery record, and track requested, invited, confirmed, or declined status. Confirmation is recorded by the EventDesk manager after the freelancer replies.
@@ -49,8 +50,7 @@ EventDesk uses the shared [Resend email API](https://resend.com/docs/api-referen
 
 ## Planned product areas
 
-The document workflow is a first operational slice. These remaining areas are needed before EventDesk can cover a full rental office workflow:
+These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
-- Delivery notes and repair tickets with recurring inspections.
 - Sub-rentals and purchases.
 - Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.

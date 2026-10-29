@@ -4,6 +4,7 @@ import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions } from "./documents.js";
 import { startEventDeskReminderWorker } from "./reminders.js";
+import { startEventDeskInspectionWorker } from "./inspections.js";
 
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
@@ -63,6 +64,7 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   startEventDeskReminderWorker(app, pool);
+  startEventDeskInspectionWorker(app, pool);
   const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
   const emailFrom = () => process.env.SMART_CHURCH_EMAIL_FROM?.trim() || process.env.EVENTDESK_EMAIL_FROM?.trim() || "";
 
@@ -328,7 +330,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       await ensureDefaultWarehouse(departmentId);
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
-      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases, serviceTickets, inspectionSchedules, staff] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
@@ -416,6 +418,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        LEFT JOIN eventdesk_asset_case_items i ON i.case_id=c.id AND i.department_id=c.department_id
                        LEFT JOIN eventdesk_assets a ON a.id=i.asset_id AND a.department_id=i.department_id
                       WHERE c.department_id=$1 AND $2::boolean GROUP BY c.id,w.name ORDER BY lower(c.name)`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT t.id,t.asset_id,a.name AS asset_name,t.unit_id,u.serial_number,t.kind,t.title,t.fault,t.priority,t.status,t.diagnosis,t.parts,t.work_performed,t.labor_minutes,t.labor_cost_cents,t.parts_cost_cents,t.due_date,t.opened_at,t.completed_at,t.owner_user_id,coalesce(owner.display_name,'') AS owner_name,
+                            coalesce((SELECT jsonb_agg(jsonb_build_object('id',f.id,'fileName',f.file_name,'mediaType',f.media_type,'createdAt',f.created_at) ORDER BY f.created_at DESC) FROM eventdesk_service_ticket_attachments f WHERE f.ticket_id=t.id AND f.department_id=t.department_id),'[]'::jsonb) AS attachments
+                       FROM eventdesk_service_tickets t JOIN eventdesk_assets a ON a.id=t.asset_id AND a.department_id=t.department_id
+                       LEFT JOIN eventdesk_asset_units u ON u.id=t.unit_id AND u.department_id=t.department_id
+                       LEFT JOIN app_users owner ON owner.id=t.owner_user_id
+                      WHERE t.department_id=$1 AND $2::boolean ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,t.due_date NULLS LAST,t.opened_at DESC`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT s.id,s.asset_id,a.name AS asset_name,s.unit_id,u.serial_number,s.interval_days,s.next_due_date,s.active,s.notes
+                       FROM eventdesk_inspection_schedules s JOIN eventdesk_assets a ON a.id=s.asset_id AND a.department_id=s.department_id
+                       LEFT JOIN eventdesk_asset_units u ON u.id=s.unit_id AND u.department_id=s.department_id
+                      WHERE s.department_id=$1 AND $2::boolean ORDER BY s.next_due_date`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT u.id,u.display_name FROM department_memberships m JOIN app_users u ON u.id=m.user_id WHERE m.department_id=$1 AND $2::boolean ORDER BY lower(u.display_name)`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, supplierRateCardId: row.supplier_rate_card_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
@@ -439,6 +452,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         assetUnits: assetUnits.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, warehouseId: row.warehouse_id, warehouseName: row.warehouse_name, serialNumber: row.serial_number, barcode: row.barcode, condition: row.condition, status: row.status, notes: row.notes })),
         warehouseTransfers: transfers.rows.map((row) => ({ id: row.id, sourceWarehouseId: row.source_warehouse_id, sourceName: row.source_name, destinationWarehouseId: row.destination_warehouse_id, destinationName: row.destination_name, status: row.status, notes: row.notes, dispatchedAt: row.dispatched_at, receivedAt: row.received_at, createdAt: row.created_at, lines: row.lines })),
         assetCases: cases.rows.map((row) => ({ id: row.id, name: row.name, barcode: row.barcode, warehouseId: row.warehouse_id, warehouseName: row.warehouse_name, items: row.items })),
+        serviceTickets: serviceTickets.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, unitId: row.unit_id, serialNumber: row.serial_number, kind: row.kind, title: row.title, fault: row.fault, priority: row.priority, status: row.status, diagnosis: row.diagnosis, parts: row.parts, workPerformed: row.work_performed, laborMinutes: row.labor_minutes, laborCostCents: row.labor_cost_cents, partsCostCents: row.parts_cost_cents, dueDate: row.due_date, openedAt: row.opened_at, completedAt: row.completed_at, ownerUserId: row.owner_user_id, ownerName: row.owner_name, attachments: row.attachments })),
+        inspectionSchedules: inspectionSchedules.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, unitId: row.unit_id, serialNumber: row.serial_number, intervalDays: row.interval_days, nextDueDate: row.next_due_date, active: row.active, notes: row.notes })),
+        staff: staff.rows.map((row) => ({ id: row.id, name: row.display_name })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
         documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [] } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [] },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
@@ -1072,6 +1088,83 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("COMMIT");
         return reply.code(201).send({ id: result.rows[0].id });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.post<{ Body: { assetId: string; unitId?: string | null; ownerUserId?: string | null; kind?: "repair" | "inspection"; title: string; fault?: string; priority?: "low" | "normal" | "high" | "urgent"; dueDate?: string | null } }>("/api/eventdesk/service-tickets", { schema: { body: { type: "object", additionalProperties: false, required: ["assetId", "title"], properties: { assetId: { type: "string", format: "uuid" }, unitId: { type: ["string", "null"], format: "uuid" }, ownerUserId: { type: ["string", "null"], format: "uuid" }, kind: { type: "string", enum: ["repair", "inspection"] }, title: { type: "string", minLength: 1, maxLength: 160 }, fault: { type: "string", maxLength: 4000 }, priority: { type: "string", enum: ["low", "normal", "high", "urgent"] }, dueDate: { type: ["string", "null"], format: "date" } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const asset = await client.query("SELECT id,name,quantity FROM eventdesk_assets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.body.assetId, departmentId]);
+        if (!asset.rowCount) { await rollback(client); return reply.code(404).send({ error: "Equipment item not found." }); }
+        if (request.body.ownerUserId && !(await client.query("SELECT 1 FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.body.ownerUserId, departmentId])).rowCount) { await rollback(client); return reply.code(400).send({ error: "Choose an owner from this location." }); }
+        if (request.body.unitId) {
+          const unit = await client.query("SELECT id FROM eventdesk_asset_units WHERE id=$1 AND department_id=$2 AND asset_id=$3 AND status NOT IN ('retired','checked_out') FOR UPDATE", [request.body.unitId, departmentId, request.body.assetId]);
+          if (!unit.rowCount) { await rollback(client); return reply.code(400).send({ error: "Choose an available serialised unit belonging to this item." }); }
+        }
+        const ticketId = randomUUID();
+        await client.query(`INSERT INTO eventdesk_service_tickets (id,department_id,asset_id,unit_id,owner_user_id,kind,title,fault,priority,due_date)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [ticketId, departmentId, request.body.assetId, request.body.unitId ?? null, request.body.ownerUserId ?? null, request.body.kind ?? "repair", request.body.title.trim(), request.body.fault?.trim() ?? "", request.body.priority ?? "normal", request.body.dueDate ?? null]);
+        const maintenance = await client.query(`INSERT INTO eventdesk_asset_maintenance (id,department_id,asset_id,starts_at,ends_at,quantity,status,notes,service_ticket_id)
+          VALUES ($1,$2,$3,CURRENT_DATE,CURRENT_DATE + interval '10 years',$4,'scheduled',$5,$6) RETURNING id`, [randomUUID(), departmentId, request.body.assetId, 1, `Service ticket ${ticketId}: ${request.body.title.trim()}`, ticketId]);
+        await client.query("UPDATE eventdesk_service_tickets SET maintenance_id=$3 WHERE id=$1 AND department_id=$2", [ticketId, departmentId, maintenance.rows[0].id]);
+        if (request.body.unitId) await client.query("UPDATE eventdesk_asset_units SET status='maintenance',updated_at=now() WHERE id=$1 AND department_id=$2", [request.body.unitId, departmentId]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id: ticketId, status: "open" });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { status: "open" | "in_progress" | "waiting_parts" | "completed" | "cancelled"; priority?: "low" | "normal" | "high" | "urgent"; diagnosis?: string; parts?: { name: string; quantity: number; unitCostCents: number }[]; workPerformed?: string; laborMinutes?: number; laborCostCents?: number; partsCostCents?: number; ownerUserId?: string | null } }>("/api/eventdesk/service-tickets/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["open", "in_progress", "waiting_parts", "completed", "cancelled"] }, priority: { type: "string", enum: ["low", "normal", "high", "urgent"] }, diagnosis: { type: "string", maxLength: 4000 }, parts: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["name", "quantity", "unitCostCents"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, quantity: { type: "number", minimum: 0.01, maximum: 100000 }, unitCostCents: { type: "integer", minimum: 0, maximum: 100000000 } } } }, workPerformed: { type: "string", maxLength: 8000 }, laborMinutes: { type: "integer", minimum: 0, maximum: 1000000 }, laborCostCents: { type: "integer", minimum: 0, maximum: 1000000000 }, partsCostCents: { type: "integer", minimum: 0, maximum: 1000000000 }, ownerUserId: { type: ["string", "null"], format: "uuid" } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const current = await client.query("SELECT id,unit_id,maintenance_id FROM eventdesk_service_tickets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!current.rowCount) { await rollback(client); return reply.code(404).send({ error: "Service ticket not found." }); }
+        if (request.body.ownerUserId && !(await client.query("SELECT 1 FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.body.ownerUserId, departmentId])).rowCount) { await rollback(client); return reply.code(400).send({ error: "Choose an owner from this location." }); }
+        await client.query(`UPDATE eventdesk_service_tickets SET status=$3,priority=coalesce($4,priority),diagnosis=coalesce($5,diagnosis),parts=coalesce($6::jsonb,parts),work_performed=coalesce($7,work_performed),labor_minutes=coalesce($8,labor_minutes),labor_cost_cents=coalesce($9,labor_cost_cents),parts_cost_cents=coalesce($10,parts_cost_cents),owner_user_id=coalesce($11,owner_user_id),completed_at=CASE WHEN $3='completed' THEN now() WHEN $3='cancelled' THEN completed_at ELSE NULL END,updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.id, departmentId, request.body.status, request.body.priority ?? null, request.body.diagnosis?.trim() ?? null, request.body.parts ? JSON.stringify(request.body.parts) : null, request.body.workPerformed?.trim() ?? null, request.body.laborMinutes ?? null, request.body.laborCostCents ?? null, request.body.partsCostCents ?? null, request.body.ownerUserId ?? null]);
+        if (current.rows[0].maintenance_id) await client.query("UPDATE eventdesk_asset_maintenance SET status=$3,ends_at=CASE WHEN $3 IN ('completed','cancelled') THEN now() ELSE GREATEST(ends_at,CURRENT_DATE + interval '10 years') END,updated_at=now() WHERE id=$1 AND department_id=$2", [current.rows[0].maintenance_id, departmentId, request.body.status === "completed" ? "completed" : request.body.status === "cancelled" ? "cancelled" : request.body.status === "in_progress" ? "in_progress" : "scheduled"]);
+        if (current.rows[0].unit_id) await client.query("UPDATE eventdesk_asset_units SET status=CASE WHEN $3 IN ('completed','cancelled') THEN 'in_stock' ELSE 'maintenance' END,updated_at=now() WHERE id=$1 AND department_id=$2 AND status NOT IN ('checked_out','retired')", [current.rows[0].unit_id, departmentId, request.body.status]);
+        await client.query("COMMIT");
+        return { id: request.params.id, status: request.body.status };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.post<{ Params: { id: string }; Body: { intervalDays: number; nextDueDate: string; unitId?: string; notes?: string } }>("/api/eventdesk/assets/:id/inspection-schedule", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["intervalDays", "nextDueDate"], properties: { intervalDays: { type: "integer", minimum: 1, maximum: 3650 }, nextDueDate: { type: "string", format: "date" }, unitId: { type: "string", format: "uuid" }, notes: { type: "string", maxLength: 1000 } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      if (!(await pool!.query("SELECT 1 FROM eventdesk_assets WHERE id=$1 AND department_id=$2", [request.params.id, departmentId])).rowCount) return reply.code(404).send({ error: "Equipment item not found." });
+      const unitId = request.body.unitId;
+      if (unitId && !(await pool!.query("SELECT 1 FROM eventdesk_asset_units WHERE id=$1 AND department_id=$2 AND asset_id=$3", [unitId, departmentId, request.params.id])).rowCount) return reply.code(400).send({ error: "Choose a serialised unit belonging to this item." });
+      const created = await pool!.query(`INSERT INTO eventdesk_inspection_schedules (id,department_id,asset_id,unit_id,interval_days,next_due_date,notes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING RETURNING id`, [randomUUID(), departmentId, unitId ? null : request.params.id, unitId ?? null, request.body.intervalDays, request.body.nextDueDate, request.body.notes?.trim() ?? ""]);
+      if (!created.rowCount) return reply.code(409).send({ error: "An inspection schedule already exists for that item or unit." });
+      return reply.code(201).send({ id: created.rows[0].id });
+    });
+
+    routes.post<{ Params: { id: string }; Body: { fileName: string; mediaType: "image/jpeg" | "image/png" | "application/pdf"; base64: string } }>("/api/eventdesk/service-tickets/:id/attachments", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["fileName", "mediaType", "base64"], properties: { fileName: { type: "string", minLength: 1, maxLength: 240 }, mediaType: { type: "string", enum: ["image/jpeg", "image/png", "application/pdf"] }, base64: { type: "string", minLength: 1, maxLength: 2800000 } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const data = Buffer.from(request.body.base64, "base64");
+      if (data.length > 2 * 1024 * 1024 || (request.body.mediaType === "image/jpeg" && (data[0] !== 0xff || data[1] !== 0xd8)) || (request.body.mediaType === "image/png" && data.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") || (request.body.mediaType === "application/pdf" && data.subarray(0, 5).toString("ascii") !== "%PDF-")) return reply.code(400).send({ error: "Choose a valid JPEG, PNG, or PDF file no larger than 2 MiB." });
+      if (!(await pool!.query("SELECT 1 FROM eventdesk_service_tickets WHERE id=$1 AND department_id=$2", [request.params.id, departmentId])).rowCount) return reply.code(404).send({ error: "Service ticket not found." });
+      const id = randomUUID();
+      await pool!.query("INSERT INTO eventdesk_service_ticket_attachments (id,department_id,ticket_id,file_name,media_type,file_data,uploaded_by) VALUES ($1,$2,$3,$4,$5,$6,$7)", [id, departmentId, request.params.id, request.body.fileName.trim(), request.body.mediaType, data, request.authenticatedUser?.id ?? null]);
+      return reply.code(201).send({ id });
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/eventdesk/service-ticket-attachments/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const attachment = await pool!.query("SELECT file_name,media_type,file_data FROM eventdesk_service_ticket_attachments WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      if (!attachment.rowCount) return reply.code(404).send({ error: "Attachment not found." });
+      return reply.type(attachment.rows[0].media_type).header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(attachment.rows[0].file_name)}`).send(attachment.rows[0].file_data);
     });
 
     routes.post<{ Body: { assetId: string; startsAt: string; endsAt: string; quantity: number; notes?: string } }>("/api/eventdesk/maintenance", { schema: { body: {
