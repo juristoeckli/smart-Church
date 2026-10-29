@@ -13,7 +13,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Create reusable rental packages from catalog equipment, set a package discount rule, then add a package to a job in one step. EventDesk expands it into normal component bookings, applies the rule to the saved component rates, and checks availability for every item before saving the entire package.
 - Create numbered quotes, rental contracts, delivery notes, regular invoices, and deposit invoices from a job plan; download branded PDFs, print them, or email them to a customer with the PDF attached.
 - Track every email delivery attempt by recipient, subject, provider response, and time; a draft moves to sent only after the email provider accepts it. Quote decisions, contract signatures, delivery returns, invoice due dates, and full or partial payments are also tracked.
-- Send an on-demand overdue payment reminder for an unpaid regular or deposit invoice. The reminder includes the current balance and the invoice PDF and is recorded in that document's delivery history. Scheduled automatic reminders are not included yet.
+- Send manual or scheduled overdue payment reminders for regular and deposit invoices. Locations configure the delay schedule and maximum attempts; finance users can preview the live balance and pause reminders per invoice. Payments, draft or issued credits, cancellations, and settlement are checked before scheduled delivery, and every attempt and provider result is recorded.
 - Create credit notes against the unpaid balance of sent invoices or deposit invoices. Draft credits reserve balance; issued credits settle it and can be cancelled with the invoice balance recalculated.
 - Export issued invoices, deposit invoices, credit notes, and payment records to a date-filtered CSV for accounting. The export includes document links, customer and job references, net, tax, gross, payments, status, and due dates.
 - Edit draft document lines and tax before sending; set location-specific company contact details, tax ID, payment terms, and a footer for printed and emailed documents.
@@ -48,7 +48,6 @@ EventDesk uses the shared [Resend email API](https://resend.com/docs/api-referen
 
 The document workflow is a first operational slice. These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
-- Scheduled automatic payment reminders.
 - Delivery notes, serial-number-level stock, barcode label generation, packing/casing, multi-warehouse stock, and transfers.
 - Repair tickets with service history and recurring inspection reminders, sub-rentals, purchases, and multi-warehouse stock.
 - Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.

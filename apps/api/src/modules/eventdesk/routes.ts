@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions } from "./documents.js";
+import { startEventDeskReminderWorker } from "./reminders.js";
 
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
@@ -61,6 +62,7 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
+  startEventDeskReminderWorker(app, pool);
   const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
   const emailFrom = () => process.env.SMART_CHURCH_EMAIL_FROM?.trim() || process.env.EVENTDESK_EMAIL_FROM?.trim() || "";
 
@@ -118,11 +120,57 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("UPDATE eventdesk_documents SET status=$3,updated_at=now() WHERE id=$1 AND department_id=$2", [invoiceId, departmentId, status]);
     }
 
+    routes.put<{ Body: { enabled: boolean; delayDays: number[]; maxAttempts: number } }>("/api/eventdesk/reminders/settings", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["enabled", "delayDays", "maxAttempts"], properties: {
+        enabled: { type: "boolean" }, delayDays: { type: "array", minItems: 1, maxItems: 10, items: { type: "integer", minimum: 1, maximum: 365 } }, maxAttempts: { type: "integer", minimum: 1, maximum: 10 },
+      } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const { enabled, delayDays, maxAttempts } = request.body;
+      if (maxAttempts > delayDays.length || delayDays.some((day, index) => index > 0 && day <= delayDays[index - 1])) return reply.code(400).send({ error: "Reminder delays must be strictly increasing, with one delay for each configured attempt." });
+      await pool!.query(`INSERT INTO eventdesk_reminder_settings (department_id,enabled,delay_days,max_attempts,updated_at)
+        VALUES ($1,$2,$3,$4,now()) ON CONFLICT (department_id) DO UPDATE SET enabled=EXCLUDED.enabled,delay_days=EXCLUDED.delay_days,max_attempts=EXCLUDED.max_attempts,updated_at=now()`, [departmentId, enabled, delayDays, maxAttempts]);
+      return { enabled, delayDays, maxAttempts };
+    });
+
+    routes.put<{ Params: { id: string }; Body: { paused: boolean } }>("/api/eventdesk/documents/:id/reminders", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["paused"], properties: { paused: { type: "boolean" } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const updated = await pool!.query(`UPDATE eventdesk_documents SET reminders_paused=$3,updated_at=now()
+        WHERE id=$1 AND department_id=$2 AND kind IN ('invoice','deposit_invoice') RETURNING id`, [request.params.id, departmentId, request.body.paused]);
+      if (!updated.rowCount) return reply.code(404).send({ error: "Invoice not found." });
+      return { id: request.params.id, paused: request.body.paused };
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/eventdesk/documents/:id/reminder-preview", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query(`SELECT d.document_number,d.kind,d.status,d.due_date,d.reminders_paused,
+          coalesce(d.customer_snapshot->>'email','') AS recipient_email,
+          d.total_cents-coalesce((SELECT sum(p.amount_cents) FROM eventdesk_document_payments p WHERE p.document_id=d.id AND p.department_id=d.department_id),0)::int
+            -coalesce((SELECT sum(c.total_cents) FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status IN ('draft','sent')),0)::int AS balance_cents,
+          (CURRENT_DATE-d.due_date)::int AS overdue_days
+        FROM eventdesk_documents d WHERE d.id=$1 AND d.department_id=$2 AND d.kind IN ('invoice','deposit_invoice')`, [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Invoice not found." });
+      const row = result.rows[0];
+      const balanceCents = Math.max(0, Number(row.balance_cents));
+      const eligible = ["sent", "partial"].includes(row.status) && row.due_date && Number(row.overdue_days) > 0 && balanceCents > 0;
+      return { number: row.document_number, recipientEmail: row.recipient_email, dueDate: row.due_date, overdueDays: Math.max(0, Number(row.overdue_days ?? 0)), balanceCents, paused: row.reminders_paused, eligible, message: eligible ? `Payment reminder for ${row.document_number}: outstanding balance ${new Intl.NumberFormat("en-CH", { style: "currency", currency: "CHF" }).format(balanceCents / 100)}.` : "This invoice is not overdue with an outstanding balance." };
+    });
+
     routes.get("/api/eventdesk/bootstrap", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
-      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
@@ -169,7 +217,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        LEFT JOIN eventdesk_assets a ON a.id=l.asset_id AND a.department_id=l.department_id
                       WHERE c.department_id=$1 GROUP BY c.id,s.name ORDER BY c.active DESC,c.valid_from DESC,lower(c.name)`, [departmentId]),
         pool!.query(`SELECT d.id, d.job_id, j.title AS job_title, d.kind, d.document_number, d.related_document_id, original.document_number AS related_document_number, d.status, d.issue_date, d.due_date,
-                            d.customer_snapshot, d.lines, d.tax_rate_bps, d.subtotal_cents, d.tax_cents, d.total_cents,
+                            d.customer_snapshot, d.lines, d.tax_rate_bps, d.subtotal_cents, d.tax_cents, d.total_cents,d.reminders_paused,
                             coalesce(sum(p.amount_cents),0)::int AS paid_cents,
                             coalesce((SELECT sum(c.total_cents)::int FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status='sent'),0)::int AS credited_cents,
                             coalesce((SELECT sum(c.total_cents)::int FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status='draft'),0)::int AS pending_credit_cents,
@@ -185,6 +233,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         pool!.query(`SELECT x.id,x.document_id,x.recipient_email,x.subject,x.status,x.provider_message_id,x.error_summary,x.sent_at,x.created_at
                        FROM eventdesk_document_deliveries x JOIN eventdesk_documents d ON d.id=x.document_id AND d.department_id=x.department_id
                       WHERE x.department_id=$1 AND $2::boolean ORDER BY x.created_at DESC`, [departmentId, canFinance]),
+        pool!.query(`SELECT enabled,delay_days,max_attempts FROM eventdesk_reminder_settings WHERE department_id=$1 AND $2::boolean`, [departmentId, canFinance]),
+        pool!.query(`SELECT id,document_id,attempt_no,delay_days,recipient_email,status,provider_message_id,error_summary,sent_at,created_at
+                       FROM eventdesk_reminder_attempts WHERE department_id=$1 AND $2::boolean ORDER BY created_at DESC`, [departmentId, canFinance]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, supplierRateCardId: row.supplier_rate_card_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
@@ -200,8 +251,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         partners: partners.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
         packages: packages.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, discountBps: row.discount_bps, items: row.items })),
         rateCards: rateCards.rows.map((row) => ({ id: row.id, supplierId: row.supplier_id, supplierName: row.supplier_name, name: row.name, validFrom: row.valid_from, validTo: row.valid_to, active: row.active, lines: row.lines })),
-        documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, relatedDocumentId: row.related_document_id, relatedDocumentNumber: row.related_document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, creditedCents: row.credited_cents, pendingCreditCents: row.pending_credit_cents, payments: row.payments })),
+        documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, relatedDocumentId: row.related_document_id, relatedDocumentNumber: row.related_document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, remindersPaused: row.reminders_paused, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, creditedCents: row.credited_cents, pendingCreditCents: row.pending_credit_cents, payments: row.payments })),
         documentDeliveries: deliveries.rows.map((row) => ({ id: row.id, documentId: row.document_id, recipientEmail: row.recipient_email, subject: row.subject, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
+        reminderSettings: reminderSettings.rows[0] ? { enabled: reminderSettings.rows[0].enabled, delayDays: reminderSettings.rows[0].delay_days, maxAttempts: reminderSettings.rows[0].max_attempts } : { enabled: false, delayDays: [3, 7, 14], maxAttempts: 3 },
+        reminderAttempts: reminders.rows.map((row) => ({ id: row.id, documentId: row.document_id, attemptNo: row.attempt_no, delayDays: row.delay_days, recipientEmail: row.recipient_email, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
         documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [] } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [] },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
