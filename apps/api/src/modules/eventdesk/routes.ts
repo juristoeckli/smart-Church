@@ -31,7 +31,7 @@ const customerSchema = {
     kind: { type: "string", enum: ["company", "person"] }, name: { type: "string", minLength: 1, maxLength: 160 },
     contactPerson: { type: "string", maxLength: 160 }, email: { type: "string", maxLength: 254 }, phone: { type: "string", maxLength: 40 },
     street: { type: "string", maxLength: 200 }, postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 },
-    country: { type: "string", maxLength: 80 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" },
+    country: { type: "string", maxLength: 80 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, defaultDiscountBps: { type: "integer", minimum: 0, maximum: 10000 },
   } },
 };
 const partnerSchema = { body: { type: "object", additionalProperties: false, required: ["kind", "name"], properties: {
@@ -104,7 +104,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
       const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, documents, docSettings, deliveries] = await Promise.all([
-        pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id,
+        pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
                        FROM eventdesk_jobs j LEFT JOIN service_events e ON e.id=j.linked_event_id AND e.department_id=j.department_id
@@ -132,7 +132,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         pool!.query(`SELECT id,name,email,phone,roles,hourly_rate_cents,notes,active FROM eventdesk_freelancers WHERE department_id=$1 ORDER BY active DESC,lower(name)`, [departmentId]),
         pool!.query(`SELECT id,freelancer_id,starts_at,ends_at,reason FROM eventdesk_freelancer_unavailability WHERE department_id=$1 AND ends_at>now() ORDER BY starts_at`, [departmentId]),
         pool!.query(`SELECT id, title, event_date, start_time FROM service_events WHERE department_id=$1 ORDER BY event_date DESC, start_time DESC LIMIT 250`, [departmentId]),
-        pool!.query(`SELECT id, kind, name, contact_person, email, phone, street, postal_code, city, country, notes, active
+        pool!.query(`SELECT id, kind, name, contact_person, email, phone, street, postal_code, city, country, notes, active, default_discount_bps
                        FROM eventdesk_customers WHERE department_id=$1 ORDER BY active DESC, lower(name)`, [departmentId]),
         pool!.query(`SELECT id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,active
                        FROM eventdesk_partners WHERE department_id=$1 ORDER BY kind,active DESC,lower(name)`, [departmentId]),
@@ -161,7 +161,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                       WHERE x.department_id=$1 AND $2::boolean ORDER BY x.created_at DESC`, [departmentId, canFinance]),
       ]);
       return {
-        jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
+        jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
         assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes, barcode: row.barcode, supplierId: row.supplier_id, supplierName: row.supplier_name })),
         bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
         maintenance: maintenance.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), quantity: row.quantity, status: row.status, notes: row.notes })),
@@ -170,7 +170,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         freelancers: freelancers.rows.map((row) => ({ id: row.id, name: row.name, email: row.email, phone: row.phone, roles: row.roles, hourlyRateCents: row.hourly_rate_cents, notes: row.notes, active: row.active })),
         freelancerUnavailability: unavailability.rows.map((row) => ({ id: row.id, freelancerId: row.freelancer_id, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), reason: row.reason })),
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
-        customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
+        customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active, defaultDiscountBps: row.default_discount_bps })),
         partners: partners.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
         packages: packages.rows.map((row) => ({ id: row.id, name: row.name, description: row.description, items: row.items })),
         documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, relatedDocumentId: row.related_document_id, relatedDocumentNumber: row.related_document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, creditedCents: row.credited_cents, pendingCreditCents: row.pending_credit_cents, payments: row.payments })),
@@ -191,7 +191,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const jobResult = await client.query(`SELECT j.id,j.title,j.customer_name,j.customer_id,j.starts_at,j.ends_at,j.venue,j.notes,
+        const jobResult = await client.query(`SELECT j.id,j.title,j.customer_name,j.customer_id,j.starts_at,j.ends_at,j.venue,j.notes,j.discount_bps,
             c.kind,c.name,c.contact_person,c.email,c.phone,c.street,c.postal_code,c.city,c.country
           FROM eventdesk_jobs j LEFT JOIN eventdesk_customers c ON c.id=j.customer_id AND c.department_id=j.department_id
          WHERE j.id=$1 AND j.department_id=$2 FOR UPDATE OF j`, [request.params.id, departmentId]);
@@ -205,10 +205,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (request.body.kind === "deposit_invoice" && (!request.body.depositAmountCents || !request.body.dueDate)) { await rollback(client); return reply.code(400).send({ error: "Enter a deposit amount and due date." }); }
         const assetLines = assetRows.rows.map((line) => ({ description: line.name, quantity: Number(line.quantity), unitCents: request.body.kind === "delivery_note" ? 0 : Number(line.daily_rate_cents), unitLabel: `day${days === 1 ? "" : "s"}`, lineTotalCents: request.body.kind === "delivery_note" ? 0 : Number(line.quantity) * Number(line.daily_rate_cents) * days }));
         const crewLines = crewRows.rows.map((line) => ({ description: `${line.role} (crew)`, quantity: Number(line.hours), unitCents: Number(line.hourly_rate_cents), unitLabel: "hour", lineTotalCents: Math.round(Number(line.hours) * Number(line.hourly_rate_cents)) }));
-        const lines = request.body.kind === "deposit_invoice"
+        let lines = request.body.kind === "deposit_invoice"
           ? request.body.depositAmountCents ? [{ description: `Deposit for ${job.title}`, quantity: 1, unitCents: request.body.depositAmountCents, unitLabel: "deposit", lineTotalCents: request.body.depositAmountCents }] : []
           : request.body.kind === "delivery_note" ? assetLines : [...assetLines, ...crewLines];
         if (!lines.length) { await rollback(client); return reply.code(400).send({ error: request.body.kind === "delivery_note" ? "Add equipment to the job before creating a delivery note." : "Add equipment or crew to the job before creating this document." }); }
+        const eligibleForDiscount = ["quote", "invoice", "contract"].includes(request.body.kind);
+        const discountBps = eligibleForDiscount ? Number(job.discount_bps ?? 0) : 0;
+        const preDiscountSubtotal = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
+        const discountCents = Math.round(preDiscountSubtotal * discountBps / 10000);
+        if (discountCents > 0) lines = [...lines, { description: `Customer discount (${(discountBps / 100).toFixed(2)}%)`, quantity: 1, unitCents: -discountCents, unitLabel: "discount", lineTotalCents: -discountCents }];
         const subtotal = request.body.kind === "delivery_note" ? 0 : lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
         const taxRateBps = request.body.taxRateBps ?? 0;
         const tax = Math.round(subtotal * taxRateBps / 10000);
@@ -510,33 +515,35 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         venue = savedVenue.rows[0].name;
       }
       let customerName = body.customerName?.trim() ?? "";
+      let discountBps = 0;
       if (body.customerId) {
-        const customer = await pool!.query("SELECT name FROM eventdesk_customers WHERE id=$1 AND department_id=$2 AND active=true", [body.customerId, departmentId]);
+        const customer = await pool!.query("SELECT name,default_discount_bps FROM eventdesk_customers WHERE id=$1 AND department_id=$2 AND active=true", [body.customerId, departmentId]);
         if (!customer.rowCount) return reply.code(400).send({ error: "Choose an active customer from this location." });
         customerName = customer.rows[0].name;
+        discountBps = Number(customer.rows[0].default_discount_bps);
       }
-      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,venue_id,starts_at,ends_at,venue,notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? ""]);
+      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,venue_id,starts_at,ends_at,venue,notes,discount_bps)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? "", discountBps]);
       return reply.code(201).send({ id: result.rows[0].id });
     });
 
-    routes.post<{ Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string } }>("/api/eventdesk/customers", { schema: customerSchema }, async (request, reply) => {
+    routes.post<{ Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; defaultDiscountBps?: number } }>("/api/eventdesk/customers", { schema: customerSchema }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "customers_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`INSERT INTO eventdesk_customers (id,department_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? ""]);
+      const result = await pool!.query(`INSERT INTO eventdesk_customers (id,department_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,default_discount_bps)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.defaultDiscountBps ?? 0]);
       return reply.code(201).send({ id: result.rows[0].id });
     });
 
-    routes.put<{ Params: { id: string }; Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; active?: boolean } }>("/api/eventdesk/customers/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: customerSchema.body } }, async (request, reply) => {
+    routes.put<{ Params: { id: string }; Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; active?: boolean; defaultDiscountBps?: number } }>("/api/eventdesk/customers/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: customerSchema.body } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "customers_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`UPDATE eventdesk_customers SET kind=$3,name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),updated_at=now()
-        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
+      const result = await pool!.query(`UPDATE eventdesk_customers SET kind=$3,name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),default_discount_bps=$14,updated_at=now()
+        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null, b.defaultDiscountBps ?? 0]);
       return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Customer not found." });
     });
 

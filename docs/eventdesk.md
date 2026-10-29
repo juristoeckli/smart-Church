@@ -6,6 +6,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 
 - Create jobs with customer, schedule, venue, notes, and an optional Smart-Church event link.
 - Maintain customer records for companies and individuals, including contact details, billing address, notes, and active status; link customers to jobs.
+- Set a default customer discount; new jobs snapshot that rate and quotes, invoices, and contracts show the discount as a separate line. Existing jobs and issued documents keep their saved prices.
 - Maintain separate supplier and venue directories; link a supplier to equipment and select a saved venue for a job.
 - Maintain an equipment catalog with stock quantity and daily rental rates.
 - Create reusable rental packages from catalog equipment, then add a package to a job in one step. EventDesk expands it into normal component bookings and checks availability for every item before saving the entire package.
