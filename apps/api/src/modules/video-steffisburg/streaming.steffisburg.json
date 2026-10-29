@@ -49,14 +49,12 @@
         {
           "id": "mini-converter-sdi-to-audio",
           "name": "BMD SDI to Audio",
-          "type": "converter",
-          "ip": ""
+          "type": "converter"
         },
         {
           "id": "mini-converter-audio-to-sdi",
           "name": "BMD Audio to SDI",
-          "type": "converter",
-          "ip": ""
+          "type": "converter"
         }
       ],
       "vpn_monitor": {
@@ -65,7 +63,7 @@
       },
       "router_model": "Ubiquiti UCG",
       "unifi_host_id": "6C63F81E6A5F0000000008E3C44B00000000095D3A240000000067DE0ECC:1628506774",
-      "department_id": "$SMART_CHURCH_DEPARTMENT_ID"
+      "department_id": "524b0373-7084-45fc-bffb-e90760d6e2be"
     },
     {
       "id": "gfc-steffisburg",
@@ -116,7 +114,7 @@
           "outputs": 40
         }
       ],
-      "department_id": "$SMART_CHURCH_DEPARTMENT_ID"
+      "department_id": "524b0373-7084-45fc-bffb-e90760d6e2be"
     },
     {
       "id": "sonnenhof",
@@ -157,14 +155,12 @@
         {
           "id": "mini-converter-sdi-to-audio",
           "name": "BMD SDI to Audio",
-          "type": "converter",
-          "ip": ""
+          "type": "converter"
         },
         {
           "id": "mini-converter-audio-to-sdi",
           "name": "BMD Audio to SDI",
-          "type": "converter",
-          "ip": ""
+          "type": "converter"
         }
       ],
       "vpn_monitor": {
@@ -173,7 +169,7 @@
       },
       "router_model": "Ubiquiti UCG",
       "unifi_host_id": "6C63F8A7CD1B00000000093ABA780000000009B9D46E0000000068590B3A:2015884364",
-      "department_id": "$SMART_CHURCH_DEPARTMENT_ID"
+      "department_id": "524b0373-7084-45fc-bffb-e90760d6e2be"
     }
   ],
   "applications": {

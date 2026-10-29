@@ -6,7 +6,7 @@ import re
 import sys
 import threading
 import time
-from controller import Controller, load_config
+from controller import Controller, load_config, set_device_address_overrides
 
 controller = Controller()
 output_lock = threading.Lock()
@@ -69,6 +69,9 @@ def dispatch(method, data):
     department_id = data.get('department_id')
     if not isinstance(department_id, str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', department_id, re.I):
         raise ValueError('Choose a configured location')
+    if method == 'set-device-addresses':
+        set_device_address_overrides(department_id, data.get('addresses'))
+        return {'updated': True}
     config = load_config()
     if method == 'status':
         return public_status(department_id)

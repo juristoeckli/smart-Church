@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { ArrowRight, Church, LockKeyhole } from "lucide-react";
 import type { AuthenticatedUser } from "@smart-church/contracts";
 
-const defaultLogoUrl = "/gfc-logo.svg";
+const smartChurchLogoUrl = "/smart-church-mark.svg";
 const usernamePattern = "[A-Za-z0-9][A-Za-z0-9._-]{2,31}";
 const usernameHelp = "Use 3–32 characters: letters, numbers, dots, hyphens, or underscores. Put your email in the Email address field.";
 
@@ -78,7 +78,7 @@ export function PasswordChangeRequired({ onChanged }: { onChanged: (user: Authen
     }
   }
 
-  return <main className="auth-page"><AuthBackdrop /><section className="auth-card" aria-labelledby="password-change-title"><a className="auth-brand" href="#home" aria-label="GfC"><img src={defaultLogoUrl} alt="GfC" onError={(event) => { event.currentTarget.style.display = "none"; }} /><span>GfC</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">ACCOUNT SECURITY</span><h1 id="password-change-title">Choose a new password</h1><p>Your administrator reset your password. Set a new one to continue.</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>New password<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">Use at least 12 characters.</p><label>Confirm new password<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "Updating…" : "Set new password"}<ArrowRight size={16} /></button></form><p className="auth-footer">Your account is stored on this installation.</p></section></main>;
+  return <main className="auth-page"><AuthBackdrop /><section className="auth-card" aria-labelledby="password-change-title"><a className="auth-brand" href="#home" aria-label="Smart-Church home"><img src={smartChurchLogoUrl} alt="" /><span className="auth-brand-name"><span>smart</span>-Church</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">ACCOUNT SECURITY</span><h1 id="password-change-title">Choose a new password</h1><p>Your administrator reset your password. Set a new one to continue.</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>New password<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">Use at least 12 characters.</p><label>Confirm new password<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "Updating…" : "Set new password"}<ArrowRight size={16} /></button></form><p className="auth-footer">Your account is stored on this installation.</p></section></main>;
 }
 
 export function Authentication({
@@ -140,13 +140,12 @@ export function Authentication({
     <main className="auth-page">
       <AuthBackdrop />
       <section className="auth-card" aria-labelledby="auth-title">
-        <a className="auth-brand" href="#home" aria-label="GfC">
-          <img src={defaultLogoUrl} alt="GfC" onError={(event) => { event.currentTarget.style.display = "none"; }} />
-          <span>GfC</span>
+        <a className="auth-brand" href="#home" aria-label="Smart-Church home">
+          <img src={smartChurchLogoUrl} alt="" />
+          <span className="auth-brand-name"><span>smart</span>-Church</span>
         </a>
-        <div className="auth-icon"><LockKeyhole size={20} /></div>
         <div className="auth-heading">
-          <span className="eyebrow">GFC WORKSPACE</span>
+          <span className="eyebrow">SMART-CHURCH</span>
           <h1 id="auth-title">{setupRequired ? "Set up your workspace" : "Welcome back"}</h1>
           <p>{setupRequired ? "Create the first server administrator account to manage this installation." : "Sign in to continue to your church workspace."}</p>
         </div>

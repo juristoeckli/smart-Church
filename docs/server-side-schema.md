@@ -15,7 +15,7 @@ flowchart LR
 
     subgraph api[API service · Fastify]
       core[Core<br/>Login · sessions · location access<br/>CSRF · module loader]
-      modules[Module route plugins<br/>Community · File Storage · Presenter<br/>Notifications · ChurchTools Sync · System Laptop]
+      modules[Module route plugins<br/>Community · File Storage · Presenter<br/>Notifications · ChurchTools Sync · Remote desktop]
       supervisor[Core Video worker supervisor<br/>Internal authenticated WebSocket]
 
       subgraph video[Video module · module-owned code]

@@ -7,7 +7,7 @@ import { hasPresenterAccess, presenterCapabilities } from "./PresenterRightsFiel
 const PresenterPage = lazy(() => import("./PresenterWorkspace").then(({ PresenterWorkspace }) => ({ default: PresenterWorkspace })));
 
 function PresenterModule(context: ModuleContext) {
-  return <PresenterPage departmentId={context.departmentId} csrfToken={context.csrfToken} capabilities={presenterCapabilities(context.canManageSite, (context.department.modulePermissions?.presenter ?? context.department.presenterPermissions ?? []) as PresenterPermission[])} />;
+  return <PresenterPage departmentId={context.departmentId} csrfToken={context.csrfToken} realtime={context.realtime} capabilities={presenterCapabilities(context.canManageSite, (context.department.modulePermissions?.presenter ?? context.department.presenterPermissions ?? []) as PresenterPermission[])} />;
 }
 
 export const moduleRegistration: ModuleRegistration = {

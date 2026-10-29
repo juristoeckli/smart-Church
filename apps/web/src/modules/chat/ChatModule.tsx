@@ -1,18 +1,21 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { CircleAlert, LogOut, MessageCircle, Plus, Search, Send, Trash2, UserPlus, Users, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { CircleAlert, MessageCircle, Pencil, Plus, Search, Send, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import "./chat.css";
-import "./chat-groups.css";
 
-type Contact = { id: string; displayName: string; online: boolean };
-type Participant = Contact & { role: "owner" | "member" };
+type PresenceStatus = "offline" | "online" | "away";
+type Contact = { id: string; displayName: string; online: boolean; presenceStatus?: PresenceStatus; isAdmin?: boolean; role?: "owner" | "admin" | "member" };
+type Participant = Contact;
 type Conversation = {
   id: string;
   kind: "direct" | "group";
   name: string | null;
+  createdBy: string;
+  titleSuffix: string | null;
   participants: Participant[];
   lastMessage: string | null;
   unreadCount: number;
+  latestUnreadMessage?: { id: string; body: string; author: string } | null;
   updatedAt: string;
 };
 type ChatMessage = { id: string; userId: string; author: string; body: string; createdAt: string; seenBy: string[] };
@@ -22,13 +25,41 @@ function timeLabel(value: string) {
   return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
-function conversationTitle(conversation: Conversation, currentUserId: string) {
-  if (conversation.kind === "group" && conversation.name) return conversation.name;
-  const others = conversation.participants.filter((person) => person.id !== currentUserId).map((person) => person.displayName);
-  return conversation.kind === "direct" ? others[0] ?? "Direct message" : others.join(", ") || "Group chat";
+function presenceStatus(person: Contact): PresenceStatus {
+  return person.presenceStatus ?? (person.online ? "online" : "offline");
 }
 
-export function ChatModule({ department, departmentId, csrfToken }: ModuleContext) {
+function chatSuffixStorageKey(userId: string, conversationId: string) {
+  return `smart-church-chat-suffix:${userId}:${conversationId}`;
+}
+
+function readChatSuffix(userId: string, conversationId: string) {
+  try { return window.localStorage.getItem(chatSuffixStorageKey(userId, conversationId)) ?? ""; }
+  catch { return ""; }
+}
+
+function presenceDot(status: PresenceStatus) {
+  if (status === "offline") return null;
+  return <i className={`chat-online-dot${status === "away" ? " chat-online-dot-away" : ""}`} title={status === "away" ? "Online; page unfocused and notifications disabled" : "Online"} aria-label={status === "away" ? "Online, page unfocused and notifications disabled" : "Online"} />;
+}
+
+function getPresenceSessionId() {
+  const key = "smart-church-chat-presence-session";
+  const stored = window.sessionStorage.getItem(key);
+  if (stored) return stored;
+  const id = window.crypto.randomUUID();
+  window.sessionStorage.setItem(key, id);
+  return id;
+}
+
+function conversationTitle(conversation: Conversation, currentUserId: string) {
+  const others = conversation.participants.filter((person) => person.id !== currentUserId).map((person) => person.displayName);
+  if (conversation.kind === "group") return (conversation.name ?? others.join(", ")) || "Group chat";
+  const suffix = conversation.titleSuffix?.trim();
+  return `${others[0] ?? "Direct message"}${suffix ? ` · ${suffix}` : ""}`;
+}
+
+export function ChatModule({ department, departmentId, csrfToken, systemNotificationsEnabled = false, realtime, requestedChatConversationId, onChatConversationOpened, onActiveChatChange, refreshCsrfToken }: ModuleContext) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
@@ -43,10 +74,16 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
   const [error, setError] = useState("");
   const [draft, setDraft] = useState("");
   const [composing, setComposing] = useState(false);
-  const [manageGroup, setManageGroup] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [groupName, setGroupName] = useState("");
+  const [managingConversation, setManagingConversation] = useState(false);
+  const [conversationEditName, setConversationEditName] = useState("");
+  const [conversationEditSuffix, setConversationEditSuffix] = useState("");
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
+  const [savingConversation, setSavingConversation] = useState(false);
+  const legacySuffixSyncs = useRef(new Set<string>());
+  const [presenceSessionId] = useState(getPresenceSessionId);
 
   const activeConversation = useMemo(() => conversations.find((conversation) => conversation.id === activeId) ?? null, [conversations, activeId]);
   const isTyping = composerFocused && draft.trim().length > 0;
@@ -63,7 +100,10 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
       ]);
       if (!conversationResponse.ok || !("conversations" in conversationResult)) throw new Error("error" in conversationResult ? conversationResult.error ?? "Could not load conversations." : "Could not load conversations.");
       if (!contactsResponse.ok || !("contacts" in contactsResult)) throw new Error("error" in contactsResult ? contactsResult.error ?? "Could not load location members." : "Could not load location members.");
-      setConversations(conversationResult.conversations);
+      setConversations(conversationResult.conversations.map((conversation) => ({
+        ...conversation,
+        titleSuffix: conversation.titleSuffix ?? null,
+      })));
       setContacts(contactsResult.contacts);
       setCurrentUserId(conversationResult.currentUserId);
       setCanModerate(conversationResult.canModerate);
@@ -74,22 +114,64 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
     } finally { setLoading(false); }
   }, [departmentId]);
 
-  const sendPresence = useCallback(async () => {
-    try {
-      await fetch("/api/modules/chat/presence", {
-        method: "POST",
-        headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken },
-      });
-    } catch { /* Presence is best effort; message access does not depend on it. */ }
-  }, [csrfToken, departmentId]);
+  useEffect(() => {
+    if (!currentUserId) return;
+    for (const conversation of conversations) {
+      if (conversation.kind !== "direct" || conversation.titleSuffix) continue;
+      const suffix = readChatSuffix(currentUserId, conversation.id);
+      if (!suffix) continue;
+      const key = `${currentUserId}:${conversation.id}`;
+      if (legacySuffixSyncs.current.has(key)) continue;
+      legacySuffixSyncs.current.add(key);
+      void mutate(`/api/modules/chat/conversations/${encodeURIComponent(conversation.id)}`, "PATCH", { titleSuffix: suffix, onlyIfEmpty: true })
+        .then(() => {
+          try { window.localStorage.removeItem(chatSuffixStorageKey(currentUserId, conversation.id)); } catch { /* The shared suffix is saved on the server. */ }
+          void loadOverview(true);
+        })
+        .catch(() => { legacySuffixSyncs.current.delete(key); });
+    }
+  }, [conversations, currentUserId, loadOverview]);
+
+  const sendPresence = useCallback(() => {
+    const focused = document.visibilityState === "visible" && document.hasFocus();
+    const notificationsEnabled = systemNotificationsEnabled && typeof Notification !== "undefined" && Notification.permission === "granted";
+    realtime?.send("module:chat:presence", { sessionId: presenceSessionId, focused, notificationsEnabled });
+  }, [presenceSessionId, realtime, systemNotificationsEnabled]);
 
   useEffect(() => {
     void loadOverview();
     void sendPresence();
-    const overviewTimer = window.setInterval(() => { void loadOverview(true); }, 15_000);
-    const presenceTimer = window.setInterval(() => { void sendPresence(); }, 20_000);
-    return () => { window.clearInterval(overviewTimer); window.clearInterval(presenceTimer); };
-  }, [loadOverview, sendPresence]);
+    const presenceTimer = window.setInterval(() => { void sendPresence(); }, 15_000);
+    const unsubscribeChanged = realtime?.subscribe("module:chat:changed", () => { void loadOverview(true); });
+    const unsubscribePresence = realtime?.subscribe("module:chat:presence", () => { void loadOverview(true); });
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", () => { void loadOverview(true); sendPresence(); });
+    const refreshPresenceAndOverview = () => { void sendPresence(); void loadOverview(true); };
+    document.addEventListener("visibilitychange", refreshPresenceAndOverview);
+    window.addEventListener("focus", refreshPresenceAndOverview);
+    window.addEventListener("blur", refreshPresenceAndOverview);
+    return () => {
+      window.clearInterval(presenceTimer);
+      unsubscribeChanged?.();
+      unsubscribePresence?.();
+      unsubscribeConnected?.();
+      document.removeEventListener("visibilitychange", refreshPresenceAndOverview);
+      window.removeEventListener("focus", refreshPresenceAndOverview);
+      window.removeEventListener("blur", refreshPresenceAndOverview);
+      realtime?.send("module:chat:presence:leave", { sessionId: presenceSessionId });
+    };
+  }, [departmentId, loadOverview, presenceSessionId, realtime, sendPresence]);
+
+  useEffect(() => {
+    onActiveChatChange?.(activeId || null);
+    return () => onActiveChatChange?.(null);
+  }, [activeId, onActiveChatChange]);
+
+  useEffect(() => {
+    if (!requestedChatConversationId) return;
+    setActiveId(requestedChatConversationId);
+    setComposing(false);
+    onChatConversationOpened?.(requestedChatConversationId);
+  }, [requestedChatConversationId, onChatConversationOpened]);
 
   useEffect(() => {
     if (!activeId) { setMessages([]); return; }
@@ -109,9 +191,21 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
       } finally { if (!cancelled) setMessagesLoading(false); }
     }
     void loadMessages(false);
-    const timer = window.setInterval(() => { void loadMessages(true); }, 4000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [activeId, departmentId]);
+    const refreshVisibleChat = () => {
+      if (document.visibilityState === "visible") void loadMessages(true);
+    };
+    const unsubscribeChanged = realtime?.subscribe("module:chat:changed", () => { void loadMessages(true); });
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", () => { void loadMessages(true); });
+    document.addEventListener("visibilitychange", refreshVisibleChat);
+    window.addEventListener("focus", refreshVisibleChat);
+    return () => {
+      cancelled = true;
+      unsubscribeChanged?.();
+      unsubscribeConnected?.();
+      document.removeEventListener("visibilitychange", refreshVisibleChat);
+      window.removeEventListener("focus", refreshVisibleChat);
+    };
+  }, [activeId, departmentId, realtime]);
 
   useEffect(() => {
     if (!activeId) { setTypingUsers([]); return; }
@@ -125,42 +219,47 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
     }
     setTypingUsers([]);
     void loadTyping();
-    const timer = window.setInterval(() => { void loadTyping(); }, 2500);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [activeId, departmentId]);
+    const unsubscribeTyping = realtime?.subscribe("module:chat:typing", () => { void loadTyping(); });
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", () => { void loadTyping(); });
+    return () => { cancelled = true; unsubscribeTyping?.(); unsubscribeConnected?.(); };
+  }, [activeId, departmentId, realtime]);
 
   useEffect(() => {
-    if (!activeId || !isTyping || composing || manageGroup) return;
-    const path = `/api/modules/chat/conversations/${encodeURIComponent(activeId)}/typing`;
-    const refreshTyping = () => fetch(path, {
-      method: "POST",
-      headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken },
-    }).catch(() => undefined);
+    if (!activeId || !isTyping || composing) return;
+    const refreshTyping = () => realtime?.send("module:chat:typing", { conversationId: activeId, typing: true });
     void refreshTyping();
     const timer = window.setInterval(() => { void refreshTyping(); }, 3000);
     return () => {
       window.clearInterval(timer);
-      void fetch(path, {
-        method: "DELETE",
-        headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken },
-        keepalive: true,
-      }).catch(() => undefined);
+      realtime?.send("module:chat:typing", { conversationId: activeId, typing: false });
     };
-  }, [activeId, composing, csrfToken, departmentId, isTyping, manageGroup]);
+  }, [activeId, composing, isTyping, realtime]);
 
   async function mutate(path: string, method: string, body?: object) {
-    const response = await fetch(path, {
+    const send = (token: string) => fetch(path, {
       method,
-      headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken, ...(body ? { "content-type": "application/json" } : {}) },
+      headers: { "x-department-id": departmentId, "x-csrf-token": token, ...(body ? { "content-type": "application/json" } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    const result = await response.json() as { error?: string; id?: string };
+    let response = await send(csrfToken);
+    let result = await response.json() as { error?: string; id?: string };
+    if (response.status === 403 && result.error?.includes("session token")) {
+      const freshToken = await refreshCsrfToken?.();
+      if (freshToken) {
+        response = await send(freshToken);
+        result = await response.json() as { error?: string; id?: string };
+      }
+    }
     if (!response.ok) throw new Error(result.error ?? "The request failed.");
     return result;
   }
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    await sendMessage();
+  }
+
+  async function sendMessage() {
     const body = draft.trim();
     if (!body || !activeConversation || sending) return;
     setSending(true); setError("");
@@ -184,10 +283,6 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not delete the message."); }
   }
 
-  function toggleContact(id: string) {
-    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-  }
-
   async function createConversation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selectedIds.length) return;
@@ -196,122 +291,190 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
       const result = await mutate("/api/modules/chat/conversations", "POST", { userIds: selectedIds, ...(selectedIds.length > 1 && groupName.trim() ? { name: groupName.trim() } : {}) });
       await loadOverview(true);
       setActiveId(result.id ?? "");
-      setComposing(false); setManageGroup(false); setSelectedIds([]); setGroupName(""); setSearch("");
+      setComposing(false); setManagingConversation(false); setSelectedIds([]); setSearch(""); setGroupName("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not start the conversation."); }
   }
 
-  function openGroupManagement() {
-    if (!activeConversation || activeConversation.kind !== "group") return;
-    setGroupName(activeConversation.name ?? ""); setSelectedIds([]); setSearch(""); setManageGroup(true);
-  }
-
-  async function renameGroup(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!activeConversation || !groupName.trim()) return;
+  async function deleteConversation(conversation: Conversation) {
+    const title = conversationTitle(conversation, currentUserId);
+    if (!window.confirm(`Delete “${title}” and all its messages for everyone in this chat?`)) return;
     setError("");
     try {
-      await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}`, "PATCH", { name: groupName.trim() });
+      await mutate(`/api/modules/chat/conversations/${encodeURIComponent(conversation.id)}`, "DELETE");
+      const remaining = conversations.filter((item) => item.id !== conversation.id);
+      setConversations(remaining);
+      if (activeId === conversation.id) {
+        setActiveId(remaining[0]?.id ?? "");
+        setMessages([]);
+        setManagingConversation(false);
+      }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not delete the chat."); }
+  }
+
+  function toggleContact(id: string) {
+    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+
+  function beginManagingConversation(conversation: Conversation) {
+    setConversationEditName(conversation.name ?? "");
+    setConversationEditSuffix(conversation.titleSuffix ?? readChatSuffix(currentUserId, conversation.id));
+    setSelectedMemberIds([]);
+    setSearch("");
+    setManagingConversation(true);
+  }
+
+  async function saveConversationEdits(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!activeConversation) return;
+    setSavingConversation(true);
+    setError("");
+    try {
+      if (activeConversation.kind === "group") {
+        await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}`, "PATCH", { name: conversationEditName });
+      } else {
+        const suffix = conversationEditSuffix.trim();
+        await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}`, "PATCH", { titleSuffix: suffix });
+        try { window.localStorage.removeItem(chatSuffixStorageKey(currentUserId, activeConversation.id)); } catch { /* The shared server name is saved; an old local fallback can be ignored. */ }
+      }
       await loadOverview(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not rename the group."); }
+      setManagingConversation(false);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this chat."); }
+    finally { setSavingConversation(false); }
   }
 
   async function addGroupMembers(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!activeConversation || !selectedIds.length) return;
+    if (!activeConversation || activeConversation.kind !== "group" || !selectedMemberIds.length) return;
+    setSavingConversation(true);
     setError("");
     try {
-      await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members`, "POST", { userIds: selectedIds });
-      setSelectedIds([]);
+      for (const userId of selectedMemberIds) {
+        await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members`, "POST", { userId });
+      }
+      setSelectedMemberIds([]);
       await loadOverview(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not add group members."); }
+    } catch (reason) {
+      await loadOverview(true);
+      setError(reason instanceof Error ? reason.message : "Could not add group members.");
+    } finally { setSavingConversation(false); }
   }
 
-  async function removeGroupMember(userId: string) {
-    if (!activeConversation) return;
+  async function removeGroupMember(person: Participant) {
+    if (!activeConversation || activeConversation.kind !== "group") return;
+    if (!window.confirm(`Remove ${person.displayName} from this group chat?`)) return;
     setError("");
     try {
-      await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members/${encodeURIComponent(userId)}`, "DELETE");
-      if (userId === currentUserId) { setManageGroup(false); setActiveId(""); }
+      await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members/${encodeURIComponent(person.id)}`, "DELETE");
       await loadOverview(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update group members."); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not remove this group member."); }
+  }
+
+  async function changeGroupMemberRole(person: Participant) {
+    if (!activeConversation || activeConversation.kind !== "group") return;
+    const role = person.role === "admin" ? "member" : "admin";
+    setError("");
+    try {
+      await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members/${encodeURIComponent(person.id)}`, "PATCH", { role });
+      await loadOverview(true);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this group member."); }
   }
 
   const filteredContacts = contacts.filter((contact) => contact.displayName.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
-  const activeMember = activeConversation?.participants.find((person) => person.id === currentUserId);
-  const canManageGroup = activeConversation?.kind === "group" && (canModerate || activeMember?.role === "owner");
-  const availableGroupContacts = filteredContacts.filter((contact) => !activeConversation?.participants.some((person) => person.id === contact.id));
+  const activeRole = activeConversation?.participants.find((person) => person.id === currentUserId)?.role;
+  const canManageActiveGroup = activeConversation?.kind === "group" && (activeRole === "owner" || activeRole === "admin");
+  const isGroupCreator = activeConversation?.kind === "group" && activeConversation.createdBy === currentUserId;
 
   return <>
     <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || `Chat for ${department.location} · ${conversations.length} ${conversations.length === 1 ? "conversation" : "conversations"}`}</div>
     <section className="page-heading chat-page-heading">
-      <div><div className="eyebrow">YOUR COMMUNITY</div><h1>Chat</h1><p className="page-subtitle">Private conversations and group chats for {department.location}.</p></div>
+      <div><div className="eyebrow">YOUR COMMUNITY</div><h1>Chat</h1><p className="page-subtitle">Private conversations for {department.location}.</p></div>
     </section>
 
     {error && <p className="chat-feedback" role="alert"><CircleAlert size={14} />{error}</p>}
     <section className="directory-card chat-layout" aria-label="Chat">
       <aside className="chat-sidebar">
-        <div className="chat-sidebar-heading"><div><h2>Messages</h2><p>Only conversation members can read messages.</p></div><button className="button button-primary chat-new-button" type="button" onClick={() => { setComposing(true); setManageGroup(false); setActiveId(""); }}><Plus size={14} />New chat</button></div>
+        <div className="chat-sidebar-heading"><div><h2>Messages</h2><p>Direct messages and group chats.</p></div><button className="button button-primary chat-new-button" type="button" onClick={() => { setComposing(true); setActiveId(""); setManagingConversation(false); setSelectedIds([]); setGroupName(""); }}><Plus size={14} />New chat</button></div>
         {loading ? <p className="chat-empty" role="status">Loading conversations…</p> : conversations.length === 0 && !composing ? <div className="chat-sidebar-empty"><MessageCircle size={18} /><span>Your conversations will appear here.</span></div> : <div className="chat-conversation-list">
           {conversations.map((conversation) => {
             const title = conversationTitle(conversation, currentUserId);
-            const otherParticipants = conversation.participants.filter((person) => person.id !== currentUserId);
-            const online = conversation.kind === "direct" && otherParticipants.some((person) => person.online);
-            return <button className={`chat-conversation${conversation.id === activeId && !composing ? " chat-conversation-active" : ""}`} type="button" key={conversation.id} onClick={() => { setActiveId(conversation.id); setComposing(false); setManageGroup(false); }}>
-              <span className={`chat-avatar${conversation.kind === "group" ? " chat-avatar-group" : ""}`}>{conversation.kind === "group" ? <Users size={16} /> : title.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
-              <span className="chat-conversation-copy"><span className="chat-conversation-title">{online && <i className="chat-online-dot" title="Online in Chat" />}{title}</span><span className="chat-conversation-preview">{conversation.lastMessage ?? (conversation.kind === "group" ? `${conversation.participants.length} members` : "Start a conversation")}</span></span>
-              {conversation.unreadCount > 0 && <span className="chat-unread-count" aria-label={`${conversation.unreadCount} unread ${conversation.unreadCount === 1 ? "message" : "messages"}`}>{conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}</span>}
-              {conversation.kind === "group" && <span className="chat-member-count">{conversation.participants.length}</span>}
-            </button>;
+            const others = conversation.participants.filter((person) => person.id !== currentUserId);
+            const groupPresence = others.some((person) => presenceStatus(person) === "online") ? "online" : others.some((person) => presenceStatus(person) === "away") ? "away" : "offline";
+            return <div className="chat-conversation-row" key={conversation.id}>
+              <button className={`chat-conversation${conversation.id === activeId && !composing ? " chat-conversation-active" : ""}`} type="button" onClick={() => { setActiveId(conversation.id); setComposing(false); setManagingConversation(false); }}>
+                <span className={`chat-avatar${conversation.kind === "group" ? " chat-avatar-group" : ""}`}>{conversation.kind === "group" ? <Users size={16} /> : title.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
+                <span className="chat-conversation-copy"><span className="chat-conversation-title">{presenceDot(groupPresence)}{title}</span><span className="chat-conversation-preview">{conversation.lastMessage ?? (conversation.kind === "group" ? `${conversation.participants.length} participants` : "Start a conversation")}</span></span>
+                {conversation.unreadCount > 0 && <span className="chat-unread-count" aria-label={`${conversation.unreadCount} unread ${conversation.unreadCount === 1 ? "message" : "messages"}`}>{conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}</span>}
+              </button>
+              <button className="chat-conversation-delete" type="button" aria-label={`Delete chat with ${title}`} title="Delete chat for everyone" onClick={() => void deleteConversation(conversation)}><Trash2 size={14} /></button>
+            </div>;
           })}
         </div>}
-        <div className="chat-online-note"><span className="chat-online-dot" />Online means active in Chat.</div>
+        <div className="chat-online-note" aria-label="Presence key"><span>No dot: offline</span><span>{presenceDot("online")} Online</span><span>{presenceDot("away")} Unfocused, no notifications</span></div>
       </aside>
 
       <div className="chat-main">
         {composing ? <section className="chat-new-panel">
-          <div className="chat-thread-heading"><div><h2>New conversation</h2><p>Choose one person for a direct message, or several for a group.</p></div><button className="chat-close-button" type="button" onClick={() => setComposing(false)} aria-label="Close new conversation"><X size={17} /></button></div>
+          <div className="chat-thread-heading"><div><h2>New chat</h2><p>Choose one person for a direct message or multiple people for a group.</p></div><button className="chat-close-button" type="button" onClick={() => { setComposing(false); setSelectedIds([]); setGroupName(""); }} aria-label="Close new conversation"><X size={17} /></button></div>
           <form className="chat-create-form" onSubmit={createConversation}>
-            <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a location member" aria-label="Find a location member" /></label>
-            {selectedIds.length > 1 && <label className="chat-group-name">Group name <input value={groupName} onChange={(event) => setGroupName(event.target.value)} maxLength={80} placeholder="e.g. Sunday volunteers" /></label>}
+            <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a person" aria-label="Find a person" /></label>
+            {selectedIds.length > 1 && <label className="chat-group-name">Group name <span className="optional-label">Optional</span><input value={groupName} onChange={(event) => setGroupName(event.target.value)} maxLength={80} placeholder="e.g. Sunday volunteers" /></label>}
             <div className="chat-contact-list">
-              {filteredContacts.length === 0 ? <p className="chat-empty">No matching members.</p> : filteredContacts.map((contact) => <label className="chat-contact-option" key={contact.id}>
+              {filteredContacts.length === 0 ? <p className="chat-empty">No matching people.</p> : filteredContacts.map((contact) => <label className="chat-contact-option" key={contact.id}>
                 <input type="checkbox" checked={selectedIds.includes(contact.id)} onChange={() => toggleContact(contact.id)} />
                 <span className="chat-contact-avatar">{contact.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
-                <span>{contact.displayName}</span>
-                <small>{contact.online ? <><i className="chat-online-dot" />Online</> : "Offline"}</small>
+                <span>{contact.displayName}{contact.isAdmin && <small>Server Administrator</small>}</span>
+                <small>{presenceStatus(contact) === "offline" ? "Offline" : <>{presenceDot(presenceStatus(contact))}{presenceStatus(contact) === "away" ? "Away" : "Online"}</>}</small>
               </label>)}
             </div>
-            <div className="chat-create-footer"><span>{selectedIds.length ? `${selectedIds.length} selected` : "Select at least one person"}</span><button className="button button-primary" type="submit" disabled={!selectedIds.length}><MessageCircle size={14} />{selectedIds.length > 1 ? "Create group" : "Start chat"}</button></div>
+            <div className="chat-create-footer"><span>{selectedIds.length ? `${selectedIds.length} ${selectedIds.length === 1 ? "person" : "people"} selected` : "Select one or more people"}</span><button className="button button-primary" type="submit" disabled={!selectedIds.length}><MessageCircle size={14} />{selectedIds.length > 1 ? "Create group" : "Start chat"}</button></div>
           </form>
         </section> : activeConversation ? <>
           <div className="chat-thread-heading">
-            <span className={`chat-avatar${activeConversation.kind === "group" ? " chat-avatar-group" : ""}`}>{activeConversation.kind === "group" ? <Users size={16} /> : conversationTitle(activeConversation, currentUserId).split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
-            <div className="chat-thread-title"><h2>{conversationTitle(activeConversation, currentUserId)}</h2><p>{activeConversation.kind === "group" ? `${activeConversation.participants.length} members · ` : ""}{activeConversation.participants.filter((person) => person.id !== currentUserId && person.online).map((person) => person.displayName).join(", ") || "Conversation"}</p></div>
-            {activeConversation.kind === "group" && <button className="button button-secondary chat-group-details-button" type="button" onClick={() => manageGroup ? setManageGroup(false) : openGroupManagement()}>{manageGroup ? "Back to chat" : "Group details"}</button>}
+            <span className="chat-avatar">{conversationTitle(activeConversation, currentUserId).split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
+            <div className="chat-thread-title"><h2>{conversationTitle(activeConversation, currentUserId)}</h2><p>{activeConversation.kind === "group" ? `${activeConversation.participants.length} participants · Group chat` : (() => { const other = activeConversation.participants.find((person) => person.id !== currentUserId); const status = other ? presenceStatus(other) : "offline"; return status === "offline" ? "Direct message" : status === "away" ? "Away" : "Online"; })()}</p></div>
+            {(activeConversation.kind === "direct" || canManageActiveGroup) && <button className="chat-close-button" type="button" onClick={() => managingConversation ? setManagingConversation(false) : beginManagingConversation(activeConversation)} aria-label={managingConversation ? "Close chat settings" : "Edit chat settings"} title={managingConversation ? "Close chat settings" : "Edit chat settings"}><Pencil size={15} /></button>}
           </div>
-          {typingUsers.length > 0 && <p className="chat-typing-indicator" role="status">{typingUsers.length === 1 ? `${typingUsers[0]} is typing…` : `${typingUsers.slice(0, 2).join(", ")}${typingUsers.length > 2 ? ` and ${typingUsers.length - 2} others` : ""} are typing…`}</p>}
-          {manageGroup && activeConversation.kind === "group" ? <section className="chat-group-manage">
-            <div className="chat-group-section-heading"><div><h3>Group members</h3><p>Only members of this group can read its messages.</p></div><span>{activeConversation.participants.length}/50</span></div>
-            {canManageGroup && <form className="chat-rename-form" onSubmit={renameGroup}><label htmlFor="chat-group-rename">Group name</label><div><input id="chat-group-rename" value={groupName} onChange={(event) => setGroupName(event.target.value)} required maxLength={80} placeholder="Name this group" /><button className="button button-secondary" type="submit" disabled={!groupName.trim() || groupName.trim() === activeConversation.name}>Save name</button></div></form>}
-            <div className="chat-group-members">{activeConversation.participants.map((person) => <div className="chat-group-member" key={person.id}>
-              <span className="chat-contact-avatar">{person.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span><span className="chat-group-member-name">{person.displayName}{person.id === currentUserId ? " (you)" : ""}{person.online && <small><i className="chat-online-dot" />Online</small>}</span>{person.role === "owner" && <span className="chat-owner-label">Owner</span>}
-              {canManageGroup && person.id !== currentUserId && <button className="chat-remove-member" type="button" onClick={() => void removeGroupMember(person.id)}>Remove</button>}
-            </div>)}</div>
-            {canManageGroup && activeConversation.participants.length < 50 && <form className="chat-add-members" onSubmit={addGroupMembers}><div className="chat-group-section-heading"><div><h3>Add people</h3><p>Choose existing members of {department.location}.</p></div><UserPlus size={16} /></div>
-              <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a location member" aria-label="Find a location member to add" /></label>
-              <div className="chat-contact-list chat-add-contact-list">{availableGroupContacts.length === 0 ? <p className="chat-empty">No more matching members.</p> : availableGroupContacts.map((contact) => <label className="chat-contact-option" key={contact.id}>
-                <input type="checkbox" checked={selectedIds.includes(contact.id)} onChange={() => toggleContact(contact.id)} /><span className="chat-contact-avatar">{contact.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span><span>{contact.displayName}</span><small>{contact.online ? <><i className="chat-online-dot" />Online</> : "Offline"}</small>
-              </label>)}</div>
-              <div className="chat-create-footer"><span>{selectedIds.length ? `${selectedIds.length} selected` : "Select people to add"}</span><button className="button button-primary" type="submit" disabled={!selectedIds.length}><UserPlus size={14} />Add members</button></div>
-            </form>}
-            <div className="chat-leave-group-row"><p>{canManageGroup ? "As owner, leaving transfers ownership to the next member." : "You can leave this group at any time."}</p><button className="button button-secondary" type="button" onClick={() => void removeGroupMember(currentUserId)}><LogOut size={14} />Leave group</button></div>
+          {managingConversation ? <section className="chat-management-panel">
+            {activeConversation.kind === "direct" ? <>
+              <div><h3>Shared chat name</h3><p>Both participants will see this suffix after the other person’s name.</p></div>
+              <form className="chat-management-form" onSubmit={saveConversationEdits}>
+                <label>Shared suffix <span className="optional-label">Optional</span><input value={conversationEditSuffix} onChange={(event) => setConversationEditSuffix(event.target.value)} maxLength={60} placeholder="e.g. Choir" /></label>
+                <p className="chat-name-preview">Preview: {activeConversation.participants.find((person) => person.id !== currentUserId)?.displayName ?? "Direct message"}{conversationEditSuffix.trim() ? ` · ${conversationEditSuffix.trim()}` : ""}</p>
+                <div className="chat-management-actions"><button className="button button-secondary" type="button" onClick={() => setManagingConversation(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={savingConversation}>{savingConversation ? "Saving…" : "Save name"}</button></div>
+              </form>
+            </> : <>
+              <div><h3>Group chat settings</h3><p>Admins can rename the group and manage its members. Only the creator can change admin roles.</p></div>
+              <form className="chat-management-form" onSubmit={saveConversationEdits}>
+                <label>Group name <span className="optional-label">Optional</span><input value={conversationEditName} onChange={(event) => setConversationEditName(event.target.value)} maxLength={80} placeholder="e.g. Sunday volunteers" /></label>
+                <div className="chat-management-actions"><button className="button button-secondary" type="button" onClick={() => setManagingConversation(false)}>Close</button><button className="button button-primary" type="submit" disabled={savingConversation}>{savingConversation ? "Saving…" : "Save name"}</button></div>
+              </form>
+              <div className="chat-managed-members"><h4>Members ({activeConversation.participants.length})</h4>
+                {activeConversation.participants.map((person) => <div className="chat-managed-member" key={person.id}>
+                  <span className="chat-managed-member-name">{person.displayName}{person.id === currentUserId && <small>You</small>}</span>
+                  <span className="chat-managed-member-role">{person.id === activeConversation.createdBy ? "Creator · Admin" : person.role === "admin" ? "Admin" : "Member"}</span>
+                  {isGroupCreator && person.id !== activeConversation.createdBy && <button className="chat-member-action" type="button" onClick={() => void changeGroupMemberRole(person)} title={person.role === "admin" ? "Remove admin role" : "Make admin"}><Shield size={14} />{person.role === "admin" ? "Demote" : "Make admin"}</button>}
+                  {canManageActiveGroup && person.id !== activeConversation.createdBy && (isGroupCreator || person.role !== "admin") && <button className="chat-member-action chat-member-remove" type="button" onClick={() => void removeGroupMember(person)} title="Remove from group"><Trash2 size={14} />Remove</button>}
+                </div>)}
+              </div>
+              <form className="chat-management-form chat-add-members" onSubmit={addGroupMembers}>
+                <h4><UserPlus size={15} />Add people</h4>
+                <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a person" aria-label="Find a person to add" /></label>
+                <div className="chat-contact-list">
+                  {filteredContacts.filter((contact) => !activeConversation.participants.some((person) => person.id === contact.id)).length === 0 ? <p className="chat-empty">No more matching people.</p> : filteredContacts.filter((contact) => !activeConversation.participants.some((person) => person.id === contact.id)).map((contact) => <label className="chat-contact-option" key={contact.id}>
+                    <input type="checkbox" checked={selectedMemberIds.includes(contact.id)} onChange={() => setSelectedMemberIds((current) => current.includes(contact.id) ? current.filter((id) => id !== contact.id) : [...current, contact.id])} />
+                    <span className="chat-contact-avatar">{contact.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span><span>{contact.displayName}</span>
+                  </label>)}
+                </div>
+                <div className="chat-management-actions"><span>{selectedMemberIds.length ? `${selectedMemberIds.length} selected` : "Select people to add"}</span><button className="button button-primary" type="submit" disabled={!selectedMemberIds.length || savingConversation}>{savingConversation ? "Adding…" : "Add to group"}</button></div>
+              </form>
+            </>}
           </section> : <>
+          {typingUsers.length > 0 && <p className="chat-typing-indicator" role="status">{typingUsers[0]} is typing…</p>}
           <div className="chat-message-list">
             {messagesLoading ? <p className="chat-empty" role="status">Loading messages…</p> : messages.length === 0 ? <div className="chat-empty-state"><span><MessageCircle size={20} /></span><strong>Start the conversation</strong><p>Send a private message to {conversationTitle(activeConversation, currentUserId)}.</p></div> : messages.map((message) => {
               const own = message.userId === currentUserId;
               return <article className={`chat-message${own ? " chat-message-own" : ""}`} key={message.id}>
-                {!own && <div className="chat-message-meta"><strong>{message.author}</strong><time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time></div>}
-                {own && <div className="chat-message-meta"><strong>You</strong><time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time></div>}
+                <div className="chat-message-meta"><strong>{own ? "You" : message.author}</strong><time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time></div>
                 <p>{message.body}</p>
                 {own && message.seenBy.length > 0 && <small className="chat-seen-receipt">Seen by {message.seenBy.join(", ")}</small>}
                 {(own || canModerate) && <button type="button" className="chat-delete" onClick={() => void remove(message)} aria-label={`Delete message from ${message.author}`} title={canModerate && !own ? "Moderate message" : "Delete your message"}><Trash2 size={13} /></button>}
@@ -320,13 +483,13 @@ export function ChatModule({ department, departmentId, csrfToken }: ModuleContex
           </div>
           <form className="chat-compose" onSubmit={send}>
             <label className="chat-compose-label" htmlFor="chat-message">Message</label>
-            <textarea id="chat-message" value={draft} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={(event) => setDraft(event.target.value)} maxLength={2000} rows={2} placeholder="Write a message…" aria-describedby="chat-character-count" />
+            <textarea id="chat-message" value={draft} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.altKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} maxLength={2000} rows={2} placeholder="Write a message… (Enter to send, Alt+Enter for a new line)" aria-describedby="chat-character-count" />
             <div className="chat-compose-footer"><span id="chat-character-count">{draft.length}/2000</span><button className="button button-primary" type="submit" disabled={sending || !draft.trim()}><Send size={14} />{sending ? "Sending…" : "Send"}</button></div>
           </form>
           </>}
-        </> : <div className="chat-select-empty"><span><MessageCircle size={23} /></span><strong>Select a conversation</strong><p>Choose a message on the left or start a new chat.</p><button className="button button-primary" type="button" onClick={() => { setComposing(true); setManageGroup(false); }}><Plus size={14} />New chat</button></div>}
+        </> : <div className="chat-select-empty"><span><MessageCircle size={23} /></span><strong>Select a conversation</strong><p>Choose a conversation or start a new chat with one or more people.</p><button className="button button-primary" type="button" onClick={() => { setComposing(true); setManagingConversation(false); setSelectedIds([]); }}><Plus size={14} />New chat</button></div>}
       </div>
     </section>
-    <footer className="page-footer"><span>Conversations are private to their members in {department.location}.</span><span>Messages refresh automatically; read receipts update as members open the chat.</span></footer>
+      <footer className="page-footer"><span>Conversations are private to their participants in {department.location}.</span><span>Direct chat suffixes sync between both participants; group settings are managed by admins.</span></footer>
   </>;
 }

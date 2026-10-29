@@ -1,15 +1,23 @@
 import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-const operations = new Set(["status", "command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets", "videohub-history"]);
+const operations = new Set(["status", "command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets", "videohub-history", "set-device-addresses"]);
 const coreUrl = process.env.SMART_CHURCH_CORE_WS_URL;
 const token = process.env.SMART_CHURCH_WORKER_TOKEN;
 if (!coreUrl || !token) process.exit(1);
 
 const pythonPath = fileURLToPath(new URL("./python/worker.py", import.meta.url));
 const stateDirectory = process.env.STREAMING_STATE_DIR || dirname(resolve(process.env.STREAMING_CONFIG_FILE));
+try {
+  mkdirSync(stateDirectory, { recursive: true });
+} catch (error) {
+  console.error(`Could not create Video worker state directory: ${error instanceof Error ? error.message : "unknown error"}`);
+  process.exit(1);
+}
 const pythonCommand = process.env.PYTHON_BINARY || (process.platform === "win32" ? "py" : "python3");
 const pythonArgs = [...(process.platform === "win32" && !process.env.PYTHON_BINARY ? ["-3"] : []), "-u", pythonPath];
 const python = spawn(pythonCommand, pythonArgs, {
@@ -21,14 +29,39 @@ const python = spawn(pythonCommand, pythonArgs, {
 
 const pending = new Set();
 let pythonReady = false;
+let pythonStartedAt = null;
 let websocketOpen = false;
 let shuttingDown = false;
 const socket = new WebSocket(coreUrl);
 const lines = createInterface({ input: python.stdout });
 
+python.once("spawn", () => { pythonStartedAt = Date.now(); });
+
+async function reportWorkerStats() {
+  const memory = process.memoryUsage();
+  let pythonRssBytes = null;
+  if (process.platform === "linux" && python.pid) {
+    try {
+      const status = await readFile(`/proc/${python.pid}/status`, "utf8");
+      const match = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status);
+      if (match) pythonRssBytes = Number(match[1]) * 1024;
+    } catch { /* The Python process may not have started or may have exited. */ }
+  }
+  process.send?.({
+    type: "worker-stats",
+    uptimeSeconds: process.uptime(),
+    memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal },
+    python: { uptimeSeconds: pythonStartedAt === null ? null : Math.floor((Date.now() - pythonStartedAt) / 1000), rssBytes: pythonRssBytes },
+  });
+}
+const statsTimer = setInterval(() => { void reportWorkerStats(); }, 10_000);
+statsTimer.unref();
+void reportWorkerStats();
+
 function stop(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
+  clearInterval(statsTimer);
   try { socket.close(1001, "worker stopping"); } catch { /* connection already closed */ }
   if (python.exitCode === null && !python.killed) {
     python.kill("SIGTERM");
@@ -85,7 +118,10 @@ lines.on("line", (line) => {
   socket.send(JSON.stringify({ type: "response", id: message.id, ...(message.error ? { error: message.error } : { result: message.result }) }));
 });
 
-python.on("error", () => stop(1));
+python.on("error", (error) => {
+  console.error(`Could not start the Video worker Python process: ${error.message}`);
+  stop(1);
+});
 python.on("exit", (code) => { if (!shuttingDown) stop(code ?? 1); });
 process.on("SIGTERM", () => stop());
 process.on("SIGINT", () => stop());

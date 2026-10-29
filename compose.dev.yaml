@@ -16,9 +16,15 @@ services:
       HOST: 0.0.0.0
       PORT: 3001
       DATABASE_URL: "postgresql://${POSTGRES_USER:?Set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/${POSTGRES_DB:?Set POSTGRES_DB in .env}"
+      SMART_CHURCH_RESEND_API_KEY: ${SMART_CHURCH_RESEND_API_KEY:-}
+      SMART_CHURCH_EMAIL_FROM: ${SMART_CHURCH_EMAIL_FROM:-}
+      SMART_CHURCH_RESEND_WEBHOOK_SECRET: ${SMART_CHURCH_RESEND_WEBHOOK_SECRET:-}
       SMART_CHURCH_WEB_ORIGIN: http://localhost:5173
       SMART_CHURCH_TRUST_PROXY: ""
       PYTHON_BINARY: python3
+      STREAMING_CONFIG_FILE: /workspace/apps/api/src/modules/video-steffisburg/streaming.steffisburg.json
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EVENTDESK_EMAIL_FROM: ${EVENTDESK_EMAIL_FROM:-}
     volumes:
       - ./apps/api/src:/workspace/apps/api/src
       - ./apps/api/migrations:/workspace/apps/api/migrations

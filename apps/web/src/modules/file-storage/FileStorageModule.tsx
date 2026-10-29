@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Check, Download, File, FileAudio, FileImage, FileText, FileVideo, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import type { StoredFile } from "@smart-church/contracts";
+import type { ModuleRealtime } from "../../module-registry";
 
 const maxResourceSize = 25 * 1024 * 1024;
 
@@ -17,7 +18,7 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function FileStorageModule({ departmentId, csrfToken, canManage }: { departmentId: string; csrfToken: string; canManage: boolean }) {
+export function FileStorageModule({ departmentId, csrfToken, canManage, realtime }: { departmentId: string; csrfToken: string; canManage: boolean; realtime?: ModuleRealtime }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [resources, setResources] = useState<StoredFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -30,23 +31,25 @@ export function FileStorageModule({ departmentId, csrfToken, canManage }: { depa
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
-  async function loadResources(signal?: AbortSignal) {
-    setLoading(true);
-    setError("");
+  const loadResources = useCallback(async (signal?: AbortSignal, quiet = false) => {
+    if (!quiet) { setLoading(true); setError(""); }
     try {
       const response = await fetch("/api/files", { headers: { "x-department-id": departmentId }, signal });
       const result = await response.json() as StoredFile[] | { error?: string };
       if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? "Could not load files." : "Could not load files.");
       setResources(result);
-    } catch (reason) { if (!signal?.aborted) setError(reason instanceof Error ? reason.message : "Could not load files."); }
-    finally { if (!signal?.aborted) setLoading(false); }
-  }
+    } catch (reason) { if (!signal?.aborted && !quiet) setError(reason instanceof Error ? reason.message : "Could not load files."); }
+    finally { if (!signal?.aborted && !quiet) setLoading(false); }
+  }, [departmentId]);
 
   useEffect(() => {
     const controller = new AbortController();
     void loadResources(controller.signal);
-    return () => controller.abort();
-  }, [departmentId]);
+    const refresh = () => { void loadResources(undefined, true); };
+    const unsubscribeChanged = realtime?.subscribe("module:file-storage:changed", refresh);
+    const unsubscribeConnected = realtime?.subscribe("realtime:connected", refresh);
+    return () => { controller.abort(); unsubscribeChanged?.(); unsubscribeConnected?.(); };
+  }, [departmentId, loadResources, realtime]);
 
   const categories = useMemo(() => ["All", ...new Set(resources.map((resource) => resource.category).sort((a, b) => a.localeCompare(b)))], [resources]);
   const filtered = useMemo(() => {

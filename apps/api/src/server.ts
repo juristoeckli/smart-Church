@@ -1,16 +1,20 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, LocationPermission, LoginCredentials, ServiceEvent, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { registerServerModules } from "./modules/module-sdk.js";
+import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
+import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 
-if (!process.env.STREAMING_CONFIG_FILE && departmentName.trim().toLowerCase() === "steffisburg") {
+if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
+  delete process.env.STREAMING_CONFIG_FILE;
+} else if (!process.env.STREAMING_CONFIG_FILE && departmentName.trim().toLowerCase() === "steffisburg") {
   process.env.STREAMING_CONFIG_FILE = resolve(fileURLToPath(new URL("./modules/video-steffisburg/streaming.steffisburg.json", import.meta.url)));
 }
 
@@ -28,9 +32,21 @@ const webContentTypes = new Map([
   [".png", "image/png"], [".svg", "image/svg+xml"], [".webp", "image/webp"],
   [".woff", "font/woff"], [".woff2", "font/woff2"],
 ]);
+const runtimeLogStream = {
+  write(line: string) {
+    process.stdout.write(line);
+    try {
+      const entry = JSON.parse(line) as { level?: number; time?: number; msg?: unknown; module?: unknown };
+      const levels: Record<number, RuntimeLogLevel> = { 10: "trace", 20: "debug", 30: "info", 40: "warn", 50: "error", 60: "fatal" };
+      const source = typeof entry.module === "string" ? `api/${entry.module}` : "api";
+      if (typeof entry.msg === "string") recordRuntimeLog(source, levels[entry.level ?? 30] ?? "info", entry.msg, entry.time ?? Date.now());
+    } catch { /* Keep normal stdout logs even if a future logger format changes. */ }
+  },
+};
 const app = Fastify({
   logger: {
     redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken"],
+    stream: runtimeLogStream,
   },
   bodyLimit: 3 * 1024 * 1024,
   disableRequestLogging: true,
@@ -205,13 +221,24 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
     reply.code(403).send({ error: "The module request origin is not valid." });
     return false;
   }
+  const localDevPort = Number(origin.port);
+  const loopbackHosts = new Set(["localhost", "127.0.0.1", "::1"]);
+  const normalizeHost = (hostname: string) => hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const originHost = normalizeHost(origin.hostname);
+  const apiHost = normalizeHost(requestHost.hostname);
+  const sameLocalMachine = originHost === apiHost || (loopbackHosts.has(originHost) && loopbackHosts.has(apiHost));
   const allowedOrigin = isAllowedWebOrigin(request, origin.origin)
-    || (!process.env.SMART_CHURCH_WEB_ORIGIN && origin.hostname === requestHost.hostname && origin.protocol === "http:" &&
-      new Set([requestHost.port, "5173"]).has(origin.port));
+    || (process.env.NODE_ENV !== "production" && !process.env.SMART_CHURCH_WEB_ORIGIN &&
+      sameLocalMachine && origin.protocol === "http:" &&
+      (origin.port === requestHost.port || (localDevPort >= 5173 && localDevPort <= 5199)));
+  if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site") {
+    reply.code(403).send({ error: "The module request origin is not allowed. Open Smart-Church from its configured web address." });
+    return false;
+  }
   const expected = Buffer.from(moduleCsrfToken(sessionToken));
   const actual = Buffer.from(csrfHeader);
-  if (!allowedOrigin || request.headers["sec-fetch-site"] === "cross-site" || actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
-    reply.code(403).send({ error: "The module request origin or session token is not valid." });
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    reply.code(403).send({ error: "The module session token is out of date. Refresh the page and try again." });
     return false;
   }
   return true;
@@ -220,6 +247,7 @@ function validModuleMutation(request: FastifyRequest, reply: FastifyReply) {
 function isAllowedWebOrigin(request: FastifyRequest, origin: string) {
   const expectedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN;
   if (!expectedOrigin) return false;
+  if (process.env.NODE_ENV !== "production" && origin === expectedOrigin) return true;
   if (directHttpMode || request.protocol === "https") return origin === expectedOrigin;
   if (!allowHttpFallback || request.protocol !== "http") return false;
   try {
@@ -236,11 +264,30 @@ function isAllowedWebOrigin(request: FastifyRequest, origin: string) {
   }
 }
 
+const realtime = new RealtimeHub(
+  app.server,
+  async (request) => {
+    const protocol = websocketRequestProtocol(request);
+    const cookieName = allowHttpFallback && protocol === "http" ? `${sessionCookieName}_http` : sessionCookieName;
+    const user = await currentUser(cookieValue(request.headers.cookie, cookieName));
+    return user && !user.mustChangePassword ? { id: user.id, role: user.role } : null;
+  },
+  async (identity, selectedDepartmentId) => {
+    if (!pool || !databaseReady) return false;
+    const result = identity.role === "server_admin"
+      ? await pool.query("SELECT 1 FROM departments WHERE id = $1", [selectedDepartmentId])
+      : await pool.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, identity.id]);
+    return (result.rowCount ?? 0) > 0;
+  },
+  (request, origin) => Boolean(origin && isAllowedWebOrigin({ protocol: websocketRequestProtocol(request) } as FastifyRequest, origin)),
+);
+
 app.addHook("onRequest", async (request, reply) => {
   const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
   if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.protocol !== "https") {
     return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
   }
+  if (request.url === "/api/webhooks/resend") return;
   const method = request.method.toUpperCase();
   if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method)) return;
   if (process.env.NODE_ENV === "production") {
@@ -266,7 +313,7 @@ app.addHook("preHandler", async (request, reply) => {
   // on port 81. Keep static page and asset requests public so the login UI can
   // load; protect application data and actions under /api/ below.
   if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
-  if (request.url === "/api/health" || request.url.startsWith("/api/auth/")) return;
+  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url.startsWith("/api/public/event-registrations/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
@@ -275,6 +322,39 @@ app.addHook("preHandler", async (request, reply) => {
   reply.header("Cache-Control", "no-store");
   if (user.mustChangePassword) return reply.code(403).send({ error: "Change your password before continuing." });
 });
+
+function realtimeTopicForPath(pathname: string) {
+  if (pathname.startsWith("/api/files")) return "module:file-storage:changed";
+  if (pathname.startsWith("/api/modules/")) {
+    const moduleId = pathname.split("/")[3];
+    if (moduleId === "chat") {
+      if (pathname.includes("/presence")) return "module:chat:presence";
+      if (pathname.includes("/typing")) return "module:chat:typing";
+      return "module:chat:changed";
+    }
+    return moduleId ? `module:${moduleId}:changed` : "core:data:changed";
+  }
+  if (pathname.startsWith("/api/presenter/")) return "module:presenter:changed";
+  if (pathname.startsWith("/api/video/")) return "module:video-steffisburg:changed";
+  if (pathname.startsWith("/api/contacts")) return "core:contacts:changed";
+  if (pathname.startsWith("/api/groups")) return "core:groups:changed";
+  if (pathname.startsWith("/api/services")) return "core:services:changed";
+  if (pathname.startsWith("/api/resources")) return "core:resources:changed";
+  return "core:data:changed";
+}
+
+app.addHook("onResponse", async (request, reply) => {
+  if (!request.authenticatedUser || reply.statusCode >= 400 || !new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase())) return;
+  let pathname: string;
+  try { pathname = new URL(request.url, "http://localhost").pathname; }
+  catch { return; }
+  if (pathname.startsWith("/api/auth/") || pathname === "/api/health") return;
+  const departmentHeader = request.headers["x-department-id"];
+  const selectedDepartmentId = typeof departmentHeader === "string" ? departmentHeader : departmentId;
+  realtime.publish(realtimeTopicForPath(pathname), selectedDepartmentId, { path: pathname, method: request.method.toUpperCase() });
+});
+
+app.addHook("onClose", async () => { realtime.close(); });
 
 type ServiceEventRow = {
   id: string;
@@ -289,6 +369,14 @@ type ServiceEventRow = {
   asset_ids: string[];
   positions: CreateServiceEvent["positions"];
   time_plan: CreateServiceEvent["timePlan"];
+  attendance_adults?: number;
+  attendance_children?: number;
+  attendance_recorded_at?: string | null;
+  registration_enabled?: boolean;
+  registration_capacity?: number | null;
+  registration_token?: string | null;
+  registration_count?: number;
+  recurrence_id?: string | null;
   source_system?: string | null;
 };
 
@@ -304,6 +392,9 @@ const serviceEventProperties = {
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
   positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } },
   timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 } } } },
+  registrationEnabled: { type: "boolean" },
+  registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
+  recurrence: { type: "object", additionalProperties: false, required: ["interval", "endDate"], properties: { interval: { type: "string", enum: ["weekly", "biweekly", "monthly"] }, endDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" } } },
 };
 const serviceEventBodySchema = {
   type: "object",
@@ -326,6 +417,14 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     assetIds: row.asset_ids ?? [],
     positions: row.positions ?? [],
     timePlan: row.time_plan ?? [],
+    attendanceAdults: row.attendance_adults ?? 0,
+    attendanceChildren: row.attendance_children ?? 0,
+    registrationEnabled: row.registration_enabled ?? false,
+    ...(row.registration_capacity ? { registrationCapacity: row.registration_capacity } : {}),
+    ...(row.registration_enabled && row.registration_token ? { registrationToken: row.registration_token } : {}),
+    registrationCount: row.registration_count ?? 0,
+    ...(row.attendance_recorded_at ? { attendanceRecordedAt: row.attendance_recorded_at } : {}),
+    ...(row.recurrence_id ? { seriesId: row.recurrence_id } : {}),
     ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
   };
 }
@@ -339,9 +438,39 @@ function validateServiceEvent(event: CreateServiceEvent) {
   if (event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
   if (!event.title.trim()) return "Enter an event title.";
   if (!event.location.trim()) return "Enter a location.";
+  if (event.registrationCapacity !== undefined && event.registrationCapacity !== null && (!Number.isInteger(event.registrationCapacity) || event.registrationCapacity < 1 || event.registrationCapacity > 100000)) return "Registration capacity must be a positive whole number.";
   if ((event.positions ?? []).some((position) => !position.name.trim())) return "Each service position needs a name.";
   if ((event.timePlan ?? []).some((item) => !item.title.trim())) return "Each time plan item needs a title.";
+  if (event.recurrence) {
+    const [endYear, endMonth, endDay] = event.recurrence.endDate.split("-").map(Number);
+    const end = new Date(Date.UTC(endYear, endMonth - 1, endDay));
+    const start = new Date(`${event.eventDate}T00:00:00Z`);
+    if (!Number.isFinite(end.getTime()) || end.toISOString().slice(0, 10) !== event.recurrence.endDate || end <= start) return "Choose a valid recurrence end date after the first gathering.";
+    if (end.getTime() - start.getTime() > 366 * 86400000) return "Recurring gatherings can be scheduled for up to one year at a time.";
+  }
   return null;
+}
+
+function recurrenceDates(startDate: string, endDate: string, interval: "weekly" | "biweekly" | "monthly") {
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  const dates = [startDate];
+  while (dates.length < 54) {
+    const previous = new Date(`${dates[dates.length - 1]}T00:00:00Z`);
+    if (interval === "weekly" || interval === "biweekly") previous.setUTCDate(previous.getUTCDate() + (interval === "weekly" ? 7 : 14));
+    else {
+      const originalDay = start.getUTCDate();
+      const year = previous.getUTCFullYear();
+      const month = previous.getUTCMonth() + 1;
+      const targetLastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+      previous.setUTCDate(1);
+      previous.setUTCMonth(month);
+      previous.setUTCDate(Math.min(originalDay, targetLastDay));
+    }
+    if (previous > end) break;
+    dates.push(previous.toISOString().slice(0, 10));
+  }
+  return dates;
 }
 
 async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent) {
@@ -358,7 +487,68 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
   return null;
 }
 
-app.get("/api/health", async () => ({ status: databaseReady ? "ok" : "database_unavailable" }));
+async function syncEventPositionResponses(client: PoolClient, eventId: string, positions: CreateServiceEvent["positions"]) {
+  const serialized = JSON.stringify(positions ?? []);
+  await client.query(
+    `DELETE FROM event_position_responses response
+      WHERE response.event_id=$1 AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
+         WHERE p.ordinal-1=response.position_index
+           AND (p.value->>'contactId')::uuid=response.contact_id
+      )`,
+    [eventId, serialized],
+  );
+  await client.query(
+    `INSERT INTO event_position_responses (event_id,position_index,contact_id)
+     SELECT $1,(position.ordinal-1)::integer,(position.value->>'contactId')::uuid
+       FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
+      WHERE p.value->>'contactId' IS NOT NULL
+     ON CONFLICT (event_id,position_index) DO NOTHING`,
+    [eventId, serialized],
+  );
+}
+
+app.get("/api/health", async () => ({
+  status: databaseReady ? "ok" : "database_unavailable",
+  services: { api: "ok", database: databaseReady ? "ok" : "unavailable" },
+}));
+
+async function readContainerMemory() {
+  try {
+    const [usage, limit] = await Promise.all([
+      readFile("/sys/fs/cgroup/memory.current", "utf8"),
+      readFile("/sys/fs/cgroup/memory.max", "utf8"),
+    ]);
+    return { usageBytes: Number(usage.trim()), limitBytes: limit.trim() === "max" ? null : Number(limit.trim()) };
+  } catch {
+    try {
+      const [usage, limit] = await Promise.all([
+        readFile("/sys/fs/cgroup/memory/memory.usage_in_bytes", "utf8"),
+        readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes", "utf8"),
+      ]);
+      return { usageBytes: Number(usage.trim()), limitBytes: Number(limit.trim()) };
+    } catch { return null; }
+  }
+}
+
+app.get("/api/admin/diagnostics", async (request, reply) => {
+  if (request.authenticatedUser?.role !== "server_admin") {
+    const selectedDepartmentId = await activeDepartmentId(request, reply, true);
+    if (!selectedDepartmentId) return reply;
+  }
+  const memory = process.memoryUsage();
+  const containerMemory = await readContainerMemory();
+  return {
+    capturedAt: new Date().toISOString(),
+    runtime: {
+      uptimeSeconds: Math.floor(process.uptime()),
+      memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external },
+      containerMemory,
+    },
+    workers: runtimeWorkerDiagnostics(),
+    logs: recentRuntimeLogs(),
+  };
+});
 
 app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error: string }> => {
   reply.header("Cache-Control", "no-store");
@@ -832,6 +1022,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
     const user = await client.query(
       `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city)
        VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11)
@@ -872,7 +1063,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"] } }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -886,6 +1077,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         streetNumber: { type: "string", maxLength: 24 },
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
+        accountRole: { type: "string", enum: ["server_admin", "user"] },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
         memberships: {
@@ -931,13 +1123,27 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
+    const current = await client.query("SELECT role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    if (!current.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    const accountRole = request.body.accountRole ?? current.rows[0].role;
+    if (current.rows[0].role === "server_admin" && accountRole !== "server_admin") {
+      const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
+      if (admins.rows[0].total <= 1) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The last Server Administrator account cannot be removed." });
+      }
+    }
     const updated = await client.query(
       `UPDATE app_users SET email = $2, username = $3, display_name = $4, birthday = $5::date,
-              street = $6, street_number = $7, postal_code = $8, city = $9
+              street = $6, street_number = $7, postal_code = $8, city = $9, role = $10
         WHERE id = $1
         RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
                   street, street_number, postal_code, city, role`,
-      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city],
+      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -1073,6 +1279,26 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
+app.put<{ Params: { id: string }; Body: { moduleIds: string[] } }>("/api/departments/:id/modules", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: {
+      type: "object", additionalProperties: false, required: ["moduleIds"],
+      properties: { moduleIds: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]*$", maxLength: 80 } } },
+    },
+  },
+}, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply)) return reply;
+  const result = await pool.query(
+    "UPDATE departments SET enabled_modules = $2, updated_at = now() WHERE id = $1 RETURNING id, name, time_zone, enabled_modules",
+    [request.params.id, request.body.moduleIds],
+  );
+  const row = result.rows[0];
+  if (!row) return reply.code(404).send({ error: "This site could not be found." });
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "unassigned", enabledModules: row.enabled_modules };
+});
+
 app.post<{ Body: CreateDepartment }>("/api/departments", {
   schema: {
     body: {
@@ -1121,18 +1347,28 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
 
 app.get("/api/department", async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
-  const selectedDepartmentId = await activeDepartmentId(request, reply);
-  if (!selectedDepartmentId) return reply;
+  let selectedDepartmentId: string | null;
+  if (request.authenticatedUser?.role === "server_admin") {
+    const header = request.headers["x-department-id"];
+    selectedDepartmentId = typeof header === "string" ? header : departmentId;
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedDepartmentId)) {
+      return reply.code(400).send({ error: "Choose a valid location." });
+    }
+  } else {
+    selectedDepartmentId = await activeDepartmentId(request, reply);
+    if (!selectedDepartmentId) return reply;
+  }
   const result = await pool.query(
-    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
+    `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role,
+            m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
        FROM departments d
-       JOIN department_memberships m ON m.department_id = d.id
-      WHERE d.id = $1 AND m.user_id = $2`,
-    [selectedDepartmentId, request.authenticatedUser?.id],
+       LEFT JOIN department_memberships m ON m.department_id = d.id AND m.user_id = $2
+      WHERE d.id = $1 AND ($3::boolean OR m.user_id IS NOT NULL)`,
+    [selectedDepartmentId, request.authenticatedUser?.id, request.authenticatedUser?.role === "server_admin"],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: request.activeDepartmentRole!, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
 });
 
 app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
@@ -1403,18 +1639,38 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const result = await pool.query<ServiceEventRow>(
     `SELECT id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-            location, description, room, asset_ids, positions, time_plan, source_system
+            location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
+            registration_enabled, registration_capacity, registration_token,
+            (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count
        FROM service_events
       WHERE department_id = $1
       ORDER BY event_date, start_time, title`,
     [selectedDepartmentId],
   );
-  return result.rows.map(mapServiceEvent);
+  const responseRows = result.rows.length ? await pool.query<{ event_id: string; position_index: number; contact_id: string; status: "pending" | "accepted" | "declined" }>(
+    "SELECT event_id,position_index,contact_id,status FROM event_position_responses WHERE event_id=ANY($1::uuid[])", [result.rows.map((row) => row.id)],
+  ) : { rows: [] };
+  const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
+  const currentContactId = linkedContact.rows[0]?.contact_id ?? null;
+  const responsesByPosition = new Map(responseRows.rows.map((row) => [`${row.event_id}:${row.position_index}`, row]));
+  return result.rows.map((row) => {
+    const event = mapServiceEvent(row);
+    const canManageRegistrations = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+    const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, ...safeEvent }) => safeEvent)(event);
+    return {
+      ...visibleEvent,
+      positions: (visibleEvent.positions ?? []).map((position, index) => {
+        const response = responsesByPosition.get(`${event.id}:${index}`);
+        const assignedToCurrentUser = Boolean(currentContactId && position.contactId === currentContactId);
+        return { ...position, responseStatus: response?.status ?? (position.contactId ? "pending" : undefined), canRespond: assignedToCurrentUser };
+      }),
+    };
+  });
 });
 
 app.post<{ Body: CreateServiceEvent }>("/api/events", {
   schema: { body: serviceEventBodySchema },
-}, async (request, reply): Promise<ServiceEvent | { error: string }> => {
+}, async (request, reply): Promise<ServiceEvent | { seriesId: string; events: ServiceEvent[] } | { error: string }> => {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
   }
@@ -1432,15 +1688,30 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
   if (assignmentError) return reply.code(400).send({ error: assignmentError });
 
-  const result = await pool.query<ServiceEventRow>(
-    `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description, room, asset_ids, positions, time_plan)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb)
-     RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
-               CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-               location, description, room, asset_ids, positions, time_plan`,
-    [randomUUID(), selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? [])],
-  );
-  return reply.code(201).send(mapServiceEvent(result.rows[0]));
+  const dates = event.recurrence ? recurrenceDates(event.eventDate, event.recurrence.endDate, event.recurrence.interval) : [event.eventDate];
+  const seriesId = event.recurrence ? randomUUID() : null;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const rows: ServiceEventRow[] = [];
+    for (const date of dates) {
+      const result = await client.query<ServiceEventRow>(
+        `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description, room, asset_ids, positions, time_plan, recurrence_id, registration_enabled, registration_capacity, registration_token)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17)
+         RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+                   CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
+                   location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id,
+                   registration_enabled, registration_capacity, registration_token, 0::int AS registration_count`,
+        [randomUUID(), selectedDepartmentId, event.title, event.kind, date, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), seriesId, event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
+      );
+      rows.push(result.rows[0]);
+      await syncEventPositionResponses(client, result.rows[0].id, event.positions);
+    }
+    await client.query("COMMIT");
+    if (seriesId) return reply.code(201).send({ seriesId, events: rows.map(mapServiceEvent) });
+    return reply.code(201).send(mapServiceEvent(rows[0]));
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 });
 
 app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id", {
@@ -1469,18 +1740,348 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
   if (assignmentError) return reply.code(400).send({ error: assignmentError });
 
-  const result = await pool.query<ServiceEventRow>(
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
         SET title = $3, kind = $4, event_date = $5, start_time = $6, end_time = $7,
-            location = $8, description = $9, room = $10, asset_ids = $11, positions = $12::jsonb, time_plan = $13::jsonb, updated_at = now()
+            location = $8, description = $9, room = $10, asset_ids = $11, positions = $12::jsonb, time_plan = $13::jsonb,
+            registration_enabled = $14, registration_capacity = $15,
+            registration_token = CASE WHEN $14 THEN COALESCE(registration_token, $16::uuid) ELSE NULL END, updated_at = now()
       WHERE id = $1 AND department_id = $2
       RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-                location, description, room, asset_ids, positions, time_plan, source_system`,
-    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? [])],
+                location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
+                registration_enabled, registration_capacity, registration_token,
+                (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
+    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
   );
-  if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  return mapServiceEvent(result.rows[0]);
+    if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
+    await syncEventPositionResponses(client, request.params.id, event.positions);
+    await client.query("COMMIT");
+    return mapServiceEvent(result.rows[0]);
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/series", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { ...serviceEventBodySchema, properties: Object.fromEntries(Object.entries(serviceEventProperties).filter(([key]) => key !== "recurrence")) },
+  },
+}, async (request, reply): Promise<ServiceEvent[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const source = await pool.query<{ recurrence_id: string | null; source_system: string | null; event_date: string }>("SELECT recurrence_id,source_system,event_date::text FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!source.rowCount) return reply.code(404).send({ error: "This event could not be found." });
+  if (source.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Edit it there and sync again." });
+  if (!source.rows[0].recurrence_id) return reply.code(400).send({ error: "This gathering is not part of a recurring series." });
+  const event = { ...request.body, title: request.body.title.trim(), location: request.body.location.trim(), endTime: request.body.endTime?.trim() || undefined, description: request.body.description?.trim() || undefined };
+  const validationError = validateServiceEvent({ ...event, recurrence: undefined });
+  if (validationError) return reply.code(400).send({ error: validationError });
+  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
+  if (assignmentError) return reply.code(400).send({ error: assignmentError });
+  const dayDelta = Math.round((Date.parse(`${event.eventDate}T00:00:00Z`) - Date.parse(`${source.rows[0].event_date}T00:00:00Z`)) / 86400000);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<ServiceEventRow>(
+    `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, start_time=$6, end_time=$7,
+       location=$8, description=$9, room=$10, asset_ids=$11, positions=$12::jsonb, time_plan=$13::jsonb,
+       registration_enabled=$14, registration_capacity=$15,
+       registration_token=CASE WHEN $14 THEN COALESCE(registration_token, gen_random_uuid()) ELSE NULL END, updated_at=now()
+     WHERE department_id=$1 AND recurrence_id=$2
+     RETURNING id,title,kind,event_date::text,to_char(start_time,'HH24:MI') AS start_time,
+       CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
+       location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,attendance_recorded_at,recurrence_id,source_system,
+       registration_enabled,registration_capacity,registration_token,
+       (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
+    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
+  );
+    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions);
+    await client.query("COMMIT");
+    return result.rows.map(mapServiceEvent);
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.delete<{ Params: { id: string } }>("/api/events/:id/series", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<{ deleted: number } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved services and events." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const existing = await pool.query<{ recurrence_id: string | null; source_system: string | null }>("SELECT recurrence_id,source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
+  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Remove it there and sync again." });
+  if (!existing.rows[0].recurrence_id) return reply.code(400).send({ error: "This gathering is not part of a recurring series." });
+  const result = await pool.query("DELETE FROM service_events WHERE department_id=$1 AND recurrence_id=$2 RETURNING id", [selectedDepartmentId, existing.rows[0].recurrence_id]);
+  return { deleted: result.rowCount ?? 0 };
+});
+
+app.put<{ Params: { id: string; positionIndex: string }; Body: { status: "pending" | "accepted" | "declined" } }>("/api/events/:id/positions/:positionIndex/response", {
+  schema: {
+    params: { type: "object", required: ["id", "positionIndex"], properties: { id: { type: "string", format: "uuid" }, positionIndex: { type: "string", pattern: "^(0|[1-9]\\d*)$" } } },
+    body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["pending", "accepted", "declined"] } } },
+  },
+}, async (request, reply): Promise<{ status: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
+  const contactId = linkedContact.rows[0]?.contact_id;
+  if (!contactId) return reply.code(409).send({ error: "Link your location membership to your person record before responding to service requests." });
+  const positionIndex = Number(request.params.positionIndex);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const eventResult = await client.query<{ positions: ServiceEvent["positions"] }>("SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    if (!eventResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    const position = eventResult.rows[0].positions?.[positionIndex];
+    if (!position || position.contactId !== contactId) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You are not assigned to this service position." }); }
+    const result = await client.query<{ status: string }>(
+      `INSERT INTO event_position_responses (event_id,position_index,contact_id,status,responded_at)
+       VALUES ($1,$2,$3,$4,CASE WHEN $4='pending' THEN NULL ELSE now() END)
+       ON CONFLICT (event_id,position_index) DO UPDATE SET status=EXCLUDED.status,responded_at=EXCLUDED.responded_at,updated_at=now()
+       WHERE event_position_responses.contact_id=EXCLUDED.contact_id
+       RETURNING status`,
+      [request.params.id, positionIndex, contactId, request.body.status],
+    );
+    if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This position assignment has changed. Refresh the schedule and try again." }); }
+    await client.query("COMMIT");
+    return { status: result.rows[0].status };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.put<{ Params: { id: string }; Body: { adults: number; children: number } }>("/api/events/:id/attendance", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["adults", "children"], properties: { adults: { type: "integer", minimum: 0, maximum: 100000 }, children: { type: "integer", minimum: 0, maximum: 100000 } } },
+  },
+}, async (request, reply): Promise<{ attendanceAdults: number; attendanceChildren: number; attendanceRecordedAt: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query<{ attendance_adults: number; attendance_children: number; attendance_recorded_at: string }>(
+    `UPDATE service_events SET attendance_adults=$3, attendance_children=$4, attendance_recorded_at=now(), updated_at=now()
+      WHERE id=$1 AND department_id=$2 AND source_system IS DISTINCT FROM 'churchtools'
+      RETURNING attendance_adults, attendance_children, attendance_recorded_at`,
+    [request.params.id, selectedDepartmentId, request.body.adults, request.body.children],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "This gathering could not be found or is managed by ChurchTools." });
+  return { attendanceAdults: result.rows[0].attendance_adults, attendanceChildren: result.rows[0].attendance_children, attendanceRecordedAt: result.rows[0].attendance_recorded_at };
+});
+
+app.get<{ Params: { id: string } }>("/api/events/:id/check-ins", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<ServiceEventCheckIn[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const event = await pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2 AND source_system IS DISTINCT FROM 'churchtools'", [request.params.id, selectedDepartmentId]);
+  if (!event.rowCount) return reply.code(404).send({ error: "This locally managed gathering could not be found." });
+  const result = await pool.query<ServiceEventCheckIn>(
+    `SELECT checkin.contact_id AS "contactId", checkin.first_time_visitor AS "firstTimeVisitor", checkin.follow_up_status AS "followUpStatus", checkin.checked_in_at AS "checkedInAt"
+       FROM event_attendance_checkins checkin
+       JOIN contacts person ON person.id=checkin.contact_id
+       JOIN service_events gathering ON gathering.id=checkin.event_id
+      WHERE checkin.event_id=$1 AND person.department_id=$2 AND gathering.department_id=$2
+      ORDER BY checked_in_at, contact_id`,
+    [request.params.id, selectedDepartmentId],
+  );
+  return result.rows;
+});
+
+app.put<{ Params: { id: string }; Body: { contactId: string; firstTimeVisitor?: boolean; followUpStatus?: "not_needed" | "needed" | "done" } }>("/api/events/:id/check-ins", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["contactId"], properties: { contactId: { type: "string", format: "uuid" }, firstTimeVisitor: { type: "boolean" }, followUpStatus: { type: "string", enum: ["not_needed", "needed", "done"] } } },
+  },
+}, async (request, reply): Promise<ServiceEventCheckIn | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query<ServiceEventCheckIn>(
+    `INSERT INTO event_attendance_checkins (event_id,contact_id,first_time_visitor,follow_up_status)
+     SELECT gathering.id,person.id,$4,COALESCE($5,CASE WHEN $4 THEN 'needed' ELSE 'not_needed' END)
+       FROM service_events gathering JOIN contacts person ON person.id=$2 AND person.department_id=gathering.department_id
+      WHERE gathering.id=$1 AND gathering.department_id=$3 AND gathering.source_system IS DISTINCT FROM 'churchtools'
+     ON CONFLICT (event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,follow_up_status=EXCLUDED.follow_up_status,updated_at=now()
+     RETURNING contact_id AS "contactId",first_time_visitor AS "firstTimeVisitor",follow_up_status AS "followUpStatus",checked_in_at AS "checkedInAt"`,
+    [request.params.id, request.body.contactId, selectedDepartmentId, request.body.firstTimeVisitor ?? false, request.body.followUpStatus ?? null],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "The gathering or person could not be found in this location." });
+  return result.rows[0];
+});
+
+app.delete<{ Params: { id: string; contactId: string } }>("/api/events/:id/check-ins/:contactId", {
+  schema: { params: { type: "object", required: ["id", "contactId"], properties: { id: { type: "string", format: "uuid" }, contactId: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<{ checkedIn: false } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query(
+    `DELETE FROM event_attendance_checkins checkin USING service_events gathering, contacts person
+      WHERE checkin.event_id=gathering.id AND checkin.contact_id=person.id AND gathering.id=$1 AND person.id=$2
+        AND gathering.department_id=$3 AND person.department_id=$3 AND gathering.source_system IS DISTINCT FROM 'churchtools'`,
+    [request.params.id, request.params.contactId, selectedDepartmentId],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "This check-in could not be found in the selected location." });
+  return { checkedIn: false };
+});
+
+app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token", {
+  schema: { params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<PublicRegistrationEvent | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
+  const result = await pool.query<{
+    title: string; event_date: string; start_time: string; end_time: string | null; location: string;
+    description: string | null; registration_capacity: number | null; registered_count: number; waitlist_count: number; registration_open: boolean;
+  }>(
+    `SELECT title,event_date::text,to_char(start_time,'HH24:MI') AS start_time,
+            CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
+            location,description,registration_capacity,event_date>=CURRENT_DATE AS registration_open,
+            (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='registered') AS registered_count,
+            (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='waitlisted') AS waitlist_count
+       FROM service_events WHERE registration_token=$1 AND registration_enabled=true`,
+    [request.params.token],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "This registration link is unavailable." });
+  const row = result.rows[0];
+  return {
+    title: row.title, eventDate: row.event_date, startTime: row.start_time,
+    ...(row.end_time ? { endTime: row.end_time } : {}), location: row.location,
+    ...(row.description ? { description: row.description } : {}),
+    ...(row.registration_capacity ? { capacity: row.registration_capacity } : {}),
+    registeredCount: row.registered_count, waitlistCount: row.waitlist_count,
+    registrationOpen: row.registration_open,
+  };
+});
+
+app.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string } }>("/api/public/event-registrations/:token", {
+  schema: {
+    params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email"], properties: {
+      firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" },
+    } },
+  },
+}, async (request, reply): Promise<{ status: "registered" | "waitlisted" } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
+  const firstName = request.body.firstName.trim();
+  const lastName = request.body.lastName.trim();
+  const email = request.body.email.trim().toLocaleLowerCase();
+  if (!firstName || !lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const event = await client.query<{ id: string; registration_capacity: number | null }>(
+      "SELECT id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
+    );
+    if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
+    const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2)", [event.rows[0].id, email]);
+    if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
+    const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [event.rows[0].id]);
+    const status = event.rows[0].registration_capacity !== null && registered.rows[0].count >= event.rows[0].registration_capacity ? "waitlisted" : "registered";
+    await client.query(
+      "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status) VALUES ($1,$2,$3,$4,$5,$6)",
+      [randomUUID(), event.rows[0].id, firstName, lastName, email, status],
+    );
+    await client.query("COMMIT");
+    return reply.code(201).send({ status });
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.get<{ Params: { id: string } }>("/api/events/:id/registrations", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<EventRegistration[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query<EventRegistration>(
+    `SELECT registration.id,registration.first_name AS "firstName",registration.last_name AS "lastName",registration.email,
+            registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt"
+       FROM event_registrations registration JOIN service_events gathering ON gathering.id=registration.event_id
+      WHERE registration.event_id=$1 AND gathering.department_id=$2 ORDER BY registration.status,registration.registered_at,registration.last_name`,
+    [request.params.id, selectedDepartmentId],
+  );
+  return result.rows;
+});
+
+app.put<{ Params: { id: string; registrationId: string }; Body: { checkedIn: boolean } }>("/api/events/:id/registrations/:registrationId/check-in", {
+  schema: {
+    params: { type: "object", required: ["id", "registrationId"], properties: { id: { type: "string", format: "uuid" }, registrationId: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["checkedIn"], properties: { checkedIn: { type: "boolean" } } },
+  },
+}, async (request, reply): Promise<EventRegistration | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query<EventRegistration>(
+    `UPDATE event_registrations registration SET checked_in_at=CASE WHEN $4 THEN COALESCE(checked_in_at,now()) ELSE NULL END
+      FROM service_events gathering WHERE registration.id=$2 AND registration.event_id=$1 AND registration.status='registered' AND gathering.id=registration.event_id AND gathering.department_id=$3
+      RETURNING registration.id,registration.first_name AS "firstName",registration.last_name AS "lastName",registration.email,
+                registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt"`,
+    [request.params.id, request.params.registrationId, selectedDepartmentId, request.body.checkedIn],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "This registration could not be found." });
+  return result.rows[0];
+});
+
+app.get("/api/visitor-follow-ups", async (request, reply): Promise<VisitorFollowUp[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query<VisitorFollowUp>(
+    `SELECT checkin.event_id AS "eventId", visitor.id AS "contactId", visitor.first_name AS "firstName", visitor.last_name AS "lastName",
+            gathering.title AS "eventTitle", gathering.event_date::text AS "eventDate", checkin.follow_up_status AS status,
+            checkin.assigned_contact_id AS "assignedContactId", assigned.first_name AS "assignedFirstName", assigned.last_name AS "assignedLastName",
+            checkin.follow_up_due_date::text AS "dueDate", checkin.follow_up_note AS note, checkin.checked_in_at AS "checkedInAt"
+       FROM event_attendance_checkins checkin
+       JOIN service_events gathering ON gathering.id=checkin.event_id
+       JOIN contacts visitor ON visitor.id=checkin.contact_id
+       LEFT JOIN contacts assigned ON assigned.id=checkin.assigned_contact_id AND assigned.department_id=$1
+      WHERE gathering.department_id=$1 AND visitor.department_id=$1
+        AND checkin.first_time_visitor=true AND checkin.follow_up_status IN ('needed','done')
+      ORDER BY CASE WHEN checkin.follow_up_status='needed' THEN 0 ELSE 1 END,
+               checkin.follow_up_due_date NULLS LAST, gathering.event_date DESC, visitor.last_name, visitor.first_name`,
+    [selectedDepartmentId],
+  );
+  return result.rows;
+});
+
+app.put<{ Params: { id: string; contactId: string }; Body: { status: "needed" | "done" | "not_needed"; assignedContactId?: string | null; dueDate?: string | null; note: string } }>("/api/events/:id/check-ins/:contactId/follow-up", {
+  schema: {
+    params: { type: "object", required: ["id", "contactId"], properties: { id: { type: "string", format: "uuid" }, contactId: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["status", "note"], properties: { status: { type: "string", enum: ["needed", "done", "not_needed"] }, assignedContactId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, dueDate: { anyOf: [{ type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" }, { type: "null" }] }, note: { type: "string", maxLength: 1000 } } },
+  },
+}, async (request, reply): Promise<{ saved: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  if (request.body.dueDate) {
+    const [year, month, day] = request.body.dueDate.split("-").map(Number);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.toISOString().slice(0, 10) !== request.body.dueDate) return reply.code(400).send({ error: "Choose a valid follow-up due date." });
+  }
+  if (request.body.assignedContactId) {
+    const assignee = await pool.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2", [request.body.assignedContactId, selectedDepartmentId]);
+    if (!assignee.rowCount) return reply.code(400).send({ error: "Choose a person from this location for the follow-up." });
+  }
+  const result = await pool.query(
+    `UPDATE event_attendance_checkins checkin
+        SET follow_up_status=$4, assigned_contact_id=$5, follow_up_due_date=$6, follow_up_note=$7, updated_at=now()
+       FROM service_events gathering, contacts visitor
+      WHERE checkin.event_id=gathering.id AND checkin.contact_id=visitor.id
+        AND gathering.id=$1 AND visitor.id=$2 AND gathering.department_id=$3 AND visitor.department_id=$3
+        AND checkin.first_time_visitor=true`,
+    [request.params.id, request.params.contactId, selectedDepartmentId, request.body.status, request.body.assignedContactId ?? null, request.body.dueDate ?? null, request.body.note.trim()],
+  );
+  if (!result.rowCount) return reply.code(404).send({ error: "This visitor follow-up could not be found in the selected location." });
+  return { saved: true };
 });
 
 app.delete<{ Params: { id: string } }>("/api/events/:id", {
@@ -1544,6 +2145,11 @@ try {
   }
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
   await registerServerModules(app, {
+    realtime: {
+      publish: (topic, selectedDepartmentId, payload) => realtime.publish(topic, selectedDepartmentId, payload),
+      onMessage: (topic, handler) => realtime.onMessage(topic, handler),
+    },
+    workers: { register: (id, name, getDiagnostics) => registerRuntimeWorker(id, name, getDiagnostics) },
     pool: pool ?? null,
     isDatabaseReady: () => databaseReady,
     getDefaultDepartmentId: () => departmentId,
@@ -1578,7 +2184,8 @@ try {
   const shutdown = () => { void app.close().catch((error) => { app.log.error({ err: error }, "Server shutdown failed."); process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
-  videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE));
+  videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE), (message) => recordRuntimeLog("api/video-steffisburg", "error", message));
+  registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null });
   videoWorker.start();
 } catch (error) {
   app.log.error(error);

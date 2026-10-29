@@ -1,0 +1,47 @@
+.runtime-diagnostics{display:grid;gap:14px;margin:24px 0 14px;padding:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);color:var(--ink)}
+.runtime-diagnostics-header{display:flex;align-items:center;justify-content:space-between;gap:14px}
+.runtime-diagnostics-header>div,.runtime-diagnostic-title,.runtime-log-heading>div{display:flex;align-items:center;gap:9px;min-width:0}
+.runtime-diagnostics-icon{display:grid;width:32px;height:32px;flex:0 0 auto;place-items:center;border-radius:8px;background:var(--green-soft);color:var(--green-dark)}
+.runtime-diagnostics-header h3,.runtime-diagnostic-title h4,.runtime-log-heading h4{margin:0;color:var(--ink);font-size:13px}
+.runtime-diagnostics-header p{margin:4px 0 0;color:var(--muted);font-size:10px;line-height:1.5}
+.runtime-refresh{display:flex;align-items:center;gap:6px;min-height:32px;flex:0 0 auto;font-size:10px}
+.runtime-diagnostics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.runtime-diagnostic-card{min-width:0;padding:13px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--panel) 76%,var(--ink) 4%)}
+.runtime-diagnostic-title{margin-bottom:10px}
+.runtime-diagnostic-title>svg{flex:0 0 auto;color:var(--green-dark)}
+.runtime-diagnostic-title h4{flex:1;font-size:11px}
+.runtime-diagnostic-title b{font-size:10px;text-transform:capitalize}
+.runtime-diagnostic-card dl{display:grid;gap:7px;margin:0}
+.runtime-diagnostic-card dl>div{display:flex;justify-content:space-between;gap:10px;font-size:10px}
+.runtime-diagnostic-card dt{color:var(--muted)}
+.runtime-diagnostic-card dd{margin:0;color:var(--ink);font-weight:650;text-align:right;font-variant-numeric:tabular-nums}
+.runtime-status-dot{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:var(--muted)}
+.runtime-status-ok{background:#26835a;box-shadow:0 0 0 3px #26835a20}
+.runtime-status-pending{background:#bd811f;box-shadow:0 0 0 3px #bd811f20}
+.runtime-status-down{background:#b43e38;box-shadow:0 0 0 3px #b43e3820}
+.runtime-text-ok{color:#17613f}
+.runtime-text-pending{color:#80520d}
+.runtime-text-down{color:#962c24}
+.runtime-worker-error{margin:0 0 9px;padding:7px 8px;border-radius:6px;background:#fff0ee;color:#842b25;font-size:10px;line-height:1.45;overflow-wrap:anywhere}
+.runtime-log-section{display:grid;gap:9px;min-width:0}
+.runtime-log-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.runtime-log-heading>div{color:var(--green-dark)}
+.runtime-log-heading h4{font-size:11px}
+.runtime-log-heading small{color:var(--muted);font-size:9px;text-align:right}
+.runtime-log-list{display:grid;max-height:320px;gap:0;overflow:auto;margin:0;padding:0;border:1px solid var(--line);border-radius:8px;list-style:none}
+.runtime-log-list li{display:grid;grid-template-columns:135px 50px 90px minmax(0,1fr);align-items:start;gap:8px;padding:8px 9px;border-bottom:1px solid var(--line);font-size:9px;line-height:1.45}
+.runtime-log-list li:last-child{border-bottom:0}
+.runtime-log-list time,.runtime-log-level,.runtime-log-list strong{color:var(--muted);font-size:9px;font-variant-numeric:tabular-nums}
+.runtime-log-list strong{color:var(--ink);font-weight:700}
+.runtime-log-level{text-transform:uppercase;font-weight:800;letter-spacing:.3px}
+.runtime-log-level-warn,.runtime-log-level-error,.runtime-log-level-fatal{color:#962c24}
+.runtime-log-message{min-width:0;color:var(--ink);overflow-wrap:anywhere;white-space:pre-wrap}
+.runtime-log-note,.runtime-diagnostics-empty{margin:0;color:var(--muted);font-size:9px;line-height:1.5}
+.runtime-diagnostics-error{margin:0;padding:8px 10px;border-radius:7px;background:#fff0ee;color:#842b25;font-size:10px}
+:root[data-theme="dark"] .runtime-diagnostic-card{background:#1b1d26}
+:root[data-theme="dark"] .runtime-worker-error,:root[data-theme="dark"] .runtime-diagnostics-error{background:#352625;color:#ffaaa5}
+:root[data-theme="dark"] .runtime-text-ok{color:#8dcba3}
+:root[data-theme="dark"] .runtime-text-pending{color:#f2c06d}
+:root[data-theme="dark"] .runtime-text-down,:root[data-theme="dark"] .runtime-log-level-warn,:root[data-theme="dark"] .runtime-log-level-error,:root[data-theme="dark"] .runtime-log-level-fatal{color:#ffaaa5}
+@media(max-width:720px){.runtime-diagnostics{padding:12px}.runtime-diagnostics-grid{grid-template-columns:minmax(0,1fr)}.runtime-log-list li{grid-template-columns:115px 42px minmax(0,1fr)}.runtime-log-list strong{display:none}}
+@media(max-width:470px){.runtime-diagnostics-header{align-items:flex-start}.runtime-diagnostics-header p{max-width:230px}.runtime-refresh{padding:0 8px}.runtime-log-list li{grid-template-columns:1fr 42px;gap:4px}.runtime-log-list time{grid-column:1}.runtime-log-level{grid-column:2;grid-row:1}.runtime-log-message{grid-column:1/-1}}
