@@ -1,7 +1,41 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const redirectUri = () => process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_REDIRECT_URI?.trim() ?? "";
 const encryptionSecret = () => process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim() ?? "";
+
+export async function ensureYoutubeTokenKey() {
+  const environmentKey = encryptionSecret();
+  if (environmentKey) return environmentKey;
+
+  const keyPath = process.env.SMART_CHURCH_VIDEO_STEFFISBURG_TOKEN_KEY_FILE?.trim()
+    || resolve(dirname(fileURLToPath(import.meta.url)), "../../../data/video-steffisburg/youtube-token-key");
+  await mkdir(dirname(keyPath), { recursive: true, mode: 0o700 });
+  try {
+    const storedKey = (await readFile(keyPath, "utf8")).trim();
+    if (storedKey) {
+      process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY = storedKey;
+      return storedKey;
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+
+  const generatedKey = randomBytes(32).toString("hex");
+  try {
+    await writeFile(keyPath, `${generatedKey}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+    const existingKey = (await readFile(keyPath, "utf8")).trim();
+    if (!existingKey) throw new Error("The persisted YouTube token encryption key is empty.");
+    process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY = existingKey;
+    return existingKey;
+  }
+  process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY = generatedKey;
+  return generatedKey;
+}
 
 export function youtubeOAuthConfigured(oauthClientId: string, oauthClientSecret: string) {
   return Boolean(oauthClientId.trim() && oauthClientSecret.trim() && redirectUri() && encryptionSecret());

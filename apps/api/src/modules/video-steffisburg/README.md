@@ -34,10 +34,10 @@ YouTube scheduling is optional. To enable it, create an OAuth 2.0 web client in
 Google Cloud, enable the YouTube Data API v3, and register the exact callback
 URL `https://<Smart-Church-origin>/api/auth/modules/video-steffisburg/youtube/callback`.
 Enter the OAuth Client ID and Client Secret in Settings → Modules → Video & streaming.
-The module encrypts the client secret before storing it. Set the exact redirect
-URL and a long random token encryption key from this module's `.env.example` in
-the protected deployment `.env`, then recreate the API container. The module
-encrypts the channel refresh token before storing it. A user with stream administrator access can then connect the channel from
+The module generates a random token encryption key on first start and stores it
+in the API's protected persistent data volume. No separate encryption key setup
+is required. The module encrypts the client secret and channel refresh token
+before storing them. A user with stream administrator access can then connect the channel from
 Video → Overview. Creating a planned
 stream schedules a YouTube broadcast with the selected visibility; **Control
 in Studio** opens that broadcast directly. The module does not change an

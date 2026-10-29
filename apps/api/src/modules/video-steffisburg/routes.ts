@@ -4,7 +4,7 @@ import { isIP } from "node:net";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { BmdConverterWorker } from "./bmd-converter-worker.js";
-import { addYoutubeVideoToPlaylist, createYoutubeBroadcast, decryptYoutubeToken, deleteYoutubeBroadcast, encryptYoutubeToken, exchangeYoutubeCode, refreshYoutubeAccessToken, setYoutubeVideoUnlisted, transitionYoutubeBroadcast, updateYoutubeBroadcast, youtubeApi, youtubeAuthorizationUrl, youtubeChannel, youtubeOAuthConfigured, youtubePlaylists } from "./youtube.js";
+import { addYoutubeVideoToPlaylist, createYoutubeBroadcast, decryptYoutubeToken, deleteYoutubeBroadcast, encryptYoutubeToken, ensureYoutubeTokenKey, exchangeYoutubeCode, refreshYoutubeAccessToken, setYoutubeVideoUnlisted, transitionYoutubeBroadcast, updateYoutubeBroadcast, youtubeApi, youtubeAuthorizationUrl, youtubeChannel, youtubeOAuthConfigured, youtubePlaylists } from "./youtube.js";
 
 type VideoPermission = "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin";
 const videoPostOperations = new Set(["command", "restart-site", "encoder-settings", "videohub-route", "videohub-presets"]);
@@ -72,6 +72,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   let youtubeArchiveMonitorRunning = false;
   let previousStatus = "";
   app.addHook("onReady", async () => {
+    await ensureYoutubeTokenKey();
     statusMonitor = setInterval(() => {
       if (statusMonitorRunning) return;
       statusMonitorRunning = true;
