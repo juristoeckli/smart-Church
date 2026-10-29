@@ -662,8 +662,8 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     );
     if (!department.rowCount) throw new Error("The configured department could not be found.");
     const result = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5, 'server_admin') RETURNING id, email, username, display_name, role, date_time_format, language`,
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, 'server_admin', false) RETURNING id, email, username, display_name, role, date_time_format, language`,
       [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
@@ -1130,8 +1130,8 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     await client.query("BEGIN");
     if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
     const user = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11)
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, true)
        RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city`,
       [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city],
     );
@@ -1332,10 +1332,10 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   }
 });
 
-app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword: boolean } }>("/api/users/:id/reset-password", {
+app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?: boolean } }>("/api/users/:id/reset-password", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["password", "mustChangePassword"], properties: { password: { type: "string", minLength: 12, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
+    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 12, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
   },
 }, async (request, reply): Promise<{ id: string; mustChangePassword: boolean } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
@@ -1349,10 +1349,10 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword:
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
-    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = $3 WHERE id = $1", [request.params.id, hashPassword(request.body.password), request.body.mustChangePassword]);
+    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = true WHERE id = $1", [request.params.id, hashPassword(request.body.password)]);
     await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [request.params.id]);
     await client.query("COMMIT");
-    return { id: request.params.id, mustChangePassword: request.body.mustChangePassword };
+    return { id: request.params.id, mustChangePassword: true };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
