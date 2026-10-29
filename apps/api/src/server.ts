@@ -12,6 +12,7 @@ import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-superv
 import { getRequiredModuleDependencies, getRequiredServerModuleIds, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
+import { createEmailConnector } from "./modules/email-worker/service.js";
 
 if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
   delete process.env.STREAMING_CONFIG_FILE;
@@ -327,7 +328,7 @@ app.addHook("preHandler", async (request, reply) => {
   // on port 81. Keep static page and asset requests public so the login UI can
   // load; protect application data and actions under /api/ below.
   if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
-  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/")) return;
+  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
@@ -611,9 +612,11 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   const count = await pool.query("SELECT count(*)::int AS total FROM app_users");
+  const signup = await pool.query<{ enabled: boolean }>("SELECT settings.enabled FROM installation_self_signup_settings settings JOIN installations installation ON installation.id=settings.installation_id WHERE installation.is_current=true");
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
+    selfSignupEnabled: signup.rows[0]?.enabled ?? false,
     httpAccessMode,
     httpsOrigin: configuredHttpsOrigin(),
     ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
@@ -2381,6 +2384,7 @@ try {
     resolveDepartmentId: activeDepartmentId,
     validateMutation: validModuleMutation,
     getVideoWorker: () => videoWorker,
+    email: createEmailConnector(pool ?? null, () => databaseReady),
   });
   app.setNotFoundHandler(async (request, reply) => {
     if ((request.method !== "GET" && request.method !== "HEAD") || request.url === "/api" || request.url.startsWith("/api/")) {

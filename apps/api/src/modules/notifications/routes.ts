@@ -1,7 +1,9 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { UserLanguage } from "@smart-church/contracts";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { renderNotificationEmail } from "./email-templates.js";
 
 type NotificationRow = {
   id: string;
@@ -15,7 +17,7 @@ type NotificationRow = {
   read_at: Date | string | null;
 };
 
-type PendingEmail = { notification_id: string; recipient_email: string; current_email: string | null; email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
+type PendingEmail = { notification_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
 type ResendWebhookPayload = { type?: string; data?: { email_id?: string; to?: string[]; [key: string]: unknown } };
 type StoredResendEvent = { provider_event_id: string; event_type: string; provider_email_id: string };
 
@@ -39,10 +41,6 @@ function verifyResendWebhook(payload: Buffer, id: string, timestamp: string, sig
   });
 }
 
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" })[character]!);
-}
-
 const announcementSchema = {
   body: {
     type: "object",
@@ -61,7 +59,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   let reminderTimer: ReturnType<typeof setInterval> | undefined;
   let storageReady = false;
-  const emailProviderConfigured = Boolean(process.env.SMART_CHURCH_RESEND_API_KEY?.trim() && process.env.SMART_CHURCH_EMAIL_FROM?.trim());
 
   async function createUpcomingReminders() {
     if (!pool || !isDatabaseReady()) return;
@@ -138,15 +135,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   async function deliverPendingEmails() {
-    const apiKey = process.env.SMART_CHURCH_RESEND_API_KEY?.trim();
-    const from = process.env.SMART_CHURCH_EMAIL_FROM?.trim();
-    if (!pool || !isDatabaseReady() || !apiKey || !from) return;
+    if (!pool || !isDatabaseReady() || !await context.email.isConfigured()) return;
     for (let sent = 0; sent < 20; sent += 1) {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         const result = await client.query<PendingEmail>(
-          `SELECT delivery.notification_id,delivery.recipient_email,account.email AS current_email,
+          `SELECT delivery.notification_id,notification.recipient_user_id,delivery.recipient_email,account.email AS current_email,account.language AS recipient_language,
                   COALESCE(preference.email_notifications_enabled,false) AS email_enabled,
                   (suppressed.email IS NOT NULL) AS email_suppressed,
                   notification.title,notification.body,delivery.attempt_count
@@ -168,22 +163,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }
         const attempts = delivery.attempt_count + 1;
         try {
-          const response = await fetch("https://api.resend.com/emails", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", "Idempotency-Key": `smart-church-${delivery.notification_id}` },
-            signal: AbortSignal.timeout(15_000),
-            body: JSON.stringify({
-              from,
-              to: [delivery.current_email],
-              subject: delivery.title,
-              text: delivery.body,
-              html: `<div style="font-family:Arial,sans-serif;line-height:1.6;max-width:640px;margin:0 auto"><h2>${escapeHtml(delivery.title)}</h2><p>${escapeHtml(delivery.body).replace(/\r?\n/g, "<br>")}</p><hr><p style="color:#64748b;font-size:12px">Sent from Smart Church</p></div>`,
-            }),
+          const emailContent = renderNotificationEmail(delivery.title, delivery.body, process.env.SMART_CHURCH_WEB_ORIGIN, delivery.recipient_language);
+          const sent = await context.email.send({
+            recipientUserId: delivery.recipient_user_id,
+            ...emailContent,
           });
-          if (!response.ok) throw new Error(`Email provider returned HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
-          const providerResult = await response.json() as { id?: string };
-          if (!providerResult.id) throw new Error("Email provider did not return an email ID.");
-          await client.query("UPDATE module_notification_email_deliveries SET recipient_email=$2,provider_email_id=$3,status='sent',attempt_count=$4,sent_at=now(),last_error=NULL,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.current_email, providerResult.id, attempts]);
+          await client.query("UPDATE module_notification_email_deliveries SET recipient_email=$2,provider_email_id=$3,status='sent',attempt_count=$4,sent_at=now(),last_error=NULL,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.current_email, sent.messageId, attempts]);
         } catch (error) {
           const message = error instanceof Error ? error.message.slice(0, 500) : "Email delivery failed.";
           await client.query(
@@ -454,8 +439,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         followUpsEnabled: preferences.rows[0]?.follow_ups_enabled ?? true,
         emailEnabled: preferences.rows[0]?.email_notifications_enabled ?? false,
         emailAddress: account.rows[0]?.email ?? null,
-        emailDeliveryConfigured: emailProviderConfigured,
-        emailWebhookConfigured: Boolean(process.env.SMART_CHURCH_RESEND_WEBHOOK_SECRET?.trim()),
+        emailDeliveryConfigured: await context.email.isConfigured(),
         emailSuppressed: Boolean(suppression.rowCount),
         canSend: request.activeDepartmentRole === "site_admin",
       };
@@ -494,7 +478,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      if (request.body.emailEnabled && !emailProviderConfigured) {
+      if (request.body.emailEnabled && !await context.email.isConfigured()) {
         const existing = await pool!.query<{ email_notifications_enabled: boolean }>("SELECT email_notifications_enabled FROM module_notification_preferences WHERE department_id=$1 AND user_id=$2", [departmentId, request.authenticatedUser!.id]);
         if (!existing.rows[0]?.email_notifications_enabled) return reply.code(503).send({ error: "Email delivery is not configured by the Smart-Church administrator." });
       }

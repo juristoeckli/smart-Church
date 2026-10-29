@@ -270,6 +270,7 @@ export interface UserRelationshipInput {
 export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
+  selfSignupEnabled?: boolean;
   httpAccessMode?: HttpAccessMode;
   httpsOrigin?: string | null;
   setupLocation?: string;

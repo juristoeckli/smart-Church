@@ -24,6 +24,19 @@ export interface ModuleServerContext {
     state: { state: string; error: string | null };
     request: (operation: string, data: Record<string, unknown>, departmentId: string, actor: string, timeout: number) => Promise<unknown>;
   } | null;
+  email: EmailConnector;
+}
+
+type EmailContent = { subject: string; text: string; html?: string; replyTo?: string };
+
+export type EmailMessage = EmailContent & (
+  | { recipientUserId: string; recipientEmail?: never }
+  | { recipientEmail: string; recipientUserId?: never }
+);
+
+export interface EmailConnector {
+  isConfigured: () => Promise<boolean>;
+  send: (message: EmailMessage) => Promise<{ messageId: string }>;
 }
 
 export interface ModuleLoaderContext extends Omit<ModuleServerContext, "workers" | "activation"> {

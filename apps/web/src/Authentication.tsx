@@ -1,20 +1,28 @@
 import { useState, type FormEvent } from "react";
 import { ArrowRight, Church, LockKeyhole } from "lucide-react";
 import type { AuthenticatedUser } from "@smart-church/contracts";
+import { AuthLanguageSelect, useAuthLanguage } from "./auth-language";
 
 const smartChurchLogoUrl = "/smart-church-mark.svg";
 const usernamePattern = "[A-Za-z0-9][A-Za-z0-9._-]{2,31}";
-const usernameHelp = "Use 3–32 characters: letters, numbers, dots, hyphens, or underscores. Put your email in the Email address field.";
-
-function authValidationMessage(message: string | undefined) {
+function authValidationMessage(message: string | undefined, t: ReturnType<typeof useAuthLanguage>["t"]) {
   const detail = message?.toLowerCase() ?? "";
-  if (detail.includes("username")) return usernameHelp;
-  if (detail.includes("email")) return "Enter a valid email address.";
-  if (detail.includes("password")) return "Use a password between 12 and 128 characters.";
-  if (detail.includes("setupcode")) return "Check the one-time setup code and enter at least 8 characters.";
-  if (detail.includes("location")) return "Enter a church location with no more than 120 characters.";
-  if (detail.includes("displayname")) return "Enter your name with no more than 100 characters.";
-  return "Some information is invalid. Check the field requirements and try again.";
+  if (detail.includes("username")) return t("invalidUsername");
+  if (detail.includes("email")) return t("invalidEmail");
+  if (detail.includes("password")) return t("invalidPassword");
+  if (detail.includes("setupcode")) return t("invalidSetupCode");
+  if (detail.includes("location")) return t("invalidLocation");
+  if (detail.includes("displayname")) return t("invalidName");
+  return t("invalidGeneric");
+}
+
+function authApiMessage(message: string | undefined, t: ReturnType<typeof useAuthLanguage>["t"]) {
+  const detail = message?.toLowerCase() ?? "";
+  if (detail.includes("username, email, or password") || detail.includes("username, email") || detail.includes("credentials")) return t("invalidCredentials");
+  if (detail.includes("too many sign-in attempts")) return t("tooManyAttempts");
+  if (detail.includes("one-time setup code")) return t("setupInvalid");
+  if (detail.includes("account database is unavailable")) return t("accountUnavailable");
+  return t("signInError");
 }
 
 function AuthDove({ className }: { className: string }) {
@@ -54,6 +62,7 @@ function AuthBackdrop() {
 }
 
 export function PasswordChangeRequired({ onChanged }: { onChanged: (user: AuthenticatedUser) => void }) {
+  const { language, selectLanguage, t } = useAuthLanguage();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -62,38 +71,56 @@ export function PasswordChangeRequired({ onChanged }: { onChanged: (user: Authen
     const values = new FormData(event.currentTarget);
     const password = String(values.get("password"));
     const confirmation = String(values.get("confirmation"));
-    if (password.length < 12) { setError("Use at least 12 characters."); return; }
-    if (password !== confirmation) { setError("The passwords do not match."); return; }
+    if (password.length < 12) { setError(t("passwordMin")); return; }
+    if (password !== confirmation) { setError(t("passwordMismatch")); return; }
     setError("");
     setIsSubmitting(true);
     try {
       const response = await fetch("/api/auth/change-password", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
       const result = await response.json() as { user?: AuthenticatedUser; error?: string };
-      if (!response.ok || !result.user) throw new Error(result.error ?? "Could not change your password.");
+      if (!response.ok || !result.user) throw new Error(result.error ?? t("signInError"));
       onChanged(result.user);
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Could not change your password.");
+      setError(submitError instanceof Error ? submitError.message : t("signInError"));
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  return <main className="auth-page"><AuthBackdrop /><section className="auth-card" aria-labelledby="password-change-title"><a className="auth-brand" href="#home" aria-label="Smart-Church home"><img src={smartChurchLogoUrl} alt="" /><span className="auth-brand-name"><span>smart</span>-Church</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">ACCOUNT SECURITY</span><h1 id="password-change-title">Choose a new password</h1><p>Choose a private password for your account before continuing.</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>New password<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">Use at least 12 characters.</p><label>Confirm new password<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? "Updating…" : "Set new password"}<ArrowRight size={16} /></button></form><p className="auth-footer">Your account is stored on this installation.</p></section></main>;
+  return <main className="auth-page"><AuthBackdrop /><section className="auth-card" aria-labelledby="password-change-title"><div className="auth-language-row"><AuthLanguageSelect language={language} onChange={selectLanguage} label={t("language")} /></div><a className="auth-brand" href="#home" aria-label={t("brandHome")}><img src={smartChurchLogoUrl} alt="" /><span className="auth-brand-name"><span>smart</span>-Church</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">{t("accountSecurity")}</span><h1 id="password-change-title">{t("choosePassword")}</h1><p>{t("choosePasswordHelp")}</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>{t("newPassword")}<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">{t("passwordMin")}</p><label>{t("confirmPassword")}<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? t("updating") : t("setPassword")}<ArrowRight size={16} /></button></form><p className="auth-footer">{t("accountStored")}</p></section></main>;
 }
 
 export function Authentication({
   setupRequired,
   setupLocation,
+  selfSignupEnabled,
   unavailableMessage,
   onAuthenticated,
 }: {
   setupRequired: boolean;
   setupLocation?: string;
+  selfSignupEnabled?: boolean;
   unavailableMessage: string;
   onAuthenticated: (user: AuthenticatedUser) => void;
 }) {
+  const { language, selectLanguage, t } = useAuthLanguage();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [showSignup, setShowSignup] = useState(false);
+  const [signupFeedback, setSignupFeedback] = useState("");
+
+  async function requestSignup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const email = String(new FormData(event.currentTarget).get("signupEmail")).trim();
+    setIsSubmitting(true); setError(""); setSignupFeedback("");
+    try {
+      const response = await fetch("/api/public/self-signup/request", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, language }) });
+      const result = await response.json() as { message?: string; error?: string };
+      if (!response.ok) throw new Error(t("signupError"));
+      setSignupFeedback(t("signupFallback"));
+    } catch { setError(t("signupError")); }
+    finally { setIsSubmitting(false); }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -124,13 +151,13 @@ export function Authentication({
       const result = await response.json() as { user?: AuthenticatedUser; error?: string; message?: string };
       if (!response.ok || !result.user) {
         const message = response.status === 400 && result.error === "Bad Request"
-          ? authValidationMessage(result.message)
-          : result.error ?? result.message ?? "Could not sign in.";
+          ? authValidationMessage(result.message, t)
+          : authApiMessage(result.error ?? result.message, t);
         throw new Error(message);
       }
       onAuthenticated(result.user);
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Could not sign in.");
+    } catch {
+      setError(t("signInError"));
     } finally {
       setIsSubmitting(false);
     }
@@ -140,41 +167,49 @@ export function Authentication({
     <main className="auth-page">
       <AuthBackdrop />
       <section className="auth-card" aria-labelledby="auth-title">
-        <a className="auth-brand" href="#home" aria-label="Smart-Church home">
+        <div className="auth-language-row"><AuthLanguageSelect language={language} onChange={selectLanguage} label={t("language")} /></div>
+        <a className="auth-brand" href="#home" aria-label={t("brandHome")}>
           <img src={smartChurchLogoUrl} alt="" />
           <span className="auth-brand-name"><span>smart</span>-Church</span>
         </a>
         <div className="auth-heading">
-          <span className="eyebrow">SMART-CHURCH</span>
-          <h1 id="auth-title">{setupRequired ? "Set up your workspace" : "Welcome back"}</h1>
-          <p>{setupRequired ? "Create the first server administrator account to manage this installation." : "Sign in to continue to your church workspace."}</p>
+          <span className="eyebrow">{t("smartChurch")}</span>
+          <h1 id="auth-title">{setupRequired ? t("setupTitle") : showSignup ? t("signupTitle") : t("welcome")}</h1>
+          <p>{setupRequired ? t("setupHelp") : showSignup ? t("signupHelp") : t("loginHelp")}</p>
         </div>
 
-        {unavailableMessage && <div className="auth-message auth-message-error" role="alert">{unavailableMessage}</div>}
+        {(unavailableMessage || !setupRequired && showSignup && selfSignupEnabled === false) && <div className="auth-message auth-message-error" role="alert">{t("unavailable")}</div>}
         {error && <div className="auth-message auth-message-error" role="alert">{error}</div>}
 
-        <form className="auth-form" onSubmit={submit}>
+        {showSignup ? <form className="auth-form" onSubmit={(event) => void requestSignup(event)}>
+          <label>{t("email")}<input name="signupEmail" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" autoFocus /></label>
+          {signupFeedback && <p className="auth-hint" role="status">{signupFeedback}</p>}
+          <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage) || selfSignupEnabled === false}>{isSubmitting ? t("sending") : t("sendSignupLink")}<ArrowRight size={16} /></button>
+          <button className="auth-link-button" type="button" onClick={() => { setShowSignup(false); setError(""); }}>{t("backToSignIn")}</button>
+        </form> : <form className="auth-form" onSubmit={submit}>
           {setupRequired && <>
-            <label>One-time setup code<input name="setupCode" required autoComplete="one-time-code" minLength={8} maxLength={80} /></label>
-            <p className="auth-hint">Find this code in the Core API terminal where the app is running.</p>
-            <label>Church location<input name="location" required autoComplete="address-level2" maxLength={120} placeholder="Enter your location" defaultValue={setupLocation ?? ""} /></label>
-            <p className="auth-hint">You can change this later in location settings.</p>
-            <label>Your name<input name="displayName" required autoComplete="name" maxLength={100} placeholder="Juri Stöckli" /></label>
-            <label>Username<input name="username" required autoComplete="username" minLength={3} maxLength={32} pattern={usernamePattern} title={usernameHelp} aria-describedby="username-help" placeholder="juri.stoeckli" /></label>
-            <p className="auth-hint" id="username-help">{usernameHelp}</p>
+            <label>{t("oneTimeCode")}<input name="setupCode" required autoComplete="one-time-code" minLength={8} maxLength={80} /></label>
+            <p className="auth-hint">{t("setupCodeHelp")}</p>
+            <label>{t("churchLocation")}<input name="location" required autoComplete="address-level2" maxLength={120} placeholder={t("enterLocation")} defaultValue={setupLocation ?? ""} /></label>
+            <p className="auth-hint">{t("locationHelp")}</p>
+            <label>{t("yourName")}<input name="displayName" required autoComplete="name" maxLength={100} placeholder="Juri Stöckli" /></label>
+            <label>{t("username")}<input name="username" required autoComplete="username" minLength={3} maxLength={32} pattern={usernamePattern} title={`${t("usernameHelp")} ${t("usernameEmailHelp")}`} aria-describedby="username-help" placeholder="juri.stoeckli" /></label>
+            <p className="auth-hint" id="username-help">{t("usernameHelp")} {t("usernameEmailHelp")}</p>
           </>}
           {setupRequired
-            ? <label>Email address<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
-            : <label>Username or email address<input name="identifier" required autoComplete="username" maxLength={254} placeholder="username or you@example.com" /></label>}
-          <label>Password<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} aria-describedby={setupRequired ? "setup-password-help" : undefined} placeholder={setupRequired ? "At least 12 characters" : "Your password"} /></label>
-          {setupRequired && <p className="auth-hint" id="setup-password-help">Use 12–128 characters.</p>}
+            ? <label>{t("email")}<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
+            : <label>{t("usernameOrEmail")}<input name="identifier" required autoComplete="username" maxLength={254} placeholder={t("identifierPlaceholder")} /></label>}
+          <label>{t("password")}<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} aria-describedby={setupRequired ? "setup-password-help" : undefined} placeholder={setupRequired ? t("passwordPlaceholder") : t("currentPasswordPlaceholder")} /></label>
+          {setupRequired && <p className="auth-hint" id="setup-password-help">{t("use12Chars")}</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
-            {isSubmitting ? "Please wait…" : setupRequired ? "Create server administrator" : "Sign in"}
+            {isSubmitting ? t("pleaseWait") : setupRequired ? t("createAdmin") : t("signIn")}
             {!isSubmitting && <ArrowRight size={17} />}
           </button>
-        </form>
+        </form>}
 
-        <div className="auth-footnote"><Church size={14} /> Your account is stored on this installation.</div>
+        {!setupRequired && selfSignupEnabled && !showSignup && <button className="auth-link-button" type="button" onClick={() => { setShowSignup(true); setError(""); }}>{t("createAccount")}</button>}
+
+        <div className="auth-footnote"><Church size={14} /> {t("accountStored")}</div>
       </section>
     </main>
   );
