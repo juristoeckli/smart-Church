@@ -17,6 +17,7 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 - Create credit notes against the unpaid balance of sent invoices or deposit invoices. Draft credits reserve balance; issued credits settle it and can be cancelled with the invoice balance recalculated.
 - Export issued invoices, deposit invoices, credit notes, and payment records to a date-filtered CSV for accounting. The export includes document links, customer and job references, net, tax, gross, payments, status, and due dates.
 - Edit draft document lines and tax before sending; set location-specific company contact details, tax ID, payment terms, and a footer for printed and emailed documents.
+- Upload a location logo, preview reusable templates for every document type, and configure tax rates with legal disclosures. New documents save branding, logo, and tax-profile snapshots so later settings changes do not rewrite existing documents.
 - Book equipment against a job. The API checks the maximum concurrent quantity for the booking dates and rejects overbooking.
 - Track reserved, checked-out, and returned quantities. The Warehouse section provides printable job pick lists and barcode scanning for each unit checked out or returned.
 - Schedule workshop maintenance for all or part of an equipment item's quantity; overlapping job bookings and maintenance windows share the same availability check.
@@ -47,7 +48,7 @@ EventDesk uses the shared [Resend email API](https://resend.com/docs/api-referen
 
 The document workflow is a first operational slice. These remaining areas are needed before EventDesk can cover a full rental office workflow:
 
-- Logo and template customization, scheduled automatic reminders, and configurable tax/legal settings.
+- Scheduled automatic payment reminders.
 - Delivery notes, serial-number-level stock, barcode label generation, packing/casing, multi-warehouse stock, and transfers.
 - Repair tickets with service history and recurring inspection reminders, sub-rentals, purchases, and multi-warehouse stock.
 - Crew calendar views, self-service freelancer confirmations, import/export, and operational reporting.

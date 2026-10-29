@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { createDocumentEmailHtml, createDocumentPdf } from "./documents.js";
+import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions } from "./documents.js";
 
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
@@ -54,6 +54,9 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
   businessName: { type: "string", maxLength: 160 }, street: { type: "string", maxLength: 200 }, postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 },
   country: { type: "string", maxLength: 80 }, email: { type: "string", maxLength: 254 }, phone: { type: "string", maxLength: 40 }, taxIdentifier: { type: "string", maxLength: 80 },
   paymentTerms: { type: "string", maxLength: 1000 }, footer: { type: "string", maxLength: 1000 },
+  logoJpegBase64: { type: ["string", "null"], maxLength: 350000 },
+  templates: { type: "object", additionalProperties: false, properties: Object.fromEntries(["quote", "contract", "delivery_note", "invoice", "deposit_invoice", "credit_note"].map((kind) => [kind, { type: "object", additionalProperties: false, properties: { title: { type: "string", maxLength: 120 }, intro: { type: "string", maxLength: 1000 }, footer: { type: "string", maxLength: 1000 } } }])) },
+  taxProfiles: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false, required: ["id", "name", "rateBps", "legalText"], properties: { id: { type: "string", minLength: 1, maxLength: 80 }, name: { type: "string", minLength: 1, maxLength: 80 }, rateBps: { type: "integer", minimum: 0, maximum: 3000 }, legalText: { type: "string", maxLength: 1000 } } } },
 } } };
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
@@ -177,7 +180,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        LEFT JOIN eventdesk_document_payments p
                          ON p.document_id=d.id AND p.department_id=d.department_id
                       WHERE d.department_id=$1 AND $2::boolean GROUP BY d.id,j.title,original.document_number ORDER BY d.issue_date DESC, d.created_at DESC`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true]),
-        pool!.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer
+        pool!.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles
                        FROM eventdesk_document_settings WHERE department_id=$1 AND $2::boolean`, [departmentId, canFinance]),
         pool!.query(`SELECT x.id,x.document_id,x.recipient_email,x.subject,x.status,x.provider_message_id,x.error_summary,x.sent_at,x.created_at
                        FROM eventdesk_document_deliveries x JOIN eventdesk_documents d ON d.id=x.document_id AND d.department_id=x.department_id
@@ -200,14 +203,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, relatedDocumentId: row.related_document_id, relatedDocumentNumber: row.related_document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, creditedCents: row.credited_cents, pendingCreditCents: row.pending_credit_cents, payments: row.payments })),
         documentDeliveries: deliveries.rows.map((row) => ({ id: row.id, documentId: row.document_id, recipientEmail: row.recipient_email, subject: row.subject, status: row.status, providerMessageId: row.provider_message_id, errorSummary: row.error_summary, sentAt: row.sent_at, createdAt: row.created_at })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
-        documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "" },
+        documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [] } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [] },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
       };
     });
 
-    routes.post<{ Params: { id: string }; Body: { kind: "quote" | "invoice" | "deposit_invoice" | "contract" | "delivery_note"; taxRateBps?: number; dueDate?: string; depositAmountCents?: number } }>("/api/eventdesk/jobs/:id/documents", { schema: {
+    routes.post<{ Params: { id: string }; Body: { kind: "quote" | "invoice" | "deposit_invoice" | "contract" | "delivery_note"; taxRateBps?: number; taxProfileId?: string; dueDate?: string; depositAmountCents?: number } }>("/api/eventdesk/jobs/:id/documents", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { type: "string", enum: ["quote", "invoice", "deposit_invoice", "contract", "delivery_note"] }, taxRateBps: { type: "integer", minimum: 0, maximum: 3000 }, dueDate: { type: "string", format: "date" }, depositAmountCents: { type: "integer", minimum: 1, maximum: 1000000000 } } },
+      body: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { type: "string", enum: ["quote", "invoice", "deposit_invoice", "contract", "delivery_note"] }, taxRateBps: { type: "integer", minimum: 0, maximum: 3000 }, taxProfileId: { type: "string", minLength: 1, maxLength: 80 }, dueDate: { type: "string", format: "date" }, depositAmountCents: { type: "integer", minimum: 1, maximum: 1000000000 } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "finance_manage");
@@ -239,17 +242,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const discountCents = Math.round(preDiscountSubtotal * discountBps / 10000);
         if (discountCents > 0) lines = [...lines, { description: `Customer discount (${(discountBps / 100).toFixed(2)}%)`, quantity: 1, unitCents: -discountCents, unitLabel: "discount", lineTotalCents: -discountCents }];
         const subtotal = request.body.kind === "delivery_note" ? 0 : lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
-        const taxRateBps = request.body.taxRateBps ?? 0;
+        const settingsResult = await client.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles FROM eventdesk_document_settings WHERE department_id=$1`, [departmentId]);
+        const settings = settingsResult.rows[0] ?? {};
+        const taxProfiles = settings.tax_profiles ?? [];
+        const taxProfile = request.body.taxProfileId ? taxProfiles.find((profile: { id: string }) => profile.id === request.body.taxProfileId) : null;
+        if (request.body.taxProfileId && !taxProfile) { await rollback(client); return reply.code(400).send({ error: "Choose a saved tax profile for this location." }); }
+        const taxRateBps = request.body.kind === "delivery_note" ? 0 : Number(taxProfile?.rateBps ?? request.body.taxRateBps ?? 0);
         const tax = Math.round(subtotal * taxRateBps / 10000);
         const seq = await client.query(`INSERT INTO eventdesk_document_sequences (department_id,kind,last_number) VALUES ($1,$2,1)
           ON CONFLICT (department_id,kind) DO UPDATE SET last_number=eventdesk_document_sequences.last_number+1 RETURNING last_number`, [departmentId, request.body.kind]);
         const prefix = { quote: "Q", invoice: "I", deposit_invoice: "D", contract: "C", delivery_note: "DN" }[request.body.kind];
         const number = `${prefix}-${new Date().getFullYear()}-${String(seq.rows[0].last_number).padStart(5, "0")}`;
         const customer = { name: job.name ?? job.customer_name, kind: job.kind ?? null, contactPerson: job.contact_person ?? "", email: job.email ?? "", phone: job.phone ?? "", street: job.street ?? "", postalCode: job.postal_code ?? "", city: job.city ?? "", country: job.country ?? "", jobTitle: job.title, venue: job.venue, startsAt: job.starts_at, endsAt: job.ends_at, jobNotes: job.notes };
+        const template = settings.document_templates?.[request.body.kind] ?? {};
+        const brandingSnapshot = { businessName: settings.business_name ?? "", street: settings.street ?? "", postalCode: settings.postal_code ?? "", city: settings.city ?? "", country: settings.country ?? "", email: settings.email ?? "", phone: settings.phone ?? "", taxIdentifier: settings.tax_identifier ?? "", paymentTerms: settings.payment_terms ?? "", footer: settings.footer ?? "", template, taxProfileName: taxProfile?.name ?? "", legalText: taxProfile?.legalText ?? "" };
         const inserted = await client.query(`INSERT INTO eventdesk_documents
-          (id,department_id,job_id,kind,document_number,status,due_date,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents)
-          VALUES ($1,$2,$3,$4,$5,'draft',$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12) RETURNING id`,
-          [randomUUID(), departmentId, job.id, request.body.kind, number, request.body.dueDate ?? null, JSON.stringify(customer), JSON.stringify(lines), taxRateBps, subtotal, tax, subtotal + tax]);
+          (id,department_id,job_id,kind,document_number,status,due_date,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents,branding_snapshot,logo_snapshot)
+          VALUES ($1,$2,$3,$4,$5,'draft',$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12,$13::jsonb,$14) RETURNING id`,
+          [randomUUID(), departmentId, job.id, request.body.kind, number, request.body.dueDate ?? null, JSON.stringify(customer), JSON.stringify(lines), taxRateBps, subtotal, tax, subtotal + tax, JSON.stringify(brandingSnapshot), settings.logo_jpeg ?? null]);
         await client.query("COMMIT");
         return reply.code(201).send({ id: inserted.rows[0].id, number });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
@@ -265,7 +275,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const invoice = await client.query(`SELECT id,job_id,document_number,kind,status,customer_snapshot,tax_rate_bps,total_cents
+        const invoice = await client.query(`SELECT id,job_id,document_number,kind,status,customer_snapshot,tax_rate_bps,total_cents,branding_snapshot,logo_snapshot
           FROM eventdesk_documents WHERE id=$1 AND department_id=$2 AND kind IN ('invoice','deposit_invoice') FOR UPDATE`, [request.params.id, departmentId]);
         if (!invoice.rowCount || !["sent", "partial"].includes(invoice.rows[0].status)) { await rollback(client); return reply.code(409).send({ error: "Credit notes can only be created for sent, unpaid invoices." }); }
         const balances = await client.query(`SELECT
@@ -281,9 +291,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const number = `CN-${new Date().getFullYear()}-${String(sequence.rows[0].last_number).padStart(5, "0")}`;
         const line = [{ description: request.body.reason.trim(), quantity: 1, unitCents: subtotal, unitLabel: "credit", lineTotalCents: subtotal }];
         const result = await client.query(`INSERT INTO eventdesk_documents
-          (id,department_id,job_id,kind,document_number,status,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents,related_document_id)
-          VALUES ($1,$2,$3,'credit_note',$4,'draft',$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11) RETURNING id`,
-          [randomUUID(), departmentId, invoice.rows[0].job_id, number, JSON.stringify(invoice.rows[0].customer_snapshot), JSON.stringify(line), taxRateBps, subtotal, tax, request.body.amountCents, request.params.id]);
+          (id,department_id,job_id,kind,document_number,status,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents,related_document_id,branding_snapshot,logo_snapshot)
+          VALUES ($1,$2,$3,'credit_note',$4,'draft',$5::jsonb,$6::jsonb,$7,$8,$9,$10,$11,$12::jsonb,$13) RETURNING id`,
+          [randomUUID(), departmentId, invoice.rows[0].job_id, number, JSON.stringify(invoice.rows[0].customer_snapshot), JSON.stringify(line), taxRateBps, subtotal, tax, request.body.amountCents, request.params.id, JSON.stringify(invoice.rows[0].branding_snapshot ?? {}), invoice.rows[0].logo_snapshot ?? null]);
         await client.query("COMMIT");
         return reply.code(201).send({ id: result.rows[0].id, number, relatedDocumentNumber: invoice.rows[0].document_number });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
@@ -330,11 +340,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "finance_manage");
       if (!departmentId) return reply;
-      const b = request.body as { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string };
-      await pool!.query(`INSERT INTO eventdesk_document_settings (department_id,business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (department_id) DO UPDATE SET
-          business_name=excluded.business_name,street=excluded.street,postal_code=excluded.postal_code,city=excluded.city,country=excluded.country,email=excluded.email,phone=excluded.phone,tax_identifier=excluded.tax_identifier,payment_terms=excluded.payment_terms,footer=excluded.footer,updated_at=now()`,
-        [departmentId, b.businessName.trim(), b.street.trim(), b.postalCode.trim(), b.city.trim(), b.country.trim(), b.email.trim(), b.phone.trim(), b.taxIdentifier.trim(), b.paymentTerms.trim(), b.footer.trim()]);
+      const b = request.body as { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string; logoJpegBase64?: string | null; templates?: Record<string, { title?: string; intro?: string; footer?: string }>; taxProfiles?: Array<{ id: string; name: string; rateBps: number; legalText: string }> };
+      let logo: Buffer | null = null;
+      if (b.logoJpegBase64) {
+        if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b.logoJpegBase64)) return reply.code(400).send({ error: "The logo must be a valid JPEG image." });
+        logo = Buffer.from(b.logoJpegBase64, "base64");
+        const dimensions = jpegDimensions(logo);
+        if (logo.length < 4 || logo.length > 256 * 1024 || logo[0] !== 0xff || logo[1] !== 0xd8 || logo[2] !== 0xff || logo.at(-2) !== 0xff || logo.at(-1) !== 0xd9 || !dimensions || dimensions.width > 4096 || dimensions.height > 4096) return reply.code(400).send({ error: "The logo must be a valid JPEG with dimensions up to 4096 × 4096 and a file size no larger than 256 KiB." });
+      }
+      const profiles = b.taxProfiles ?? [];
+      if (new Set(profiles.map((profile) => profile.id)).size !== profiles.length) return reply.code(400).send({ error: "Tax profile IDs must be unique." });
+      await pool!.query(`INSERT INTO eventdesk_document_settings (department_id,business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb) ON CONFLICT (department_id) DO UPDATE SET
+          business_name=excluded.business_name,street=excluded.street,postal_code=excluded.postal_code,city=excluded.city,country=excluded.country,email=excluded.email,phone=excluded.phone,tax_identifier=excluded.tax_identifier,payment_terms=excluded.payment_terms,footer=excluded.footer,logo_jpeg=excluded.logo_jpeg,document_templates=excluded.document_templates,tax_profiles=excluded.tax_profiles,updated_at=now()`,
+        [departmentId, b.businessName.trim(), b.street.trim(), b.postalCode.trim(), b.city.trim(), b.country.trim(), b.email.trim(), b.phone.trim(), b.taxIdentifier.trim(), b.paymentTerms.trim(), b.footer.trim(), logo, JSON.stringify(b.templates ?? {}), JSON.stringify(profiles)]);
       return { ok: true };
     });
 
@@ -384,7 +403,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "finance_manage");
       if (!departmentId) return reply;
-      const result = await pool!.query(`SELECT d.document_number,d.kind,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,j.title AS job_title,original.document_number AS related_document_number,
+      const result = await pool!.query(`SELECT d.document_number,d.kind,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,d.branding_snapshot,d.logo_snapshot,j.title AS job_title,original.document_number AS related_document_number,
           coalesce(s.business_name,'') AS business_name,coalesce(s.street,'') AS street,coalesce(s.postal_code,'') AS postal_code,coalesce(s.city,'') AS city,coalesce(s.country,'') AS country,
           coalesce(s.email,'') AS email,coalesce(s.phone,'') AS phone,coalesce(s.tax_identifier,'') AS tax_identifier,coalesce(s.payment_terms,'') AS payment_terms,coalesce(s.footer,'') AS footer
         FROM eventdesk_documents d JOIN eventdesk_jobs j ON j.id=d.job_id AND j.department_id=d.department_id
@@ -393,7 +412,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE d.id=$1 AND d.department_id=$2`, [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Document not found." });
       const row = result.rows[0];
-      const pdf = createDocumentPdf({ number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents }, { businessName: row.business_name, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, email: row.email, phone: row.phone, taxIdentifier: row.tax_identifier, paymentTerms: row.payment_terms, footer: row.footer });
+      const savedBranding = row.branding_snapshot ?? {};
+      const pdf = createDocumentPdf({ number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents }, { businessName: savedBranding.businessName ?? row.business_name, street: savedBranding.street ?? row.street, postalCode: savedBranding.postalCode ?? row.postal_code, city: savedBranding.city ?? row.city, country: savedBranding.country ?? row.country, email: savedBranding.email ?? row.email, phone: savedBranding.phone ?? row.phone, taxIdentifier: savedBranding.taxIdentifier ?? row.tax_identifier, paymentTerms: savedBranding.paymentTerms ?? row.payment_terms, footer: savedBranding.footer ?? row.footer, template: savedBranding.template, taxProfileName: savedBranding.taxProfileName, legalText: savedBranding.legalText, logoJpeg: row.logo_snapshot ? Buffer.from(row.logo_snapshot) : null });
       return reply.header("content-type", "application/pdf").header("content-disposition", `attachment; filename="${row.document_number}.pdf"`).send(pdf);
     });
 
@@ -412,7 +432,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const recipientEmail = request.body.recipientEmail.trim().toLocaleLowerCase("en-US");
       const subject = request.body.subject.trim();
       if (!subject) return reply.code(400).send({ error: "Enter an email subject." });
-      const result = await pool!.query(`SELECT d.id,d.department_id,d.document_number,d.kind,d.status,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,j.title AS job_title,original.document_number AS related_document_number,
+      const result = await pool!.query(`SELECT d.id,d.department_id,d.document_number,d.kind,d.status,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,d.branding_snapshot,d.logo_snapshot,j.title AS job_title,original.document_number AS related_document_number,
           coalesce(s.business_name,'') AS business_name,coalesce(s.street,'') AS street,coalesce(s.postal_code,'') AS postal_code,coalesce(s.city,'') AS city,coalesce(s.country,'') AS country,
           coalesce(s.email,'') AS email,coalesce(s.phone,'') AS phone,coalesce(s.tax_identifier,'') AS tax_identifier,coalesce(s.payment_terms,'') AS payment_terms,coalesce(s.footer,'') AS footer
         FROM eventdesk_documents d JOIN eventdesk_jobs j ON j.id=d.job_id AND j.department_id=d.department_id
@@ -435,7 +455,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         balanceCents = Number(reminder.rows[0].balance_cents);
       }
       const document = { number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, ...(balanceCents === undefined ? {} : { balanceCents }) };
-      const branding = { businessName: row.business_name, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, email: row.email, phone: row.phone, taxIdentifier: row.tax_identifier, paymentTerms: row.payment_terms, footer: row.footer };
+      const savedBranding = row.branding_snapshot ?? {};
+      const branding = { businessName: savedBranding.businessName ?? row.business_name, street: savedBranding.street ?? row.street, postalCode: savedBranding.postalCode ?? row.postal_code, city: savedBranding.city ?? row.city, country: savedBranding.country ?? row.country, email: savedBranding.email ?? row.email, phone: savedBranding.phone ?? row.phone, taxIdentifier: savedBranding.taxIdentifier ?? row.tax_identifier, paymentTerms: savedBranding.paymentTerms ?? row.payment_terms, footer: savedBranding.footer ?? row.footer, template: savedBranding.template, taxProfileName: savedBranding.taxProfileName, legalText: savedBranding.legalText, logoJpeg: row.logo_snapshot ? Buffer.from(row.logo_snapshot) : null };
       const pdf = createDocumentPdf(document, branding);
       const providerResponse = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
