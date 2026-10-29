@@ -1,4 +1,8 @@
 FROM node:24-bookworm-slim AS build
+ARG SMART_CHURCH_VERSION=
+ARG SMART_CHURCH_BUILD_NUMBER=
+ENV VITE_SMART_CHURCH_VERSION=${SMART_CHURCH_VERSION}
+ENV VITE_SMART_CHURCH_BUILD_NUMBER=${SMART_CHURCH_BUILD_NUMBER}
 WORKDIR /workspace
 RUN corepack enable && corepack prepare pnpm@11.25.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./

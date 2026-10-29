@@ -1,6 +1,6 @@
 import { Component, lazy, Suspense, type ComponentType, type ErrorInfo, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
-import type { DepartmentProfile } from "@smart-church/contracts";
+import type { DepartmentProfile, UserLanguage } from "@smart-church/contracts";
 import type { RealtimeEvent } from "./realtime";
 
 export interface ModuleRealtime {
@@ -10,6 +10,7 @@ export interface ModuleRealtime {
 }
 
 export interface ModuleContext {
+  language: UserLanguage;
   department: DepartmentProfile;
   departmentId: string;
   csrfToken: string;
@@ -38,6 +39,7 @@ export interface ModuleAccessContext {
 export interface ModuleRegistration {
   id: string;
   name: string;
+  translations?: Partial<Record<UserLanguage, Record<string, string>>>;
   icon: LucideIcon;
   required?: boolean;
   adminOnly?: boolean;
@@ -51,6 +53,10 @@ export interface ModuleRegistration {
   settings?: ComponentType<ModuleSettingsContext>;
   navigation?: ComponentType<{ context: ModuleContext }>;
   pageClassName?: string;
+}
+
+export function moduleTranslation(translations: ModuleRegistration["translations"], language: UserLanguage, key: string, englishFallback = key): string {
+  return translations?.[language]?.[key] ?? translations?.en?.[key] ?? englishFallback;
 }
 
 const registrations = import.meta.glob<{ moduleRegistration: ModuleRegistration }>("./modules/*/module.tsx");

@@ -209,6 +209,7 @@ export interface AuthenticatedUser {
   mustChangePassword: boolean;
   dateTimeFormat: DateTimeFormat;
   language: UserLanguage;
+  languageIsCustom: boolean;
 }
 
 export type DateTimeFormat = "DD.MM.YYYY HH:MM" | "DD/MM/YYYY HH:MM" | "MM/DD/YYYY h:mm AM/PM" | "YYYY-MM-DD HH:MM";
@@ -269,10 +270,14 @@ export interface UserRelationshipInput {
 export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
+  httpAccessMode?: HttpAccessMode;
+  httpsOrigin?: string | null;
   setupLocation?: string;
   user?: AuthenticatedUser;
   csrfToken?: string;
 }
+
+export type HttpAccessMode = "none" | "warning" | "redirect";
 
 export interface CreateAdminAccount {
   setupCode: string;

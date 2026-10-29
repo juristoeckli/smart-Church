@@ -56,6 +56,9 @@ jobs:
           file: Dockerfile
           target: api
           push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
           tags: ${{ steps.api-meta.outputs.tags }}
           labels: ${{ steps.api-meta.outputs.labels }}
           cache-from: type=gha,scope=api
@@ -76,6 +79,9 @@ jobs:
           file: Dockerfile
           target: web
           push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
           tags: ${{ steps.web-meta.outputs.tags }}
           labels: ${{ steps.web-meta.outputs.labels }}
           cache-from: type=gha,scope=web

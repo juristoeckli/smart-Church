@@ -3,12 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/smart-church-mark.svg" />
     <meta name="theme-color" content="#f6f7f4" />
     <meta name="description" content="A thoughtful workspace for your church community." />
     <title>Smart Church</title>
+    <style>
+      .http-access-warning { position: relative; z-index: 10000; display: flex; justify-content: center; gap: .35rem; padding: .7rem 1rem; background: #fff4d6; color: #573b00; font: 600 14px/1.4 system-ui, sans-serif; text-align: center; }
+      .http-access-warning[hidden] { display: none; }
+      .http-access-warning a { color: inherit; text-decoration: underline; }
+    </style>
   </head>
   <body>
+    <aside id="http-access-warning" class="http-access-warning" role="status" hidden></aside>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

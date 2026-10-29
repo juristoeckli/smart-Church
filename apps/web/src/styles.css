@@ -134,10 +134,11 @@
 .auth-sessions-section { align-items: flex-start; }
 .auth-session-list { display: grid; flex: 1; gap: 10px; min-width: 0; }
 .auth-session-toolbar { display: flex; justify-content: flex-end; }
-.auth-session-card { align-items: center; background: var(--surface, #fff); border: 1px solid var(--line-subtle, #e2e5e9); border-radius: 12px; display: flex; gap: 16px; justify-content: space-between; min-width: 0; padding: 14px; }
+.auth-session-card { align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); display: flex; gap: 16px; justify-content: space-between; min-width: 0; padding: 14px; }
 .auth-session-details { display: grid; gap: 4px; min-width: 0; }
 .auth-session-details strong { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; overflow-wrap: anywhere; }
-.auth-session-details small { color: var(--text-muted, #697386); }
-.auth-session-current { background: var(--accent-soft, #edf4f4); border-radius: 999px; color: var(--accent-strong, #355f61); font-size: 11px; font-weight: 650; padding: 3px 8px; }
+.auth-session-details small { color: var(--muted); }
+.auth-session-current { background: var(--green-soft); border-radius: 999px; color: var(--green); font-size: 11px; font-weight: 650; padding: 3px 8px; }
 .auth-session-revoke { flex: 0 0 auto; }
 @media (max-width: 640px) { .auth-session-card { align-items: flex-start; flex-direction: column; } }
+.topbar-language-control{position:relative;display:flex;align-items:center}.topbar-language-button{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--ink);font-size:10px;font-weight:700;cursor:pointer}.topbar-language-button:hover,.topbar-language-button[aria-expanded="true"]{border-color:var(--green);color:var(--green)}.topbar-language-menu{position:absolute;top:calc(100% + 7px);right:0;z-index:1200;display:grid;min-width:190px;padding:5px;border:1px solid var(--line);border-radius:10px;background:var(--panel);box-shadow:0 12px 30px #0002}.topbar-language-menu button{display:flex;align-items:center;min-height:34px;border:0;border-radius:6px;background:transparent;color:var(--ink);padding:8px 10px;text-align:left;font:inherit;font-size:11px;cursor:pointer}.topbar-language-menu button:hover,.topbar-language-menu button[aria-checked="true"]{background:var(--green-soft);color:var(--green)}.topbar-language-menu button:disabled{opacity:.55;cursor:wait}

@@ -36,6 +36,9 @@ jobs:
           file: Dockerfile
           target: api
           push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/smart-church-api:${{ github.sha }}
             ghcr.io/${{ github.repository_owner }}/smart-church-api:${{ github.ref_name }}
@@ -49,6 +52,9 @@ jobs:
           file: Dockerfile
           target: web
           push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/smart-church-web:${{ github.sha }}
             ghcr.io/${{ github.repository_owner }}/smart-church-web:${{ github.ref_name }}

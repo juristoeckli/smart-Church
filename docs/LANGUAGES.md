@@ -13,3 +13,5 @@ Localization is being rolled out by interface area. The current dictionary cover
 3. Use the `translate` function for user-facing strings and keep each sentence as a complete translated value; do not assemble sentences from translated fragments.
 4. Keep backend data, enum values, route names, and persisted values language-neutral. Translate only what the user sees.
 5. Run the web TypeScript check. Review each language in the UI before marking its area complete.
+
+Optional client modules can provide their own `translations` map on `ModuleRegistration`. Use `moduleTranslation(translations, language, key)` for module copy; it checks the selected language, then English, then the supplied fallback. The active user language is passed to module components as `ModuleContext.language`. The Module Demo shows a complete English, German, French, and Italian example.

@@ -20,7 +20,25 @@ export const moduleRegistration: ModuleRegistration = {
 };
 ```
 
-The component receives `department`, `departmentId`, `csrfToken`, `canManageSite`, a module-local `state` string, and `onStateChange`. Optional registration fields include `adminOnly`, `enabledByDefault`, `initialState`, `isAvailable(context)`, `navigation`, `settings`, and `pageClassName`. The `settings` component receives the selected `departmentId`, `csrfToken`, and available departments and is hosted by the generic Settings page. A module with user-selectable access levels can also declare `accessLabel` and `accessLevels`; People & access displays these declarations without Core changes, and selections are available in `department.modulePermissions[<module-id>]`. Site administrators inherit module access. Use `isAvailable` to hide the module when a member has none of its required grants and `navigation` for module-owned sidebar subsections. The registry adds available modules to the Modules navigation, handles module hash routes and saved state, and renders each module inside a failure boundary. The module implementation is lazy-loaded so an unavailable module does not prevent the core workspace from rendering.
+The component receives `department`, `departmentId`, `csrfToken`, the active user `language`, `canManageSite`, a module-local `state` string, and `onStateChange`. Optional registration fields include `adminOnly`, `enabledByDefault`, `initialState`, `isAvailable(context)`, `navigation`, `settings`, and `pageClassName`. The `settings` component receives the selected `departmentId`, `csrfToken`, and available departments and is hosted by the generic Settings page. A module with user-selectable access levels can also declare `accessLabel` and `accessLevels`; People & access displays these declarations without Core changes, and selections are available in `department.modulePermissions[<module-id>]`. Site administrators inherit module access. Use `isAvailable` to hide the module when a member has none of its required grants and `navigation` for module-owned sidebar subsections. The registry adds available modules to the Modules navigation, handles module hash routes and saved state, and renders each module inside a failure boundary. The module implementation is lazy-loaded so an unavailable module does not prevent the core workspace from rendering.
+
+Modules can declare localized UI copy with `translations`. English is the fallback for a missing language or key, then the registration's `name` is used for a missing English name. The active user language is also available as `language` in the module component context, so module-owned screens can use the same translation map:
+
+```tsx
+export const moduleRegistration: ModuleRegistration = {
+  id: "example-module",
+  name: "Example module",
+  translations: {
+    en: { name: "Example module", greeting: "Welcome" },
+    de: { name: "Beispielmodul", greeting: "Willkommen" },
+    fr: { name: "Module exemple", greeting: "Bienvenue" },
+    it: { name: "Modulo di esempio", greeting: "Benvenuto" },
+  },
+  // ...icon and component
+};
+```
+
+Use `moduleTranslation(moduleRegistration.translations, language, "greeting")` in module-owned UI; it returns the selected translation or its English fallback. The registry uses the `name` translation for module navigation, page headings, and module management.
 
 The optional `realtime` client context uses the core-owned authenticated WebSocket connection. Subscribe to module-owned topics such as `module:<id>:changed`; use `realtime:connected` to refresh after reconnect because events are transient and are not queued. Call `send(topic, payload)` only for commands handled by that module's API routes. Modules should not open their own socket or depend on another module's topics. Realtime is an invalidation/notification channel: fetch authoritative state from the module's API after receiving an event.
 

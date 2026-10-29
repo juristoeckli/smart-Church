@@ -6,7 +6,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { getRequiredModuleDependencies, getRequiredServerModuleIds, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
@@ -55,7 +55,16 @@ const app = Fastify({
 });
 let databaseReady = false;
 let firstRunSetupCode: string | null = null;
+let httpAccessMode: HttpAccessMode = "none";
 const sessionCookieName = "smart_church_session";
+function configuredHttpsOrigin() {
+  try {
+    const origin = new URL(process.env.SMART_CHURCH_WEB_ORIGIN ?? "");
+    return origin.protocol === "https:" ? origin.origin : null;
+  } catch {
+    return null;
+  }
+}
 function sessionCookieNameFor(request: FastifyRequest) {
   return allowHttpFallback && request.protocol === "http" ? `${sessionCookieName}_http` : sessionCookieName;
 }
@@ -139,12 +148,12 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
         WHERE token_hash = $1 AND expires_at > now()
         RETURNING user_id
      )
-     SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password, u.date_time_format, u.language
+     SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password, u.date_time_format, u.language, u.language_is_custom
        FROM active_session s JOIN app_users u ON u.id = s.user_id`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -289,7 +298,7 @@ const realtime = new RealtimeHub(
 
 app.addHook("onRequest", async (request, reply) => {
   const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
-  if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.protocol !== "https") {
+  if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.url !== "/api/public/http-access" && request.protocol !== "https") {
     return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
   }
   if (request.url === "/api/webhooks/resend") return;
@@ -318,7 +327,7 @@ app.addHook("preHandler", async (request, reply) => {
   // on port 81. Keep static page and asset requests public so the login UI can
   // load; protect application data and actions under /api/ below.
   if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
-  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/")) return;
+  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
@@ -518,6 +527,11 @@ app.get("/api/health", async () => ({
   services: { api: "ok", database: databaseReady ? "ok" : "unavailable" },
 }));
 
+app.get("/api/public/http-access", async (_request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  return { mode: httpAccessMode, httpsOrigin: configuredHttpsOrigin() };
+});
+
 async function readContainerMemory() {
   try {
     const [usage, limit] = await Promise.all([
@@ -600,10 +614,34 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
+    httpAccessMode,
+    httpsOrigin: configuredHttpsOrigin(),
     ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
     ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieNameFor(request))!) } : {}),
     ...(user ? { user } : {}),
   };
+});
+
+app.put<{ Body: { mode: HttpAccessMode } }>("/api/admin/web-settings/http-access", {
+  schema: {
+    body: {
+      type: "object", additionalProperties: false, required: ["mode"],
+      properties: { mode: { type: "string", enum: ["none", "warning", "redirect"] } },
+    },
+  },
+}, async (request, reply) => {
+  if (!databaseReady || !pool || !installationId) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerAdmin(request, reply) || !validModuleMutation(request, reply)) return reply;
+  const httpsOrigin = configuredHttpsOrigin();
+  if (request.body.mode === "redirect" && !httpsOrigin) return reply.code(400).send({ error: "Configure the public HTTPS origin before enabling HTTPS redirects." });
+  await pool.query(
+    `INSERT INTO installation_http_settings (installation_id, access_mode, updated_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (installation_id) DO UPDATE SET access_mode = EXCLUDED.access_mode, updated_at = now()`,
+    [installationId, request.body.mode],
+  );
+  httpAccessMode = request.body.mode;
+  return { mode: httpAccessMode, httpsOrigin };
 });
 
 app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
@@ -663,11 +701,11 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     if (!department.rowCount) throw new Error("The configured department could not be found.");
     const result = await client.query(
       `INSERT INTO app_users (id, email, username, display_name, password_hash, role, must_change_password)
-       VALUES ($1, $2, $3, $4, $5, 'server_admin', false) RETURNING id, email, username, display_name, role, date_time_format, language`,
+       VALUES ($1, $2, $3, $4, $5, 'server_admin', false) RETURNING id, email, username, display_name, role, date_time_format, language, language_is_custom`,
       [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
-    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language };
+    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom };
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [user.id, departmentId],
@@ -708,7 +746,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, display_name, password_hash, role, must_change_password, date_time_format, language FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, display_name, password_hash, role, must_change_password, date_time_format, language, language_is_custom FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
@@ -727,7 +765,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   for (const key of buckets) failedLogins.delete(key);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom };
   await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
@@ -750,23 +788,23 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   const result = await pool.query(
-    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, date_time_format, language",
+    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, date_time_format, language, language_is_custom",
     [user.id, hashPassword(request.body.password)],
   );
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
   await createSession(user.id, request, reply, request.protocol === "https");
-  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language } };
+  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom } };
 });
 
-app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage } }>("/api/auth/preferences", {
+app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage | null } }>("/api/auth/preferences", {
   schema: {
     body: {
       type: "object", additionalProperties: false, minProperties: 1,
       properties: {
         dateTimeFormat: { type: "string", enum: ["DD.MM.YYYY HH:MM", "DD/MM/YYYY HH:MM", "MM/DD/YYYY h:mm AM/PM", "YYYY-MM-DD HH:MM"] },
-        language: { type: "string", enum: ["en", "de", "fr", "it"] },
+        language: { anyOf: [{ type: "string", enum: ["en", "de", "fr", "it"] }, { type: "null" }] },
       },
     },
   },
@@ -777,10 +815,14 @@ app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFor
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   if (!validModuleMutation(request, reply)) return;
   await pool.query(
-    "UPDATE app_users SET date_time_format = COALESCE($2, date_time_format), language = COALESCE($3, language) WHERE id = $1",
-    [user.id, request.body.dateTimeFormat ?? null, request.body.language ?? null],
+    `UPDATE app_users
+        SET date_time_format = COALESCE($2, date_time_format),
+            language = CASE WHEN $3 THEN COALESCE($4, language) ELSE language END,
+            language_is_custom = CASE WHEN $3 THEN $4 IS NOT NULL ELSE language_is_custom END
+      WHERE id = $1`,
+    [user.id, request.body.dateTimeFormat ?? null, Object.hasOwn(request.body, "language"), request.body.language ?? null],
   );
-  return { dateTimeFormat: request.body.dateTimeFormat ?? user.dateTimeFormat, language: request.body.language ?? user.language };
+  return { dateTimeFormat: request.body.dateTimeFormat ?? user.dateTimeFormat, language: request.body.language ?? user.language, languageIsCustom: request.body.language === undefined ? user.languageIsCustom : request.body.language !== null };
 });
 
 app.get("/api/auth/sessions", async (request, reply) => {
@@ -2308,6 +2350,13 @@ try {
   try {
     databaseReady = await initializeDatabase();
     if (databaseReady && pool) {
+      const accessSettings = await pool.query<{ access_mode: HttpAccessMode }>(
+        `SELECT settings.access_mode
+           FROM installation_http_settings settings
+           JOIN installations installation ON installation.id = settings.installation_id
+          WHERE installation.is_current = TRUE`,
+      );
+      httpAccessMode = accessSettings.rows[0]?.access_mode ?? "none";
       await pool.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
       const accounts = await pool.query("SELECT count(*)::int AS total FROM app_users");
       if (accounts.rows[0].total === 0) {
