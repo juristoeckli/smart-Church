@@ -71,7 +71,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get("/api/eventdesk/bootstrap", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      const [jobs, assets, bookings, crew, contacts, events, customers, documents] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, events, customers, documents] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue, j.status, j.notes, j.created_at
@@ -83,6 +83,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         pool!.query(`SELECT b.id, b.job_id, b.asset_id, a.name AS asset_name, a.barcode, b.quantity, b.checked_out_quantity, b.daily_rate_cents, b.status
                        FROM eventdesk_job_assets b JOIN eventdesk_assets a ON a.id=b.asset_id AND a.department_id=b.department_id
                       WHERE b.department_id=$1 ORDER BY a.name`, [departmentId]),
+        pool!.query(`SELECT m.id,m.asset_id,m.starts_at,m.ends_at,m.quantity,m.status,m.notes,a.name AS asset_name
+                       FROM eventdesk_asset_maintenance m JOIN eventdesk_assets a ON a.id=m.asset_id AND a.department_id=m.department_id
+                      WHERE m.department_id=$1 ORDER BY m.starts_at DESC`, [departmentId]),
         pool!.query(`SELECT c.id, c.job_id, c.role, c.contact_id, trim(coalesce(p.first_name,'') || ' ' || coalesce(p.last_name,'')) AS contact_name,
                             c.hours, c.hourly_rate_cents, c.status, c.notes
                        FROM eventdesk_job_crew c LEFT JOIN contacts p ON p.id=c.contact_id AND p.department_id=c.department_id
@@ -105,6 +108,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
         assets: assets.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, quantity: row.quantity, dailyRateCents: row.daily_rate_cents, active: row.active, notes: row.notes, barcode: row.barcode })),
         bookings: bookings.rows.map((row) => ({ id: row.id, jobId: row.job_id, assetId: row.asset_id, assetName: row.asset_name, barcode: row.barcode, quantity: row.quantity, checkedOutQuantity: row.checked_out_quantity, dailyRateCents: row.daily_rate_cents, status: row.status })),
+        maintenance: maintenance.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), quantity: row.quantity, status: row.status, notes: row.notes })),
         crew: crew.rows.map((row) => ({ id: row.id, jobId: row.job_id, role: row.role, contactId: row.contact_id, contactName: row.contact_name?.trim() || null, hours: Number(row.hours), hourlyRateCents: row.hourly_rate_cents, status: row.status, notes: row.notes })),
         contacts: contacts.rows.map((row) => ({ id: row.id, name: `${row.first_name} ${row.last_name}`.trim() })),
         events: events.rows.map((row) => ({ id: row.id, title: row.title, eventDate: row.event_date, startTime: row.start_time })),
@@ -270,9 +274,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed')
           UNION SELECT j.ends_at FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
            WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed')
+          UNION SELECT m.starts_at FROM eventdesk_asset_maintenance m WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress')
+          UNION SELECT m.ends_at FROM eventdesk_asset_maintenance m WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress')
         ) SELECT coalesce(max((SELECT coalesce(sum(b.quantity),0) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed')
-            AND j.starts_at <= p.moment AND j.ends_at > p.moment)),0)::int AS quantity FROM points p`, [departmentId, request.params.id]);
+            AND j.starts_at <= p.moment AND j.ends_at > p.moment)+(SELECT coalesce(sum(m.quantity),0) FROM eventdesk_asset_maintenance m
+            WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at<=p.moment AND m.ends_at>p.moment)),0)::int AS quantity FROM points p`, [departmentId, request.params.id]);
         if (b.quantity < booked.rows[0].quantity) { await rollback(client); return reply.code(409).send({ error: `At least ${booked.rows[0].quantity} units are already booked at the busiest time.` }); }
         await client.query(`UPDATE eventdesk_assets SET name=$3,category=$4,quantity=$5,daily_rate_cents=$6,notes=$7,active=coalesce($8,active),barcode=$9,updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.id, departmentId, b.name.trim(), b.category?.trim() || "General", b.quantity, b.dailyRateCents ?? 0, b.notes?.trim() ?? "", b.active ?? null, b.barcode?.trim() ?? ""]);
         await client.query("COMMIT");
@@ -294,11 +301,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const reserved = await client.query(`WITH points AS (
           SELECT $3::timestamptz AS moment
           UNION SELECT greatest(j.starts_at, $3::timestamptz) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
-           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed')
-             AND j.starts_at < $4 AND j.ends_at > $3
-        ) SELECT coalesce(max((SELECT coalesce(sum(b.quantity),0) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
-          WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed')
-            AND j.starts_at <= p.moment AND j.ends_at > p.moment)),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at]);
+           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at < $4 AND j.ends_at > $3
+          UNION SELECT greatest(m.starts_at, $3::timestamptz) FROM eventdesk_asset_maintenance m
+           WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at < $4 AND m.ends_at > $3
+        ) SELECT coalesce(max(
+          (SELECT coalesce(sum(b.quantity),0) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
+            WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at <= p.moment AND j.ends_at > p.moment)
+          +(SELECT coalesce(sum(m.quantity),0) FROM eventdesk_asset_maintenance m WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at <= p.moment AND m.ends_at > p.moment)
+        ),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, job.rows[0].starts_at, job.rows[0].ends_at]);
         const available = asset.rows[0].quantity - Number(reserved.rows[0].quantity);
         if (request.body.quantity > available) { await rollback(client); return reply.code(409).send({ error: `Only ${Math.max(0, available)} unit(s) are available for those dates.` }); }
         const result = await client.query(`INSERT INTO eventdesk_job_assets (id,department_id,job_id,asset_id,quantity,daily_rate_cents)
@@ -306,6 +316,52 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("COMMIT");
         return reply.code(201).send({ id: result.rows[0].id });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.post<{ Body: { assetId: string; startsAt: string; endsAt: string; quantity: number; notes?: string } }>("/api/eventdesk/maintenance", { schema: { body: {
+      type: "object", additionalProperties: false, required: ["assetId", "startsAt", "endsAt", "quantity"], properties: {
+        assetId: { type: "string", format: "uuid" }, startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
+        quantity: { type: "integer", minimum: 1, maximum: 100000 }, notes: { type: "string", maxLength: 1000 },
+      },
+    } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      if (new Date(request.body.endsAt) <= new Date(request.body.startsAt)) return reply.code(400).send({ error: "Maintenance end must be after its start." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const asset = await client.query("SELECT quantity,active FROM eventdesk_assets WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.body.assetId, departmentId]);
+        if (!asset.rowCount || !asset.rows[0].active) { await rollback(client); return reply.code(404).send({ error: "Active equipment item not found." }); }
+        if (request.body.quantity > Number(asset.rows[0].quantity)) { await rollback(client); return reply.code(400).send({ error: "Maintenance quantity cannot exceed the equipment stock." }); }
+        const reserved = await client.query(`WITH points AS (
+          SELECT $3::timestamptz AS moment
+          UNION SELECT greatest(j.starts_at,$3::timestamptz) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
+           WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at<$4 AND j.ends_at>$3
+          UNION SELECT greatest(m.starts_at,$3::timestamptz) FROM eventdesk_asset_maintenance m
+           WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at<$4 AND m.ends_at>$3
+        ) SELECT coalesce(max(
+          (SELECT coalesce(sum(b.quantity),0) FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id
+            WHERE b.department_id=$1 AND b.asset_id=$2 AND b.status IN ('reserved','checked_out') AND j.status NOT IN ('cancelled','completed') AND j.starts_at<=p.moment AND j.ends_at>p.moment)
+          +(SELECT coalesce(sum(m.quantity),0) FROM eventdesk_asset_maintenance m WHERE m.department_id=$1 AND m.asset_id=$2 AND m.status IN ('scheduled','in_progress') AND m.starts_at<=p.moment AND m.ends_at>p.moment)
+        ),0)::int AS quantity FROM points p`, [departmentId, request.body.assetId, request.body.startsAt, request.body.endsAt]);
+        if (Number(reserved.rows[0].quantity) + request.body.quantity > Number(asset.rows[0].quantity)) { await rollback(client); return reply.code(409).send({ error: "That maintenance window overlaps jobs or other maintenance beyond the available stock." }); }
+        const result = await client.query(`INSERT INTO eventdesk_asset_maintenance (id,department_id,asset_id,starts_at,ends_at,quantity,notes)
+          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`, [randomUUID(), departmentId, request.body.assetId, request.body.startsAt, request.body.endsAt, request.body.quantity, request.body.notes?.trim() ?? ""]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id: result.rows[0].id });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { status: "in_progress" | "completed" | "cancelled" } }>("/api/eventdesk/maintenance/:id/status", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["in_progress", "completed", "cancelled"] } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "inventory_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query("UPDATE eventdesk_asset_maintenance SET status=$3,updated_at=now() WHERE id=$1 AND department_id=$2 AND status IN ('scheduled','in_progress') RETURNING id", [request.params.id, departmentId, request.body.status]);
+      return result.rowCount ? { id: request.params.id, status: request.body.status } : reply.code(404).send({ error: "Open maintenance task not found." });
     });
 
     routes.put<{ Params: { id: string }; Body: { status: BookingStatus } }>("/api/eventdesk/bookings/:id/status", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: bookingStatuses } } } } }, async (request, reply) => {
