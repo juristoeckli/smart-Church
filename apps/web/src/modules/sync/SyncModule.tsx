@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Check, CircleAlert, Database, RefreshCw, Trash2 } from "lucide-react";
 import { formatUserDate } from "../../date-format";
+import { ElvantoSyncSettings } from "./ElvantoSyncSettings";
 
 type SyncStatus = {
   configured: boolean;
@@ -95,6 +96,7 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
       {status?.lastSyncError && <p className="sync-feedback sync-feedback-error" role="alert"><CircleAlert size={15} />Last sync failed: {status.lastSyncError}</p>}
     </section>
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>Module controls</h2><p>Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? "Pause sync" : "Enable sync"}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />Remove sync and imported data</button></div></section>}
+    <ElvantoSyncSettings departmentId={departmentId} />
     <footer className="page-footer"><span>Automatically syncs every 15 minutes while enabled.</span><span>Only site administrators can manage this connection.</span></footer>
   </div>;
 }

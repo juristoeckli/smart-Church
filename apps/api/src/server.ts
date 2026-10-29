@@ -6,13 +6,14 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { getRequiredModuleDependencies, getRequiredServerModuleIds, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
-import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
+import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 import { createEmailConnector } from "./modules/email-worker/service.js";
+import { allServerPermissions, hasServerPermission as userHasServerPermission, serverPermissionsForUser } from "./server-permissions.js";
 
 if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
   delete process.env.STREAMING_CONFIG_FILE;
@@ -47,7 +48,7 @@ const runtimeLogStream = {
 };
 const app = Fastify({
   logger: {
-    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken"],
+    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken", "req.body.apiKey"],
     stream: runtimeLogStream,
   },
   bodyLimit: 3 * 1024 * 1024,
@@ -149,12 +150,12 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
         WHERE token_hash = $1 AND expires_at > now()
         RETURNING user_id
      )
-     SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password, u.date_time_format, u.language, u.language_is_custom
+     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.date_time_format, u.language, u.language_is_custom
        FROM active_session s JOIN app_users u ON u.id = s.user_id`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -203,6 +204,16 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
 function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
   if (request.authenticatedUser?.role === "server_admin") return true;
   reply.code(403).send({ error: "Server administrator access is required." });
+  return false;
+}
+
+function hasServerPermission(request: FastifyRequest, permission: ServerPermission) {
+  return userHasServerPermission(request.authenticatedUser?.role, request.authenticatedUser?.serverPermissions, permission);
+}
+
+function requireServerPermission(request: FastifyRequest, reply: FastifyReply, permission: ServerPermission) {
+  if (hasServerPermission(request, permission)) return true;
+  reply.code(403).send({ error: `Server ${permission.replace("server_", "")} access is required.` });
   return false;
 }
 
@@ -583,9 +594,10 @@ function readSystemCpuPercent() {
 }
 
 app.get("/api/admin/diagnostics", async (request, reply) => {
-  if (request.authenticatedUser?.role !== "server_admin") {
-    const selectedDepartmentId = await activeDepartmentId(request, reply, true);
-    if (!selectedDepartmentId) return reply;
+  const canView = hasServerPermission(request, "server_view");
+  const canTroubleshoot = hasServerPermission(request, "server_troubleshoot");
+  if (!canView && !canTroubleshoot) {
+    return reply.code(403).send({ error: "Server diagnostics permission required." });
   }
   const memory = process.memoryUsage();
   const containerMemory = await readContainerMemory();
@@ -605,6 +617,19 @@ app.get("/api/admin/diagnostics", async (request, reply) => {
     workers: runtimeWorkerDiagnostics(),
     logs: recentRuntimeLogs(),
   };
+});
+
+app.post<{ Params: { id: string } }>("/api/admin/workers/:id/restart", { schema: {
+  params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", minLength: 1, maxLength: 120 } } },
+} }, async (request, reply) => {
+  if (!requireServerPermission(request, reply, "server_troubleshoot")) return reply;
+  if (!validModuleMutation(request, reply)) return reply;
+  try {
+    if (!await restartRuntimeWorker(request.params.id)) return reply.code(404).send({ error: "This worker does not support restart controls." });
+    return reply.code(202).send({ accepted: true });
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof Error ? error.message : "The worker could not be restarted." });
+  }
 });
 
 app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error: string }> => {
@@ -634,7 +659,7 @@ app.put<{ Body: { mode: HttpAccessMode } }>("/api/admin/web-settings/http-access
   },
 }, async (request, reply) => {
   if (!databaseReady || !pool || !installationId) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply) || !validModuleMutation(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage") || !validModuleMutation(request, reply)) return reply;
   const httpsOrigin = configuredHttpsOrigin();
   if (request.body.mode === "redirect" && !httpsOrigin) return reply.code(400).send({ error: "Configure the public HTTPS origin before enabling HTTPS redirects." });
   await pool.query(
@@ -708,7 +733,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
       [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
-    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom };
+    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: allServerPermissions };
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [user.id, departmentId],
@@ -749,7 +774,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, display_name, password_hash, role, must_change_password, date_time_format, language, language_is_custom FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, date_time_format, language, language_is_custom FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
@@ -768,7 +793,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   for (const key of buckets) failedLogins.delete(key);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
   await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
@@ -791,14 +816,14 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   const result = await pool.query(
-    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, date_time_format, language, language_is_custom",
+    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, server_permissions, date_time_format, language, language_is_custom",
     [user.id, hashPassword(request.body.password)],
   );
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
   await createSession(user.id, request, reply, request.protocol === "https");
-  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom } };
+  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } };
 });
 
 app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage | null } }>("/api/auth/preferences", {
@@ -999,10 +1024,10 @@ app.delete<{ Params: { userId: string } }>("/api/location-access/:userId", {
 
 app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const result = await pool.query(
     `SELECT u.id, u.email, u.username, u.display_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
-            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role,
+            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role, u.server_permissions,
             memberships.memberships,
             phones.phone_numbers, relations.relationships
        FROM app_users u
@@ -1021,12 +1046,12 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
        ) relations ON true
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], memberships: row.memberships }));
 });
 
 app.get("/api/people-options", async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const result = await pool.query(
     `SELECT id, department_id, first_name, last_name, email, source_system
        FROM contacts ORDER BY department_id, lower(last_name), lower(first_name)`,
@@ -1136,6 +1161,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         relationships: relationshipsSchema,
         password: { type: "string", minLength: 12, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
+        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage"] } },
         memberships: {
           type: "array", maxItems: 100,
           items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
@@ -1145,7 +1171,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   },
 }, async (request, reply): Promise<SiteUser | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
@@ -1157,11 +1183,15 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const phoneNumbers = cleanPhoneNumbers(request.body.phoneNumbers);
   const relationships = request.body.relationships ?? [];
   const accountRole = request.body.accountRole;
+  const serverPermissions = accountRole === "user" ? request.body.serverPermissions ?? [] : [];
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
   if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
   if (accountRole === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can grant Server Administrator access." });
+  }
+  if (serverPermissions.length && request.authenticatedUser?.role !== "server_admin") {
+    return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
   }
   if (accountRole === "user" && memberships.length === 0) {
     return reply.code(400).send({ error: "Assign a local user to at least one site." });
@@ -1175,10 +1205,10 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     await client.query("BEGIN");
     if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
     const user = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, true)
-       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city`,
-      [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city],
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password, server_permissions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, true, $12)
+       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city, server_permissions`,
+      [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city, serverPermissions],
     );
     for (const membership of memberships) {
       if (membership.contactId) {
@@ -1203,7 +1233,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     }
     await client.query("COMMIT");
     const row = user.rows[0];
-    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, memberships });
+    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1214,7 +1244,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"] } }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"]; serverPermissions?: CreateSiteUser["serverPermissions"] } }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -1229,6 +1259,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
+        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage"] } },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
         memberships: {
@@ -1251,7 +1282,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   },
 }, async (request, reply): Promise<SiteUser | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
@@ -1281,6 +1312,14 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       return reply.code(404).send({ error: "This local user could not be found." });
     }
     const accountRole = request.body.accountRole ?? current.rows[0].role;
+    if (accountRole !== current.rows[0].role && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can change an account's installation role." });
+    }
+    if (request.body.serverPermissions?.length && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
+    }
     if (current.rows[0].role === "server_admin" && accountRole !== "server_admin") {
       const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
       if (admins.rows[0].total <= 1) {
@@ -1290,11 +1329,12 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     }
     const updated = await client.query(
       `UPDATE app_users SET email = $2, username = $3, display_name = $4, birthday = $5::date,
-              street = $6, street_number = $7, postal_code = $8, city = $9, role = $10
+              street = $6, street_number = $7, postal_code = $8, city = $9, role = $10,
+              server_permissions = CASE WHEN $11 THEN $12::TEXT[] ELSE server_permissions END
         WHERE id = $1
         RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
-                  street, street_number, postal_code, city, role`,
-      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole],
+                  street, street_number, postal_code, city, role, server_permissions`,
+      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : []],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -1328,7 +1368,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     }
     await client.query("COMMIT");
     const row = updated.rows[0];
-    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, memberships };
+    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1345,7 +1385,7 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   },
 }, async (request, reply): Promise<{ id: string } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   if (request.params.id === request.authenticatedUser?.id) {
     return reply.code(400).send({ error: "You cannot delete your own account." });
   }
@@ -1358,6 +1398,10 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    if (target.rows[0].role === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can delete an installation administrator." });
     }
     if (target.rows[0].role === "server_admin") {
       const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
@@ -1384,15 +1428,19 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?
   },
 }, async (request, reply): Promise<{ id: string; mustChangePassword: boolean } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   if (request.params.id === request.authenticatedUser?.id) return reply.code(400).send({ error: "Choose another user to reset their password." });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const target = await client.query("SELECT id FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const target = await client.query("SELECT id,role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    if (target.rows[0].role === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can reset an installation administrator password." });
     }
     await client.query("UPDATE app_users SET password_hash = $2, must_change_password = true WHERE id = $1", [request.params.id, hashPassword(request.body.password)]);
     await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [request.params.id]);
@@ -1408,14 +1456,14 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?
 
 app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
-  if (request.authenticatedUser?.role === "server_admin") {
+  if (hasServerPermission(request, "server_manage")) {
     const result = await pool.query(
       `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, COALESCE(m.permissions, '{}'::TEXT[]) AS permissions, COALESCE(m.video_permissions, '{}'::TEXT[]) AS video_permissions, COALESCE(m.presenter_permissions, '{}'::TEXT[]) AS presenter_permissions, COALESCE(m.module_permissions, '{}'::JSONB) AS module_permissions
          FROM departments d
          LEFT JOIN department_memberships m
            ON m.department_id = d.id AND m.user_id = $1
         ORDER BY d.name`,
-      [request.authenticatedUser.id],
+      [request.authenticatedUser?.id],
     );
     return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions }));
   }
@@ -1439,7 +1487,7 @@ app.put<{ Body: { moduleIds: string[] } }>("/api/installation/modules", {
   },
 }, async (request, reply): Promise<{ enabledModules: string[] } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   if (!installationId) return reply.code(503).send({ error: "The installation identity is unavailable." });
   const client = await pool.connect();
   try {
@@ -1524,7 +1572,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   },
 }, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to create locations." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   if (!installationId) return reply.code(503).send({ error: "The installation identity is unavailable." });
   const location = request.body.location.trim();
   const timeZone = request.body.timeZone.trim();
@@ -1567,7 +1615,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
 app.get("/api/department", async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
   let selectedDepartmentId: string | null;
-  if (request.authenticatedUser?.role === "server_admin") {
+  if (hasServerPermission(request, "server_manage")) {
     const header = request.headers["x-department-id"];
     selectedDepartmentId = typeof header === "string" ? header : departmentId;
     if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedDepartmentId)) {
@@ -1583,7 +1631,7 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
        FROM departments d
        LEFT JOIN department_memberships m ON m.department_id = d.id AND m.user_id = $2
       WHERE d.id = $1 AND ($3::boolean OR m.user_id IS NOT NULL)`,
-    [selectedDepartmentId, request.authenticatedUser?.id, request.authenticatedUser?.role === "server_admin"],
+    [selectedDepartmentId, request.authenticatedUser?.id, hasServerPermission(request, "server_manage")],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
@@ -1651,7 +1699,7 @@ app.put<{ Body: { logoDataUrl: string | null } }>("/api/branding", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to save site branding." });
   }
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
 
   let mimeType: "image/png" | "image/jpeg" | "image/webp" | null = null;
   let imageData: Buffer | null = null;
@@ -1704,7 +1752,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     ...((request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage")) && row.email ? { email: row.email } : {}),
     ...((request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage")) && row.phone ? { phone: row.phone } : {}),
     status: row.status,
-    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
+    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
   }));
 });
 
@@ -1820,7 +1868,7 @@ app.put<{ Params: { id: string }; Body: CreateContact }>("/api/contacts/:id", {
 
   const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "Person not found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This person is managed by ChurchTools. Edit them there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This person is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Edit them there and sync again.` });
   const firstName = request.body.firstName.trim();
   const lastName = request.body.lastName.trim();
   if (!firstName || !lastName) return reply.code(400).send({ error: "First and last name are required." });
@@ -1843,7 +1891,7 @@ app.delete<{ Params: { id: string } }>("/api/contacts/:id", {
 
   const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "Person not found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This person is managed by ChurchTools. Remove them there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This person is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Remove them there and sync again.` });
   const result = await pool.query("DELETE FROM contacts WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This person could not be found." });
   return { deleted: true };
@@ -2414,7 +2462,7 @@ try {
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
   videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE), (message) => recordRuntimeLog("api/video-steffisburg", "error", message));
-  registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null });
+  registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null }, () => videoWorker?.restart());
   removeVideoActivationListener = onServerModuleActivationChange("video-steffisburg", (enabled) => {
     if (enabled) videoWorker?.start();
     else videoWorker?.stop();

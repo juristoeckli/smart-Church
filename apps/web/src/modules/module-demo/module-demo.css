@@ -49,6 +49,7 @@
 .module-demo-spinner{animation:module-demo-spin 1s linear infinite}
 @keyframes module-demo-spin{to{transform:rotate(360deg)}}
 .module-demo-footer{padding-top:3px;color:var(--demo-copy);font-size:11px;line-height:1.5}
+.module-demo-note-date{display:block;margin-top:3px;color:var(--demo-copy);font-size:10px}
 :root[data-theme="dark"] .module-demo-page{--demo-inset:#171922;--demo-copy:#d0ceda;--demo-accent:#c5a8e8}
 :root[data-theme="dark"] .module-demo-idea-list li button:hover{background:#38252e;color:#ffaaa5}
 :root[data-theme="dark"] .module-demo-weather-error{color:#ffaaa5!important}

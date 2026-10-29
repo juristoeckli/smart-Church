@@ -13,7 +13,7 @@ export interface ModuleServerContext {
     onMessage: (topic: string, handler: (context: { userId: string; departmentId: string }, payload: unknown) => void | Promise<void>) => () => void;
   };
   workers: {
-    register: (name: string, getDiagnostics: () => ManagedWorkerDiagnostics) => () => void;
+    register: (name: string, getDiagnostics: () => ManagedWorkerDiagnostics, restart?: () => void | Promise<void>) => () => void;
   };
   pool: Pool | null;
   isDatabaseReady: () => boolean;
@@ -27,7 +27,12 @@ export interface ModuleServerContext {
   email: EmailConnector;
 }
 
-type EmailContent = { subject: string; text: string; html?: string; replyTo?: string };
+type EmailContent = {
+  subject: string;
+  text: string;
+  html?: string;
+  replyTo?: string;
+};
 
 export type EmailMessage = EmailContent & (
   | { recipientUserId: string; recipientEmail?: never }
@@ -41,7 +46,7 @@ export interface EmailConnector {
 
 export interface ModuleLoaderContext extends Omit<ModuleServerContext, "workers" | "activation"> {
   workers: {
-    register: (id: string, name: string, getDiagnostics: () => ManagedWorkerDiagnostics) => () => void;
+    register: (id: string, name: string, getDiagnostics: () => ManagedWorkerDiagnostics, restart?: () => void | Promise<void>) => () => void;
   };
 }
 
@@ -310,7 +315,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           }),
         },
         workers: {
-          register: (name, getDiagnostics) => context.workers.register(`${manifest.id}:${name}`, `${manifest.name ?? manifest.id} · ${name}`, getDiagnostics),
+          register: (name, getDiagnostics, restart) => context.workers.register(`${manifest.id}:${name}`, `${manifest.name ?? manifest.id} · ${name}`, getDiagnostics, restart),
         },
       };
       app.register(async (scope) => {

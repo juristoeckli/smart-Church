@@ -22,7 +22,8 @@ try {
   const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
   await writeFile(resolve(datasetPath, "pages/001-01.png"), png);
   const listed = await listDatasets();
-  assert.deepEqual(listed.map(({ id, songCount, slideCount }) => ({ id, songCount, slideCount })), [{ id: manifest.id, songCount: 2, slideCount: 2 }]);
+  assert.ok(listed.some(({ id, builtIn }) => id === "aktuell" && builtIn), "the built-in Aktuell dataset should be present");
+  assert.deepEqual(listed.filter(({ id }) => id === manifest.id).map(({ id, songCount, slideCount }) => ({ id, songCount, slideCount })), [{ id: manifest.id, songCount: 2, slideCount: 2 }]);
   const archive = await datasetArchive(manifest.id);
   assert.ok(archive);
   const chunks = [];

@@ -6,6 +6,7 @@ import "./module-demo.css";
 
 type DemoState = { counter: number; ideas: string[] };
 type DemoEvent = { message?: unknown };
+type DemoNote = { id: string; message: string; createdAt: string };
 type WeatherResult = { place: string; country?: string; temperature: number; weatherCode: number; timeZone: string };
 const emptyState: DemoState = { counter: 0, ideas: [] };
 
@@ -35,7 +36,7 @@ function readState(value: string): DemoState {
   return Number.isSafeInteger(oldCounter) && oldCounter >= 0 ? { ...emptyState, counter: oldCounter } : emptyState;
 }
 
-export function ModuleDemo({ department, departmentId, state, onStateChange, realtime, language }: ModuleContext) {
+export function ModuleDemo({ department, departmentId, state, onStateChange, realtime, language, csrfToken, canManageSite }: ModuleContext) {
   const t = (key: string) => translateModuleDemo(language, key);
   const demoState = useMemo(() => readState(state), [state]);
   const [ideaDraft, setIdeaDraft] = useState("");
@@ -49,6 +50,11 @@ export function ModuleDemo({ department, departmentId, state, onStateChange, rea
   const [serverWorkerTime, setServerWorkerTime] = useState("");
   const [serverWorkerLoading, setServerWorkerLoading] = useState(false);
   const [serverWorkerError, setServerWorkerError] = useState("");
+  const [notes, setNotes] = useState<DemoNote[]>([]);
+  const [noteDraft, setNoteDraft] = useState("");
+  const [notesLoading, setNotesLoading] = useState(true);
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [notesError, setNotesError] = useState("");
   const weatherRequestId = useRef(0);
   const workerRef = useRef<Worker | null>(null);
 
@@ -79,6 +85,24 @@ export function ModuleDemo({ department, departmentId, state, onStateChange, rea
     if (typeof payload?.message === "string") setLastEvent(payload.message);
   }), [realtime]);
 
+  useEffect(() => {
+    let active = true;
+    setNotesLoading(true);
+    const loadNotes = async () => {
+      try {
+        const response = await fetch("/api/modules/module-demo/notes", { headers: { "x-department-id": departmentId }, cache: "no-store" });
+        const result = await response.json() as DemoNote[] | { error?: string };
+        if (!response.ok || !Array.isArray(result)) throw new Error("error" in result ? result.error ?? t("notesLoadFailed") : t("notesLoadFailed"));
+        if (active) { setNotes(result); setNotesError(""); }
+      } catch {
+        if (active) setNotesError(t("notesLoadFailed"));
+      } finally { if (active) setNotesLoading(false); }
+    };
+    void loadNotes();
+    const unsubscribe = realtime?.subscribe("module:module-demo:notes-changed", () => { void loadNotes(); });
+    return () => { active = false; unsubscribe?.(); };
+  }, [departmentId, realtime, language]);
+
   function save(next: DemoState) {
     onStateChange(JSON.stringify(next));
   }
@@ -90,6 +114,37 @@ export function ModuleDemo({ department, departmentId, state, onStateChange, rea
     save({ ...demoState, ideas: [...demoState.ideas, idea] });
     setIdeaDraft("");
   }
+
+  async function addNote(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = noteDraft.trim();
+    if (!message || notesSaving) return;
+    setNotesSaving(true); setNotesError("");
+    try {
+      const response = await fetch("/api/modules/module-demo/notes", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ message }),
+      });
+      const result = await response.json() as DemoNote | { error?: string };
+      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? t("notesSaveFailed") : t("notesSaveFailed"));
+      setNotes((current) => [result, ...current.filter((note) => note.id !== result.id)].slice(0, 100));
+      setNoteDraft("");
+    } catch { setNotesError(t("notesSaveFailed")); }
+    finally { setNotesSaving(false); }
+  }
+
+  async function deleteNote(noteId: string) {
+    setNotesError("");
+    try {
+      const response = await fetch(`/api/modules/module-demo/notes/${noteId}`, { method: "DELETE", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken } });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? t("notesDeleteFailed"));
+      setNotes((current) => current.filter((note) => note.id !== noteId));
+    } catch { setNotesError(t("notesDeleteFailed")); }
+  }
+
+  const canManageNotes = canManageSite || (department.permissions ?? []).includes("groups_manage");
 
   function sendDemoEvent() {
     const message = realtimeMessage.trim();
@@ -173,6 +228,21 @@ export function ModuleDemo({ department, departmentId, state, onStateChange, rea
           </div>
           <div className="module-demo-event-output" aria-live="polite"><strong>{t("latestEvent")}</strong><span>{lastEvent || t("noEvent")}</span></div>
           <small className="module-demo-hint">{t("eventHint")}</small>
+        </div>
+      </section>
+
+      <section className="module-demo-card module-demo-card-wide" aria-labelledby="module-demo-notes-heading">
+        <div className="module-demo-card-icon"><Puzzle size={20} /></div>
+        <div className="module-demo-card-content">
+          <span className="module-demo-card-label">{t("database")}</span>
+          <h2 id="module-demo-notes-heading">{t("notesTitle")}</h2>
+          <p>{t("notesHelp")}</p>
+          {canManageNotes && <form className="module-demo-idea-form" onSubmit={(event) => void addNote(event)}>
+            <input aria-label={t("noteLabel")} maxLength={200} placeholder={t("notePlaceholder")} value={noteDraft} onChange={(event) => setNoteDraft(event.target.value)} />
+            <button className="button button-primary" type="submit" disabled={!noteDraft.trim() || notesSaving}><Plus size={15} />{notesSaving ? t("savingNote") : t("saveNote")}</button>
+          </form>}
+          {notesError && <p className="module-demo-weather-error" role="alert">{notesError}</p>}
+          {notesLoading ? <p className="module-demo-empty">{t("loadingNotes")}</p> : notes.length ? <ul className="module-demo-idea-list">{notes.map((note) => <li key={note.id}><span>{note.message}<small className="module-demo-note-date">{new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(new Date(note.createdAt))}</small></span>{canManageNotes && <button type="button" aria-label={t("deleteNote")} title={t("deleteNote")} onClick={() => void deleteNote(note.id)}><Trash2 size={14} /></button>}</li>)}</ul> : <p className="module-demo-empty">{t("emptyNotes")}</p>}
         </div>
       </section>
 

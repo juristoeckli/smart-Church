@@ -1,14 +1,20 @@
 import type { FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { ModuleDemoWorker } from "./worker-supervisor.js";
 
 type DemoMessage = { message?: unknown };
+type DemoNoteRow = { id: string; message: string; created_at: Date | string };
+
+function mapDemoNote(row: DemoNoteRow) {
+  return { id: row.id, message: row.message, createdAt: new Date(row.created_at).toISOString() };
+}
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const worker = new ModuleDemoWorker((message) => app.log.error({ module: "module-demo" }, message));
   worker.setEnabled(context.activation.isEnabled());
   const removeActivationListener = context.activation.onChange((enabled) => worker.setEnabled(enabled));
-  const unregisterWorker = context.workers.register("server-clock", () => worker.diagnostics);
+  const unregisterWorker = context.workers.register("server-clock", () => worker.diagnostics, () => worker.restart());
   const stop = context.realtime.onMessage("module:module-demo:send", async ({ departmentId }, payload) => {
     if (!context.pool || !context.isDatabaseReady() || !payload || typeof payload !== "object") return;
     const message = (payload as DemoMessage).message;
@@ -22,6 +28,54 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     if (!(enabled.rows[0]?.enabled_modules ?? []).includes("module-demo")) return;
     context.realtime.publish("module:module-demo:changed", departmentId, { message: cleaned, sentAt: new Date().toISOString() });
+  });
+
+  app.get("/api/modules/module-demo/notes", async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return reply.code(503).send({ error: "The account database is unavailable." });
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const enabled = await context.pool.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id = $1", [departmentId]);
+    if (!(enabled.rows[0]?.enabled_modules ?? []).includes("module-demo")) return reply.code(404).send({ error: "Module Demo is not enabled for this site." });
+    const result = await context.pool.query<DemoNoteRow>(
+      "SELECT id,message,created_at FROM module_demo_notes WHERE department_id=$1 ORDER BY created_at DESC,id DESC LIMIT 100",
+      [departmentId],
+    );
+    return result.rows.map(mapDemoNote);
+  });
+
+  app.post<{ Body: { message: string } }>("/api/modules/module-demo/notes", { schema: {
+    body: { type: "object", additionalProperties: false, required: ["message"], properties: { message: { type: "string", minLength: 1, maxLength: 200 } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return reply.code(503).send({ error: "The account database is unavailable." });
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply, false, false, "groups_manage");
+    if (!departmentId) return reply;
+    const enabled = await context.pool.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id = $1", [departmentId]);
+    if (!(enabled.rows[0]?.enabled_modules ?? []).includes("module-demo")) return reply.code(404).send({ error: "Module Demo is not enabled for this site." });
+    const message = request.body.message.trim();
+    if (!message) return reply.code(400).send({ error: "Enter a note before saving." });
+    const result = await context.pool.query<DemoNoteRow>(
+      "INSERT INTO module_demo_notes (id,department_id,message) VALUES ($1,$2,$3) RETURNING id,message,created_at",
+      [randomUUID(), departmentId, message],
+    );
+    const note = mapDemoNote(result.rows[0]!);
+    context.realtime.publish("module:module-demo:notes-changed", departmentId, { action: "created", noteId: note.id });
+    return reply.code(201).send(note);
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/modules/module-demo/notes/:id", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return reply.code(503).send({ error: "The account database is unavailable." });
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply, false, false, "groups_manage");
+    if (!departmentId) return reply;
+    const enabled = await context.pool.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id = $1", [departmentId]);
+    if (!(enabled.rows[0]?.enabled_modules ?? []).includes("module-demo")) return reply.code(404).send({ error: "Module Demo is not enabled for this site." });
+    const result = await context.pool.query("DELETE FROM module_demo_notes WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, departmentId]);
+    if (!result.rowCount) return reply.code(404).send({ error: "The note was not found in this site." });
+    context.realtime.publish("module:module-demo:notes-changed", departmentId, { action: "deleted", noteId: request.params.id });
+    return { deleted: true };
   });
 
   app.get("/api/modules/module-demo/worker/time", async (request, reply) => {

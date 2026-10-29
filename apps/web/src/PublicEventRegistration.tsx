@@ -1,8 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { CalendarDays, Check, Clock3, MapPin } from "lucide-react";
 import type { PublicRegistrationEvent } from "@smart-church/contracts";
+import { publicLanguage, publicText } from "./public-translations";
 
 export function PublicEventRegistration({ token }: { token: string }) {
+  const language = publicLanguage();
   const [event, setEvent] = useState<PublicRegistrationEvent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -10,6 +12,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
   const [submitted, setSubmitted] = useState<"registered" | "waitlisted" | null>(null);
 
   useEffect(() => {
+    document.documentElement.lang = language;
     let active = true;
     fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`)
       .then(async (response) => {
@@ -20,7 +23,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
       .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load this event."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [token]);
+  }, [token, language]);
 
   async function register(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
@@ -40,26 +43,26 @@ export function PublicEventRegistration({ token }: { token: string }) {
     finally { setSending(false); }
   }
 
-  const date = event ? new Intl.DateTimeFormat("en-GB", { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${event.eventDate}T12:00:00Z`)) : "";
+  const date = event ? new Intl.DateTimeFormat(language, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${event.eventDate}T12:00:00Z`)) : "";
   return <main className="public-registration-page"><section className="public-registration-card">
-    <span className="eyebrow">SMART CHURCH · EVENT REGISTRATION</span>
-    {loading ? <p className="public-registration-message">Loading event…</p> : error && !event ? <><h1>Registration unavailable</h1><p className="public-registration-message">{error}</p></> : event && <>
+    <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
+    {loading ? <p className="public-registration-message">{publicText(language, "eventLoading")}</p> : error && !event ? <><h1>{publicText(language, "eventUnavailable")}</h1><p className="public-registration-message">{error}</p></> : event && <>
       <h1>{event.title}</h1>
       <div className="public-registration-details"><span><CalendarDays size={17} />{date}</span><span><Clock3 size={17} />{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</span><span><MapPin size={17} />{event.location}</span></div>
       {event.description && <p className="public-registration-description">{event.description}</p>}
-      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{submitted === "registered" ? "You’re registered" : "You’re on the waitlist"}</h2><p>{submitted === "registered" ? "Your place is confirmed. We look forward to seeing you." : "The event is full, but you’re on the waitlist. The organizers will contact you if a place opens."}</p></div></div>
-        : !event.registrationOpen ? <p className="public-registration-message">Registration for this event is closed.</p>
+      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "registered" ? "registered" : "waitlisted")}</h2><p>{publicText(language, submitted === "registered" ? "registeredHelp" : "waitlistedHelp")}</p></div></div>
+        : !event.registrationOpen ? <p className="public-registration-message">{publicText(language, "registrationClosed")}</p>
           : <>
-            <p className="public-registration-capacity">{event.capacity ? `${Math.max(event.capacity - event.registeredCount, 0)} places remaining` : "Registration is open"}{event.waitlistCount ? ` · ${event.waitlistCount} on waitlist` : ""}</p>
+            <p className="public-registration-capacity">{event.capacity ? publicText(language, "placesRemaining", { count: Math.max(event.capacity - event.registeredCount, 0) }) : publicText(language, "registrationOpen")}{event.waitlistCount ? publicText(language, "waitlistCount", { count: event.waitlistCount }) : ""}</p>
             <form className="public-registration-form" onSubmit={(submitEvent) => void register(submitEvent)}>
-              <div className="form-row"><label>First name<input name="firstName" autoComplete="given-name" maxLength={80} required /></label><label>Last name<input name="lastName" autoComplete="family-name" maxLength={80} required /></label></div>
-              <label>Email address<input type="email" name="email" autoComplete="email" maxLength={254} required /></label>
-              <p className="public-registration-privacy">Your details are shared with the event organizers to manage registration and check-in.</p>
+              <div className="form-row"><label>{publicText(language, "firstName")}<input name="firstName" autoComplete="given-name" maxLength={80} required /></label><label>{publicText(language, "lastName")}<input name="lastName" autoComplete="family-name" maxLength={80} required /></label></div>
+              <label>{publicText(language, "email")}<input type="email" name="email" autoComplete="email" maxLength={254} required /></label>
+              <p className="public-registration-privacy">{publicText(language, "eventPrivacy")}</p>
               {error && <p className="public-registration-error" role="alert">{error}</p>}
-              <button className="button button-primary" type="submit" disabled={sending}>{sending ? "Submitting…" : "Register"}</button>
+              <button className="button button-primary" type="submit" disabled={sending}>{sending ? publicText(language, "submitting") : publicText(language, "register")}</button>
             </form>
           </>}
     </>}
-    <footer>Smart Church</footer>
+    <footer>{publicText(language, "smartChurch")}</footer>
   </section></main>;
 }

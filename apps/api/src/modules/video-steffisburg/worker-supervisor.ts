@@ -129,6 +129,24 @@ export class VideoWorkerSupervisor {
     this.stateValue = this.configured ? "stopped" : "unconfigured";
   }
 
+  restart() {
+    if (this.closing) throw new Error("The Video worker supervisor is shutting down.");
+    if (!this.configured) throw new Error("The Video worker is not configured.");
+    if (!this.enabled) throw new Error("The Video module is disabled for this installation.");
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+    const child = this.child;
+    this.child = null;
+    this.connection?.socket.destroy();
+    this.connection = null;
+    child?.kill();
+    this.rejectAll("The Video worker is restarting.");
+    this.restartCount = 0;
+    this.errorValue = null;
+    this.stateValue = "starting";
+    this.launch();
+  }
+
   private onUpgrade = (request: IncomingMessage, socket: import("node:net").Socket, head: Buffer) => {
     if (request.url !== "/internal/workers/video" || !loopback(socket.remoteAddress)) return;
     if (!this.enabled || this.closing) return socket.destroy();

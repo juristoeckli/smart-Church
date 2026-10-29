@@ -55,6 +55,25 @@ export class ModuleDemoWorker {
     child?.kill();
   }
 
+  restart() {
+    if (this.closing) throw new Error("The worker supervisor is shutting down.");
+    if (!this.enabled) throw new Error("Module Demo is disabled for this installation.");
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.startupTimer) clearTimeout(this.startupTimer);
+    this.restartTimer = null;
+    this.startupTimer = null;
+    const child = this.child;
+    this.child = null;
+    child?.kill();
+    this.rejectPending(new Error("The demo worker is restarting."));
+    this.readyReject?.(new Error("The demo worker is restarting."));
+    this.readyPromise = null;
+    this.readyResolve = null;
+    this.readyReject = null;
+    this.restartCount = 0;
+    this.launch();
+  }
+
   private launch() {
     if (this.closing || !this.enabled || this.child) return;
     this.status = "starting";

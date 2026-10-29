@@ -73,6 +73,15 @@ importers:
         specifier: ^6.0.0
         version: 6.0.3
 
+  packages/worker-sdk:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.10.0
+        version: 24.19.2
+      typescript:
+        specifier: ^6.0.0
+        version: 6.0.3
+
 packages:
 
   '@derhuerst/http-basic@8.2.4':

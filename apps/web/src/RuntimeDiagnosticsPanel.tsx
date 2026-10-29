@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Activity, RefreshCw, Server, Terminal } from "lucide-react";
+import { Activity, RefreshCw, RotateCw, Server, Terminal } from "lucide-react";
 import { formatUserDate } from "./date-format";
 import "./runtime-diagnostics.css";
 
@@ -12,6 +12,7 @@ type WorkerDiagnostic = {
   uptimeSeconds: number | null;
   memory: Memory | null;
   processes?: Array<{ name: string; uptimeSeconds: number | null; rssBytes: number | null }>;
+  restartable: boolean;
 };
 type RuntimeDiagnostics = {
   capturedAt: string;
@@ -54,10 +55,11 @@ function formatTime(value: string) {
   return Number.isFinite(date.getTime()) ? formatUserDate(date, true) : value;
 }
 
-export function RuntimeDiagnosticsPanel({ departmentId }: { departmentId: string }) {
+export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWorkers = false }: { departmentId: string; csrfToken: string; canRestartWorkers?: boolean }) {
   const [diagnostics, setDiagnostics] = useState<RuntimeDiagnostics | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [restartingWorkerId, setRestartingWorkerId] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -70,6 +72,24 @@ export function RuntimeDiagnosticsPanel({ departmentId }: { departmentId: string
       setError(reason instanceof Error ? reason.message : "Could not load runtime diagnostics.");
     } finally { setLoading(false); }
   }, [departmentId]);
+
+  async function restartWorker(worker: WorkerDiagnostic) {
+    if (!worker.restartable || restartingWorkerId) return;
+    if (!window.confirm(`Restart ${worker.name}? Active operations may be interrupted.`)) return;
+    setRestartingWorkerId(worker.id);
+    setError("");
+    try {
+      const response = await fetch(`/api/admin/workers/${encodeURIComponent(worker.id)}/restart`, {
+        method: "POST",
+        headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken },
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not restart the worker.");
+      await refresh();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not restart the worker.");
+    } finally { setRestartingWorkerId(""); }
+  }
 
   useEffect(() => {
     void refresh();
@@ -97,7 +117,7 @@ export function RuntimeDiagnosticsPanel({ departmentId }: { departmentId: string
           const ready = worker.status === "ready";
           const pending = worker.status === "starting" || worker.status === "backoff";
           return <article className="runtime-diagnostic-card" key={worker.id}>
-            <div className="runtime-diagnostic-title"><span className={`runtime-status-dot ${ready ? "runtime-status-ok" : pending ? "runtime-status-pending" : "runtime-status-down"}`} /><h4>{worker.name}</h4><b className={`runtime-worker-state ${ready ? "runtime-text-ok" : pending ? "runtime-text-pending" : "runtime-text-down"}`}>{worker.status}</b></div>
+            <div className="runtime-diagnostic-title"><span className={`runtime-status-dot ${ready ? "runtime-status-ok" : pending ? "runtime-status-pending" : "runtime-status-down"}`} /><h4>{worker.name}</h4><b className={`runtime-worker-state ${ready ? "runtime-text-ok" : pending ? "runtime-text-pending" : "runtime-text-down"}`}>{worker.status}</b>{canRestartWorkers && worker.restartable && <button className="button button-secondary runtime-worker-restart" type="button" onClick={() => void restartWorker(worker)} disabled={Boolean(restartingWorkerId) || worker.status === "stopped" || worker.status === "unconfigured"} aria-label={`Restart ${worker.name}`} title={`Restart ${worker.name}`}>{restartingWorkerId === worker.id ? <RefreshCw className="runtime-restart-spin" size={13} /> : <RotateCw size={13} />}{restartingWorkerId === worker.id ? "Restarting…" : "Restart"}</button>}</div>
             {worker.error && <p className="runtime-worker-error">{worker.error}</p>}
             <dl><div><dt>Worker memory</dt><dd>{formatBytes(worker.memory?.rssBytes)}</dd></div><div><dt>Heap used / total</dt><dd>{formatBytes(worker.memory?.heapUsedBytes)} / {formatBytes(worker.memory?.heapTotalBytes)}</dd></div><div><dt>Uptime</dt><dd>{formatUptime(worker.uptimeSeconds)}</dd></div>{worker.processes?.map((process) => <div key={process.name}><dt>{process.name} memory / uptime</dt><dd>{formatBytes(process.rssBytes)} / {formatUptime(process.uptimeSeconds)}</dd></div>)}</dl>
           </article>;

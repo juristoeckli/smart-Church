@@ -5,7 +5,14 @@ import type { ModuleServerContext } from "../module-sdk.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
+const elvantoAreas = ["people", "peopleFlows", "groups", "services", "songs", "calendar", "financial"] as const;
+type ElvantoArea = typeof elvantoAreas[number];
+type ElvantoDirection = "off" | "bidirectional" | "elvanto_to_smart_church" | "smart_church_to_elvanto";
+type ElvantoDirections = Record<ElvantoArea, ElvantoDirection>;
+type ElvantoSettings = { department_id: string; encrypted_api_key: string; directions: ElvantoDirections; financial_enabled: boolean; enabled: boolean; last_connected_at: string | null; last_sync_at: string | null; last_sync_error: string | null; people_import_page: number; people_import_total: number | null; people_import_created_count: number; people_import_updated_count: number; people_import_skipped_count: number; people_import_complete: boolean; people_preview_at: string | null; people_preview_scanned_count: number; people_preview_total: number | null; people_preview_complete: boolean; people_importing: boolean; people_import_started_at: string | null; groups_import_page: number; groups_import_total: number | null; groups_import_created_count: number; groups_import_updated_count: number; groups_import_skipped_count: number; groups_import_complete: boolean; groups_preview_at: string | null; groups_preview_scanned_count: number; groups_preview_total: number | null; groups_preview_complete: boolean; groups_importing: boolean; groups_import_started_at: string | null; updated_at: Date | string };
 const running = new Set<string>();
+const elvantoPeopleImportRunning = new Set<string>();
+const elvantoGroupsImportRunning = new Set<string>();
 const syncIntervalMs = 15 * 60 * 1000;
 
 function cryptoKey() {
@@ -27,6 +34,101 @@ function decrypt(value: string) {
     decipher.setAuthTag(Buffer.from(tag, "base64url"));
     return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8");
   } catch { throw new Error("Re-enter the ChurchTools login token."); }
+}
+function elvantoCryptoKey() {
+  const source = process.env.SMART_CHURCH_SYNC_ENCRYPTION_KEY || process.env.DATABASE_URL;
+  if (!source) throw new Error("Set SMART_CHURCH_SYNC_ENCRYPTION_KEY to encrypt the Elvanto API key.");
+  return scryptSync(source, "smart-church/elvanto-sync/v1", 32);
+}
+function encryptElvantoKey(apiKey: string) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", elvantoCryptoKey(), iv);
+  const data = Buffer.concat([cipher.update(apiKey, "utf8"), cipher.final()]);
+  return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), data.toString("base64url")].join(".");
+}
+function decryptElvantoKey(value: string) {
+  const [version, iv, tag, data] = value.split(".");
+  if (version !== "v1" || !iv || !tag || !data) throw new Error("Reconnect Elvanto to replace its saved API key.");
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", elvantoCryptoKey(), Buffer.from(iv, "base64url"));
+    decipher.setAuthTag(Buffer.from(tag, "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8");
+  } catch { throw new Error("Reconnect Elvanto to replace its saved API key."); }
+}
+function normalizeElvantoDirections(value: unknown): ElvantoDirections {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Choose a sync direction for each Elvanto data area.");
+  const input = value as Record<string, unknown>;
+  const output = {} as ElvantoDirections;
+  const directions = new Set<ElvantoDirection>(["off", "bidirectional", "elvanto_to_smart_church", "smart_church_to_elvanto"]);
+  for (const area of elvantoAreas) {
+    const direction = input[area];
+    if (typeof direction !== "string" || !directions.has(direction as ElvantoDirection)) throw new Error(`Choose a valid sync direction for ${area}.`);
+    output[area] = direction as ElvantoDirection;
+  }
+  return output;
+}
+async function testElvantoConnection(apiKey: string) {
+  const payload = await elvantoRequest(apiKey, "people/getAll", { page: 1, page_size: 1 });
+  if (payload.status !== "ok") throw new Error("Elvanto did not confirm the connection. Check the API key and People read permission.");
+  return true;
+}
+async function elvantoRequest(apiKey: string, endpoint: string, body: JsonObject = {}) {
+  const response = await fetch(`https://api.elvanto.com/v1/${endpoint}.json`, {
+    method: "POST",
+    headers: { Authorization: `Basic ${Buffer.from(`${apiKey}:x`).toString("base64")}`, Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000),
+    redirect: "error",
+  });
+  const payload = await response.json() as JsonObject;
+  const nestedError = payload.error && typeof payload.error === "object" ? payload.error as JsonObject : {};
+  const apiMessage = [payload.message, typeof payload.error === "string" ? payload.error : "", nestedError.message, nestedError.description].filter((value): value is string => typeof value === "string").join(" ");
+  if (/\bno (people|groups?|services?|songs?|events?|transactions?|arrangements?)\b.*\b(found|match|criteria)\b/i.test(apiMessage)) return { status: "ok" };
+  if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? "Elvanto rejected the API key or does not allow this API read. Check the key and account permissions." : `Elvanto returned HTTP ${response.status} for ${endpoint}.`);
+  if (payload.status !== "ok") throw new Error(`Elvanto did not confirm the ${endpoint} request. Check the key and account permissions.`);
+  return payload;
+}
+function elvantoCollection(payload: JsonObject, key: string, singular: string) {
+  const container = payload[key];
+  if (!container || typeof container !== "object") return [] as JsonObject[];
+  const items = (container as JsonObject)[singular];
+  if (Array.isArray(items)) return items.filter((item): item is JsonObject => Boolean(item) && typeof item === "object");
+  return items && typeof items === "object" ? [items as JsonObject] : [];
+}
+function elvantoGroupPeople(group: JsonObject) {
+  const people = group.people;
+  if (!people || typeof people !== "object") return [] as JsonObject[];
+  const rows = (people as JsonObject).person;
+  if (Array.isArray(rows)) return rows.filter((person): person is JsonObject => Boolean(person) && typeof person === "object");
+  return rows && typeof rows === "object" ? [rows as JsonObject] : [];
+}
+async function checkElvantoArea(apiKey: string, area: ElvantoArea): Promise<{ area: ElvantoArea; accessible: boolean; recordCount?: number; detail?: string }> {
+  const today = new Date().toISOString().slice(0, 10);
+  const recentStart = new Date(Date.now() - 5 * 365 * 86400000).toISOString().slice(0, 10);
+  let payload: JsonObject;
+  let collection: string;
+  let singular: string;
+  switch (area) {
+    case "people": payload = await elvantoRequest(apiKey, "people/getAll", { page: 1, page_size: 1 }); collection = "people"; singular = "person"; break;
+    case "peopleFlows": payload = await elvantoRequest(apiKey, "peopleFlows/getAll"); collection = "people_flows"; singular = "people_flow"; break;
+    case "groups": payload = await elvantoRequest(apiKey, "groups/getAll", { page: 1, page_size: 1, fields: ["people"] }); collection = "groups"; singular = "group"; break;
+    case "services": payload = await elvantoRequest(apiKey, "services/getAll", { page: 1, page_size: 1, all: "yes", fields: ["plans", "volunteers", "songs", "notes"] }); collection = "services"; singular = "service"; break;
+    case "songs": {
+      payload = await elvantoRequest(apiKey, "songs/getAll", { page: 1, page_size: 1 });
+      collection = "songs"; singular = "song";
+      const songs = elvantoCollection(payload, collection, singular);
+      if (songs[0]?.id) {
+        await elvantoRequest(apiKey, "songs/arrangements/getAll", { page: 1, page_size: 1, song_id: String(songs[0].id) });
+        return { area, accessible: true, recordCount: Number((payload.songs as JsonObject | undefined)?.total ?? 0), detail: "Song and arrangement reads are available." };
+      }
+      return { area, accessible: true, recordCount: Number((payload.songs as JsonObject | undefined)?.total ?? 0), detail: "Song access is available; no song was returned to check arrangements." };
+    }
+    case "calendar": payload = await elvantoRequest(apiKey, "calendar/events/getAll", { page: 1, page_size: 1, start: recentStart, end: today }); collection = "events"; singular = "event"; break;
+    case "financial": payload = await elvantoRequest(apiKey, "financial/transactions/getAll", { page: 1, page_size: 1, start: recentStart, end: today }); collection = "transactions"; singular = "transaction"; break;
+  }
+  const container = payload[collection] as JsonObject | undefined;
+  const total = Number(container?.total ?? container?.on_this_page ?? elvantoCollection(payload, collection, singular).length);
+  return { area, accessible: true, recordCount: Number.isFinite(total) ? total : 0 };
 }
 function normalizeUrl(value: string) {
   let url: URL;
@@ -58,6 +160,10 @@ function idOf(row: JsonObject) {
 }
 function firstText(...values: any[]) {
   return (values.find((value) => typeof value === "string" && value.trim()) ?? "").trim();
+}
+function plainDescription(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">") .replace(/\s+/g, " ").trim();
 }
 function personIdOf(row: JsonObject) {
   const value = row.personId ?? row.person?.id ?? row.person_id ?? row.memberId ?? row.person?.personId ?? row.id;
@@ -140,6 +246,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     }
     async function settings(departmentId: string) {
       const result = await pool!.query<Settings>("SELECT department_id,instance_url,encrypted_login_token,enabled FROM churchtools_sync_settings WHERE department_id=$1", [departmentId]);
+      return result.rows[0] ?? null;
+    }
+    async function elvantoSettings(departmentId: string) {
+      const result = await pool!.query<ElvantoSettings>("SELECT department_id,encrypted_api_key,directions,financial_enabled,enabled,last_connected_at,last_sync_at,last_sync_error,people_import_page,people_import_total,people_import_created_count,people_import_updated_count,people_import_skipped_count,people_import_complete,people_preview_at,people_preview_scanned_count,people_preview_total,people_preview_complete,people_importing,people_import_started_at,groups_import_page,groups_import_total,groups_import_created_count,groups_import_updated_count,groups_import_skipped_count,groups_import_complete,groups_preview_at,groups_preview_scanned_count,groups_preview_total,groups_preview_complete,groups_importing,groups_import_started_at,updated_at FROM elvanto_sync_settings WHERE department_id=$1", [departmentId]);
       return result.rows[0] ?? null;
     }
     async function statusError(departmentId: string, message: string) {
@@ -315,6 +425,416 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         return { deleted: true };
       } catch (error) { await db.query("ROLLBACK"); throw error; }
       finally { db.release(); }
+    });
+    routes.get("/api/modules/sync/elvanto", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      const directions = row?.directions ?? Object.fromEntries(elvantoAreas.map((area) => [area, "off"])) as ElvantoDirections;
+      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null };
+    });
+    routes.post("/api/modules/sync/elvanto/check-permissions", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before checking API permissions." });
+      const selected = elvantoAreas.filter((area) => row.directions[area] !== "off" && (area !== "financial" || row.financial_enabled));
+      if (!selected.length) return reply.code(400).send({ error: "Select at least one data area before checking permissions." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      const checks = await mapConcurrent(selected, 2, async (area) => {
+        try { return await checkElvantoArea(apiKey, area); }
+        catch (error) { return { area, accessible: false, detail: error instanceof Error ? error.message : "The API permission check failed." }; }
+      });
+      return { checks };
+    });
+    routes.post("/api/modules/sync/elvanto/people-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before previewing people." });
+      if (row.directions.people === "off" || row.directions.people === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set People direction to Elvanto → Smart Church or bidirectional before previewing an import." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+
+      const previewLock = await pool!.query(
+        "UPDATE elvanto_sync_settings SET people_importing=FALSE,people_import_started_at=NULL,people_preview_at=NULL,people_preview_complete=FALSE,people_preview_scanned_count=0,people_preview_total=NULL WHERE department_id=$1 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+        [dept],
+      );
+      if (!previewLock.rowCount) return reply.code(409).send({ error: "A People import is running. Wait for it to finish before creating another preview." });
+      // Build a read-only plan. The import step will use the same external IDs, but no contact is modified here.
+      const people: JsonObject[] = [];
+      const pageSize = 1000;
+      const maxPages = 200;
+      let total: number | null = null;
+      let complete = false;
+      for (let page = 1; page <= maxPages; page += 1) {
+        const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: pageSize });
+        const batch = elvantoCollection(payload, "people", "person");
+        people.push(...batch);
+        const container = payload.people as JsonObject | undefined;
+        const reportedTotal = Number(container?.total);
+        if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
+        if (total !== null && people.length >= total) { complete = true; break; }
+        if (batch.length < pageSize) { complete = true; break; }
+      }
+      const existing = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; email: string | null; first_name: string; last_name: string }>(
+        "SELECT id,source_system,source_id,email,first_name,last_name FROM contacts WHERE department_id=$1",
+        [dept],
+      );
+      const bySourceId = new Map(existing.rows.filter((contact) => contact.source_system === "elvanto" && contact.source_id).map((contact) => [contact.source_id!, contact]));
+      const byEmail = new Map<string, typeof existing.rows>();
+      for (const contact of existing.rows) if (contact.email?.trim()) {
+        const email = contact.email.trim().toLocaleLowerCase();
+        byEmail.set(email, [...(byEmail.get(email) ?? []), contact]);
+      }
+      const seen = new Set<string>();
+      let createCount = 0;
+      let alreadyLinkedCount = 0;
+      let emailMatchCount = 0;
+      let ambiguousEmailCount = 0;
+      let invalidCount = 0;
+      const sample: Array<{ firstName: string; lastName: string; email: string | null; action: "create" | "already_linked" | "review_email_match" | "review_ambiguous_email" | "needs_review" | "duplicate_source_id" }> = [];
+      const seenEmails = new Set<string>();
+      for (const person of people) {
+        const sourceId = idOf(person);
+        const firstName = firstText(person.firstname, person.firstName, person.first_name, person.preferred_name);
+        const lastName = firstText(person.lastname, person.lastName, person.last_name);
+        const rawEmail = firstText(person.email);
+        const rawPhone = firstText(person.mobile, person.phone);
+        const email = rawEmail || null;
+        let action: typeof sample[number]["action"];
+        if (!sourceId || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || (rawEmail && (rawEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(rawEmail))) || rawPhone.length > 40) { invalidCount += 1; action = "needs_review"; }
+        else if (seen.has(sourceId)) { invalidCount += 1; action = "duplicate_source_id"; }
+        else if (bySourceId.has(sourceId)) { alreadyLinkedCount += 1; action = "already_linked"; }
+        else if (email && (byEmail.get(email.toLocaleLowerCase())?.length ?? 0) > 1) { ambiguousEmailCount += 1; action = "review_ambiguous_email"; }
+        else if (email && (byEmail.get(email.toLocaleLowerCase())?.length ?? 0) === 1) { emailMatchCount += 1; action = "review_email_match"; }
+        else if (email && seenEmails.has(email.toLocaleLowerCase())) { ambiguousEmailCount += 1; action = "review_ambiguous_email"; }
+        else { createCount += 1; action = "create"; }
+        if (sourceId) seen.add(sourceId);
+        if (email) seenEmails.add(email.toLocaleLowerCase());
+        if (sample.length < 50) sample.push({ firstName, lastName, email, action });
+      }
+      const savedPreview = await pool!.query(
+        "UPDATE elvanto_sync_settings SET people_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_preview_complete=$2,people_preview_scanned_count=$3,people_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE RETURNING department_id",
+        [dept, complete, people.length, total, row.updated_at],
+      );
+      if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
+      return { scannedCount: people.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, emailMatchCount, ambiguousEmailCount, invalidCount, sample };
+    });
+    routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/people-import", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoPeopleImportRunning.has(dept)) return reply.code(409).send({ error: "A People import is already running for this location." });
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before importing people." });
+      if (row.directions.people === "off" || row.directions.people === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set People direction to Elvanto → Smart Church or bidirectional before importing." });
+      const previewTime = row.people_preview_at ? new Date(row.people_preview_at).getTime() : 0;
+      if (!row.people_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete People import preview first. Previews expire after one hour and after connection settings change." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoPeopleImportRunning.add(dept);
+      let reserved = false;
+      try {
+        const reservation = await pool!.query(
+          "UPDATE elvanto_sync_settings SET people_importing=TRUE,people_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND people_preview_complete=TRUE AND people_preview_at > now()-interval '1 hour' AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+          [dept, row.updated_at],
+        );
+        if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired or settings changed. Run a fresh complete People preview before importing." });
+        reserved = true;
+        const restart = Boolean(request.body?.restart);
+        let page = restart ? 1 : row.people_import_page;
+        let total = restart ? null : row.people_import_total;
+        let created = restart ? 0 : row.people_import_created_count;
+        let updated = restart ? 0 : row.people_import_updated_count;
+        let skipped = restart ? 0 : row.people_import_skipped_count;
+        let complete = restart ? false : row.people_import_complete;
+        if (restart) await pool!.query(
+          "UPDATE elvanto_sync_settings SET people_import_page=1,people_import_total=NULL,people_import_created_count=0,people_import_updated_count=0,people_import_skipped_count=0,people_import_complete=FALSE,updated_at=now() WHERE department_id=$1",
+          [dept],
+        );
+        for (let pageBatch = 0; pageBatch < 5 && !complete; pageBatch += 1) {
+          const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: 1000 });
+          const people = elvantoCollection(payload, "people", "person");
+          const reportedTotal = Number((payload.people as JsonObject | undefined)?.total);
+          if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
+          const contacts = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; email: string | null }>(
+            "SELECT id,source_system,source_id,email FROM contacts WHERE department_id=$1",
+            [dept],
+          );
+          const linkedIds = new Set(contacts.rows.filter((contact) => contact.source_system === "elvanto" && contact.source_id).map((contact) => contact.source_id!));
+          const emails = new Map<string, number>();
+          for (const contact of contacts.rows) if (contact.email?.trim()) {
+            const email = contact.email.trim().toLocaleLowerCase();
+            emails.set(email, (emails.get(email) ?? 0) + 1);
+          }
+          const seenIds = new Set<string>();
+          const records: Array<{ source_id: string; first_name: string; last_name: string; email: string | null; phone: string | null }> = [];
+          let pageCreated = 0;
+          let pageUpdated = 0;
+          let pageSkipped = 0;
+          for (const person of people) {
+            const sourceId = idOf(person);
+            const firstName = firstText(person.firstname, person.firstName, person.first_name, person.preferred_name);
+            const lastName = firstText(person.lastname, person.lastName, person.last_name);
+            const rawEmail = firstText(person.email);
+            const email = rawEmail || null;
+            const rawPhone = firstText(person.mobile, person.phone);
+            const phone = rawPhone || null;
+            if (!sourceId || seenIds.has(sourceId) || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) || (phone && phone.length > 40)) { pageSkipped += 1; continue; }
+            seenIds.add(sourceId);
+            if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone }); pageUpdated += 1; continue; }
+            if (email && (emails.get(email.toLocaleLowerCase()) ?? 0) > 0) { pageSkipped += 1; continue; }
+            if (email) emails.set(email.toLocaleLowerCase(), 1);
+            records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone });
+            pageCreated += 1;
+          }
+          const nextPage = page + 1;
+          complete = people.length === 0 || (total !== null ? nextPage > Math.max(1, Math.ceil(total / 1000)) : people.length < 1000);
+          const db = await pool!.connect();
+          try {
+            await db.query("BEGIN");
+            if (records.length) {
+              await db.query(
+                `INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status,source_system,source_id)
+                 SELECT gen_random_uuid(),$1,incoming.first_name,incoming.last_name,incoming.email,incoming.phone,'member','elvanto',incoming.source_id
+                   FROM jsonb_to_recordset($2::jsonb) AS incoming(source_id text,first_name text,last_name text,email text,phone text)
+                 ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL
+                 DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,email=EXCLUDED.email,phone=EXCLUDED.phone,status='member',updated_at=now()
+                 WHERE contacts.source_system='elvanto'`,
+                [dept, JSON.stringify(records)],
+              );
+            }
+            created += pageCreated; updated += pageUpdated; skipped += pageSkipped;
+            page = nextPage;
+            await db.query(
+              `UPDATE elvanto_sync_settings SET people_import_page=$2,people_import_total=$3,people_import_created_count=$4,
+                people_import_updated_count=$5,people_import_skipped_count=$6,people_import_complete=$7,
+                last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1`,
+              [dept, page, total, created, updated, skipped, complete],
+            );
+            await db.query("COMMIT");
+          } catch (error) { await db.query("ROLLBACK"); throw error; }
+          finally { db.release(); }
+          if (!people.length) break;
+        }
+        return { peopleImport: { page, total, created, updated, skipped, complete }, pagesProcessed: Math.min(5, complete ? Math.max(0, page - row.people_import_page) : 5) };
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "People import failed." });
+      } finally {
+        if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET people_importing=FALSE,people_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        elvantoPeopleImportRunning.delete(dept);
+      }
+    });
+    routes.post("/api/modules/sync/elvanto/groups-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before previewing groups." });
+      if (row.directions.groups === "off" || row.directions.groups === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set Groups direction to Elvanto → Smart Church or bidirectional before previewing an import." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      const previewLock = await pool!.query(
+        `UPDATE elvanto_sync_settings SET groups_importing=FALSE,groups_import_started_at=NULL,groups_preview_at=NULL,groups_preview_complete=FALSE,groups_preview_scanned_count=0,groups_preview_total=NULL
+          WHERE department_id=$1 AND people_importing=FALSE AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') RETURNING department_id`,
+        [dept],
+      );
+      if (!previewLock.rowCount) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before creating a Groups preview." });
+      const groups: JsonObject[] = [];
+      let total: number | null = null;
+      let complete = false;
+      for (let page = 1; page <= 200; page += 1) {
+        const payload = await elvantoRequest(apiKey, "groups/getAll", { page, page_size: 1000, fields: ["people"] });
+        const batch = elvantoCollection(payload, "groups", "group");
+        groups.push(...batch);
+        const reported = Number((payload.groups as JsonObject | undefined)?.total);
+        if (Number.isFinite(reported) && reported >= 0) total = reported;
+        if (total !== null && groups.length >= total) { complete = true; break; }
+        if (batch.length < 1000) { complete = true; break; }
+      }
+      const [existingGroups, linkedPeople] = await Promise.all([
+        pool!.query<{ source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
+        pool!.query<{ source_id: string; id: string }>("SELECT source_id,id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]),
+      ]);
+      const bySourceId = new Map(existingGroups.rows.filter((group) => group.source_system === "elvanto" && group.source_id).map((group) => [group.source_id!, group]));
+      const names = new Map<string, typeof existingGroups.rows>();
+      for (const group of existingGroups.rows) names.set(group.name.trim().toLocaleLowerCase(), [...(names.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
+      const linkedIds = new Set(linkedPeople.rows.map((person) => person.source_id));
+      const seen = new Set<string>();
+      const sample: Array<{ name: string; action: "create" | "already_linked" | "review_name_conflict" | "needs_review" | "duplicate_source_id"; members: number; linkedMembers: number }> = [];
+      let createCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0; let memberCount = 0; let linkedMemberCount = 0;
+      for (const group of groups) {
+        const sourceId = idOf(group);
+        const name = firstText(group.name, group.title);
+        const members = elvantoGroupPeople(group);
+        const valid = Boolean(sourceId && name && name.length <= 120 && plainDescription(group.description).length <= 1000);
+        let action: typeof sample[number]["action"];
+        if (!valid) { invalidCount += 1; action = "needs_review"; }
+        else if (seen.has(sourceId)) { invalidCount += 1; action = "duplicate_source_id"; }
+        else if (bySourceId.has(sourceId)) { alreadyLinkedCount += 1; action = "already_linked"; }
+        else if ((names.get(name.toLocaleLowerCase()) ?? []).length > 0) { conflictCount += 1; action = "review_name_conflict"; }
+        else { createCount += 1; action = "create"; }
+        if (sourceId) seen.add(sourceId);
+        memberCount += members.length;
+        const linkedMembers = members.filter((person) => linkedIds.has(idOf(person))).length;
+        linkedMemberCount += linkedMembers;
+        if (sample.length < 50) sample.push({ name, action, members: members.length, linkedMembers });
+      }
+      const savedPreview = await pool!.query(
+        "UPDATE elvanto_sync_settings SET groups_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,groups_preview_complete=$2,groups_preview_scanned_count=$3,groups_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE RETURNING department_id",
+        [dept, complete, groups.length, total, row.updated_at],
+      );
+      if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
+      return { scannedCount: groups.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, nameConflictCount: conflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, sample };
+    });
+    routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/groups-import", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoGroupsImportRunning.has(dept)) return reply.code(409).send({ error: "A Groups import is already running for this location." });
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before importing groups." });
+      if (row.directions.groups === "off" || row.directions.groups === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set Groups direction to Elvanto → Smart Church or bidirectional before importing." });
+      const previewTime = row.groups_preview_at ? new Date(row.groups_preview_at).getTime() : 0;
+      if (!row.groups_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete Groups preview first. Previews expire after one hour and after connection settings change." });
+      if (row.people_importing) return reply.code(409).send({ error: "Wait for the People import to finish before importing groups." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
+      catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoGroupsImportRunning.add(dept);
+      let reserved = false;
+      try {
+        const reservation = await pool!.query(
+          `UPDATE elvanto_sync_settings SET groups_importing=TRUE,groups_import_started_at=now(),updated_at=now()
+            WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_preview_complete=TRUE AND groups_preview_at > now()-interval '1 hour'
+              AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') RETURNING department_id`,
+          [dept, row.updated_at],
+        );
+        if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a fresh complete Groups preview before importing." });
+        reserved = true;
+        const restart = Boolean(request.body?.restart);
+        let page = restart ? 1 : row.groups_import_page;
+        let total = restart ? null : row.groups_import_total;
+        let created = restart ? 0 : row.groups_import_created_count;
+        let updated = restart ? 0 : row.groups_import_updated_count;
+        let skipped = restart ? 0 : row.groups_import_skipped_count;
+        let complete = restart ? false : row.groups_import_complete;
+        if (restart) await pool!.query("UPDATE elvanto_sync_settings SET groups_import_page=1,groups_import_total=NULL,groups_import_created_count=0,groups_import_updated_count=0,groups_import_skipped_count=0,groups_import_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
+        for (let pageBatch = 0; pageBatch < 5 && !complete; pageBatch += 1) {
+          const payload = await elvantoRequest(apiKey, "groups/getAll", { page, page_size: 1000, fields: ["people"] });
+          const groups = elvantoCollection(payload, "groups", "group");
+          const reported = Number((payload.groups as JsonObject | undefined)?.total);
+          if (Number.isFinite(reported) && reported >= 0) total = reported;
+          const contacts = await pool!.query<{ id: string; source_id: string }>("SELECT id,source_id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]);
+          const contactIdBySource = new Map(contacts.rows.map((contact) => [contact.source_id, contact.id]));
+          const existing = await pool!.query<{ id: string; source_id: string | null; source_system: string | null; name: string }>("SELECT id,source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]);
+          const groupIdBySource = new Map(existing.rows.filter((group) => group.source_system === "elvanto" && group.source_id).map((group) => [group.source_id!, group.id]));
+          const namesByKey = new Map<string, typeof existing.rows>();
+          for (const group of existing.rows) namesByKey.set(group.name.trim().toLocaleLowerCase(), [...(namesByKey.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
+          const seen = new Set<string>();
+          const seenNames = new Set<string>();
+          let pageCreated = 0; let pageUpdated = 0; let pageSkipped = 0;
+          const db = await pool!.connect();
+          try {
+            await db.query("BEGIN");
+            for (const group of groups) {
+              const sourceId = idOf(group);
+              const name = firstText(group.name, group.title);
+              const description = plainDescription(group.description);
+              if (!sourceId || seen.has(sourceId) || !name || name.length > 120 || description.length > 1000) { pageSkipped += 1; continue; }
+              seen.add(sourceId);
+              const existingId = groupIdBySource.get(sourceId);
+              const nameKey = name.toLocaleLowerCase();
+              const conflictingOwner = (namesByKey.get(nameKey) ?? []).some((owner) => !(owner.source_system === "elvanto" && owner.source_id === sourceId));
+              if (conflictingOwner || seenNames.has(nameKey)) { pageSkipped += 1; continue; }
+              seenNames.add(nameKey);
+              let groupId = existingId;
+              if (existingId) {
+                const changed = await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [existingId, dept, name, description]);
+                if (!changed.rowCount) { pageSkipped += 1; continue; }
+                pageUpdated += 1;
+              } else {
+                const inserted = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,$3,'elvanto',$4) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", [dept, name, description, sourceId]);
+                if (!inserted.rowCount) { pageSkipped += 1; continue; }
+                groupId = inserted.rows[0].id;
+                pageCreated += 1;
+                namesByKey.set(nameKey, [...(namesByKey.get(nameKey) ?? []), { id: groupId, source_id: sourceId, source_system: "elvanto", name }]);
+              }
+              if (!groupId) { pageSkipped += 1; continue; }
+              await db.query("DELETE FROM group_members WHERE group_id=$1", [groupId]);
+              const memberIds = new Set<string>();
+              for (const person of elvantoGroupPeople(group)) {
+                const contactId = contactIdBySource.get(idOf(person));
+                if (!contactId || memberIds.has(contactId)) continue;
+                memberIds.add(contactId);
+                const role = firstText(person.position) || "Member";
+                await db.query("INSERT INTO group_members (group_id,contact_id,role,status) VALUES ($1,$2,$3,'active') ON CONFLICT (group_id,contact_id) DO UPDATE SET role=EXCLUDED.role,status='active'", [groupId, contactId, role.slice(0, 80)]);
+              }
+            }
+            created += pageCreated; updated += pageUpdated; skipped += pageSkipped;
+            page += 1;
+            complete = groups.length === 0 || (total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : groups.length < 1000);
+            await db.query("UPDATE elvanto_sync_settings SET groups_import_page=$2,groups_import_total=$3,groups_import_created_count=$4,groups_import_updated_count=$5,groups_import_skipped_count=$6,groups_import_complete=$7,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, total, created, updated, skipped, complete]);
+            await db.query("COMMIT");
+          } catch (error) { await db.query("ROLLBACK"); throw error; }
+          finally { db.release(); }
+          if (!groups.length) break;
+        }
+        return { groupsImport: { page, total, created, updated, skipped, complete } };
+      } catch (error) {
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Groups import failed." });
+      } finally {
+        if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET groups_importing=FALSE,groups_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        elvantoGroupsImportRunning.delete(dept);
+      }
+    });
+    routes.put<{ Body: { apiKey?: string; directions: ElvantoDirections; financialEnabled: boolean } }>("/api/modules/sync/elvanto", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["directions", "financialEnabled"], properties: { apiKey: { type: "string", maxLength: 4096 }, directions: { type: "object", additionalProperties: false, required: [...elvantoAreas], properties: Object.fromEntries(elvantoAreas.map((area) => [area, { type: "string", enum: ["off", "bidirectional", "elvanto_to_smart_church", "smart_church_to_elvanto"] }])) }, financialEnabled: { type: "boolean" } } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      let directions: ElvantoDirections;
+      try { directions = normalizeElvantoDirections(request.body.directions); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Choose valid sync directions." }); }
+      if (!request.body.financialEnabled && directions.financial !== "off") return reply.code(400).send({ error: "Enable the explicit financial data permission before selecting a financial sync direction." });
+      const existing = await elvantoSettings(dept);
+      let apiKey = request.body.apiKey?.trim();
+      if (!apiKey && existing) try { apiKey = decryptElvantoKey(existing.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      if (!apiKey) return reply.code(400).send({ error: "Enter an Elvanto API key." });
+      try { await testElvantoConnection(apiKey); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Elvanto connection failed." }); }
+      let encryptedKey = existing?.encrypted_api_key;
+      if (request.body.apiKey?.trim()) try { encryptedKey = encryptElvantoKey(apiKey); } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : "API key encryption is unavailable." }); }
+      if (!encryptedKey) return reply.code(503).send({ error: "API key encryption is unavailable." });
+      const result = await pool!.query(
+        `INSERT INTO elvanto_sync_settings (department_id,encrypted_api_key,directions,financial_enabled,enabled,last_connected_at)
+         VALUES ($1,$2,$3::jsonb,$4,false,now())
+         ON CONFLICT (department_id) DO UPDATE SET encrypted_api_key=EXCLUDED.encrypted_api_key,directions=EXCLUDED.directions,financial_enabled=EXCLUDED.financial_enabled,last_connected_at=now(),last_sync_error=NULL,
+          people_import_page=CASE WHEN $5 THEN 1 ELSE elvanto_sync_settings.people_import_page END,
+          people_import_total=CASE WHEN $5 THEN NULL ELSE elvanto_sync_settings.people_import_total END,
+          people_import_created_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.people_import_created_count END,
+          people_import_updated_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.people_import_updated_count END,
+          people_import_skipped_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.people_import_skipped_count END,
+          people_import_complete=CASE WHEN $5 THEN FALSE ELSE elvanto_sync_settings.people_import_complete END,
+          groups_import_page=CASE WHEN $5 THEN 1 ELSE elvanto_sync_settings.groups_import_page END,
+          groups_import_total=CASE WHEN $5 THEN NULL ELSE elvanto_sync_settings.groups_import_total END,
+          groups_import_created_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.groups_import_created_count END,
+          groups_import_updated_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.groups_import_updated_count END,
+          groups_import_skipped_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.groups_import_skipped_count END,
+          groups_import_complete=CASE WHEN $5 THEN FALSE ELSE elvanto_sync_settings.groups_import_complete END,
+          people_preview_at=NULL,people_preview_scanned_count=0,people_preview_total=NULL,people_preview_complete=FALSE,
+          groups_preview_at=NULL,groups_preview_scanned_count=0,groups_preview_total=NULL,groups_preview_complete=FALSE,
+          people_importing=FALSE,people_import_started_at=NULL,groups_importing=FALSE,groups_import_started_at=NULL,updated_at=now()
+         WHERE (elvanto_sync_settings.people_importing=FALSE OR elvanto_sync_settings.people_import_started_at < now()-interval '15 minutes')
+           AND (elvanto_sync_settings.groups_importing=FALSE OR elvanto_sync_settings.groups_import_started_at < now()-interval '15 minutes')
+         RETURNING department_id`,
+        [dept, encryptedKey, JSON.stringify(directions), request.body.financialEnabled, Boolean(request.body.apiKey?.trim())],
+      );
+      if (!result.rowCount) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before changing settings." });
+      return { saved: true, configured: true, directions, financialEnabled: request.body.financialEnabled };
+    });
+    routes.delete("/api/modules/sync/elvanto", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const result = await pool!.query("DELETE FROM elvanto_sync_settings WHERE department_id=$1 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') RETURNING department_id", [dept]);
+      if (!result.rowCount) {
+        const existing = await elvantoSettings(dept);
+        if (existing) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before disconnecting Elvanto." });
+      }
+      return { disconnected: true };
     });
     const timer = setInterval(() => {
       if (!pool || !isDatabaseReady()) return;

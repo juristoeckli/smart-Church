@@ -17,7 +17,7 @@ type BookingRow = {
 
 function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null; public_signup_enabled?: boolean; public_signup_token?: string | null }): ChurchGroup {
   const memberDetails = (row.member_details ?? []).map((member) => ({ contactId: member.contactId, role: member.role, status: member.status, ...(member.joinedOn ? { joinedOn: String(member.joinedOn).slice(0, 10) } : {}) }));
-  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" || row.source_system === "elvanto" ? { importedFrom: row.source_system } : {}) };
 }
 
 function mapBookableResource(row: BookableResourceRow): BookableResource {
@@ -87,7 +87,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!departmentId) return reply;
       const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
-      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This group is managed by ChurchTools. Edit it there and sync again." });
+      if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync. Edit it in the source system and sync again." });
       const name = request.body.name.trim();
       if (!name) return reply.code(400).send({ error: "Enter a group name." });
       try {
@@ -118,7 +118,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         await client.query("BEGIN");
         const group = await client.query("SELECT id,source_system FROM church_groups WHERE id = $1 AND department_id = $2 FOR UPDATE", [request.params.id, departmentId]);
         if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
-        if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by ChurchTools." }); }
+        if (group.rows[0].source_system === "churchtools" || group.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by an external sync." }); }
         const contactIds = request.body.members.map((member) => member.contactId);
         if (new Set(contactIds).size !== contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Each person can only appear once." }); }
         if (contactIds.length) {
@@ -140,7 +140,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!departmentId) return reply;
       const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
-      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This group is managed by ChurchTools. Remove it there and sync again." });
+      if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync. Remove it in the source system and sync again." });
       const result = await pool!.query("DELETE FROM church_groups WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
       return { deleted: true };
@@ -155,7 +155,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!validateMutation(request, reply)) return reply;
       const existing = await pool!.query<{ source_system: string | null }>("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
-      if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This group is managed by ChurchTools." });
+      if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync." });
       const result = await pool!.query<{ public_signup_enabled: boolean; public_signup_token: string | null }>(
         `UPDATE church_groups SET public_signup_enabled=$3,
            public_signup_token=CASE WHEN $3 THEN COALESCE(public_signup_token,$4::uuid) ELSE NULL END, updated_at=now()
@@ -191,7 +191,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         await client.query("BEGIN");
         const group = await client.query<{ id: string; source_system: string | null }>("SELECT id,source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
         if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
-        if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by ChurchTools." }); }
+        if (group.rows[0].source_system === "churchtools" || group.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This group is managed by an external sync." }); }
         const joinRequest = await client.query<{ id: string; first_name: string; last_name: string; email: string }>(
           "SELECT id,first_name,last_name,email FROM group_join_requests WHERE id=$1 AND group_id=$2 AND department_id=$3 AND status='pending' FOR UPDATE",
           [request.params.requestId, request.params.id, departmentId],
@@ -233,7 +233,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
       const result = await pool!.query<{ name: string; description: string }>(
-        "SELECT name,description FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS DISTINCT FROM 'churchtools'",
+        "SELECT name,description FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS NULL",
         [request.params.token],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "This group registration link is unavailable." });
@@ -249,7 +249,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const lastName = request.body.lastName.trim();
       const email = request.body.email.trim().toLocaleLowerCase();
       if (!firstName || !lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
-      const group = await pool!.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS DISTINCT FROM 'churchtools'", [request.params.token]);
+      const group = await pool!.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS NULL", [request.params.token]);
       if (!group.rowCount) return reply.code(404).send({ error: "Registration is closed for this group." });
       const existing = await pool!.query("SELECT 1 FROM group_join_requests WHERE group_id=$1 AND lower(email)=lower($2) AND status='pending'", [group.rows[0].id, email]);
       if (existing.rowCount) return reply.code(409).send({ error: "A request from this email is already waiting for review." });
@@ -299,7 +299,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         await client.query("BEGIN");
         const group = await client.query("SELECT id,source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
         if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
-        if (group.rows[0].source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported group attendance is managed in ChurchTools." }); }
+        if (group.rows[0].source_system === "churchtools" || group.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported group attendance is managed in the source system." }); }
         const inserted = await client.query(
           `INSERT INTO group_meetings (id, department_id, group_id, meeting_date, title)
            VALUES ($1,$2,$3,$4,$5) ON CONFLICT (group_id,meeting_date,title) DO NOTHING

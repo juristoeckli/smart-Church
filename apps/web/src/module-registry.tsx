@@ -2,6 +2,7 @@ import { Children, cloneElement, Component, isValidElement, lazy, Suspense, type
 import type { LucideIcon } from "lucide-react";
 import type { DepartmentProfile, UserLanguage } from "@smart-church/contracts";
 import type { RealtimeEvent } from "./realtime";
+import { translateFor, type TranslationKey } from "./i18n";
 
 export interface ModuleRealtime {
   subscribe: (topic: string, listener: (event: RealtimeEvent) => void) => () => void;
@@ -72,6 +73,7 @@ function translateModuleNode(node: ReactNode, translations: ModuleRegistration["
   if (Array.isArray(node)) return node.map((child) => translateModuleNode(child, translations, language));
   if (!isValidElement<{ children?: ReactNode }>(node)) return node;
   const props = node.props as Record<string, unknown>;
+  if (props["data-no-translate"] === true) return node;
   const translatedProps: Record<string, unknown> = {};
   for (const attribute of ["aria-label", "aria-description", "title", "placeholder", "alt"] as const) {
     const value = props[attribute];
@@ -80,7 +82,7 @@ function translateModuleNode(node: ReactNode, translations: ModuleRegistration["
   return cloneElement(node, translatedProps, translateModuleNode(node.props.children, translations, language));
 }
 
-function ModuleTranslationHost({ children, translations, language }: { children: ReactNode; translations: ModuleRegistration["translations"]; language: UserLanguage }) {
+export function ModuleTranslationHost({ children, translations, language }: { children: ReactNode; translations: ModuleRegistration["translations"]; language: UserLanguage }) {
   return <>{Children.map(children, (child) => translateModuleNode(child, translations, language))}</>;
 }
 
@@ -104,7 +106,7 @@ export const moduleRegistryReady = Promise.all(Object.entries(registrations).map
   registeredModules.push(...modules.filter((module): module is ModuleRegistration => module !== null));
 });
 
-interface ModuleBoundaryProps { children: ReactNode; }
+interface ModuleBoundaryProps { children: ReactNode; language?: UserLanguage; }
 interface ModuleBoundaryState { failed: boolean; }
 
 class ModuleBoundary extends Component<ModuleBoundaryProps, ModuleBoundaryState> {
@@ -117,12 +119,12 @@ class ModuleBoundary extends Component<ModuleBoundaryProps, ModuleBoundaryState>
   }
 
   render() {
-    if (this.state.failed) return <section className="module-load-error" role="alert"><h2>This module could not be opened</h2><p>The rest of Smart-Church is still available. Check this module's setup and try again.</p></section>;
+    if (this.state.failed) return <section className="module-load-error" role="alert"><h2>{translateFor(this.props.language ?? "en", "module.loadFailedTitle" as TranslationKey)}</h2><p>{translateFor(this.props.language ?? "en", "module.loadFailedBody" as TranslationKey)}</p></section>;
     return this.props.children;
   }
 }
 
-class ModuleIconBoundary extends Component<ModuleBoundaryProps, ModuleBoundaryState> {
+class ModuleIconBoundary extends Component<{ children: ReactNode }, ModuleBoundaryState> {
   state: ModuleBoundaryState = { failed: false };
 
   static getDerivedStateFromError(): ModuleBoundaryState { return { failed: true }; }
@@ -141,17 +143,17 @@ export function ModuleIconHost({ module }: { module: ModuleRegistration }) {
 
 export function ModuleHost({ module, context }: { module: ModuleRegistration; context: ModuleContext }) {
   const Module = module.component;
-  return <ModuleBoundary key={module.id}><ModuleTranslationHost translations={module.translations} language={context.language}><Suspense fallback={<section className="module-load-error" role="status">Loading {module.name}…</section>}><Module {...context} /></Suspense></ModuleTranslationHost></ModuleBoundary>;
+  return <ModuleBoundary key={module.id} language={context.language}><ModuleTranslationHost translations={module.translations} language={context.language}><Suspense fallback={<section className="module-load-error" role="status">{translateFor(context.language, "module.loading" as TranslationKey)}</section>}><Module {...context} /></Suspense></ModuleTranslationHost></ModuleBoundary>;
 }
 
 export function ModuleSettingsHost({ module, context }: { module: ModuleRegistration; context: ModuleSettingsContext }) {
   const Settings = module.settings;
   if (!Settings) return null;
-  return <ModuleBoundary key={`${module.id}-settings`}><ModuleTranslationHost translations={module.translations} language={context.language}><Suspense fallback={<section className="module-load-error" role="status">Loading {module.name} settings…</section>}><Settings {...context} /></Suspense></ModuleTranslationHost></ModuleBoundary>;
+  return <ModuleBoundary key={`${module.id}-settings`} language={context.language}><ModuleTranslationHost translations={module.translations} language={context.language}><Suspense fallback={<section className="module-load-error" role="status">{translateFor(context.language, "module.settingsLoading" as TranslationKey)}</section>}><Settings {...context} /></Suspense></ModuleTranslationHost></ModuleBoundary>;
 }
 
 export function ModuleNavigationHost({ module, context }: { module: ModuleRegistration; context: ModuleContext }) {
   const Navigation = module.navigation;
   if (!Navigation) return null;
-  return <ModuleBoundary key={`${module.id}-navigation`}><ModuleTranslationHost translations={module.translations} language={context.language}><Navigation context={context} /></ModuleTranslationHost></ModuleBoundary>;
+  return <ModuleBoundary key={`${module.id}-navigation`} language={context.language}><ModuleTranslationHost translations={module.translations} language={context.language}><Navigation context={context} /></ModuleTranslationHost></ModuleBoundary>;
 }
