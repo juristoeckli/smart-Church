@@ -39,6 +39,11 @@ const partnerSchema = { body: { type: "object", additionalProperties: false, req
   postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 }, country: { type: "string", maxLength: 80 },
   notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" },
 } } };
+const documentSettingsSchema = { body: { type: "object", additionalProperties: false, required: ["businessName", "street", "postalCode", "city", "country", "email", "phone", "taxIdentifier", "paymentTerms", "footer"], properties: {
+  businessName: { type: "string", maxLength: 160 }, street: { type: "string", maxLength: 200 }, postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 },
+  country: { type: "string", maxLength: 80 }, email: { type: "string", maxLength: 254 }, phone: { type: "string", maxLength: 40 }, taxIdentifier: { type: "string", maxLength: 80 },
+  paymentTerms: { type: "string", maxLength: 1000 }, footer: { type: "string", maxLength: 1000 },
+} } };
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
@@ -77,7 +82,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get("/api/eventdesk/bootstrap", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      const [jobs, assets, bookings, maintenance, crew, contacts, events, customers, partners, documents] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, events, customers, partners, documents, docSettings] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
@@ -113,6 +118,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        LEFT JOIN eventdesk_document_payments p
                          ON p.document_id=d.id AND p.department_id=d.department_id
                       WHERE d.department_id=$1 AND $2::boolean GROUP BY d.id,j.title ORDER BY d.issue_date DESC, d.created_at DESC`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true]),
+        pool!.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer
+                       FROM eventdesk_document_settings WHERE department_id=$1 AND $2::boolean`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, status: row.status, notes: row.notes, createdAt: new Date(row.created_at).toISOString() })),
@@ -125,6 +132,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         customers: customers.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
         partners: partners.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, contactPerson: row.contact_person, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, active: row.active })),
         documents: documents.rows.map((row) => ({ id: row.id, jobId: row.job_id, jobTitle: row.job_title, kind: row.kind, number: row.document_number, status: row.status, issueDate: row.issue_date, dueDate: row.due_date, customer: row.customer_snapshot, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, paidCents: row.paid_cents, payments: row.payments })),
+        documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "" },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
       };
     });
@@ -169,6 +177,47 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("COMMIT");
         return reply.code(201).send({ id: inserted.rows[0].id, number });
       } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { lines: { description: string; quantity: number; unitCents: number; unitLabel: string }[]; taxRateBps?: number; dueDate?: string | null } }>("/api/eventdesk/documents/:id", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["lines"], properties: {
+        lines: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["description", "quantity", "unitCents", "unitLabel"], properties: {
+          description: { type: "string", minLength: 1, maxLength: 160 }, quantity: { type: "number", exclusiveMinimum: 0, maximum: 100000 }, unitCents: { type: "integer", minimum: 0, maximum: 100000000 }, unitLabel: { type: "string", maxLength: 24 },
+        } } }, taxRateBps: { type: "integer", minimum: 0, maximum: 3000 }, dueDate: { type: ["string", "null"], format: "date" },
+      } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const document = await client.query("SELECT kind FROM eventdesk_documents WHERE id=$1 AND department_id=$2 AND status='draft' FOR UPDATE", [request.params.id, departmentId]);
+        if (!document.rowCount) { await rollback(client); return reply.code(409).send({ error: "Only draft documents can be edited." }); }
+        const isDeliveryNote = document.rows[0].kind === "delivery_note";
+        const lines = request.body.lines.map((line) => ({ ...line, unitCents: isDeliveryNote ? 0 : line.unitCents, unitLabel: isDeliveryNote ? "unit" : line.unitLabel, lineTotalCents: isDeliveryNote ? 0 : Math.round(line.quantity * line.unitCents) }));
+        const subtotal = lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
+        const taxRateBps = isDeliveryNote ? 0 : request.body.taxRateBps ?? 0;
+        const tax = Math.round(subtotal * taxRateBps / 10000);
+        await client.query(`UPDATE eventdesk_documents SET lines=$3::jsonb,tax_rate_bps=$4,subtotal_cents=$5,tax_cents=$6,total_cents=$7,
+          due_date=CASE WHEN kind='invoice' THEN $8::date ELSE due_date END,updated_at=now() WHERE id=$1 AND department_id=$2`,
+          [request.params.id, departmentId, JSON.stringify(lines), taxRateBps, subtotal, tax, subtotal + tax, request.body.dueDate ?? null]);
+        await client.query("COMMIT");
+        return { id: request.params.id, subtotalCents: subtotal, taxCents: tax, totalCents: subtotal + tax };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put("/api/eventdesk/document-settings", { schema: documentSettingsSchema }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "finance_manage");
+      if (!departmentId) return reply;
+      const b = request.body as { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string };
+      await pool!.query(`INSERT INTO eventdesk_document_settings (department_id,business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (department_id) DO UPDATE SET
+          business_name=excluded.business_name,street=excluded.street,postal_code=excluded.postal_code,city=excluded.city,country=excluded.country,email=excluded.email,phone=excluded.phone,tax_identifier=excluded.tax_identifier,payment_terms=excluded.payment_terms,footer=excluded.footer,updated_at=now()`,
+        [departmentId, b.businessName.trim(), b.street.trim(), b.postalCode.trim(), b.city.trim(), b.country.trim(), b.email.trim(), b.phone.trim(), b.taxIdentifier.trim(), b.paymentTerms.trim(), b.footer.trim()]);
+      return { ok: true };
     });
 
     routes.put<{ Params: { id: string }; Body: { status: "sent" | "accepted" | "signed" | "rejected" | "cancelled" | "returned" } }>("/api/eventdesk/documents/:id/status", { schema: {

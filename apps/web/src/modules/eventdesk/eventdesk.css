@@ -87,6 +87,19 @@
 :root[data-theme="dark"] .eventdesk-status-cancelled,:root[data-theme="dark"] .eventdesk-status-declined{background:#4c2929;color:#f0aaaa}
 .eventdesk-document-create{display:grid;gap:12px;padding-bottom:18px;margin-bottom:18px;border-bottom:1px solid var(--line)}
 .eventdesk-document-create h2{margin:0;font-size:16px}
+.eventdesk-branding-settings{padding:12px 0;border-bottom:1px solid var(--line)}
+.eventdesk-branding-settings summary{font-weight:650;cursor:pointer}
+.eventdesk-branding-settings form{padding-top:12px}
+.eventdesk-draft-editor{display:grid;gap:10px;padding:14px;margin-bottom:14px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--green) 3%,var(--panel))}
+.eventdesk-draft-line{display:grid;grid-template-columns:minmax(150px,1fr) 90px 110px 90px auto;gap:7px;align-items:center}
+.eventdesk-draft-line input,.eventdesk-document-create input,.eventdesk-document-create select,.eventdesk-document-create textarea{min-width:0;min-height:36px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
+.eventdesk-draft-line input:disabled{opacity:.6}
+.eventdesk-document-branding{display:grid;gap:3px;padding-bottom:12px;margin-bottom:16px;border-bottom:2px solid var(--green)}
+.eventdesk-document-branding strong{font-size:18px}
+.eventdesk-document-branding span,.eventdesk-document-terms p,.eventdesk-document-footer{color:var(--muted);font-size:12px;white-space:pre-wrap}
+.eventdesk-document-terms{margin-top:18px;font-size:12px}
+.eventdesk-document-terms p{margin:5px 0}
+.eventdesk-document-footer{padding-top:12px;margin-top:18px;border-top:1px solid var(--line)}
 .eventdesk-document-preview{padding:18px}
 .eventdesk-document-top{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
 .eventdesk-document-top h2{margin:5px 0;font-size:24px}
@@ -115,4 +128,5 @@
 .eventdesk-partner-actions select{min-height:36px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:12px}
 @media print{body *{visibility:hidden!important}.eventdesk-document-preview,.eventdesk-document-preview *,.eventdesk-picklist,.eventdesk-picklist *{visibility:visible!important}.eventdesk-document-preview,.eventdesk-picklist{position:absolute;inset:0;width:100%;padding:1.5cm;color:#111;background:#fff}.eventdesk-document-preview button,.eventdesk-document-preview form,.eventdesk-picklist button,.eventdesk-warehouse-controls{display:none!important}.eventdesk-picklist-body{padding:0}.eventdesk-picklist .eventdesk-panel-heading{padding:0 0 16px;border-color:#bbb}.eventdesk-picklist .eventdesk-asset-row{border-color:#bbb}}
 @media(max-width:720px){.eventdesk-warehouse-form{grid-template-columns:1fr 1fr}.eventdesk-warehouse-form label:nth-child(3){grid-column:1/-1}}
+@media(max-width:720px){.eventdesk-draft-line{grid-template-columns:1fr 1fr}.eventdesk-draft-line input:first-child{grid-column:1/-1}.eventdesk-draft-line button{justify-self:start}}
 @media(max-width:620px){.eventdesk-partner-actions{width:100%;justify-content:flex-end}.eventdesk-panel-heading:has(.eventdesk-partner-actions){align-items:flex-start;flex-direction:column}}
