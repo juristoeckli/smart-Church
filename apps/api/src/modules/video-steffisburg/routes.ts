@@ -35,7 +35,7 @@ const deviceAddressBodySchema = {
 const youtubeClientSettingSchema = {
   body: {
     type: "object", additionalProperties: false, required: ["clientId"],
-    properties: { clientId: { type: "string", maxLength: 512 }, clientSecret: { type: "string", maxLength: 512 } },
+    properties: { clientId: { type: "string", maxLength: 512 }, clientSecret: { type: "string", maxLength: 512 }, redirectUri: { type: "string", maxLength: 2048 } },
   },
 };
 type DeviceAddressTarget = "router" | "encoder" | "device";
@@ -65,7 +65,7 @@ function youtubeMonitorUrl(embedHtml?: string) {
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, getVideoWorker, realtime } = context;
   const converterWorkers = new Map<string, BmdConverterWorker>();
-  const youtubeOAuthStates = new Map<string, { departmentId: string; userId: string; username: string; expiresAt: number }>();
+  const youtubeOAuthStates = new Map<string, { departmentId: string; userId: string; username: string; redirectUri: string; expiresAt: number }>();
   let statusMonitor: ReturnType<typeof setInterval> | undefined;
   let youtubeArchiveMonitor: ReturnType<typeof setInterval> | undefined;
   let statusMonitorRunning = false;
@@ -165,7 +165,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   async function youtubeOAuthSettings() {
-    const result = await pool!.query<{ youtube_client_id: string; youtube_client_secret_encrypted: string | null }>("SELECT youtube_client_id, youtube_client_secret_encrypted FROM video_module_settings WHERE singleton=true");
+    const result = await pool!.query<{ youtube_client_id: string; youtube_client_secret_encrypted: string | null; youtube_redirect_uri: string }>("SELECT youtube_client_id, youtube_client_secret_encrypted, youtube_redirect_uri FROM video_module_settings WHERE singleton=true");
     const row = result.rows[0];
     let clientSecret = "";
     if (row?.youtube_client_secret_encrypted && process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim()) {
@@ -174,6 +174,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return {
       clientId: row?.youtube_client_id?.trim() ?? "",
       clientSecret,
+      redirectUri: row?.youtube_redirect_uri?.trim() || process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_REDIRECT_URI?.trim() || "",
       clientSecretConfigured: Boolean(row?.youtube_client_secret_encrypted),
     };
   }
@@ -191,7 +192,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!connection) throw new Error("Connect a YouTube channel before scheduling this stream.");
     const settings = await youtubeOAuthSettings();
     const oauthClientId = connection.oauth_client_id || settings.clientId;
-    if (!youtubeOAuthConfigured(oauthClientId, settings.clientSecret)) throw new Error("Configure the YouTube client ID and client secret in Video module settings, plus its redirect URL and token key in the server environment.");
+    if (!oauthClientId || !settings.clientSecret || !process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim()) throw new Error("Configure the YouTube client ID and secret in Video module settings.");
     return refreshYoutubeAccessToken(decryptYoutubeToken(connection.encrypted_refresh_token), oauthClientId, settings.clientSecret);
   }
 
@@ -446,7 +447,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return {
         nextEvent,
         adjacentEvents,
-        youtube: { configured: youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret), connected: Boolean(connection), ...(connection ? { channelId: connection.channel_id, channelTitle: connection.channel_title } : {}) },
+        youtube: { configured: youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, oauthSettings.redirectUri), connected: Boolean(connection), ...(connection ? { channelId: connection.channel_id, channelTitle: connection.channel_title } : {}) },
         playlists,
         streams: remoteSync.broadcasts.flatMap((broadcast) => {
           const youtubeBroadcastId = broadcast.id;
@@ -808,12 +809,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!selectedDepartmentId) return reply;
     try {
       const settings = await youtubeOAuthSettings();
-      return { clientId: settings.clientId, clientSecretConfigured: settings.clientSecretConfigured, tokenKeyConfigured: Boolean(process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim()) };
+      return { clientId: settings.clientId, redirectUri: settings.redirectUri, clientSecretConfigured: settings.clientSecretConfigured, tokenKeyConfigured: Boolean(process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim()) };
     }
     catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : "Could not load YouTube client settings." }); }
   });
 
-  app.put<{ Body: { clientId: string; clientSecret?: string } }>("/api/video/settings/youtube-client", {
+  app.put<{ Body: { clientId: string; clientSecret?: string; redirectUri?: string } }>("/api/video/settings/youtube-client", {
     schema: youtubeClientSettingSchema,
   }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
@@ -824,6 +825,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.code(400).send({ error: "Enter a Google OAuth client ID ending in .apps.googleusercontent.com." });
     }
     const clientSecret = request.body.clientSecret?.trim() ?? "";
+    const redirectUri = request.body.redirectUri?.trim() || process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_REDIRECT_URI?.trim() || "";
+    if (redirectUri) {
+      try {
+        const parsed = new URL(redirectUri);
+        const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+        if ((!localHttp && parsed.protocol !== "https:") || parsed.pathname !== "/api/auth/modules/video-steffisburg/youtube/callback" || parsed.search || parsed.hash || parsed.username || parsed.password) throw new Error();
+      } catch {
+        return reply.code(400).send({ error: "Use an HTTPS URL (or localhost for development) ending in /api/auth/modules/video-steffisburg/youtube/callback." });
+      }
+    }
     try {
       const current = await pool!.query<{ youtube_client_secret_encrypted: string | null }>("SELECT youtube_client_secret_encrypted FROM video_module_settings WHERE singleton=true");
       let encryptedSecret = current.rows[0]?.youtube_client_secret_encrypted ?? null;
@@ -832,12 +843,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         encryptedSecret = encryptYoutubeToken(clientSecret);
       }
       await pool!.query(
-        `INSERT INTO video_module_settings (singleton, youtube_client_id, youtube_client_secret_encrypted, updated_by)
-         VALUES (true,$1,$2,$3)
-         ON CONFLICT (singleton) DO UPDATE SET youtube_client_id=EXCLUDED.youtube_client_id, youtube_client_secret_encrypted=EXCLUDED.youtube_client_secret_encrypted, updated_by=EXCLUDED.updated_by, updated_at=now()`,
-        [clientId, encryptedSecret, request.authenticatedUser!.username],
+        `INSERT INTO video_module_settings (singleton, youtube_client_id, youtube_client_secret_encrypted, youtube_redirect_uri, updated_by)
+         VALUES (true,$1,$2,$3,$4)
+         ON CONFLICT (singleton) DO UPDATE SET youtube_client_id=EXCLUDED.youtube_client_id, youtube_client_secret_encrypted=EXCLUDED.youtube_client_secret_encrypted, youtube_redirect_uri=EXCLUDED.youtube_redirect_uri, updated_by=EXCLUDED.updated_by, updated_at=now()`,
+        [clientId, encryptedSecret, redirectUri, request.authenticatedUser!.username],
       );
-      return { clientId, clientSecretConfigured: Boolean(encryptedSecret) };
+      return { clientId, redirectUri, clientSecretConfigured: Boolean(encryptedSecret) };
     } catch (error) { return reply.code(503).send({ error: error instanceof Error ? error.message : "Could not save YouTube client settings." }); }
   });
 
@@ -846,11 +857,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const selectedDepartmentId = await activeVideoDepartment(request, reply, "stream_admin");
     if (!selectedDepartmentId) return reply;
     const oauthSettings = await youtubeOAuthSettings();
-    if (!youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret)) return reply.code(503).send({ error: "Configure the YouTube client ID and client secret in Video module settings, plus the redirect URL and token encryption key in the server environment." });
+    if (!youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, oauthSettings.redirectUri)) return reply.code(503).send({ error: "Configure the YouTube client ID, client secret, and redirect URL in Video module settings." });
     const state = randomBytes(32).toString("base64url");
-    youtubeOAuthStates.set(state, { departmentId: selectedDepartmentId, userId: request.authenticatedUser!.id, username: request.authenticatedUser!.username, expiresAt: Date.now() + 10 * 60_000 });
+    youtubeOAuthStates.set(state, { departmentId: selectedDepartmentId, userId: request.authenticatedUser!.id, username: request.authenticatedUser!.username, redirectUri: oauthSettings.redirectUri, expiresAt: Date.now() + 10 * 60_000 });
     for (const [key, value] of youtubeOAuthStates) if (value.expiresAt <= Date.now()) youtubeOAuthStates.delete(key);
-    return { authorizationUrl: youtubeAuthorizationUrl(state, oauthSettings.clientId) };
+    return { authorizationUrl: youtubeAuthorizationUrl(state, oauthSettings.clientId, oauthSettings.redirectUri) };
   });
 
   app.get<{ Querystring: { state?: string; code?: string; error?: string } }>("/api/auth/modules/video-steffisburg/youtube/callback", {
@@ -866,8 +877,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!request.query.code) return reply.code(400).send({ error: "Google did not return an authorization code." });
     try {
       const oauthSettings = await youtubeOAuthSettings();
-      if (!youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret)) return reply.code(503).send({ error: "YouTube OAuth settings are incomplete. Check the module Client ID and Client Secret, plus the server redirect URL and token key." });
-      const tokens = await exchangeYoutubeCode(request.query.code, oauthSettings.clientId, oauthSettings.clientSecret);
+      if (!youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, state.redirectUri)) return reply.code(503).send({ error: "YouTube OAuth settings are incomplete. Check the module Client ID and Client Secret, plus its redirect URL." });
+      const tokens = await exchangeYoutubeCode(request.query.code, oauthSettings.clientId, oauthSettings.clientSecret, state.redirectUri);
       const accessToken = tokens.access_token!;
       const channel = await youtubeChannel(accessToken);
       const existing = await youtubeConnection(state.departmentId);

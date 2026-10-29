@@ -31,9 +31,10 @@ Sonnenhof Shelly Pro 1 relays. Planned streams are stored by this module and
 use the current or next service's title, speaker, theme, and time.
 
 YouTube scheduling is optional. To enable it, create an OAuth 2.0 web client in
-Google Cloud, enable the YouTube Data API v3, and register the exact callback
-URL `https://<Smart-Church-origin>/api/auth/modules/video-steffisburg/youtube/callback`.
-Enter the OAuth Client ID and Client Secret in Settings → Modules → Video & streaming.
+Google Cloud and enable the YouTube Data API v3. Enter the OAuth Client ID,
+Client Secret, and redirect URL in Settings → Modules → Video & streaming, then
+register the exact URL shown there as an authorized redirect URI in Google Cloud.
+The module suggests the callback URL based on the current Smart-Church origin.
 The module generates a random token encryption key on first start and stores it
 in the API's protected persistent data volume. No separate encryption key setup
 is required. The module encrypts the client secret and channel refresh token

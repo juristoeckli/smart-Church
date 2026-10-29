@@ -6,7 +6,7 @@ import "./video-settings.css";
 
 type Address = { siteId: string; siteName: string; targetType: "router" | "encoder" | "device"; targetId: string; targetName: string; ip: string };
 type SettingsResponse = { defaults: Address[]; addresses: Address[]; error?: string };
-type YoutubeClientResponse = { clientId?: string; clientSecretConfigured?: boolean; tokenKeyConfigured?: boolean; error?: string };
+type YoutubeClientResponse = { clientId?: string; redirectUri?: string; clientSecretConfigured?: boolean; tokenKeyConfigured?: boolean; error?: string };
 
 function key(address: Pick<Address, "siteId" | "targetType" | "targetId">) {
   return `${address.siteId}\u0000${address.targetType}\u0000${address.targetId}`;
@@ -34,6 +34,8 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
   const [feedbackError, setFeedbackError] = useState(false);
   const [youtubeClientId, setYoutubeClientId] = useState("");
   const [savedYoutubeClientId, setSavedYoutubeClientId] = useState("");
+  const [youtubeRedirectUri, setYoutubeRedirectUri] = useState("");
+  const [savedYoutubeRedirectUri, setSavedYoutubeRedirectUri] = useState("");
   const [youtubeClientSecret, setYoutubeClientSecret] = useState("");
   const [youtubeClientSecretConfigured, setYoutubeClientSecretConfigured] = useState(false);
   const [youtubeTokenKeyConfigured, setYoutubeTokenKeyConfigured] = useState(false);
@@ -59,7 +61,16 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     void fetch("/api/video/settings/youtube-client", { headers: { "x-department-id": departmentId }, signal: controller.signal })
       .then(readYoutubeClientResponse)
-      .then((result) => { const value = result.clientId ?? ""; setYoutubeClientId(value); setSavedYoutubeClientId(value); setYoutubeClientSecretConfigured(Boolean(result.clientSecretConfigured)); setYoutubeTokenKeyConfigured(Boolean(result.tokenKeyConfigured)); })
+      .then((result) => {
+        const value = result.clientId ?? "";
+        const redirectUri = result.redirectUri || `${window.location.origin}/api/auth/modules/video-steffisburg/youtube/callback`;
+        setYoutubeClientId(value);
+        setSavedYoutubeClientId(value);
+        setYoutubeRedirectUri(redirectUri);
+        setSavedYoutubeRedirectUri(result.redirectUri ?? "");
+        setYoutubeClientSecretConfigured(Boolean(result.clientSecretConfigured));
+        setYoutubeTokenKeyConfigured(Boolean(result.tokenKeyConfigured));
+      })
       .catch((error: unknown) => { if (!controller.signal.aborted) { setYoutubeClientFeedback(error instanceof Error ? error.message : "Could not load the YouTube client setting."); setYoutubeClientFeedbackError(true); } })
       .finally(() => { if (!controller.signal.aborted) setYoutubeClientLoading(false); });
     return () => controller.abort();
@@ -103,12 +114,14 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
       const response = await fetch("/api/video/settings/youtube-client", {
         method: "PUT",
         headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
-        body: JSON.stringify({ clientId: youtubeClientId.trim(), clientSecret: youtubeClientSecret }),
+        body: JSON.stringify({ clientId: youtubeClientId.trim(), clientSecret: youtubeClientSecret, redirectUri: youtubeRedirectUri.trim() }),
       });
       const result = await readYoutubeClientResponse(response);
       const value = result.clientId ?? "";
       setYoutubeClientId(value);
       setSavedYoutubeClientId(value);
+      setYoutubeRedirectUri(result.redirectUri ?? "");
+      setSavedYoutubeRedirectUri(result.redirectUri ?? "");
       setYoutubeClientSecret("");
       setYoutubeClientSecretConfigured(Boolean(result.clientSecretConfigured));
       setYoutubeClientFeedback("YouTube OAuth client settings saved.");
@@ -127,7 +140,7 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
     const rightIndex = siteOrder.indexOf(rightName);
     return (leftIndex < 0 ? siteOrder.length : leftIndex) - (rightIndex < 0 ? siteOrder.length : rightIndex) || leftName.localeCompare(rightName);
   });
-  const youtubeClientSettingsChanged = youtubeClientId.trim() !== savedYoutubeClientId || Boolean(youtubeClientSecret.trim());
+  const youtubeClientSettingsChanged = youtubeClientId.trim() !== savedYoutubeClientId || youtubeRedirectUri.trim() !== savedYoutubeRedirectUri || Boolean(youtubeClientSecret.trim());
   return <section className="video-settings" aria-labelledby="video-device-settings-title">
     <div className="server-admin-panel-heading"><h3 id="video-device-settings-title">Video device addresses</h3><p>Configure the router, encoders, and devices used by Video &amp; streaming for {location}. Existing addresses are loaded as the defaults.</p></div>
     {loading ? <p className="video-settings-message">Loading device addresses…</p> : addresses.length === 0 ? <p className="video-settings-message">No Video devices are configured for this location.</p> : <>
@@ -141,10 +154,11 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
     {feedback && <p className={`video-settings-feedback${feedbackError ? " is-error" : ""}`} role="status">{feedback}</p>}
     <section className="video-settings-site video-settings-youtube-client" aria-labelledby="video-youtube-client-title">
       <h4 id="video-youtube-client-title">YouTube OAuth client</h4>
-      <p>Set the OAuth Client ID and Client Secret from Google Cloud. The secret is encrypted before it is stored. The module’s token encryption key stays in the protected API environment.</p>
+      <p>Set the OAuth Client ID and Client Secret from Google Cloud. The secret is encrypted before it is stored. Register the redirect URL below as an authorized redirect URI in Google Cloud.</p>
       {youtubeClientLoading ? <p className="video-settings-message">Loading YouTube client settings…</p> : <>
         <label>OAuth Client ID<input aria-label="YouTube OAuth Client ID" value={youtubeClientId} onChange={(event) => { setYoutubeClientId(event.target.value); setYoutubeClientFeedback(""); }} autoComplete="off" spellCheck={false} placeholder="1234567890-…apps.googleusercontent.com" maxLength={512} /></label>
         <label>OAuth Client Secret<input aria-label="YouTube OAuth Client Secret" type="password" value={youtubeClientSecret} onChange={(event) => { setYoutubeClientSecret(event.target.value); setYoutubeClientFeedback(""); }} autoComplete="new-password" spellCheck={false} placeholder={youtubeClientSecretConfigured ? "Saved encrypted · enter a new value to replace" : "Paste the Client Secret from Google Cloud"} maxLength={512} disabled={!youtubeTokenKeyConfigured} /></label>
+        <label>OAuth Redirect URL<input aria-label="YouTube OAuth Redirect URL" type="url" value={youtubeRedirectUri} onChange={(event) => { setYoutubeRedirectUri(event.target.value); setYoutubeClientFeedback(""); }} autoComplete="url" spellCheck={false} placeholder="https://smart-church.example/api/auth/modules/video-steffisburg/youtube/callback" maxLength={2048} /></label>
         {!youtubeTokenKeyConfigured && <p className="video-settings-feedback is-error">Set the module token encryption key in the API environment before saving a client secret.</p>}
         {youtubeClientSecretConfigured && <p className="video-settings-message">A client secret is saved encrypted. Leave the field blank to keep it.</p>}
       </>}

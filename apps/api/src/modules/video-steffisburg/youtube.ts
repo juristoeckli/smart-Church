@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const redirectUri = () => process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_REDIRECT_URI?.trim() ?? "";
+const redirectUri = (configured?: string) => configured?.trim() || process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_REDIRECT_URI?.trim() || "";
 const encryptionSecret = () => process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim() ?? "";
 
 export async function ensureYoutubeTokenKey() {
@@ -37,15 +37,15 @@ export async function ensureYoutubeTokenKey() {
   return generatedKey;
 }
 
-export function youtubeOAuthConfigured(oauthClientId: string, oauthClientSecret: string) {
-  return Boolean(oauthClientId.trim() && oauthClientSecret.trim() && redirectUri() && encryptionSecret());
+export function youtubeOAuthConfigured(oauthClientId: string, oauthClientSecret: string, configuredRedirectUri?: string) {
+  return Boolean(oauthClientId.trim() && oauthClientSecret.trim() && redirectUri(configuredRedirectUri) && encryptionSecret());
 }
 
-export function youtubeAuthorizationUrl(state: string, oauthClientId: string) {
+export function youtubeAuthorizationUrl(state: string, oauthClientId: string, configuredRedirectUri?: string) {
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.search = new URLSearchParams({
     client_id: oauthClientId,
-    redirect_uri: redirectUri(),
+    redirect_uri: redirectUri(configuredRedirectUri),
     response_type: "code",
     scope: "https://www.googleapis.com/auth/youtube.force-ssl",
     access_type: "offline",
@@ -55,12 +55,12 @@ export function youtubeAuthorizationUrl(state: string, oauthClientId: string) {
   return url.toString();
 }
 
-export async function exchangeYoutubeCode(code: string, oauthClientId: string, oauthClientSecret: string) {
+export async function exchangeYoutubeCode(code: string, oauthClientId: string, oauthClientSecret: string, configuredRedirectUri?: string) {
   const result = await tokenRequest({
     code,
     client_id: oauthClientId,
     client_secret: oauthClientSecret,
-    redirect_uri: redirectUri(),
+    redirect_uri: redirectUri(configuredRedirectUri),
     grant_type: "authorization_code",
   });
   if (!result.access_token) throw new Error("Google did not return an access token.");
