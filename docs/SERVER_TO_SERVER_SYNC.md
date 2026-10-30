@@ -181,10 +181,16 @@ uses `SMART_CHURCH_WEB_ORIGIN` (or the request origin in production); set the
 variable to the server's externally reachable HTTPS origin when callback
 access is available.
 
-For full-site redundancy, the primary sends a standby request to the remote
-site. Its Server Administrator approves the request locally; after approval,
-the primary discovers that standby and pushes snapshots outbound. The standby
-does not need a callback to the primary.
+For full-site redundancy, either server can initiate setup. If the primary can
+reach the standby, it sends a standby request and the standby's Server
+Administrator approves it; the primary then pushes snapshots. If only the
+standby can reach the primary, its administrator selects the primary and sends
+a signed outbound standby request. A Server Administrator on the primary
+approves that exact installation and site before any snapshot is released.
+After approval, the standby pulls snapshots over its existing outbound
+HTTPS/API connection. Both paths bind authorization to the source site, target
+installation, target site, and source epoch. Neither path requires a callback
+to an outbound-only server or an additional network port.
 
 Every adapter must define a stable globally unique source ID, owner ID,
 monotonic record revision, canonical serialization/version, allowed fields,
