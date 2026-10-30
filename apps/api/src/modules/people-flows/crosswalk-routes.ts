@@ -81,7 +81,12 @@ export function registerElvantoPeopleFlowCrosswalkRoutes(app: FastifyInstance, c
       for (const link of stepLinks.rows) stepsBySource.set(link.source_flow_id, [...(stepsBySource.get(link.source_flow_id) ?? []), link]);
       const linkedPersonIds = new Set(linkedPeople.rows.map((row) => row.source_id));
       const seenSourceIds = new Set<string>();
-      const flows = snapshots.rows.map((snapshot) => {
+      const flows: Array<{
+        sourceFlowId: string; name: string; snapshotUpdatedAt: string | null; sourceMissing: boolean;
+        remoteSteps: Array<{ id: string; name: string }>; localFlowId: string | null; localFlowName: string | null; localFlowStatus: string | null;
+        stepLinks: Array<{ sourceStepId: string; sourceStepPresent: boolean; localStepId: string; localStepTitle: string }>;
+        assignmentCount: number; linkedAssignmentCount: number; unmatchedAssignmentCount: number;
+      }> = snapshots.rows.map((snapshot) => {
         seenSourceIds.add(snapshot.source_id);
         const link = flowBySource.get(snapshot.source_id);
         const personIds = memberPersonIds(snapshot.members);
