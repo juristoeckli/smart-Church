@@ -34,6 +34,7 @@ export interface ServiceEvent {
   title: string;
   kind: ServiceEventKind;
   eventDate: string;
+  isAllDay?: boolean;
   startTime: string;
   endTime?: string;
   location: string;
@@ -96,6 +97,7 @@ export interface EventRegistration {
 export interface PublicRegistrationEvent {
   title: string;
   eventDate: string;
+  isAllDay?: boolean;
   startTime: string;
   endTime?: string;
   location: string;
