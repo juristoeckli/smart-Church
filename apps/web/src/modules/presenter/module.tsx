@@ -2,6 +2,7 @@ import { lazy } from "react";
 import { MonitorPlay } from "lucide-react";
 import type { ModuleContext, ModuleRegistration } from "../../module-registry";
 import { translationsForModule } from "../translations";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 import type { PresenterPermission } from "@smart-church/contracts";
 import { hasPresenterAccess, presenterCapabilities } from "./PresenterRightsFieldset";
 
@@ -14,7 +15,7 @@ function PresenterModule(context: ModuleContext) {
 export const moduleRegistration: ModuleRegistration = {
   id: "presenter",
   name: "Presenter",
-  translations: translationsForModule("presenter"),
+  translations: mergeModuleTranslationOverrides("presenter", translationsForModule("presenter")),
   icon: MonitorPlay,
   accessLabel: "Presenter",
   accessLevels: [
