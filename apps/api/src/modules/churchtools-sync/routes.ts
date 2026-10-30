@@ -606,6 +606,17 @@ async function list(base: string, token: string, endpoint: string) {
   }
   return result;
 }
+async function listComplete(base: string, token: string, endpoint: string) {
+  const items: JsonObject[] = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const payload = await get(base, token, endpoint + (endpoint.includes("?") ? "&" : "?") + "limit=200&page=" + page);
+    const entries = rows(payload); items.push(...entries);
+    const meta = payload.meta?.pagination ?? payload.meta ?? payload.data?.meta?.pagination ?? {};
+    const last = Number(meta.lastPage ?? meta.last_page ?? meta.totalPages ?? 0);
+    if ((last && page >= last) || entries.length < 200) return { items, complete: true };
+  }
+  return { items, complete: false };
+}
 async function testLogin(base: string, token: string) {
   if (!token.trim()) throw new Error("Enter a ChurchTools login token.");
   await get(base, token.trim(), "whoami");
@@ -793,11 +804,203 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       } finally { running.delete(departmentId); }
     }
 
+    routes.post<{ Body: { startDate: string; endDate: string } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
+      const config = await settings(dept); if (!config) return reply.code(404).send({ error: "Configure ChurchTools before preparing a migration." });
+      if (request.body.startDate > request.body.endDate) return reply.code(400).send({ error: "The migration start date must be on or before its end date." });
+      running.add(dept);
+      try {
+        const token = decrypt(config.encrypted_login_token);
+        const [peopleResult, groupsResult, resourcesResult, eventsResult] = await Promise.all([
+          listComplete(config.instance_url, token, "persons"), listComplete(config.instance_url, token, "groups"), listComplete(config.instance_url, token, "resources"),
+          listComplete(config.instance_url, token, `events?from=${encodeURIComponent(request.body.startDate)}&to=${encodeURIComponent(request.body.endDate)}`),
+        ]);
+        if (![peopleResult, groupsResult, resourcesResult, eventsResult].every((result) => result.complete)) return reply.code(413).send({ error: "At least one ChurchTools list exceeds the complete preview limit of 20,000 records. Narrow the migration date range and preview again." });
+        const memberResults = await mapConcurrent(groupsResult.items, 8, async (group) => {
+          const sourceId = idOf(group); if (!sourceId) return { sourceId, members: [] as JsonObject[], complete: true };
+          const embedded = Array.isArray(group.members) ? group.members : Array.isArray(group.persons) ? group.persons : null;
+          if (embedded) return { sourceId, members: embedded as JsonObject[], complete: true };
+          const result = await listComplete(config.instance_url, token, `groups/${encodeURIComponent(sourceId)}/members`);
+          return { sourceId, members: result.items, complete: result.complete };
+        });
+        if (memberResults.some((result) => !result.complete)) return reply.code(413).send({ error: "At least one ChurchTools group has more than 20,000 members. No migration preview was saved." });
+        const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result.members]));
+        const mappedEvents = mapEvents(eventsResult.items);
+        const resourceRows = resourcesResult.items.map((resource) => {
+          const capacityValue = Number(resource.capacity ?? resource.maxPersons ?? resource.max_persons);
+          const approvalValue = resource.requiresApproval ?? resource.requires_approval ?? resource.approvalRequired ?? resource.mustBeConfirmed;
+          return { sourceId: idOf(resource), name: firstText(resource.name, resource.title, resource.resourceName).slice(0, 120), category: resourceCategory(resource), description: firstText(resource.description, resource.note, resource.information).slice(0, 1000), location: firstText(resource.location?.name, resource.location, resource.place?.name, resource.place).slice(0, 160), capacity: Number.isInteger(capacityValue) && capacityValue > 0 && capacityValue <= 10000 ? capacityValue : null, requiresApproval: approvalValue === true || approvalValue === 1 || approvalValue === "1", active: resource.active !== false && resource.archived !== true && resource.isArchived !== true };
+        });
+        const records: JsonObject[] = [
+          ...peopleResult.items.map((person) => ({ area: "person", sourceId: idOf(person), firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) })),
+          ...groupsResult.items.map((group) => ({ area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), memberSourceIds: (membersByGroup.get(idOf(group)) ?? []).map(personIdOf).filter(Boolean) })),
+          ...mappedEvents.map((event) => ({ area: "event", ...event })),
+          ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
+        ];
+        const [localPeople, localGroups, localEvents, localResources, migrationLinks] = await Promise.all([
+          pool!.query<{ source_id: string | null; source_system: string | null; email: string | null }>("SELECT source_id,source_system,email FROM contacts WHERE department_id=$1", [dept]),
+          pool!.query<{ source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
+          pool!.query<{ source_id: string | null; source_system: string | null; title: string; event_date: string; start_time: string }>("SELECT source_id,source_system,title,event_date::text,to_char(start_time,'HH24:MI') AS start_time FROM service_events WHERE department_id=$1", [dept]),
+          pool!.query<{ source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,source_system,name FROM bookable_resources WHERE department_id=$1", [dept]),
+          pool!.query<{ area: string; source_id: string }>("SELECT area,source_id FROM churchtools_migration_links WHERE department_id=$1", [dept]),
+        ]);
+        const emailSet = new Set(localPeople.rows.filter((row) => row.email).map((row) => row.email!.toLocaleLowerCase()));
+        const linkSet = (area: string, rowsWithSources: Array<{ source_id: string | null; source_system: string | null }>) => new Set([...migrationLinks.rows.filter((link) => link.area === area).map((link) => link.source_id), ...rowsWithSources.filter((row) => row.source_system === "churchtools" && row.source_id).map((row) => row.source_id!)]);
+        const linkedPeople = linkSet("person", localPeople.rows);
+        const groupsBySource = linkSet("group", localGroups.rows);
+        const groupsByName = new Set(localGroups.rows.filter((row) => !row.source_system).map((row) => row.name.toLocaleLowerCase()));
+        const eventsBySource = linkSet("event", localEvents.rows);
+        const eventNames = new Set(localEvents.rows.map((row) => `${row.event_date}|${row.title.toLocaleLowerCase()}|${row.start_time.slice(0, 5)}`));
+        const resourcesBySource = linkSet("resource", localResources.rows);
+        const resourcesByName = new Set(localResources.rows.filter((row) => !row.source_system).map((row) => row.name.toLocaleLowerCase()));
+        let create = 0; let update = 0; let review = 0; let invalid = 0; let unmappedFields = 0;
+        for (const record of records) {
+          unmappedFields += Array.isArray(record.unmappedFields) ? record.unmappedFields.length : 0;
+          if (!record.sourceId
+            || (record.area === "person" && ((!record.firstName && !record.lastName) || String(record.firstName ?? "ChurchTools").length > 80 || String(record.lastName ?? `Person ${record.sourceId}`).length > 80 || String(record.email ?? "").length > 254 || String(record.phone ?? "").length > 40))
+            || (record.area === "group" && (!record.name || String(record.name).trim().length > 120 || String(record.description ?? "").length > 1000))
+            || (record.area === "event" && (!record.title || !record.date || !record.start))
+            || (record.area === "resource" && (!record.name || String(record.name).trim().length > 120))) { record.action = "invalid"; invalid += 1; continue; }
+          if (record.area === "person") {
+            if (linkedPeople.has(String(record.sourceId))) { record.action = "update"; update += 1; }
+            else if (record.email && emailSet.has(String(record.email).toLocaleLowerCase())) { record.action = "review_email_conflict"; review += 1; }
+            else { record.action = "create"; create += 1; }
+          } else if (record.area === "group") {
+            if (groupsBySource.has(String(record.sourceId))) { record.action = "update"; update += 1; }
+            else if (groupsByName.has(String(record.name).toLocaleLowerCase())) { record.action = "review_name_conflict"; review += 1; }
+            else { record.action = "create"; create += 1; }
+          } else if (record.area === "event") {
+            if (eventsBySource.has(String(record.sourceId))) { record.action = "update"; update += 1; }
+            else if (eventNames.has(`${record.date}|${String(record.title).toLocaleLowerCase()}|${record.start}`)) { record.action = "review_event_conflict"; review += 1; }
+            else { record.action = "create"; create += 1; }
+          } else if (record.area === "resource") {
+            if (resourcesBySource.has(String(record.sourceId))) { record.action = "update"; update += 1; }
+            else if (resourcesByName.has(String(record.name).toLocaleLowerCase())) { record.action = "review_name_conflict"; review += 1; }
+            else { record.action = "create"; create += 1; }
+          }
+        }
+        const encryptedSnapshot = encrypt(JSON.stringify(records));
+        await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
+          VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,complete=FALSE,updated_at=now()`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action })) };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
+      finally { running.delete(dept); }
+    });
+    routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/churchtools/migration", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (running.has(dept)) return reply.code(409).send({ error: "Another ChurchTools operation is running for this location." });
+      const snapshotResult = await pool!.query<{ encrypted_snapshot: string; preview_at: Date | string; page: number; total: number; created_count: number; updated_count: number; skipped_count: number; complete: boolean }>("SELECT encrypted_snapshot,preview_at,page,total,created_count,updated_count,skipped_count,complete FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
+      const saved = snapshotResult.rows[0]; if (!saved) return reply.code(409).send({ error: "Run a complete ChurchTools migration preview before importing." });
+      const pageBefore = request.body?.restart ? 0 : saved.page;
+      if (!request.body?.restart && pageBefore === 0 && Date.now() - new Date(saved.preview_at).getTime() > 60 * 60 * 1000) return reply.code(409).send({ error: "The migration preview expired. Create a fresh preview before importing." });
+      let snapshot: JsonObject[];
+      try { snapshot = JSON.parse(decrypt(saved.encrypted_snapshot)) as JsonObject[]; } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "The saved migration preview cannot be decrypted." }); }
+      if (!Array.isArray(snapshot) || snapshot.length !== saved.total) return reply.code(409).send({ error: "The saved migration preview is incomplete. Create a new preview." });
+      running.add(dept); let reserved = false;
+      try {
+        const reservation = await pool!.query(`UPDATE churchtools_migration_snapshots SET migration_running=TRUE,migration_started_at=now(),updated_at=now()
+          WHERE department_id=$1 AND (migration_running=FALSE OR migration_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept]);
+        if (!reservation.rowCount) return reply.code(409).send({ error: "Another migration batch is already running for this location." });
+        reserved = true;
+        let page = pageBefore; let created = request.body?.restart ? 0 : saved.created_count; let updated = request.body?.restart ? 0 : saved.updated_count; let skipped = request.body?.restart ? 0 : saved.skipped_count;
+        if (request.body?.restart) await pool!.query("UPDATE churchtools_migration_snapshots SET page=0,created_count=0,updated_count=0,skipped_count=0,complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
+        const batch = snapshot.slice(page, page + 50); let batchCreated = 0; let batchUpdated = 0; let batchSkipped = 0;
+        const db = await pool!.connect();
+        try {
+          await db.query("BEGIN");
+          for (const record of batch) {
+            const sourceId = String(record.sourceId ?? ""); const action = String(record.action ?? "invalid");
+            if (!sourceId || action.startsWith("review_") || action === "invalid") { batchSkipped += 1; page += 1; continue; }
+            if (record.area === "person") {
+              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN contacts local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='person' AND link.source_id=$2", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              if (!linked.rowCount && record.email) {
+                const collision = await db.query("SELECT 1 FROM contacts WHERE department_id=$1 AND lower(email)=lower($2) LIMIT 1", [dept, record.email]);
+                if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
+              }
+              if (linked.rowCount) {
+                await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]); batchUpdated += 1;
+                await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+              } else {
+                const inserted = await db.query<{ id: string }>("INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'member') ON CONFLICT DO NOTHING RETURNING id", [dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]);
+                if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
+              }
+            } else if (record.area === "group") {
+              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN church_groups local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='group' AND link.source_id=$2", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM church_groups WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              if (!linked.rowCount) {
+                const collision = await db.query("SELECT 1 FROM church_groups WHERE department_id=$1 AND lower(name)=lower($2) LIMIT 1", [dept, record.name]);
+                if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
+                linked = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description) VALUES (gen_random_uuid(),$1,$2,$3) ON CONFLICT DO NOTHING RETURNING id", [dept, record.name, record.description ?? ""]);
+                if (!linked.rowCount) { batchSkipped += 1; page += 1; continue; }
+                await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchCreated += 1;
+              } else {
+                await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.name, record.description ?? ""]);
+                await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchUpdated += 1;
+              }
+              const memberSourceIds = Array.isArray(record.memberSourceIds) ? record.memberSourceIds.map(String).filter(Boolean) : [];
+              if (memberSourceIds.length) await db.query(`INSERT INTO group_members (group_id,contact_id)
+                SELECT $1,COALESCE(link.local_record_id,c.id) FROM unnest($3::text[]) AS source(source_id)
+                LEFT JOIN churchtools_migration_links link ON link.department_id=$2 AND link.area='person' AND link.source_id=source.source_id
+                LEFT JOIN contacts c ON c.department_id=$2 AND c.source_system='churchtools' AND c.source_id=source.source_id
+                WHERE COALESCE(link.local_record_id,c.id) IS NOT NULL
+                ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, memberSourceIds]);
+            } else if (record.area === "event") {
+              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN service_events local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='event' AND link.source_id=$2", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              if (!linked.rowCount) {
+                const collision = await db.query("SELECT 1 FROM service_events WHERE department_id=$1 AND lower(title)=lower($2) AND event_date=$3 AND start_time=$4 LIMIT 1", [dept, record.title, record.date, record.start]);
+                if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
+              }
+              const sourcePositions = Array.isArray(record.positions) ? record.positions as JsonObject[] : [];
+              const sourcePersonIds = [...new Set(sourcePositions.map((position) => String(position.personId ?? "")).filter(Boolean))];
+              const linkedPositionContacts = sourcePersonIds.length ? await db.query<{ source_id: string; id: string }>(`SELECT source_id,local_record_id::text AS id FROM churchtools_migration_links WHERE department_id=$1 AND area='person' AND source_id=ANY($2::text[])
+                UNION SELECT source_id,id::text FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=ANY($2::text[])`, [dept, sourcePersonIds]) : { rows: [] as Array<{ source_id: string; id: string }> };
+              const contactsBySource = new Map(linkedPositionContacts.rows.map((contact) => [contact.source_id, contact.id]));
+              const positions = sourcePositions.map((position) => ({ name: position.name, ...(position.personId && contactsBySource.has(String(position.personId)) ? { contactId: contactsBySource.get(String(position.personId)) } : {}) }));
+              const values = [dept, record.title, record.date, record.isAllDay === true, record.start, record.end, record.location || "ChurchTools", record.description ?? null, record.room ?? "", JSON.stringify(positions), JSON.stringify(record.timePlan ?? []), sourceId];
+              if (linked.rowCount) {
+                await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(1, 11)]); batchUpdated += 1;
+                await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+              } else {
+                const inserted = await db.query<{ id: string }>("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 11));
+                if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
+              }
+            } else if (record.area === "resource") {
+              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN bookable_resources local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='resource' AND link.source_id=$2", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM bookable_resources WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              if (!linked.rowCount) {
+                const collision = await db.query("SELECT 1 FROM bookable_resources WHERE department_id=$1 AND lower(name)=lower($2) LIMIT 1", [dept, record.name]);
+                if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
+              }
+              const values = [dept, record.name, record.category, record.description, record.location, record.capacity, record.requiresApproval, record.active, sourceId];
+              if (linked.rowCount) {
+                await db.query("UPDATE bookable_resources SET name=$3,category=$4,description=$5,location=$6,capacity=$7,requires_approval=$8,active=$9,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(1, 8)]);
+                await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchUpdated += 1;
+              } else {
+                const inserted = await db.query<{ id: string }>("INSERT INTO bookable_resources (id,department_id,name,category,description,location,capacity,requires_approval,active) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 8));
+                if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
+              }
+            } else batchSkipped += 1;
+            page += 1;
+          }
+          created += batchCreated; updated += batchUpdated; skipped += batchSkipped;
+          const complete = page >= snapshot.length;
+          await db.query("UPDATE churchtools_migration_snapshots SET page=$2,created_count=$3,updated_count=$4,skipped_count=$5,complete=$6,updated_at=now() WHERE department_id=$1", [dept, page, created, updated, skipped, complete]);
+          await db.query("COMMIT");
+          return { migration: { page, total: snapshot.length, created, updated, skipped, complete, processedThisBatch: batch.length } };
+        } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "The ChurchTools migration batch failed." }); }
+      finally { if (reserved) await pool!.query("UPDATE churchtools_migration_snapshots SET migration_running=FALSE,migration_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {}); running.delete(dept); }
+    });
     routes.get("/api/modules/sync/churchtools", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       const result = await pool!.query("SELECT s.instance_url,s.enabled,s.last_sync_at,s.last_sync_error,(SELECT count(*)::int FROM contacts c WHERE c.department_id=s.department_id AND c.source_system='churchtools') AS people_count,(SELECT count(*)::int FROM church_groups g WHERE g.department_id=s.department_id AND g.source_system='churchtools') AS group_count,(SELECT count(*)::int FROM service_events e WHERE e.department_id=s.department_id AND e.source_system='churchtools') AS service_count,(SELECT count(*)::int FROM bookable_resources r WHERE r.department_id=s.department_id AND r.source_system='churchtools') AS resource_count FROM churchtools_sync_settings s WHERE s.department_id=$1", [dept]);
       const row = result.rows[0];
-      return row ? { configured: true, instanceUrl: row.instance_url, enabled: row.enabled, lastSyncAt: row.last_sync_at, lastSyncError: row.last_sync_error, peopleCount: row.people_count, groupCount: row.group_count, serviceCount: row.service_count, resourceCount: row.resource_count } : { configured: false, enabled: false, peopleCount: 0, groupCount: 0, serviceCount: 0, resourceCount: 0 };
+      const migrationResult = await pool!.query<{ page: number; total: number; created_count: number; updated_count: number; skipped_count: number; complete: boolean; preview_at: Date | string; start_date: string; end_date: string }>("SELECT page,total,created_count,updated_count,skipped_count,complete,preview_at,start_date::text,end_date::text FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
+      const migration = migrationResult.rows[0];
+      return row ? { configured: true, instanceUrl: row.instance_url, enabled: row.enabled, lastSyncAt: row.last_sync_at, lastSyncError: row.last_sync_error, peopleCount: row.people_count, groupCount: row.group_count, serviceCount: row.service_count, resourceCount: row.resource_count, migration: migration ? { page: migration.page, total: migration.total, created: migration.created_count, updated: migration.updated_count, skipped: migration.skipped_count, complete: migration.complete, previewAt: migration.preview_at, startDate: migration.start_date, endDate: migration.end_date } : null } : { configured: false, enabled: false, peopleCount: 0, groupCount: 0, serviceCount: 0, resourceCount: 0, migration: migration ? { page: migration.page, total: migration.total, created: migration.created_count, updated: migration.updated_count, skipped: migration.skipped_count, complete: migration.complete, previewAt: migration.preview_at, startDate: migration.start_date, endDate: migration.end_date } : null };
     });
     routes.put<{ Body: { instanceUrl: string; loginToken?: string } }>("/api/modules/sync/churchtools", { schema: { body: { type: "object", additionalProperties: false, required: ["instanceUrl"], properties: { instanceUrl: { type: "string", minLength: 10, maxLength: 255 }, loginToken: { type: "string", maxLength: 2048 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
