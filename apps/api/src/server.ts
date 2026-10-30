@@ -633,25 +633,45 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
   return validateServicePlanSongs(departmentId, event.timePlan ?? []);
 }
 
-async function syncEventPositionResponses(client: PoolClient, eventId: string, positions: CreateServiceEvent["positions"]) {
-  const serialized = JSON.stringify(positions ?? []);
-  await client.query(
-    `DELETE FROM event_position_responses response
-      WHERE response.event_id=$1 AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
-         WHERE p.ordinal-1=response.position_index
-           AND (p.value->>'contactId')::uuid=response.contact_id
-      )`,
-    [eventId, serialized],
+async function syncEventPositionResponses(
+  client: PoolClient,
+  eventId: string,
+  positions: CreateServiceEvent["positions"],
+  previousPositions: CreateServiceEvent["positions"] = [],
+) {
+  const currentPositions = positions ?? [];
+  const oldPositions = previousPositions ?? [];
+  const existing = await client.query<{ position_index: number; contact_id: string; status: "pending" | "accepted" | "declined"; responded_at: Date | null; updated_at: Date }>(
+    "SELECT position_index,contact_id,status,responded_at,updated_at FROM event_position_responses WHERE event_id=$1 ORDER BY position_index",
+    [eventId],
   );
-  await client.query(
-    `INSERT INTO event_position_responses (event_id,position_index,contact_id)
-     SELECT $1,(position.ordinal-1)::integer,(position.value->>'contactId')::uuid
-       FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
-      WHERE p.value->>'contactId' IS NOT NULL
-     ON CONFLICT (event_id,position_index) DO NOTHING`,
-    [eventId, serialized],
-  );
+  const retained = new Map<number, typeof existing.rows[number]>();
+  const usedPositions = new Set<number>();
+  for (const response of existing.rows) {
+    const previous = oldPositions[response.position_index];
+    if (!previous?.contactId || previous.contactId !== response.contact_id) continue;
+    const oldName = previous.name.trim().toLocaleLowerCase();
+    const nextIndex = currentPositions.findIndex((position, index) =>
+      !usedPositions.has(index)
+      && position.contactId === response.contact_id
+      && position.name.trim().toLocaleLowerCase() === oldName,
+    );
+    if (nextIndex < 0) continue;
+    retained.set(nextIndex, response);
+    usedPositions.add(nextIndex);
+  }
+
+  await client.query("DELETE FROM event_position_responses WHERE event_id=$1", [eventId]);
+  for (let index = 0; index < currentPositions.length; index += 1) {
+    const contactId = currentPositions[index].contactId;
+    if (!contactId) continue;
+    const previousResponse = retained.get(index);
+    await client.query(
+      `INSERT INTO event_position_responses (event_id,position_index,contact_id,status,responded_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [eventId, index, contactId, previousResponse?.status ?? "pending", previousResponse?.responded_at ?? null, previousResponse?.updated_at ?? new Date()],
+    );
+  }
 }
 
 async function listWorshipSongs(departmentId: string, includeArchived = false): Promise<WorshipSong[]> {
@@ -2296,6 +2316,11 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const previousPositionsResult = await client.query<{ positions: ServiceEvent["positions"] }>(
+      "SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE",
+      [request.params.id, selectedDepartmentId],
+    );
+    if (!previousPositionsResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
         SET title = $3, kind = $4, event_date = $5, is_all_day = $6, start_time = $7, end_time = $8,
@@ -2311,7 +2336,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
     [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
   );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
-    await syncEventPositionResponses(client, request.params.id, event.positions);
+    await syncEventPositionResponses(client, request.params.id, event.positions, previousPositionsResult.rows[0].positions);
     await client.query("COMMIT");
     return mapServiceEvent(result.rows[0]);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -2340,6 +2365,10 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const previousSeries = await client.query<{ id: string; positions: ServiceEvent["positions"] }>(
+      "SELECT id,positions FROM service_events WHERE department_id=$1 AND recurrence_id=$2 FOR UPDATE",
+      [selectedDepartmentId, source.rows[0].recurrence_id],
+    );
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, is_all_day=$6, start_time=$7, end_time=$8,
        location=$9, description=$10, room=$11, asset_ids=$12, positions=$13::jsonb, time_plan=$14::jsonb,
@@ -2353,7 +2382,8 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
        (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
     [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
   );
-    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions);
+    const previousPositionsByEvent = new Map(previousSeries.rows.map((row) => [row.id, row.positions]));
+    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions, previousPositionsByEvent.get(row.id));
     await client.query("COMMIT");
     return result.rows.map(mapServiceEvent);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
