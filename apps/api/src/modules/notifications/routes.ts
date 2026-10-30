@@ -97,8 +97,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   (SELECT count(*) FROM module_notification_webhook_events event JOIN module_notification_email_deliveries d ON d.provider_email_id=event.provider_email_id JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1)::text "webhookEvents",
                   EXISTS(SELECT 1 FROM module_notification_preferences WHERE department_id=$1 AND email_notifications_enabled) email_enabled`, [departmentId]);
         const row = result.rows[0];
+        const otherNotificationSites = await pool.query<{ count: string }>(`SELECT count(*)::text AS count
+          FROM departments department
+          LEFT JOIN installation_modules module ON module.installation_id=department.installation_id AND module.module_id='notifications'
+          WHERE department.installation_id=(SELECT installation_id FROM departments WHERE id=$1)
+            AND department.id<>$1
+            AND ('notifications'=ANY(department.enabled_modules) OR module.enabled=TRUE AND (module.required=TRUE OR module.client_managed=FALSE))`, [departmentId]);
+        const blockers = Number(otherNotificationSites.rows[0]?.count ?? 0) > 0
+          ? ["Email suppression records are installation-wide and would replace data used by another Notifications location. Make suppression data location-scoped before enabling redundancy for multiple locations."]
+          : [];
         const ready = !row.emailEnabled || await context.email.isConfigured();
-        return { ready, blockers: ready ? [] : ["Email notifications are enabled for this site but the email connector is not configured on this server."], recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.deliveries) + Number(row.webhookEvents) };
+        if (!ready) blockers.push("Email notifications are enabled for this site but the email connector is not configured on this server.");
+        return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.deliveries) + Number(row.webhookEvents) };
       } catch {
         return { ready: false, blockers: ["Notifications storage is not initialized on this server."], recordCount: 0 };
       }

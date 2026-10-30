@@ -164,10 +164,10 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
     if (localState.rows[0]?.role !== "primary") throw new Error("Only a writable primary can push a redundancy snapshot.");
     const identity = await getIdentity(pool, siteName);
     const local = await redundancyManifest(pool, context.replication.list(), departmentId);
-    const missingAdapters = local.blockers.filter((blocker) => blocker === "The core site-data adapter is missing." || blocker.endsWith("has no active replication adapter."));
-    if (missingAdapters.length) throw new Error(`The primary cannot replicate every enabled module: ${missingAdapters.join(" ")}`);
+    if (local.blockers.length) throw new Error(`The primary is not ready to create a complete site snapshot: ${local.blockers.join(" ")}`);
     const remote = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; upstreamInstallationId: string | null; upstreamDepartmentId: string | null; siteEpoch: string; lastSnapshotId: string | null; lastSnapshotAt: string | null; lastVerifiedAt: string | null; lastSourceDigest: string | null; modules: RedundancyModuleManifestEntry[]; ready: boolean; blockers: string[] }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(targetDepartmentId)}`);
     if (remote.role !== "standby" || remote.upstreamInstallationId !== identity.installationId || remote.upstreamDepartmentId !== departmentId || remote.installationId !== peer.installation_id || remote.departmentId !== targetDepartmentId) throw new Error("The destination has not been configured as this site's standby.");
+    if (remote.blockers.length) throw new Error(`The standby is not ready to receive a complete site snapshot: ${remote.blockers.join(" ")}`);
     if (manifestKey(local.modules) !== manifestKey(remote.modules)) throw new Error("The primary and standby module versions or replication adapters do not match.");
     const client = await pool.connect();
     let snapshot: Record<string, unknown>;
