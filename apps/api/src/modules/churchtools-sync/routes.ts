@@ -968,19 +968,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
               const memberDetails = Array.isArray(record.memberDetails) ? record.memberDetails.filter((item: unknown): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
               if (memberDetails.length) {
-                for (const member of memberDetails) {
-                  const sourcePersonId = firstText(member.sourcePersonId);
-                  if (!sourcePersonId) continue;
-                  const role = firstText(member.role).slice(0, 80) || "Member";
-                  const status = member.status === "paused" || member.status === "waitlist" ? member.status : "active";
-                  const joinedOn = membershipDate(member.joinedOn);
-                  await db.query(`INSERT INTO group_members (group_id,contact_id,role,status,joined_on)
-                    SELECT $1,COALESCE(link.local_record_id,c.id),$4,$5,$6 FROM (VALUES ($3::text)) AS source(source_id)
-                    LEFT JOIN churchtools_migration_links link ON link.department_id=$2 AND link.area='person' AND link.source_id=source.source_id
-                    LEFT JOIN contacts c ON c.department_id=$2 AND c.source_system='churchtools' AND c.source_id=source.source_id
-                    WHERE COALESCE(link.local_record_id,c.id) IS NOT NULL
-                    ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, sourcePersonId, role, status, joinedOn]);
-                }
+                await db.query(`INSERT INTO group_members (group_id,contact_id,role,status,joined_on)
+                  SELECT $1,COALESCE(link.local_record_id,c.id),left(COALESCE(NULLIF(trim(member.role),''),'Member'),80),
+                    CASE WHEN member.status IN ('paused','waitlist') THEN member.status ELSE 'active' END,member."joinedOn"
+                  FROM jsonb_to_recordset($3::jsonb) AS member("sourcePersonId" text,role text,status text,"joinedOn" date)
+                  LEFT JOIN churchtools_migration_links link ON link.department_id=$2 AND link.area='person' AND link.source_id=member."sourcePersonId"
+                  LEFT JOIN contacts c ON c.department_id=$2 AND c.source_system='churchtools' AND c.source_id=member."sourcePersonId"
+                  WHERE member."sourcePersonId" IS NOT NULL AND member."sourcePersonId"<>'' AND COALESCE(link.local_record_id,c.id) IS NOT NULL
+                  ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, JSON.stringify(memberDetails)]);
               } else {
                 const memberSourceIds = Array.isArray(record.memberSourceIds) ? record.memberSourceIds.map(String).filter(Boolean) : [];
                 if (memberSourceIds.length) await db.query(`INSERT INTO group_members (group_id,contact_id)
