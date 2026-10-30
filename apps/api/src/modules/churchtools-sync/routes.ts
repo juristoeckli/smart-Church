@@ -2107,15 +2107,18 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let apiKey: string;
       try { apiKey = decryptElvantoKey(settings.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       elvantoSongsExportRunning.add(dept);
-      let reserved = false;
+      let reserved = false; let settingsReserved = false;
       try {
+        const settingsLock = await pool!.query("UPDATE elvanto_sync_settings SET songs_importing=TRUE,songs_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND songs_importing=FALSE AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND financial_importing=FALSE AND people_exporting=FALSE RETURNING department_id", [dept, settings.updated_at]);
+        if (!settingsLock.rowCount) return reply.code(409).send({ error: "Another Elvanto sync is running for this location." });
+        settingsReserved = true;
         const lock = await pool!.query("UPDATE elvanto_song_export_state SET exporting=TRUE,started_at=now(),updated_at=now() WHERE department_id=$1 AND preview_at=$2 AND preview_at>now()-interval '1 hour' AND (exporting=FALSE OR started_at<now()-interval '15 minutes') RETURNING department_id", [dept, saved.preview_at]);
         if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired or another Songs export is running. Run a new preview." });
         reserved = true;
         let index=saved.page, created=saved.created_count, updated=saved.updated_count, skipped=saved.skipped_count;
         const rows=saved.preview_rows;
         let processed=0;
-        while(index<rows.length && processed<3) {
+        while(index<rows.length && processed<1) {
           const item=rows[index];
           if(item.action!=="create" && item.action!=="update") { skipped++; index++; processed++; await pool!.query("UPDATE elvanto_song_export_state SET page=$2,skipped_count=$3,updated_at=now() WHERE department_id=$1",[dept,index,skipped]); continue; }
           const current=await elvantoLocalSongsForExport(dept,[item.songId]);
@@ -2178,6 +2181,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         return reply.code(400).send({error:error instanceof Error?error.message:"Could not export Elvanto songs."});
       } finally {
         if(reserved) await pool!.query("UPDATE elvanto_song_export_state SET exporting=FALSE,started_at=NULL,updated_at=now() WHERE department_id=$1",[dept]).catch(()=>{});
+        if(settingsReserved) await pool!.query("UPDATE elvanto_sync_settings SET songs_importing=FALSE,songs_import_started_at=NULL,updated_at=now() WHERE department_id=$1",[dept]).catch(()=>{});
         elvantoSongsExportRunning.delete(dept);
       }
     });
