@@ -15,7 +15,13 @@ type SyncStatus = {
   groupCount: number;
   serviceCount: number;
   resourceCount: number;
+  migration?: { page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; previewAt: string; startDate: string; endDate: string } | null;
 };
+type ChurchToolsMigrationPreview = { complete: boolean; total: number; create: number; update: number; review: number; invalid: number; unmappedFields: number; startDate: string; endDate: string; sample: Array<{ area: string; name: string; email?: string | null; date?: string; action: string }> };
+
+function shiftUtcYear(years: number) {
+  const date = new Date(); date.setUTCFullYear(date.getUTCFullYear() + years); return date.toISOString().slice(0, 10);
+}
 
 export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: { departmentId: string; csrfToken: string; settingsPanel?: boolean }) {
   const [activePlatform, setActivePlatform] = useState<"churchtools" | "elvanto" | "server">("churchtools");
@@ -25,6 +31,9 @@ export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: {
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
+  const [migrationStartDate, setMigrationStartDate] = useState(() => shiftUtcYear(-5));
+  const [migrationEndDate, setMigrationEndDate] = useState(() => shiftUtcYear(5));
+  const [migrationPreview, setMigrationPreview] = useState<ChurchToolsMigrationPreview | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -61,6 +70,27 @@ export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: {
     setBusy(true); setFeedback(""); setError("");
     try { await request("/api/modules/sync/churchtools/run", "POST"); setFeedback("ChurchTools data synced."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Sync failed."); await load(); }
+    finally { setBusy(false); }
+  }
+
+  async function previewMigration() {
+    setBusy(true); setFeedback(""); setError(""); setMigrationPreview(null);
+    try {
+      const result = await request("/api/modules/sync/churchtools/migration-preview", "POST", { startDate: migrationStartDate, endDate: migrationEndDate }) as unknown as ChurchToolsMigrationPreview;
+      if (!result.complete || !Array.isArray(result.sample)) throw new Error("ChurchTools did not return a complete migration preview.");
+      setMigrationPreview(result); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview the ChurchTools migration."); }
+    finally { setBusy(false); }
+  }
+
+  async function importMigration() {
+    if (!status?.migration?.previewAt) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const result = await request("/api/modules/sync/churchtools/migration", "POST") as unknown as { migration?: NonNullable<SyncStatus["migration"]> };
+      if (!result.migration) throw new Error("ChurchTools did not return migration progress.");
+      await load(); setFeedback(result.migration.complete ? "ChurchTools migration is complete." : "Migration batch complete. Continue to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import the ChurchTools migration batch."); await load(); }
     finally { setBusy(false); }
   }
 
@@ -103,6 +133,14 @@ export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: {
       {feedback && <p className="sync-feedback" role="status"><Check size={15} />{feedback}</p>}
       {status?.lastSyncError && <p className="sync-feedback sync-feedback-error" role="alert"><CircleAlert size={15} />Last sync failed: {status.lastSyncError}</p>}
     </section>
+    {settingsPanel && status?.configured && <section className="directory-card sync-settings-card">
+      <div className="directory-heading"><div><h2>One-time ChurchTools migration</h2><p>Preview and import people, groups, services/events, and resources into this location. Imported records stay editable and are not tied to scheduled sync.</p></div></div>
+      <p className="sync-help">Matching uses stable ChurchTools IDs. Email, name, and event matches are flagged for review instead of merged. Group import only adds linked members; local-only memberships are kept. Resource bookings and unsupported profile fields are not imported.</p>
+      <div className="form-row"><label>Events from<input type="date" value={migrationStartDate} max={migrationEndDate} onChange={(event) => { setMigrationStartDate(event.target.value); setMigrationPreview(null); }} /></label><label>Through<input type="date" value={migrationEndDate} min={migrationStartDate} onChange={(event) => { setMigrationEndDate(event.target.value); setMigrationPreview(null); }} /></label></div>
+      <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewMigration()} disabled={busy || !migrationStartDate || !migrationEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview migration"}</button></div>
+      {migrationPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Migration preview · {migrationPreview.startDate} – {migrationPreview.endDate}</strong><span>{migrationPreview.total} source records · {migrationPreview.create} new · {migrationPreview.update} linked updates · {migrationPreview.review} conflicts · {migrationPreview.invalid} invalid</span><small>{migrationPreview.unmappedFields} source fields are not mapped.</small></div>{migrationPreview.sample.map((item, index) => <div className="sync-feedback" key={`${item.area}-${item.name}-${item.date ?? ""}-${index}`}><strong>{item.name || item.area}</strong><span>{item.area}{item.date ? ` · ${item.date}` : ""}{item.email ? ` · ${item.email}` : ""} · {item.action.replaceAll("_", " ")}</span></div>)}<small className="sync-help">Only the first 40 records are shown. The saved snapshot is encrypted; each import request processes at most 50 records and can resume after a reload.</small><button className="button button-primary" type="button" onClick={() => void importMigration()} disabled={busy || !migrationPreview.complete || migrationPreview.create + migrationPreview.update === 0}><Check size={15} />{busy ? "Importing…" : "Import reviewed records"}</button></div>}
+      {status.migration && <div className="sync-feedback" aria-live="polite"><strong>Migration progress</strong><span>{status.migration.complete ? "Complete" : `${status.migration.page} of ${status.migration.total} records processed`} · {status.migration.created} created · {status.migration.updated} updated · {status.migration.skipped} skipped</span>{!status.migration.complete && status.migration.previewAt && <button className="button button-secondary" type="button" onClick={() => void importMigration()} disabled={busy}>Continue migration</button>}</div>}
+    </section>}
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>Module controls</h2><p>Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? "Pause sync" : "Enable sync"}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />Remove sync and imported data</button></div></section>}
     <footer className="page-footer"><span>Automatically syncs every 15 minutes while enabled.</span><span>Only site administrators can manage this connection.</span></footer>
     </div>}
