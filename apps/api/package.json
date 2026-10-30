@@ -7,6 +7,7 @@
     "dev": "node --env-file-if-exists=../../.env --import tsx --watch src/server.ts",
     "typecheck": "tsc --noEmit",
     "test:datasets": "node --experimental-strip-types scripts/test-datasets.mjs",
+    "test:churchtools-event-time": "node --experimental-strip-types scripts/test-churchtools-event-time.mjs",
     "test:email-worker": "node --import tsx scripts/test-email-worker.mjs",
     "test:runtime-diagnostics": "node --import tsx scripts/test-runtime-diagnostics.mjs",
     "test:server-permissions": "node --experimental-strip-types scripts/test-server-permissions.mjs",

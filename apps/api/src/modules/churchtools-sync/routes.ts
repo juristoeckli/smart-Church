@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerChurchToolsSyncReplication } from "./replication.js";
+import { parseChurchToolsEventDateTime } from "./event-time.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -641,20 +642,12 @@ async function testLogin(base: string, token: string) {
   if (!token.trim()) throw new Error("Enter a ChurchTools login token.");
   await get(base, token.trim(), "whoami");
 }
-function dateTime(value: any, dateFallback?: string, timeFallback?: string) {
-  if (typeof value === "string" && value) {
-    const date = new Date(value);
-    if (Number.isFinite(date.getTime())) return { date: value.slice(0, 10), time: value.length >= 16 ? value.slice(11, 16) : timeFallback?.slice(0, 5) || "09:00" };
-  }
-  if (dateFallback && /^\d{4}-\d{2}-\d{2}$/.test(dateFallback)) return { date: dateFallback, time: timeFallback?.slice(0, 5) || "09:00" };
-  return null;
-}
-function mapEvents(events: JsonObject[]) {
+function mapEvents(events: JsonObject[], timeZone = "Europe/Zurich") {
   return events.flatMap((row) => {
     const sourceId = idOf(row);
-    const start = dateTime(row.startDate ?? row.start ?? row.startDateTime ?? row.date, row.date, row.startTime);
+    const start = parseChurchToolsEventDateTime(row.startDate ?? row.start ?? row.startDateTime ?? row.date, row.date, row.startTime, timeZone);
     if (!sourceId || !start) return [];
-    const end = dateTime(row.endDate ?? row.end ?? row.endDateTime, start.date, row.endTime);
+    const end = parseChurchToolsEventDateTime(row.endDate ?? row.end ?? row.endDateTime, start.date, row.endTime, timeZone);
     const assignments: JsonObject[] = Array.isArray(row.services) ? row.services : Array.isArray(row.eventServices) ? row.eventServices : [];
     const agenda: JsonObject[] = Array.isArray(row.agenda?.items) ? row.agenda.items : Array.isArray(row.agendaItems) ? row.agendaItems : [];
     return [{
@@ -724,7 +717,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             throw error;
           }
         });
-        const services = mapEvents(events);
+        const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+        const services = mapEvents(events, departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich");
         const db = await pool.connect();
         try {
           await db.query("BEGIN");
@@ -846,7 +840,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         });
         if (memberResults.some((result) => !result.complete)) return reply.code(413).send({ error: "At least one ChurchTools group has more than 20,000 members. No migration preview was saved." });
         const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result.members]));
-        const mappedEvents = mapEvents(eventsResult.items);
+        const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
+        const mappedEvents = mapEvents(eventsResult.items, departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich");
         const resourceRows = resourcesResult.items.map((resource) => {
           const capacityValue = Number(resource.capacity ?? resource.maxPersons ?? resource.max_persons);
           const approvalValue = resource.requiresApproval ?? resource.requires_approval ?? resource.approvalRequired ?? resource.mustBeConfirmed;
