@@ -40,7 +40,7 @@ function canonical(value: unknown): string {
 
 async function discoverTables(client: Pick<PoolClient, "query">): Promise<Table[]> {
   const result = await client.query<Column>(`SELECT table_name,column_name,data_type,ordinal_position FROM information_schema.columns
-    WHERE table_schema='public' AND (table_name='churchtools_sync_settings' OR left(table_name,8)='elvanto_')
+    WHERE table_schema='public' AND (table_name='churchtools_sync_settings' OR left(table_name,8)='elvanto_' OR left(table_name,22)='churchtools_migration_')
     ORDER BY table_name,ordinal_position`);
   const byName = new Map<string, Column[]>();
   for (const column of result.rows) byName.set(column.table_name, [...(byName.get(column.table_name) ?? []), column]);
@@ -95,14 +95,14 @@ async function inspect(client: PoolClient, departmentId: string) {
   }
   if (bytes > maxSnapshotBytes) blockers.push("Integration settings and imported records exceed the 200 MiB snapshot limit.");
   for (const table of tables) {
-    for (const column of table.columns.filter((item) => ["encrypted_login_token", "encrypted_api_key", "encrypted_payload"].includes(item.column_name))) {
+    for (const column of table.columns.filter((item) => ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"].includes(item.column_name))) {
       const rows = await client.query<{ value: string }>(`SELECT ${q(column.column_name)} AS value FROM ${q(table.name)} WHERE department_id=$1 AND ${q(column.column_name)} IS NOT NULL AND ${q(column.column_name)}<>''`, [departmentId]);
       if (rows.rowCount && !cryptoKey()) {
-        blockers.push("Set SMART_CHURCH_SYNC_ENCRYPTION_KEY to the same secret on both servers, then re-enter saved ChurchTools or Elvanto credentials.");
+        blockers.push("Set SMART_CHURCH_SYNC_ENCRYPTION_KEY to the same secret on both servers, then re-enter saved ChurchTools or Elvanto credentials and migration previews.");
         continue;
       }
       for (const row of rows.rows) {
-        try { decrypt(row.value, column.column_name === "encrypted_login_token" ? "churchtools" : "elvanto"); }
+        try { decrypt(row.value, column.column_name === "encrypted_login_token" || column.column_name === "encrypted_snapshot" ? "churchtools" : "elvanto"); }
         catch (error) { blockers.push(error instanceof Error ? error.message : "A saved integration credential cannot be decrypted."); break; }
       }
     }
@@ -119,7 +119,7 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
       const tables = await discoverTables(pool);
       const shape = tables.map((table) => [table.name, table.columns.map((column) => [column.column_name, column.data_type])]);
       let hasSecrets = false;
-      for (const table of tables) for (const column of table.columns.filter((item) => ["encrypted_login_token", "encrypted_api_key", "encrypted_payload"].includes(item.column_name))) {
+      for (const table of tables) for (const column of table.columns.filter((item) => ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"].includes(item.column_name))) {
         const result = await pool.query<{ present: boolean }>(`SELECT EXISTS(SELECT 1 FROM ${q(table.name)} WHERE department_id=$1 AND ${q(column.column_name)} IS NOT NULL AND ${q(column.column_name)}<>'') AS present`, [departmentId]);
         hasSecrets ||= result.rows[0]?.present === true;
       }
@@ -157,11 +157,11 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
       for (const name of order) {
         const table = snapshot.tables.find((item) => item.name === name)!;
         for (const row of table.rows) {
-          for (const column of ["encrypted_login_token", "encrypted_api_key", "encrypted_payload"]) {
+          for (const column of ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"]) {
             const value = row[column];
             if (typeof value === "string" && value) {
               if (!key) throw new Error("SMART_CHURCH_SYNC_ENCRYPTION_KEY is required to restore saved integration credentials.");
-              decrypt(value, column === "encrypted_login_token" ? "churchtools" : "elvanto");
+              decrypt(value, column === "encrypted_login_token" || column === "encrypted_snapshot" ? "churchtools" : "elvanto");
             }
           }
           const values: Record<string, unknown> = { ...row, department_id: departmentId };
