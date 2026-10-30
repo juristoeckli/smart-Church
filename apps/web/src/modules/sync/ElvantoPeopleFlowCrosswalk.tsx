@@ -44,6 +44,7 @@ const crosswalkTranslations: Partial<Record<UserLanguage, Locale>> = {
     "active": "aktiv",
     "archived": "archiviert",
     "Remove stale link": "Veraltete Verknüpfung entfernen",
+    "· Source flow missing": "· Quell-Flow fehlt",
   },
   fr: {
     "Link Elvanto People Flows to local workflows": "Lier les People Flows Elvanto aux workflows locaux",
@@ -75,6 +76,7 @@ const crosswalkTranslations: Partial<Record<UserLanguage, Locale>> = {
     "active": "actif",
     "archived": "archivé",
     "Remove stale link": "Supprimer le lien obsolète",
+    "· Source flow missing": "· Flow source manquant",
   },
   it: {
     "Link Elvanto People Flows to local workflows": "Collega i People Flow Elvanto ai workflow locali",
@@ -142,6 +144,7 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
     "active": "attivo",
     "archived": "archiviato",
     "Remove stale link": "Rimuovi collegamento obsoleto",
+    "· Source flow missing": "· Flow sorgente mancante",
   }, [selected?.sourceFlowId, selected?.localFlowId, selected?.stepLinks]);
 
   async function save() {
@@ -176,7 +179,7 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
       {!data ? <p className="sync-help">Loading…</p> : data.flows.length === 0 ? <p className="sync-help">No imported Elvanto People Flows are available. Import them from Elvanto first.</p> : <>
         <label>Choose an Elvanto flow<select value={sourceFlowId} onChange={(event) => setSourceFlowId(event.target.value)}>{data.flows.map((flow) => <option key={flow.sourceFlowId} value={flow.sourceFlowId}>{flow.name}{flow.sourceMissing ? " · missing" : ""}</option>)}</select></label>
         {selected && <>
-          <p className="sync-help">{selected.assignmentCount} people assignments · {selected.linkedAssignmentCount} linked · {selected.unmatchedAssignmentCount} unmatched</p>
+          <p className="sync-help"><span>{selected.assignmentCount} people assignments</span> · <span>{selected.linkedAssignmentCount} linked</span> · <span>{selected.unmatchedAssignmentCount} unmatched</span></p>
           {selected.sourceMissing && <p className="sync-inline-error" role="alert">This flow no longer appears in the latest Elvanto snapshot. Its link is retained for review; no remote or local workflow was changed.</p>}
           <label>Select a local workflow<select value={localFlowId} disabled={busy} onChange={(event) => { setLocalFlowId(event.target.value); setStepSelection({}); }}><>{selected.sourceMissing && selected.localFlowId && <option value={selected.localFlowId} disabled>{selected.localFlowName} · Source flow missing</option>}<option value="">{selected.sourceMissing ? "Remove stale link" : "Unlinked"}</option>{!selected.sourceMissing && localFlows.map((flow) => <option key={flow.id} value={flow.id}>{flow.name} · {flow.status}</option>)}</>}</select></label>
           {selectedLocal && !selected.sourceMissing && <fieldset className="module-rights-fieldset"><legend>Map Elvanto steps to local steps</legend>{selected.remoteSteps.map((remoteStep) => <label className="module-right-option" key={remoteStep.id}><span><strong>{remoteStep.name}</strong>{!remoteStep.name && <small>{remoteStep.id}</small>}</span><select value={stepSelection[remoteStep.id] ?? ""} disabled={busy || selected.sourceMissing} onChange={(event) => setStepSelection((current) => ({ ...current, [remoteStep.id]: event.target.value }))}><option value="">No local step</option>{(selectedLocal?.steps ?? []).filter((step) => step.active).map((step) => <option key={step.id} value={step.id}>{step.title}</option>)}</select></label>)}</fieldset>}
