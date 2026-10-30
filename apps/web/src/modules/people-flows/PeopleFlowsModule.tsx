@@ -9,6 +9,22 @@ type ProgressStep = { stepId: string; title: string; position: number; required:
 type Assignment = { id: string; flowId: string; contactId: string; contactName: string; status: "active" | "completed" | "cancelled"; dueOn: string | null; startedAt: string; completedAt: string | null; steps: ProgressStep[] };
 type Contact = { id: string; firstName: string; lastName: string; email?: string; status: "member" | "visitor"; importedFrom?: string };
 type Audit = { id: string; actorUserId: string | null; action: string; flowId: string | null; enrollmentId: string | null; stepId: string | null; metadata: Record<string, unknown>; createdAt: string };
+function dueLabel(language: ModuleContext["language"], date: string) {
+  const label: Record<ModuleContext["language"], string> = {
+    en: `Due ${date}`, de: `Fällig am ${date}`, fr: `Échéance : ${date}`, it: `Scadenza: ${date}`,
+  };
+  return label[language];
+}
+function assignmentSummary(language: ModuleContext["language"], created: number, skipped: number) {
+  const label: Record<ModuleContext["language"], (created: number, skipped: number) => string> = {
+    en: (created, skipped) => `People assigned: ${created}; already active: ${skipped}.`,
+    de: (created, skipped) => `Zugewiesene Personen: ${created}; bereits aktiv: ${skipped}.`,
+    fr: (created, skipped) => `Personnes attribuées : ${created} ; déjà actives : ${skipped}.`,
+    it: (created, skipped) => `Persone assegnate: ${created}; già attive: ${skipped}.`,
+  };
+  return label[language](created, skipped);
+}
+
 
 function statusLabel(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
 function auditLabel(action: string) {
@@ -136,7 +152,7 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
     await run(async () => {
       const result = await api(`/api/people-flows/${selectedFlow.id}/assignments`, "POST", { contactIds: selectedContacts, dueOn: assignmentDueOn || null }) as { created: number; skipped: number };
       setSelectedContacts([]); setAssignmentDueOn("");
-      setFeedback(`Assigned ${result.created} people; ${result.skipped} already active.`);
+      setFeedback(assignmentSummary(language, result.created, result.skipped));
     }, "Assignments updated.");
   }
 
@@ -214,11 +230,11 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
               <button className="button button-primary" type="submit" disabled={busy || selectedContacts.length === 0}><Users size={15} />Assign selected</button>
             </form>}
             {assignments.length === 0 ? <p className="people-flows-empty">No assignments yet.</p> : <div className="people-flows-assignments">{assignments.map((assignment) => <article className="people-flows-assignment" key={assignment.id}>
-              <div className="people-flows-section-heading"><div><h3>{assignment.contactName}</h3><p>{statusLabel(assignment.status)} · {assignment.dueOn ? `Due ${assignment.dueOn}` : "No overall due date"}</p></div>
+              <div className="people-flows-section-heading"><div><h3>{assignment.contactName}</h3><p>{statusLabel(assignment.status)} · {assignment.dueOn ? dueLabel(language, assignment.dueOn) : "No overall due date"}</p></div>
                 {assignment.status === "active" ? <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "completed")} disabled={busy}>Complete workflow</button> : <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "active")} disabled={busy}>Reopen</button>}
                 {assignment.status === "active" && <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "cancelled")} disabled={busy}>Cancel</button>}
               </div>
-              <div className="people-flows-progress">{assignment.steps.map((step) => <div className="people-flows-progress-step" key={step.stepId}><label><input type="checkbox" checked={step.status === "completed"} disabled={busy || assignment.status !== "active"} onChange={(event) => void setStepStatus(assignment, step, event.target.checked ? "completed" : "pending")} /><span><strong>{step.title}</strong><small>{!step.active ? "Archived step" : step.required ? "Required" : "Optional"} · {step.dueOn ? `Due ${step.dueOn}` : "No due date"}{step.status === "skipped" ? " · Skipped" : ""}</small></span></label></div>)}</div>
+              <div className="people-flows-progress">{assignment.steps.map((step) => <div className="people-flows-progress-step" key={step.stepId}><label><input type="checkbox" checked={step.status === "completed"} disabled={busy || assignment.status !== "active"} onChange={(event) => void setStepStatus(assignment, step, event.target.checked ? "completed" : "pending")} /><span><strong>{step.title}</strong><small>{!step.active ? "Archived step" : step.required ? "Required" : "Optional"} · {step.dueOn ? dueLabel(language, step.dueOn) : "No due date"}{step.status === "skipped" ? " · Skipped" : ""}</small></span></label></div>)}</div>
             </article>)}</div>}
           </section>
 
