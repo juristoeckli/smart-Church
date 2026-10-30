@@ -181,13 +181,25 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       const membershipIdsResult = await client.query<{ user_id: string }>("SELECT user_id FROM department_memberships WHERE department_id=$1", [targetDepartmentId]);
       const previousUsers = membershipIdsResult.rows.map((row) => row.user_id);
       const usersBeingReplaced = previousUsers.filter((userId) => !localServerAdminIds.has(userId));
+      const removedFromSiteUsers = usersBeingReplaced.filter((userId) => !replicatedUserIds.has(userId));
+      const usersWithOtherMemberships = new Set((await client.query<{ user_id: string }>(
+        "SELECT DISTINCT user_id FROM department_memberships WHERE user_id=ANY($1::uuid[]) AND department_id<>$2",
+        [removedFromSiteUsers, targetDepartmentId],
+      )).rows.map((row) => row.user_id));
+      const orphanedSiteUsers = removedFromSiteUsers.filter((userId) => !usersWithOtherMemberships.has(userId));
+      // Phone numbers and relationships belong to accounts, not locations.
+      // Replace phone data for replicated accounts, and clear stale accounts
+      // only when they are not still used by another local location.
+      const usersWithReplicatedPhones = [...new Set([...replicatedUserIds, ...orphanedSiteUsers])];
       // Module activation is server-local: some modules depend on hardware or
       // services reachable only from one installation. Replicate the site's
       // identity and schedule timezone without enabling source modules here.
       await client.query("UPDATE departments SET name=$2,time_zone=$3 WHERE id=$1", [targetDepartmentId, snapshot.department.name, snapshot.department.time_zone]);
       for (const query of deleteQueries) await client.query(query, [targetDepartmentId]);
-      await client.query("DELETE FROM user_relationships WHERE user_id=ANY($1::uuid[]) OR related_user_id=ANY($1::uuid[])", [usersBeingReplaced]);
-      await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersBeingReplaced]);
+      await client.query(`DELETE FROM user_relationships
+        WHERE (user_id=ANY($1::uuid[]) AND related_user_id=ANY($1::uuid[]))
+           OR user_id=ANY($2::uuid[]) OR related_user_id=ANY($2::uuid[])`, [[...replicatedUserIds], orphanedSiteUsers]);
+      await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersWithReplicatedPhones]);
 
       const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "worship_songs", "worship_song_arrangements", "service_plan_templates", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "event_registrations"];
       const upsertQueries: Partial<Record<SnapshotTable, string>> = {
