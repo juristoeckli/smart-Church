@@ -2240,8 +2240,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           let action = "create"; let start: string | null = null; let end: string | null = null;
           try {
             if (!event.title.trim() || (!event.is_all_day && !event.end_time)) throw new Error("An event needs a title, start time, and end time to export.");
-            start = event.is_all_day ? `${event.event_date} 00:00:00` : localEventTimeToUtc(event.event_date, event.start_time.slice(0, 5), timeZone);
-            end = event.is_all_day ? `${shiftDate(event.event_date, 1)} 00:00:00` : localEventTimeToUtc(event.event_date, event.end_time!.slice(0, 5), timeZone);
+            start = event.is_all_day ? localEventTimeToUtc(event.event_date, "00:00", timeZone) : localEventTimeToUtc(event.event_date, event.start_time.slice(0, 5), timeZone);
+            end = event.is_all_day ? localEventTimeToUtc(shiftDate(event.event_date, 1), "00:00", timeZone) : localEventTimeToUtc(event.event_date, event.end_time!.slice(0, 5), timeZone);
             if (end <= start) throw new Error("The event end time must be later than its start time.");
             if (linkedRemoteId && !remote) action = "review_missing_remote";
             else if (remote) action = "update";
