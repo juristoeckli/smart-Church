@@ -988,10 +988,10 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
        JOIN department_self_signup_settings settings ON settings.department_id=department.id AND settings.enabled=true
       WHERE department.installation_id=(SELECT id FROM installations WHERE is_current=true) ORDER BY department.name`,
   );
-  const selfSignupSites: Array<{ id: string; name: string }> = [];
-  for (const site of signupCandidates.rows) {
-    if (await emailConnector.isConfigured(site.id)) selfSignupSites.push(site);
-  }
+  const signupAvailability = await Promise.all(signupCandidates.rows.map(async (site) =>
+    await emailConnector.isConfigured(site.id) ? site : null,
+  ));
+  const selfSignupSites = signupAvailability.filter((site): site is { id: string; name: string } => site !== null);
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
