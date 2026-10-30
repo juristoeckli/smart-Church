@@ -160,6 +160,10 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
       const updateCount = previewRows.filter((row) => row.action === "update").length;
       const alreadyLinkedCount = previewRows.filter((row) => row.action === "already_linked").length;
       const reviewCount = previewRows.length - importCount - updateCount - alreadyLinkedCount;
+      await pool!.query(
+        "INSERT INTO elvanto_sync_audit(department_id,area,action,outcome,details) VALUES($1,'songs','preview','success',$2::jsonb)",
+        [departmentId, JSON.stringify({ total: previewRows.length, create: importCount, update: updateCount, alreadyLinked: alreadyLinkedCount, review: reviewCount })],
+      ).catch(() => {});
       return { previewId, total: previewRows.length, importCount, updateCount, alreadyLinkedCount, reviewCount, expiresAt, sample: previewRows.slice(0, 50).map(({ sourceId, title, action }) => ({ sourceId, title, action })) };
     });
 
@@ -210,6 +214,7 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
         if (resolution === "keep_local" && !row.linked) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Keep local is available only for a song already linked to Elvanto." }); }
         row.resolution = resolution;
         await client.query("UPDATE elvanto_worship_song_import_previews SET rows=$2::jsonb,updated_at=now() WHERE department_id=$1", [departmentId, JSON.stringify(rows)]);
+        await client.query("INSERT INTO elvanto_sync_audit(department_id,area,action,outcome,details) VALUES($1,'songs','conflict_resolution','success',$2::jsonb)", [departmentId, JSON.stringify({ resolution })]);
         await client.query("COMMIT");
         return { sourceId: row.sourceId, resolution: row.resolution };
       } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -396,6 +401,7 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
           "UPDATE elvanto_worship_song_import_previews SET rows=$2::jsonb,cursor=$3,created_count=$4,updated_count=$5,skipped_count=$6,review_count=$7,updated_at=now() WHERE department_id=$1",
           [departmentId, JSON.stringify(previewRows), cursor, createdCount, updatedCount, skippedCount, reviewCount],
         );
+        await client.query("INSERT INTO elvanto_sync_audit(department_id,area,action,outcome,details) VALUES($1,'songs','import',$2,$3::jsonb)", [departmentId, cursor >= previewRows.length ? "complete" : "success", JSON.stringify({ processed, created: createdCount - Number(preview.created_count), updated: updatedCount - Number(preview.updated_count), skipped: skippedCount - Number(preview.skipped_count), review: reviewCount - Number(preview.review_count), complete: cursor >= previewRows.length })]);
         await client.query("COMMIT");
         return { import: { cursor, total: previewRows.length, created: createdCount, updated: updatedCount, skipped: skippedCount, review: reviewCount, complete, processedThisBatch: processed } };
       } catch (error) {

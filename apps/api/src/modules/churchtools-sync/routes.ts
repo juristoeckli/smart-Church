@@ -798,11 +798,36 @@ function mapEvents(events: JsonObject[], timeZone = "Europe/Zurich") {
 
 export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = deps;
+  const auditDepartments = new WeakMap<FastifyRequest, string>();
   registerChurchToolsSyncReplication(deps);
   app.register(async (routes) => {
+    routes.addHook("onResponse", async (request, reply) => {
+      if (!pool || !isDatabaseReady()) return;
+      const departmentId = auditDepartments.get(request);
+      const route = request.routeOptions.url;
+      if (!departmentId || !route) return;
+      const match = route.match(/^\/api\/modules\/sync\/elvanto\/(people-flows|people|groups|services|songs|calendar|financial)(?:-(.*))?$/);
+      if (!match) return;
+      const slug = match[1];
+      const suffix = match[2] ?? "";
+      const area = slug === "people-flows" ? "peopleFlows" : slug;
+      const action = suffix.includes("resolve") ? "conflict_resolution"
+        : suffix.endsWith("preview") ? "preview"
+          : suffix.endsWith("import") ? "import"
+            : suffix.endsWith("export") ? "export" : null;
+      if (!action) return;
+      // People incremental sync and Services already write richer transactional audit rows.
+      if ((slug === "people" && suffix.startsWith("incremental-")) || (slug === "services" && (suffix === "preview" || suffix === "import"))) return;
+      await recordElvantoAudit(pool, departmentId, area, action, reply.statusCode >= 200 && reply.statusCode < 300 ? "success" : "failed", {
+        endpoint: route,
+        httpStatus: reply.statusCode,
+      }).catch(() => {});
+    });
     async function department(request: FastifyRequest, reply: FastifyReply, manage = false) {
       if (!pool || !isDatabaseReady()) { reply.code(503).send({ error: "The database is unavailable." }); return null; }
-      return resolveDepartmentId(request, reply, manage);
+      const departmentId = await resolveDepartmentId(request, reply, manage);
+      if (departmentId) auditDepartments.set(request, departmentId);
+      return departmentId;
     }
     async function settings(departmentId: string) {
       const result = await pool!.query<Settings>("SELECT department_id,instance_url,encrypted_login_token,enabled FROM churchtools_sync_settings WHERE department_id=$1", [departmentId]);
