@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Check, Download, File, FileAudio, FileImage, FileText, FileVideo, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
-import type { StoredFile } from "@smart-church/contracts";
-import type { ModuleRealtime } from "../../module-registry";
+import type { StoredFile, UserLanguage } from "@smart-church/contracts";
+import { moduleTranslation, type ModuleRealtime } from "../../module-registry";
+import { translationsForModule } from "../translations";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 
 const maxResourceSize = 25 * 1024 * 1024;
+const fileStorageTranslations = mergeModuleTranslationOverrides("file-storage", translationsForModule("file-storage"));
 
 function resourceIcon(type: string) {
   if (type.startsWith("image/")) return FileImage;
@@ -18,7 +21,8 @@ function formatSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function FileStorageModule({ departmentId, csrfToken, canManage, realtime }: { departmentId: string; csrfToken: string; canManage: boolean; realtime?: ModuleRealtime }) {
+export function FileStorageModule({ departmentId, csrfToken, canManage, language, realtime }: { departmentId: string; csrfToken: string; canManage: boolean; language: UserLanguage; realtime?: ModuleRealtime }) {
+  const t = (key: string) => moduleTranslation(fileStorageTranslations, language, key);
   const fileInput = useRef<HTMLInputElement>(null);
   const [resources, setResources] = useState<StoredFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -102,7 +106,7 @@ export function FileStorageModule({ departmentId, csrfToken, canManage, realtime
   }
 
   async function deleteResource(resource: StoredFile) {
-    if (!window.confirm(`Delete “${resource.title}” and its file? This cannot be undone.`)) return;
+    if (!window.confirm(t("Delete “{title}” and its file? This cannot be undone.").replace("{title}", resource.title))) return;
     try {
       const response = await fetch(`/api/files/${resource.id}`, { method: "DELETE", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken } });
       const result = await response.json() as { error?: string };
@@ -114,9 +118,9 @@ export function FileStorageModule({ departmentId, csrfToken, canManage, realtime
   return <>
     <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || "Shared files for your church community"}{error && <button className="event-retry" type="button" onClick={() => void loadResources()}>Try again</button>}</div>
     <section className="page-heading"><div><div className="eyebrow">SHARED MATERIALS</div><h1>File storage</h1><p className="page-subtitle">Keep forms, guides, recordings, and other church files easy to find.</p></div>{canManage && <button className="button button-primary" type="button" onClick={openUpload}><Upload size={16} /> Add file</button>}</section>
-    <section className="directory-card community-resource-card"><div className="directory-heading"><div><h2>Church files</h2><p>{resources.length} {resources.length === 1 ? "file" : "files"} · Up to 25 MiB per file</p></div></div>
-      <div className="directory-toolbar community-resource-toolbar"><label className="search-field"><Search size={15} /><input aria-label="Search files" placeholder="Search files…" value={query} onChange={(event) => setQuery(event.target.value)} /></label><label className="community-category-filter"><span className="sr-only">Filter by category</span><select aria-label="Filter files by category" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>{categories.map((item) => <option key={item}>{item}</option>)}</select></label></div>
-      {loading ? <p className="community-empty">Loading files…</p> : filtered.length ? <div className="community-resource-list">{filtered.map((resource) => { const Icon = resourceIcon(resource.contentType); return <article className="community-resource-row" key={resource.id}><span className="community-resource-icon"><Icon size={19} /></span><div className="community-resource-title"><strong>{resource.title}</strong><small>{resource.category} · {resource.fileName} · {formatSize(resource.fileSize)}</small></div><button className="community-row-action" type="button" aria-label={`Download ${resource.title}`} title="Download" onClick={() => void downloadResource(resource)}><Download size={16} /></button>{canManage && <><button className="community-row-action" type="button" aria-label={`Edit ${resource.title}`} title="Edit" onClick={() => openEdit(resource)}><Pencil size={15} /></button><button className="community-row-action community-row-delete" type="button" aria-label={`Delete ${resource.title}`} title="Delete" onClick={() => void deleteResource(resource)}><Trash2 size={15} /></button></>}</article>; })}</div> : <p className="community-empty">{resources.length ? "No files match your search." : "No shared files yet. Add a file to start file storage."}</p>}
+    <section className="directory-card community-resource-card"><div className="directory-heading"><div><h2>Church files</h2><p>{resources.length} {resources.length === 1 ? t("file") : t("files")} · {t("· Up to 25 MiB per file")}</p></div></div>
+      <div className="directory-toolbar community-resource-toolbar"><label className="search-field"><Search size={15} /><input aria-label="Search files" placeholder="Search files…" value={query} onChange={(event) => setQuery(event.target.value)} /></label><label className="community-category-filter"><span className="sr-only">Filter by category</span><select aria-label="Filter files by category" value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>{categories.map((item) => <option key={item} value={item}>{t(item)}</option>)}</select></label></div>
+      {loading ? <p className="community-empty">Loading files…</p> : filtered.length ? <div className="community-resource-list">{filtered.map((resource) => { const Icon = resourceIcon(resource.contentType); return <article className="community-resource-row" key={resource.id}><span className="community-resource-icon"><Icon size={19} /></span><div className="community-resource-title"><strong>{resource.title}</strong><small>{resource.category} · {resource.fileName} · {formatSize(resource.fileSize)}</small></div><button className="community-row-action" type="button" aria-label={`${t("Download")} ${resource.title}`} title="Download" onClick={() => void downloadResource(resource)}><Download size={16} /></button>{canManage && <><button className="community-row-action" type="button" aria-label={`${t("Edit")} ${resource.title}`} title="Edit" onClick={() => openEdit(resource)}><Pencil size={15} /></button><button className="community-row-action community-row-delete" type="button" aria-label={`${t("Delete")} ${resource.title}`} title="Delete" onClick={() => void deleteResource(resource)}><Trash2 size={15} /></button></>}</article>; })}</div> : <p className="community-empty">{resources.length ? "No files match your search." : "No shared files yet. Add a file to start file storage."}</p>}
     </section>
     <footer className="page-footer"><span>Useful things, ready when you need them.</span><span>© 2026 Smart Church</span></footer>
     <input ref={fileInput} className="sr-only" type="file" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (!file) return; if (file.size > maxResourceSize) { setError("Files must be 25 MiB or smaller."); event.currentTarget.value = ""; return; } setSelectedFile(file); setTitle(file.name.replace(/\.[^.]+$/, "")); setCategory("General"); setEditing(null); setError(""); }} />
