@@ -2101,7 +2101,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           remoteGroups.push(...batch);
           const reported = Number((payload.groups as JsonObject | undefined)?.total);
           if (Number.isFinite(reported) && reported >= 0) reportedTotal = reported;
-          if (reportedTotal !== null && remoteGroups.length >= reportedTotal || batch.length < 1000) { complete = true; break; }
+          if (reportedTotal !== null) {
+            if (remoteGroups.length >= reportedTotal) { complete = true; break; }
+          } else if (batch.length < 1000) { complete = true; break; }
         }
         if (!complete || remoteGroups.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto Groups list. No export preview was saved." });
         const localResult = await pool!.query<{ id: string; name: string; elvanto_source_id: string | null; contact_id: string | null; person_source_id: string | null; role: string | null; status: string | null }>(
@@ -2256,7 +2258,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const reported = Number((payload.groups as JsonObject | undefined)?.total);
         if (Number.isFinite(reported) && reported >= 0) total = reported;
         if (total !== null && groups.length >= total) { complete = true; break; }
-        if (batch.length < 1000) { complete = true; break; }
+        if (total === null && batch.length < 1000) { complete = true; break; }
       }
       const [existingGroups, linkedPeople] = await Promise.all([
         pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string; description: string | null }>("SELECT id,source_id,elvanto_source_id,source_system,name,description FROM church_groups WHERE department_id=$1", [dept]),
@@ -2520,7 +2522,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const batch = elvantoCollection(payload, "services", "service"); services.push(...batch);
         const reported = Number((payload.services as JsonObject | undefined)?.total);
         if (Number.isFinite(reported) && reported >= 0) total = reported;
-        if (batch.length < 1000 || total !== null && page * 1000 >= total) { complete = true; break; }
+        if (total !== null && services.length >= total) { complete = true; break; }
+        if (total === null && batch.length < 1000) { complete = true; break; }
       }
       const [local, contacts] = await Promise.all([
         pool!.query<{ source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[] }>("SELECT source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room,positions,time_plan FROM service_events WHERE department_id=$1", [dept]),
@@ -2529,6 +2532,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const events = services.flatMap((service) => mapElvantoServices(service, new Map(contacts.rows.map((person) => [person.source_id, person.id]))));
       const bySource = new Map(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
       const sourceIds = [...new Set(events.map((event) => event.sourceId).filter(Boolean))];
+      const remoteServiceSourceIds = new Set(services.flatMap((service) => {
+        const serviceId = idOf(service);
+        if (!serviceId) return [];
+        const times = elvantoServiceTimes(service);
+        const occurrences: JsonObject[] = times.length ? times : [{ id: "default" }];
+        return occurrences.map((time) => `${serviceId}:${String(time.id ?? time.time_id ?? "default")}`);
+      }));
+      const linkedServiceSourceIds = new Set(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id && !event.source_id.startsWith("calendar:")).map((event) => event.source_id!));
+      const missingRemoteCount = complete ? [...linkedServiceSourceIds].filter((sourceId) => !remoteServiceSourceIds.has(sourceId)).length : 0;
       const stateRows = sourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null }>("SELECT source_id,baseline FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND source_id=ANY($2::text[])", [dept, sourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null }> };
       const stateBySource = new Map(stateRows.rows.map((state) => [state.source_id, state]));
       const byTitleDate = new Set(local.rows.map((event) => `${event.event_date}|${event.title.trim().toLocaleLowerCase()}`));
@@ -2582,8 +2594,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         for (const baseline of seedBaselines) await pool!.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'services',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=COALESCE(elvanto_event_sync_state.baseline,EXCLUDED.baseline),updated_at=now()", [dept, baseline.sourceId, JSON.stringify(baseline.snapshot)]);
         for (const conflict of localConflicts) await pool!.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,pending_preview_at,pending_local,pending_remote,pending_remote_hash,resolution,updated_at) VALUES($1,'services',$2,$3,$4::jsonb,$5::jsonb,$6,NULL,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET pending_preview_at=EXCLUDED.pending_preview_at,pending_local=EXCLUDED.pending_local,pending_remote=EXCLUDED.pending_remote,pending_remote_hash=EXCLUDED.pending_remote_hash,resolution=NULL,updated_at=now()", [dept, conflict.sourceId, previewAt, JSON.stringify(conflict.local), JSON.stringify(conflict.remote), elvantoServiceSnapshotHash(conflict.remote)]);
       }
-      await recordElvantoAudit(pool!, dept, "services", "preview", complete ? "complete" : "incomplete", { scanned: events.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, conflicts: conflictCount + localConflictCount, invalid: invalidCount, assignmentCreate: assignmentCreateCount, assignmentChange: assignmentChangeCount, missingPeopleLinks: missingPeopleLinkCount });
-      return { scannedCount: events.length, reportedTotal: total, complete, createCount, updateCount, alreadyLinkedCount, conflictCount, localConflictCount, invalidCount, assignmentCreateCount, assignmentChangeCount, missingPeopleLinkCount, previewAt: previewAt ? new Date(previewAt).toISOString() : null, sample };
+      await recordElvantoAudit(pool!, dept, "services", "preview", complete ? "complete" : "incomplete", { scanned: events.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, missingRemote: missingRemoteCount, conflicts: conflictCount + localConflictCount, invalid: invalidCount, assignmentCreate: assignmentCreateCount, assignmentChange: assignmentChangeCount, missingPeopleLinks: missingPeopleLinkCount });
+      return { scannedCount: events.length, reportedTotal: total, complete, createCount, updateCount, alreadyLinkedCount, missingRemoteCount, conflictCount, localConflictCount, invalidCount, assignmentCreateCount, assignmentChangeCount, missingPeopleLinkCount, previewAt: previewAt ? new Date(previewAt).toISOString() : null, sample };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/services-conflicts", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 50 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
