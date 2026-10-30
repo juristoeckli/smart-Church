@@ -83,7 +83,12 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
         ...current,
         peers: current.peers.map((peer) => {
           const channel = statuses.get(peer.installation_id);
-          return channel ? { ...peer, channels: { inbound: channel.inbound, outbound: channel.outbound, outboundError: channel.outboundError } } : peer;
+          return {
+            ...peer,
+            channels: channel
+              ? { inbound: channel.inbound, outbound: channel.outbound, outboundError: channel.outboundError }
+              : { inbound: false, outbound: false, outboundError: null },
+          };
         }),
       } : current);
     } catch { /* Keep the last known state until the next poll. */ }
