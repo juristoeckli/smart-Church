@@ -128,6 +128,43 @@ export async function installSiteWriteFenceTriggers(pool: Pool) {
     END LOOP;
   END
   $fence$`);
+  const relatedFence = await pool.query<{ installed: boolean }>("SELECT to_regprocedure('public.enforce_related_site_write_fence()') IS NOT NULL AS installed");
+  if (!relatedFence.rows[0]?.installed) return;
+  await pool.query(`DO $related_fence$
+  DECLARE
+    relation_record RECORD;
+    trigger_name TEXT;
+  BEGIN
+    FOR relation_record IN
+      SELECT constraint_row.conname AS constraint_name,
+             child.relname AS child_table,
+             child_column.attname AS child_column,
+             parent.relname AS parent_table,
+             parent_column.attname AS parent_column
+        FROM pg_constraint constraint_row
+        JOIN pg_class child ON child.oid=constraint_row.conrelid
+        JOIN pg_namespace child_ns ON child_ns.oid=child.relnamespace
+        JOIN pg_class parent ON parent.oid=constraint_row.confrelid
+        JOIN pg_namespace parent_ns ON parent_ns.oid=parent.relnamespace
+        JOIN pg_attribute child_column ON child_column.attrelid=child.oid AND child_column.attnum=constraint_row.conkey[1]
+        JOIN pg_attribute parent_column ON parent_column.attrelid=parent.oid AND parent_column.attnum=constraint_row.confkey[1]
+       WHERE constraint_row.contype='f'
+         AND cardinality(constraint_row.conkey)=1
+         AND cardinality(constraint_row.confkey)=1
+         AND child_ns.nspname='public'
+         AND parent_ns.nspname='public'
+         AND child_column.atttypid='uuid'::regtype
+         AND parent_column.atttypid='uuid'::regtype
+         AND child.relname NOT LIKE 'sync_%'
+         AND EXISTS (SELECT 1 FROM pg_attribute column_row WHERE column_row.attrelid=parent.oid AND column_row.attname='department_id' AND NOT column_row.attisdropped)
+    LOOP
+      trigger_name := left('smart_church_related_write_fence_' || md5(relation_record.constraint_name), 63);
+      EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', trigger_name, relation_record.child_table);
+      EXECUTE format('CREATE TRIGGER %I BEFORE INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.enforce_related_site_write_fence(%L,%L,%L)',
+        trigger_name, relation_record.child_table, relation_record.child_column, relation_record.parent_table, relation_record.parent_column);
+    END LOOP;
+  END
+  $related_fence$`);
 }
 
 export function getRequiredServerModuleIds() {
