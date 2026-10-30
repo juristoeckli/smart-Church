@@ -233,7 +233,7 @@ async function remoteIdentity(baseUrl: string, trustedPeer?: RemotePeerAddress, 
   return remote;
 }
 
-async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, method: string, path: string, body = "", timeoutMs = 12_000, allowBootstrapHttp = false) {
+async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, method: string, path: string, body = "", timeoutMs = 12_000) {
   const timestamp = String(Date.now());
   const nonce = randomBytes(24).toString("base64url");
   const headers: Record<string, string> = {
@@ -245,16 +245,27 @@ async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited
     "x-sc-signature": signBytes(identity.privateKeyPem, canonicalRequest(method, path, timestamp, nonce, body)),
   };
   if (body) headers["content-type"] = "application/json";
-  if (allowBootstrapHttp) {
-    if (path !== `${prefix}/status`) throw new Error("HTTPS is reserved for Sync peer trust bootstrap; operational Sync requests must use the federation WebSocket.");
-    if (!peer.base_url) throw new Error("This peer has no reachable HTTPS address for trust bootstrap.");
-    const response = await fetch(`${peer.base_url}${path}`, { method, headers, ...(body ? { body } : {}), signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
-    return readRemoteJson<T>(response, peer.public_key_pem, nonce);
-  }
   if (!activeFederationChannels) throw new Error("The authenticated federation WebSocket service is not ready.");
   const tunneled = await activeFederationChannels.request(peer, method, path, headers, body, timeoutMs);
   const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
   return readRemoteJson<T>(response, peer.public_key_pem, nonce);
+}
+
+async function bootstrapRemoteStatus(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, timeoutMs = 12_000) {
+  if (!peer.base_url) throw new Error("This peer has no reachable HTTPS address for trust bootstrap.");
+  const path = `${prefix}/status`;
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(24).toString("base64url");
+  const headers = {
+    accept: "application/json",
+    "x-sc-protocol": protocolVersion,
+    "x-sc-installation": identity.installationId,
+    "x-sc-timestamp": timestamp,
+    "x-sc-nonce": nonce,
+    "x-sc-signature": signBytes(identity.privateKeyPem, canonicalRequest("GET", path, timestamp, nonce, "")),
+  };
+  const response = await fetch(`${peer.base_url}${path}`, { method: "GET", headers, signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
+  return readRemoteJson<{ installationId: string; peerInstallationId: string; peerTrustState: string; peerFingerprint: string; protocolVersion: string }>(response, peer.public_key_pem, nonce);
 }
 
 async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, path: string, body: string, timeoutMs = 300_000) {
@@ -1750,7 +1761,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (peer.trust_state !== "trusted" && !peer.base_url) return reply.code(409).send({ error: "This pending peer has no reachable HTTPS address for trust bootstrap." });
     try {
       const identity = await getIdentity(pool, siteName);
-      const status = await signedRemoteRequest<{ installationId: string; peerInstallationId: string; peerTrustState: string; peerFingerprint: string; protocolVersion: string }>(peer, identity, "GET", `${prefix}/status`, "", 12_000, peer.trust_state !== "trusted");
+      const status = peer.trust_state === "trusted"
+        ? await signedRemoteRequest<{ installationId: string; peerInstallationId: string; peerTrustState: string; peerFingerprint: string; protocolVersion: string }>(peer, identity, "GET", `${prefix}/status`)
+        : await bootstrapRemoteStatus(peer, identity);
       if (status.installationId !== peer.installation_id || status.peerInstallationId !== identity.installationId || status.peerFingerprint !== identity.fingerprint || status.protocolVersion !== protocolVersion) throw new Error("The remote server returned a status for a different peer identity.");
       return { reachable: true, remoteTrustState: status.peerTrustState };
     } catch (error) {
@@ -1769,7 +1782,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!peer.base_url) return reply.code(409).send({ error: "This outgoing peer has no reachable address. Re-pair it with a valid HTTPS server URL." });
       try {
         const identity = await getIdentity(pool, siteName);
-        const status = await signedRemoteRequest<{ peerTrustState: string }>(peer, identity, "GET", `${prefix}/status`, "", 12_000, true);
+        const status = await bootstrapRemoteStatus(peer, identity);
         if (status.peerTrustState !== "trusted") return reply.code(409).send({ error: "The remote Server Administrator has not approved this installation yet." });
       } catch { return reply.code(502).send({ error: "Could not verify that the remote administrator approved this installation. Try again later." }); }
     }
