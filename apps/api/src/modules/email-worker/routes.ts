@@ -63,7 +63,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           JOIN installations installation ON installation.id=department.installation_id AND installation.is_current=TRUE
           WHERE department.installation_id=(SELECT installation_id FROM departments WHERE id=$1)
             AND department.id<>$1`, [departmentId]);
-        if (Number(otherSites.rows[0]?.count ?? 0) > 0) blockers.push("Email settings and self-sign-up requests are installation-wide and would replace data used by other locations. Make Email Delivery data location-scoped before enabling redundancy for multiple locations.");
+        const hasInstallationWideState = snapshot.emailSettings.length > 0 || snapshot.selfSignupSettings.length > 0 || snapshot.selfSignupRequests.length > 0;
+        if (Number(otherSites.rows[0]?.count ?? 0) > 0 && hasInstallationWideState) blockers.push("Email settings and self-sign-up requests are installation-wide and would replace data used by other locations. Make Email Delivery data location-scoped before enabling redundancy for multiple locations.");
         const installation = await context.pool.query<{ enabled: boolean }>("SELECT COALESCE((SELECT enabled FROM installation_email_settings WHERE installation_id=(SELECT installation_id FROM departments WHERE id=$1)),false) AS enabled", [departmentId]);
         if (installation.rows[0]?.enabled && !await context.email.isConfigured()) blockers.push("Email delivery is enabled but credentials are unavailable on this server; reconfigure them locally before promotion.");
         const encryptedPassword = snapshot.emailSettings[0]?.encrypted_smtp_password;
