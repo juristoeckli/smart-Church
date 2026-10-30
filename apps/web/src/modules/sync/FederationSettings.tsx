@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Check, Copy, Link2, Plus, RefreshCw, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
+import { getActiveLanguage } from "../../i18n";
+import { translateModuleText } from "../../module-registry";
+import { translationsForModule } from "../translations";
 
 type FederationIdentity = { installationId: string; displayName: string; publicKeyPem: string; fingerprint: string; protocolVersion: string };
 type Peer = { installation_id: string; display_name: string; base_url: string | null; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; created_at: string; approved_at: string | null; last_seen_at: string | null; last_error: string | null; channels?: { inbound: boolean; outbound: boolean; outboundError?: string | null } };
@@ -15,6 +18,8 @@ type RedundancyPeerSite = { id: string; name: string; time_zone: string; role: s
 const availableScopes = [{ id: "people_names", label: "People names", detail: "Names and member/visitor status only. No contact details or login data." }, { id: "services", label: "Services & events", detail: "Schedule details only. No attendance, registrations, or assignments." }];
 
 export function FederationSettings({ csrfToken, departmentId }: { csrfToken: string; departmentId: string }) {
+  const language = getActiveLanguage();
+  const tr = (value: string) => translateModuleText(value, translationsForModule("sync"), language);
   const [settings, setSettings] = useState<PeerSettings | null>(null);
   const [shares, setShares] = useState<Share[]>([]);
   const [subscriptions, setSubscriptions] = useState<Subscription[]>([]);
@@ -121,7 +126,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
 
   async function configureStandby() {
     if (!redundancyPeerId || !redundancyPeerSiteId) return;
-    if (!window.confirm("The next primary snapshot will replace this location's existing data. Continue?")) return;
+    if (!window.confirm(tr("The next primary snapshot will replace this location's existing data. Continue?"))) return;
     setBusy("redundancy-standby"); setError(""); setFeedback("");
     try {
       await request("/api/modules/sync/federation/redundancy/standby", "POST", { sourceInstallationId: redundancyPeerId, sourceDepartmentId: redundancyPeerSiteId, replaceExistingData: true });
@@ -142,7 +147,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
 
   async function requestOutboundStandby() {
     if (!redundancyPeerId || !redundancyPeerSiteId) return;
-    if (!window.confirm("This local site's data will be replaced by the selected primary's full snapshot after its administrator approves the request. Continue?")) return;
+    if (!window.confirm(tr("This local site's data will be replaced by the selected primary's full snapshot after its administrator approves the request. Continue?"))) return;
     setBusy("redundancy-pull-request"); setError(""); setFeedback("");
     try {
       const result = await request<{ requestState: string; role: string }>("/api/modules/sync/federation/redundancy/request-pull-standby", "POST", { peerInstallationId: redundancyPeerId, sourceDepartmentId: redundancyPeerSiteId, replaceExistingData: true });
@@ -152,7 +157,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   }
 
   async function reviewStandbyRequest(item: RedundancyReadiness["pendingStandbyRequests"][number], decision: "approve" | "reject") {
-    if (decision === "approve" && !window.confirm(`Approve ${item.sourceServerName} · ${item.sourceDepartmentName} as this site's primary? Its next verified snapshot will replace this site's replicated data.`)) return;
+    if (decision === "approve" && !window.confirm(tr(`Approve ${item.sourceServerName} · ${item.sourceDepartmentName} as this site's primary? Its next verified snapshot will replace this site's replicated data.`))) return;
     setBusy(`standby-request:${item.id}`); setError(""); setFeedback("");
     try {
       await request(`/api/modules/sync/federation/redundancy/standby-requests/${item.id}/review`, "POST", { decision, confirmReplace: decision === "approve" });
@@ -162,7 +167,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   }
 
   async function reviewPullStandbyRequest(item: RedundancyReadiness["pendingPullRequests"][number], decision: "approve" | "reject") {
-    if (decision === "approve" && !window.confirm(`Approve ${item.targetServerName} · ${item.targetDepartmentName} to pull complete snapshots of this site's data?`)) return;
+    if (decision === "approve" && !window.confirm(tr(`Approve ${item.targetServerName} · ${item.targetDepartmentName} to pull complete snapshots of this site's data?`))) return;
     setBusy(`pull-standby-request:${item.id}`); setError(""); setFeedback("");
     try {
       await request(`/api/modules/sync/federation/redundancy/pull-standby-requests/${item.id}/review`, "POST", { decision, confirmReplace: decision === "approve" });
@@ -182,7 +187,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   }
 
   async function fenceCurrentPrimary() {
-    if (!window.confirm("This immediately makes this location read-only. Confirm the old primary has also been blocked from serving traffic or writes outside this app.")) return;
+    if (!window.confirm(tr("This immediately makes this location read-only. Confirm the old primary has also been blocked from serving traffic or writes outside this app."))) return;
     setBusy("redundancy-fence"); setError(""); setFeedback("");
     try {
       await request("/api/modules/sync/federation/redundancy/fence", "POST", { note: fencingNote });
@@ -193,7 +198,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
 
   async function promoteStandby() {
     if (!redundancyReadiness?.upstreamInstallationId) return;
-    if (!window.confirm("Promotion enables writes on this server. Confirm the old primary has been externally fenced. Changes made there after the last snapshot may be missing.")) return;
+    if (!window.confirm(tr("Promotion enables writes on this server. Confirm the old primary has been externally fenced. Changes made there after the last snapshot may be missing."))) return;
     setBusy("redundancy-promote"); setError(""); setFeedback("");
     try {
       const result = await request<{ epoch: string }>("/api/modules/sync/federation/redundancy/promote", "POST", { fencedInstallationId: redundancyReadiness.upstreamInstallationId, fencingNote: promotionNote, confirmSnapshotDataLoss });
@@ -266,7 +271,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   }
 
   async function revokePeer(peer: Peer) {
-    if (!window.confirm(`Revoke trust for ${peer.display_name}? All sync grants to this server will stop.`)) return;
+    if (!window.confirm(tr(`Revoke trust for ${peer.display_name}? All sync grants to this server will stop.`))) return;
     setBusy(`revoke:${peer.installation_id}`); setError(""); setFeedback("");
     try { await request(`/api/modules/sync/federation/peers/${peer.installation_id}`, "DELETE"); setFeedback(`${peer.display_name} has been revoked.`); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : `Could not revoke ${peer.display_name}.`); }
@@ -283,7 +288,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   }
 
   async function revokeShare(share: Share) {
-    if (!window.confirm(`Revoke this ${share.scopes.join(" and ")} share with ${share.peerName}?`)) return;
+    if (!window.confirm(tr(`Revoke this ${share.scopes.join(" and ")} share with ${share.peerName}?`))) return;
     setBusy(`share:${share.id}`); setError("");
     try { await request(`/api/modules/sync/federation/shares/${share.id}`, "DELETE"); setFeedback("Share revoked. The receiving server will purge its replica on its next sync."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke this share."); }
@@ -314,7 +319,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   }
 
   async function rejectSubscription(subscription: Subscription) {
-    if (!window.confirm(`Remove the shared data from ${subscription.sourceServerName}?`)) return;
+    if (!window.confirm(tr(`Remove the shared data from ${subscription.sourceServerName}?`))) return;
     setBusy(`remove:${subscription.id}`); setError("");
     try { await request(`/api/modules/sync/federation/subscriptions/${subscription.id}`, "DELETE"); setFeedback("Subscription removed and its managed replica purged."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not remove the subscription."); }
