@@ -73,7 +73,27 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load server Sync settings."); }
   }, [departmentId]);
 
+  const refreshChannelStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/modules/sync/federation/channels", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json() as { channels?: Array<{ installationId: string; inbound: boolean; outbound: boolean }> };
+      const statuses = new Map((data.channels ?? []).map((channel) => [channel.installationId, channel]));
+      setSettings((current) => current ? {
+        ...current,
+        peers: current.peers.map((peer) => {
+          const channel = statuses.get(peer.installation_id);
+          return channel ? { ...peer, channels: { inbound: channel.inbound, outbound: channel.outbound } } : peer;
+        }),
+      } : current);
+    } catch { /* Keep the last known state until the next poll. */ }
+  }, []);
+
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    const timer = window.setInterval(() => { void refreshChannelStatus(); }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [refreshChannelStatus]);
 
   async function request<T>(path: string, method: string, body?: object): Promise<T> {
     const response = await fetch(path, { method, headers: { "x-csrf-token": csrfToken, "x-department-id": departmentId, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });

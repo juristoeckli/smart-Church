@@ -1368,6 +1368,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   });
 
+  app.get(`${adminPrefix}/channels`, async (request, reply) => {
+    if (!requireManager(request, reply)) return;
+    const peers = await pool.query<{ installation_id: string }>("SELECT installation_id FROM sync_peers WHERE trust_state<>'revoked' ORDER BY installation_id");
+    return {
+      channels: peers.rows.map(({ installation_id }) => ({
+        installationId: installation_id,
+        ...(activeFederationChannels?.status(installation_id) ?? { inbound: false, outbound: false }),
+      })),
+    };
+  });
+
   app.get(`${adminPrefix}/redundancy/readiness`, async (request, reply) => {
     const department = await context.resolveDepartmentId(request, reply, true);
     if (!department || !requireManager(request, reply)) return reply;
