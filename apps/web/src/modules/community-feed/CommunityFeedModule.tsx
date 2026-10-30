@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Heart, MessageCircle, Newspaper, Send, Trash2 } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
+import { translateModuleText } from "../../module-registry";
 import { formatUserDate } from "../../date-format";
+import { translationsForModule } from "../translations";
 import "./community-feed.css";
 
 type FeedComment = { id: string; body: string; authorId: string; authorName: string; createdAt: string };
@@ -22,7 +24,7 @@ function formatPostDate(value: string) {
   return formatUserDate(value, true);
 }
 
-export function CommunityFeedModule({ departmentId, csrfToken }: ModuleContext) {
+export function CommunityFeedModule({ departmentId, csrfToken, language }: ModuleContext) {
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
@@ -91,7 +93,7 @@ export function CommunityFeedModule({ departmentId, csrfToken }: ModuleContext) 
   }
 
   async function deletePost(post: FeedPost) {
-    if (!window.confirm("Delete this post and its comments?")) return;
+    if (!window.confirm(translateModuleText("Delete this post and its comments?", translationsForModule("community-feed"), language))) return;
     try {
       await sendMutation(`/api/modules/community-feed/posts/${post.id}`, "DELETE");
       setPosts((current) => current.filter((item) => item.id !== post.id));

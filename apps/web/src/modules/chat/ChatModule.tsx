@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { CircleAlert, MessageCircle, Pencil, Plus, Search, Send, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
-import type { ModuleContext } from "../../module-registry";
+import { translateModuleText, type ModuleContext } from "../../module-registry";
 import { formatUserDate } from "../../date-format";
+import { translationsForModule } from "../translations";
 import "./chat.css";
 
 type PresenceStatus = "offline" | "online" | "away";
@@ -60,7 +61,7 @@ function conversationTitle(conversation: Conversation, currentUserId: string) {
   return `${others[0] ?? "Direct message"}${suffix ? ` · ${suffix}` : ""}`;
 }
 
-export function ChatModule({ department, departmentId, csrfToken, systemNotificationsEnabled = false, realtime, requestedChatConversationId, onChatConversationOpened, onActiveChatChange, refreshCsrfToken }: ModuleContext) {
+export function ChatModule({ department, departmentId, csrfToken, language, systemNotificationsEnabled = false, realtime, requestedChatConversationId, onChatConversationOpened, onActiveChatChange, refreshCsrfToken }: ModuleContext) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
@@ -298,7 +299,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
 
   async function deleteConversation(conversation: Conversation) {
     const title = conversationTitle(conversation, currentUserId);
-    if (!window.confirm(`Delete “${title}” and all its messages for everyone in this chat?`)) return;
+    if (!window.confirm(translateModuleText(`Delete “${title}” and all its messages for everyone in this chat?`, translationsForModule("chat"), language))) return;
     setError("");
     try {
       await mutate(`/api/modules/chat/conversations/${encodeURIComponent(conversation.id)}`, "DELETE");
@@ -362,7 +363,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
 
   async function removeGroupMember(person: Participant) {
     if (!activeConversation || activeConversation.kind !== "group") return;
-    if (!window.confirm(`Remove ${person.displayName} from this group chat?`)) return;
+    if (!window.confirm(translateModuleText(`Remove ${person.displayName} from this group chat?`, translationsForModule("chat"), language))) return;
     setError("");
     try {
       await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members/${encodeURIComponent(person.id)}`, "DELETE");
