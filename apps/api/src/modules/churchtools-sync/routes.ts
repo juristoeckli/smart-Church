@@ -419,7 +419,7 @@ function mapElvantoPeopleProfile(person: JsonObject, customFields: Array<{ id: s
     if (value) profile[key] = value;
   }
   for (const [key, source] of [["archived", "archived"], ["contact", "contact"], ["volunteer", "volunteer"]] as const) {
-    if (person[source] !== undefined && person[source] !== null) profile[key] = person[source] === true || person[source] === 1 || person[source] === "1";
+    if (person[source] !== undefined && person[source] !== null) profile[key] = person[source] === true || person[source] === 1 || ["1", "true", "yes"].includes(String(person[source]).trim().toLowerCase());
   }
   for (const [key, source] of [["developmentChild", "development_child"], ["specialNeedsChild", "special_needs_child"]] as const) {
     const value = firstText(person[source]);
