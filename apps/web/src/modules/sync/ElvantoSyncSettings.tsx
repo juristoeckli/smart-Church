@@ -22,10 +22,10 @@ type IncrementalPeopleProgress = { cursorAt: string | null; previewId: string | 
 type PeopleExportPreview = { complete: boolean; total: number; create: number; update: number; review: number; sample: Array<{ firstName: string; lastName: string; email: string | null; action: string }> };
 type GroupsExportPreview = { complete: boolean; groups: number; total: number; create: number; update: number; addMembers: number; review: number; missingPeople: number; remoteOnlyMembers: number; sample: Array<{ name: string; action: string; membersToAdd: number; missingPeople: number; remoteOnlyMembers: number }> };
 type GroupsPreview = {
-  scannedCount: number; reportedTotal: number | null; complete: boolean;
-  createCount: number; updateCount: number; alreadyLinkedCount: number; memberAddCount: number; nameConflictCount: number; invalidCount: number;
+  scannedCount: number; reportedTotal: number | null; complete: boolean; previewAt: string | null;
+  createCount: number; updateCount: number; alreadyLinkedCount: number; memberAddCount: number; nameConflictCount: number; localConflictCount: number; invalidCount: number;
   memberCount: number; linkedMemberCount: number; unmatchedMemberCount: number; localOnlyMemberCount: number;
-  sample: Array<{ name: string; action: string; members: number; linkedMembers: number; membersToAdd: number; changedFields: string[] }>;
+  sample: Array<{ sourceId?: string; name: string; action: string; members: number; linkedMembers: number; membersToAdd: number; changedFields: string[]; local?: Record<string, unknown>; remote?: Record<string, unknown> }>;
 };
 type ServicesPreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
@@ -99,6 +99,10 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [incrementalPeopleTotal, setIncrementalPeopleTotal] = useState(0);
   const [peopleExportPreview, setPeopleExportPreview] = useState<PeopleExportPreview | null>(null);
   const [groupsPreview, setGroupsPreview] = useState<GroupsPreview | null>(null);
+  const [groupConflicts, setGroupConflicts] = useState<ServiceConflict[]>([]);
+  const [groupConflictOffset, setGroupConflictOffset] = useState(0);
+  const [groupConflictTotal, setGroupConflictTotal] = useState(0);
+  const [groupConflictUnresolved, setGroupConflictUnresolved] = useState(0);
   const [groupsExportPreview, setGroupsExportPreview] = useState<GroupsExportPreview | null>(null);
   const [servicesPreview, setServicesPreview] = useState<ServicesPreview | null>(null);
   const [serviceConflicts, setServiceConflicts] = useState<ServiceConflict[]>([]);
@@ -304,13 +308,34 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   }
 
   async function previewGroups() {
-    setBusy(true); setFeedback(""); setError(""); setGroupsPreview(null);
+    setBusy(true); setFeedback(""); setError(""); setGroupsPreview(null); setGroupConflicts([]); setGroupConflictTotal(0); setGroupConflictUnresolved(0);
     try {
       const response = await fetch("/api/modules/sync/elvanto/groups-preview", { method: "POST", headers: { "x-department-id": departmentId } });
       const result = await response.json() as GroupsPreview & { error?: string };
       if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto groups.");
       setGroupsPreview(result);
+      if (result.previewAt) await loadGroupConflicts(0);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto groups."); }
+    finally { setBusy(false); }
+  }
+
+  async function loadGroupConflicts(offset: number) {
+    const response = await fetch(`/api/modules/sync/elvanto/groups-conflicts?offset=${offset}&limit=20`, { headers: { "x-department-id": departmentId } });
+    const result = await response.json() as { rows?: ServiceConflict[]; total?: number; unresolved?: number; error?: string };
+    if (!response.ok || !Array.isArray(result.rows)) throw new Error(result.error ?? "Could not load group conflicts.");
+    setGroupConflicts(result.rows); setGroupConflictOffset(offset); setGroupConflictTotal(result.total ?? 0); setGroupConflictUnresolved(result.unresolved ?? 0);
+  }
+
+  async function resolveGroupConflict(conflict: ServiceConflict, resolution: "use_elvanto" | "keep_local") {
+    if (!groupsPreview?.previewAt) return;
+    setBusy(true); setError(""); setFeedback("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/groups-conflicts", { method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ sourceId: conflict.sourceId, previewAt: groupsPreview.previewAt, remoteHash: conflict.remoteHash, resolution }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not save the group conflict decision.");
+      await loadGroupConflicts(groupConflictOffset);
+      setFeedback(tr("Group conflict decision saved."));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the group conflict decision."); }
     finally { setBusy(false); }
   }
 
@@ -718,11 +743,12 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {status?.configured && status.peopleFlowsImport?.complete && <ElvantoPeopleFlowCrosswalk departmentId={departmentId} />}
     {groupsPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Groups import preview</strong><span>{groupsPreview.scannedCount} scanned{groupsPreview.reportedTotal !== null && <> of {groupsPreview.reportedTotal} reported by Elvanto</>}{!groupsPreview.complete && <em> — preview is incomplete</em>}</span></div>
-      <div className="sync-feedback"><span>{groupsPreview.createCount} {tr("new")} groups</span> · <span>{groupsPreview.updateCount} {tr("groups to update")}</span> · <span>{groupsPreview.alreadyLinkedCount} {tr("unchanged")} groups</span> · <span>{groupsPreview.memberAddCount} {tr("members to add")}</span> · <span>{groupsPreview.nameConflictCount} name conflicts to review</span> · <span>{groupsPreview.invalidCount} invalid groups</span></div>
+      <div className="sync-feedback"><span>{groupsPreview.createCount} {tr("new")} groups</span> · <span>{groupsPreview.updateCount} {tr("groups to update")}</span> · <span>{groupsPreview.alreadyLinkedCount} {tr("unchanged")} groups</span> · <span>{groupsPreview.memberAddCount} {tr("members to add")}</span> · <span>{groupsPreview.nameConflictCount} {tr("name conflicts to review")}</span> · <span>{groupsPreview.localConflictCount} {tr("local edits need a decision")}</span> · <span>{groupsPreview.invalidCount} {tr("invalid groups")}</span></div>
       <div className="sync-feedback"><span>{groupsPreview.memberCount} member assignments found</span> · <span>{groupsPreview.linkedMemberCount} members linked to Elvanto people</span> · <span>{groupsPreview.unmatchedMemberCount} members need the People import first</span> · <span>{groupsPreview.localOnlyMemberCount} local-only memberships will be kept</span></div>
-      {groupsPreview.sample.map((group, index) => <div className="sync-feedback" key={`${group.name}-${index}`}><strong>{group.name}</strong><span>{group.members} members · {group.linkedMembers} linked · {group.membersToAdd} to add · {group.action === "update" ? tr("Update") : group.action === "already_linked" ? tr("Unchanged") : group.action === "review_name_conflict" ? "Review name conflict" : group.action === "needs_review" ? "Needs review" : group.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New group"}</span></div>)}
+      {groupsPreview.sample.map((group, index) => <div className="sync-feedback" key={`${group.sourceId ?? group.name}-${index}`}><strong>{group.name}</strong><span>{group.members} members · {group.linkedMembers} linked · {group.membersToAdd} to add · {group.action === "update" ? tr("Update") : group.action === "local_changes_kept" ? tr("Local edits kept; Elvanto has no newer changes") : group.action === "review_local_conflict" ? tr("Local and Elvanto versions need review") : group.action === "already_linked" ? tr("Unchanged") : group.action === "review_name_conflict" ? tr("Review name conflict") : group.action === "needs_review" ? tr("Needs review") : group.action === "duplicate_source_id" ? tr("Duplicate Elvanto ID") : tr("New group")}</span></div>)}
+      {groupConflictTotal > 0 && <div className="sync-connection-form"><strong>{tr("Resolve group conflicts")} ({groupConflictUnresolved} {tr("decisions remaining")})</strong><small className="sync-help">{tr("Compare the local group with the current Elvanto version. Choose which version to keep for each group before importing.")}</small>{groupConflicts.map((conflict) => <div className="sync-feedback" key={conflict.sourceId}><strong>{tr("Elvanto group")} {conflict.sourceId}</strong><div><strong>{tr("Local version")}</strong><pre className="sync-song-json">{JSON.stringify(conflict.local, null, 2)}</pre><strong>{tr("Elvanto version")}</strong><pre className="sync-song-json">{JSON.stringify(conflict.remote, null, 2)}</pre><span>{conflict.resolution ? `${tr("Decision")}: ${tr(conflict.resolution === "use_elvanto" ? "Use Elvanto values" : "Keep local values")}` : tr("No decision saved")}</span><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void resolveGroupConflict(conflict, "keep_local")} disabled={busy}>{tr("Keep local values")}</button><button className="button button-secondary" type="button" onClick={() => void resolveGroupConflict(conflict, "use_elvanto")} disabled={busy}>{tr("Use Elvanto values")}</button></div></div></div>)}<div className="community-inline-actions"><button className="button button-secondary" type="button" disabled={busy || groupConflictOffset <= 0} onClick={() => void loadGroupConflicts(Math.max(0, groupConflictOffset - 20))}>{tr("Previous")}</button><span className="sync-help">Showing {groupConflictTotal ? groupConflictOffset + 1 : 0}–{Math.min(groupConflictOffset + groupConflicts.length, groupConflictTotal)} of {groupConflictTotal}</span><button className="button button-secondary" type="button" disabled={busy || groupConflictOffset + 20 >= groupConflictTotal} onClick={() => void loadGroupConflicts(groupConflictOffset + 20)}>{tr("Next")}</button></div></div>}
       <small className="sync-help">Requires a complete preview. Work advances five Elvanto pages per batch. Same-name groups are skipped for manual resolution. Refreshes only add or update linked members; local-only memberships are never removed automatically.</small>
-      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importGroups()} disabled={busy || !groupsPreview.complete || groupsPreview.createCount + groupsPreview.updateCount + groupsPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.groupsImport?.complete ? "Refresh Groups from Elvanto" : status?.groupsImport ? "Continue Groups import" : "Import eligible groups"}</button></div>
+      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importGroups()} disabled={busy || !groupsPreview.complete || groupConflictUnresolved > 0 || groupsPreview.createCount + groupsPreview.updateCount + groupsPreview.alreadyLinkedCount + groupsPreview.localConflictCount === 0}><Check size={15} />{busy ? "Importing…" : status?.groupsImport?.complete ? "Refresh Groups from Elvanto" : status?.groupsImport ? "Continue Groups import" : "Import eligible groups"}</button></div>
     </div>}
     {groupsExportPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Groups export preview</strong><span>{groupsExportPreview.groups} local groups · {groupsExportPreview.create} new · {groupsExportPreview.update} updates · {groupsExportPreview.addMembers} members to add · {groupsExportPreview.review} needing review</span></div><div className="sync-feedback"><span>{groupsExportPreview.missingPeople} active members need a People export first</span> · <span>{groupsExportPreview.remoteOnlyMembers} Elvanto memberships will be kept for review</span></div>{groupsExportPreview.sample.map((group, index) => <div className="sync-feedback" key={`${group.name}-${index}`}><strong>{group.name}</strong><span>{group.action.replaceAll("_", " ")} · {group.membersToAdd} members to add · {group.missingPeople} people not linked · {group.remoteOnlyMembers} remote-only memberships</span></div>)}<small className="sync-help">Only group names and active member links are exported. Member removals are never automatic; Elvanto-only members stay in place for manual review. Writes are resumable in batches of at most five API calls.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void exportGroups()} disabled={busy || !groupsExportPreview.complete || groupsExportPreview.create + groupsExportPreview.update + groupsExportPreview.addMembers === 0}><Check size={15} />{busy ? "Exporting…" : status?.groupsExport && !status.groupsExport.complete ? "Continue Groups export" : "Export Groups to Elvanto"}</button></div></div>}
     {servicesPreview && <div className="sync-connection-form" aria-live="polite">

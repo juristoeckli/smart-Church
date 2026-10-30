@@ -351,6 +351,19 @@ function elvantoCalendarSnapshotChanges(snapshot: ReturnType<typeof elvantoCalen
 function elvantoCalendarSnapshotHash(snapshot: ReturnType<typeof elvantoCalendarSnapshot>) {
   return JSON.stringify(canonicalJson(snapshot));
 }
+function elvantoGroupSnapshot(name: string, description: string, members: Record<string, string>): JsonObject {
+  return canonicalJson({ name, description, members }) as JsonObject;
+}
+function elvantoGroupSnapshotHash(snapshot: JsonObject) {
+  return createHash("sha256").update(JSON.stringify(canonicalJson(snapshot))).digest("hex");
+}
+function elvantoGroupSnapshotChanges(baseline: JsonObject, snapshot: JsonObject) {
+  const changed: string[] = [];
+  if (String(baseline.name ?? "") !== String(snapshot.name ?? "")) changed.push("name");
+  if (String(baseline.description ?? "") !== String(snapshot.description ?? "")) changed.push("description");
+  if (JSON.stringify(canonicalJson(baseline.members ?? {})) !== JSON.stringify(canonicalJson(snapshot.members ?? {}))) changed.push("members");
+  return changed;
+}
 function mapElvantoCalendarEvent(event: JsonObject) {
   const id = idOf(event);
   const start = elvantoTime(event.start_date ?? event.startDate ?? event.starts);
@@ -2222,14 +2235,18 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       for (const group of existingGroups.rows) names.set(group.name.trim().toLocaleLowerCase(), [...(names.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
       const contactIdBySource = new Map(linkedPeople.rows.map((person) => [person.source_system === "elvanto" ? person.source_id : person.elvanto_source_id, person.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
       const localMembershipRows = await pool!.query<{ group_id: string; contact_id: string; person_source_id: string | null; role: string }>(
-        "SELECT g.id AS group_id,m.contact_id,m.role,COALESCE(c.elvanto_source_id,CASE WHEN c.source_system='elvanto' THEN c.source_id END) AS person_source_id FROM church_groups g JOIN group_members m ON m.group_id=g.id JOIN contacts c ON c.id=m.contact_id AND c.department_id=g.department_id WHERE g.department_id=$1 AND g.source_system='elvanto'",
+        "SELECT g.id AS group_id,m.contact_id,m.role,COALESCE(c.elvanto_source_id,CASE WHEN c.source_system='elvanto' THEN c.source_id END) AS person_source_id FROM church_groups g JOIN group_members m ON m.group_id=g.id JOIN contacts c ON c.id=m.contact_id AND c.department_id=g.department_id WHERE g.department_id=$1 AND ((g.source_system='elvanto' AND g.source_id IS NOT NULL) OR (g.source_system IS NULL AND g.elvanto_source_id IS NOT NULL))",
         [dept],
       );
       const existingMembersByGroup = new Map<string, Map<string, string>>();
       for (const member of localMembershipRows.rows) existingMembersByGroup.set(member.group_id, new Map([...(existingMembersByGroup.get(member.group_id) ?? new Map<string, string>()), [member.person_source_id ?? `local:${member.contact_id}`, member.role]]));
+      const groupSourceIds = [...new Set(groups.map(idOf).filter(Boolean))];
+      const groupSyncStates = groupSourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null }>("SELECT source_id,baseline FROM elvanto_group_sync_state WHERE department_id=$1 AND source_id=ANY($2::text[])", [dept, groupSourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null }> };
+      const groupStateBySource = new Map(groupSyncStates.rows.map((state) => [state.source_id, state]));
       const seen = new Set<string>();
-      const sample: Array<{ name: string; action: "create" | "update" | "already_linked" | "review_name_conflict" | "needs_review" | "duplicate_source_id"; members: number; linkedMembers: number; membersToAdd: number; changedFields: string[] }> = [];
-      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0; let memberCount = 0; let linkedMemberCount = 0; let memberAddCount = 0;
+      const pendingGroupStates: Array<{ sourceId: string; local: JsonObject; remote: JsonObject; requiresReview: boolean; resolution: "use_elvanto" | "keep_local" | null }> = [];
+      const sample: Array<{ sourceId: string; name: string; action: "create" | "update" | "already_linked" | "review_name_conflict" | "review_local_conflict" | "local_changes_kept" | "needs_review" | "duplicate_source_id"; members: number; linkedMembers: number; membersToAdd: number; changedFields: string[]; local?: JsonObject; remote?: JsonObject }> = [];
+      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let localConflictCount = 0; let invalidCount = 0; let memberCount = 0; let linkedMemberCount = 0; let memberAddCount = 0;
       let localOnlyMemberCount = 0;
       for (const group of groups) {
         const sourceId = idOf(group);
@@ -2253,26 +2270,64 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const rolesToUpdate = [...targetMemberRoles].filter(([personId, role]) => existingMemberRoles.has(personId) && existingMemberRoles.get(personId) !== role).length;
         memberAddCount += membersToAdd;
         const changedFields: string[] = [];
-        if (existingGroup?.source_system === "elvanto") {
-          if (existingGroup.name !== name) changedFields.push("name");
-          if ((existingGroup.description ?? "") !== plainDescription(group.description)) changedFields.push("description");
-          if (membersToAdd > 0) changedFields.push("members");
-          if (rolesToUpdate > 0) changedFields.push("member roles");
-          if (changedFields.length) { updateCount += 1; action = "update"; }
+        if (valid && existingGroup?.source_system === "elvanto") {
+          const mappedLocalMembers = Object.fromEntries([...existingMemberRoles].filter(([memberId]) => !memberId.startsWith("local:")));
+          const localSnapshot = elvantoGroupSnapshot(existingGroup.name, existingGroup.description ?? "", mappedLocalMembers);
+          const remoteSnapshot = elvantoGroupSnapshot(name, plainDescription(group.description), Object.fromEntries(targetMemberRoles));
+          const baseline = groupStateBySource.get(sourceId)?.baseline;
+          const localChanges = baseline ? elvantoGroupSnapshotChanges(baseline, localSnapshot) : (elvantoGroupSnapshotHash(localSnapshot) === elvantoGroupSnapshotHash(remoteSnapshot) ? [] : ["legacy baseline missing"]);
+          const remoteChanges = baseline ? elvantoGroupSnapshotChanges(baseline, remoteSnapshot) : (localChanges.length ? ["legacy baseline missing"] : []);
+          const review = localChanges.length > 0 && remoteChanges.length > 0;
+          if (review) { action = "review_local_conflict"; localConflictCount += 1; }
+          else if (remoteChanges.length) { action = "update"; updateCount += 1; changedFields.push(...remoteChanges); }
+          else if (localChanges.length) { action = "local_changes_kept"; alreadyLinkedCount += 1; changedFields.push(...localChanges); }
           else alreadyLinkedCount += 1;
+          if (!review) {
+            if (membersToAdd > 0 && !changedFields.includes("members")) changedFields.push("members");
+            if (rolesToUpdate > 0 && !changedFields.includes("members")) changedFields.push("member roles");
+          }
+          pendingGroupStates.push({ sourceId, local: localSnapshot, remote: remoteSnapshot, requiresReview: review, resolution: review ? null : remoteChanges.length ? "use_elvanto" : "keep_local" });
+          if (review && sample.length < 50) sample.push({ sourceId, name, action, members: members.length, linkedMembers, membersToAdd, changedFields: [...new Set([...localChanges, ...remoteChanges])], local: localSnapshot, remote: remoteSnapshot });
         } else if (existingGroup) alreadyLinkedCount += 1;
         if (existingGroup?.source_system === "elvanto") {
           localOnlyMemberCount += [...existingMemberRoles.keys()].filter((memberId) => memberId.startsWith("local:") || !members.some((person) => idOf(person) === memberId)).length;
         }
-        if (sample.length < 50) sample.push({ name, action, members: members.length, linkedMembers, membersToAdd, changedFields });
+        if (sample.length < 50 && action !== "review_local_conflict") sample.push({ sourceId, name, action, members: members.length, linkedMembers, membersToAdd, changedFields });
       }
       const savedPreview = await pool!.query(
-        "UPDATE elvanto_sync_settings SET groups_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,groups_preview_complete=$2,groups_preview_scanned_count=$3,groups_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id",
+        "UPDATE elvanto_sync_settings SET groups_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,groups_preview_complete=$2,groups_preview_scanned_count=$3,groups_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id,groups_preview_at",
         [dept, complete, groups.length, total, row.updated_at],
       );
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-      await recordElvantoAudit(pool!, dept, "groups", "preview", complete ? "complete" : "incomplete", { scanned: groups.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, membersToAdd: memberAddCount, conflicts: conflictCount, invalid: invalidCount });
-      return { scannedCount: groups.length, reportedTotal: total, complete, createCount, updateCount, alreadyLinkedCount, memberAddCount, nameConflictCount: conflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, localOnlyMemberCount, sample };
+      const previewAt = savedPreview.rows[0].groups_preview_at as string | null;
+      await pool!.query("UPDATE elvanto_group_sync_state SET pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,requires_review=FALSE,resolution=NULL,updated_at=now() WHERE department_id=$1 AND pending_preview_at IS NOT NULL", [dept]);
+      if (complete && previewAt) for (const state of pendingGroupStates) await pool!.query(
+        "INSERT INTO elvanto_group_sync_state(department_id,source_id,pending_preview_at,pending_local,pending_remote,pending_remote_hash,requires_review,resolution,updated_at) VALUES($1,$2,$3,$4::jsonb,$5::jsonb,$6,$7,$8,now()) ON CONFLICT(department_id,source_id) DO UPDATE SET pending_preview_at=EXCLUDED.pending_preview_at,pending_local=EXCLUDED.pending_local,pending_remote=EXCLUDED.pending_remote,pending_remote_hash=EXCLUDED.pending_remote_hash,requires_review=EXCLUDED.requires_review,resolution=EXCLUDED.resolution,updated_at=now()",
+        [dept, state.sourceId, previewAt, JSON.stringify(state.local), JSON.stringify(state.remote), elvantoGroupSnapshotHash(state.remote), state.requiresReview, state.resolution],
+      );
+      await recordElvantoAudit(pool!, dept, "groups", "preview", complete ? "complete" : "incomplete", { scanned: groups.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, membersToAdd: memberAddCount, conflicts: conflictCount, localConflicts: localConflictCount, invalid: invalidCount });
+      return { scannedCount: groups.length, reportedTotal: total, complete, previewAt, createCount, updateCount, alreadyLinkedCount, memberAddCount, nameConflictCount: conflictCount, localConflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, localOnlyMemberCount, sample };
+    });
+    routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/groups-conflicts", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 50 } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings?.groups_preview_complete || !settings.groups_preview_at || new Date(settings.groups_preview_at).getTime() < Date.now() - 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete Groups preview before reviewing conflicts." });
+      const offset = request.query.offset ?? 0; const limit = request.query.limit ?? 20;
+      const [rows, counts] = await Promise.all([
+        pool!.query<{ source_id: string; pending_local: JsonObject; pending_remote: JsonObject; pending_remote_hash: string; resolution: "use_elvanto" | "keep_local" | null }>("SELECT source_id,pending_local,pending_remote,pending_remote_hash,resolution FROM elvanto_group_sync_state WHERE department_id=$1 AND pending_preview_at=$2 AND requires_review=TRUE AND pending_remote IS NOT NULL ORDER BY source_id OFFSET $3 LIMIT $4", [dept, settings.groups_preview_at, offset, limit]),
+        pool!.query<{ total: number; unresolved: number }>("SELECT count(*)::int AS total,count(*) FILTER (WHERE resolution IS NULL)::int AS unresolved FROM elvanto_group_sync_state WHERE department_id=$1 AND pending_preview_at=$2 AND requires_review=TRUE AND pending_remote IS NOT NULL", [dept, settings.groups_preview_at]),
+      ]);
+      return { previewAt: settings.groups_preview_at, rows: rows.rows.map((item) => ({ sourceId: item.source_id, local: item.pending_local, remote: item.pending_remote, remoteHash: item.pending_remote_hash, resolution: item.resolution })), total: counts.rows[0]?.total ?? 0, unresolved: counts.rows[0]?.unresolved ?? 0 };
+    });
+    routes.put<{ Body: { sourceId: string; previewAt: string; remoteHash: string; resolution: "use_elvanto" | "keep_local" } }>("/api/modules/sync/elvanto/groups-conflicts", { schema: { body: { type: "object", additionalProperties: false, required: ["sourceId", "previewAt", "remoteHash", "resolution"], properties: { sourceId: { type: "string", minLength: 1, maxLength: 200 }, previewAt: { type: "string", format: "date-time" }, remoteHash: { type: "string", minLength: 1, maxLength: 100 }, resolution: { type: "string", enum: ["use_elvanto", "keep_local"] } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings?.groups_preview_complete || !settings.groups_preview_at || new Date(settings.groups_preview_at).getTime() < Date.now() - 60 * 60 * 1000 || new Date(settings.groups_preview_at).getTime() !== new Date(request.body.previewAt).getTime()) return reply.code(409).send({ error: "The Groups preview expired or changed. Run a fresh preview before saving a decision." });
+      if (settings.groups_importing) return reply.code(409).send({ error: "Wait for the Groups import to finish before changing a conflict decision." });
+      const updated = await pool!.query("UPDATE elvanto_group_sync_state SET resolution=$5,updated_at=now() WHERE department_id=$1 AND source_id=$2 AND pending_preview_at=$3 AND pending_remote_hash=$4 AND requires_review=TRUE AND pending_remote IS NOT NULL RETURNING source_id", [dept, request.body.sourceId, settings.groups_preview_at, request.body.remoteHash, request.body.resolution]);
+      if (!updated.rowCount) return reply.code(409).send({ error: "The group conflict changed. Reload the preview and review it again." });
+      await recordElvantoAudit(pool!, dept, "groups", "conflict_resolution", "saved", { useElvanto: request.body.resolution === "use_elvanto", keepLocal: request.body.resolution === "keep_local" });
+      return { saved: true };
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/groups-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -2283,6 +2338,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const previewTime = row.groups_preview_at ? new Date(row.groups_preview_at).getTime() : 0;
       if (!row.groups_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete Groups preview first. Previews expire after one hour and after connection settings change." });
       if (row.people_importing) return reply.code(409).send({ error: "Wait for the People import to finish before importing groups." });
+      const unresolved = await pool!.query<{ count: number }>("SELECT count(*)::int AS count FROM elvanto_group_sync_state WHERE department_id=$1 AND pending_preview_at=$2 AND requires_review=TRUE AND resolution IS NULL", [dept, row.groups_preview_at]);
+      if ((unresolved.rows[0]?.count ?? 0) > 0) return reply.code(409).send({ error: "Review every Groups conflict before importing. Choose Elvanto values or keep local values for each conflict." });
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
       catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
@@ -2312,8 +2369,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           if (Number.isFinite(reported) && reported >= 0) total = reported;
           const contacts = await pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null }>("SELECT id,source_id,elvanto_source_id,source_system FROM contacts WHERE department_id=$1 AND ((source_system='elvanto' AND source_id IS NOT NULL) OR (source_system IS NULL AND elvanto_source_id IS NOT NULL))", [dept]);
           const contactIdBySource = new Map(contacts.rows.map((contact) => [contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id, contact.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
+          const personSourceByContact = new Map(contacts.rows.map((contact) => [contact.id, contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id] as const).filter((entry): entry is [string, string] => Boolean(entry[1])));
           const existing = await pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string; description: string | null }>("SELECT id,source_id,elvanto_source_id,source_system,name,description FROM church_groups WHERE department_id=$1", [dept]);
           const groupIdBySource = new Map(existing.rows.map((group) => [group.source_system === "elvanto" ? group.source_id : group.elvanto_source_id, group.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
+          const pageSourceIds = [...new Set(groups.map(idOf).filter(Boolean))];
+          const syncStates = pageSourceIds.length ? await pool!.query<{ source_id: string; pending_preview_at: Date | string; pending_local: JsonObject; pending_remote: JsonObject; pending_remote_hash: string; requires_review: boolean; resolution: "use_elvanto" | "keep_local" | null }>("SELECT source_id,pending_preview_at,pending_local,pending_remote,pending_remote_hash,requires_review,resolution FROM elvanto_group_sync_state WHERE department_id=$1 AND source_id=ANY($2::text[])", [dept, pageSourceIds]) : { rows: [] as Array<{ source_id: string; pending_preview_at: Date | string; pending_local: JsonObject; pending_remote: JsonObject; pending_remote_hash: string; requires_review: boolean; resolution: "use_elvanto" | "keep_local" | null }> };
+          const syncStateBySource = new Map(syncStates.rows.map((state) => [state.source_id, state]));
           const namesByKey = new Map<string, typeof existing.rows>();
           for (const group of existing.rows) namesByKey.set(group.name.trim().toLocaleLowerCase(), [...(namesByKey.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
           const seen = new Set<string>();
@@ -2333,16 +2394,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               const conflictingOwner = (namesByKey.get(nameKey) ?? []).some((owner) => !((owner.source_system === "elvanto" && owner.source_id === sourceId) || owner.elvanto_source_id === sourceId));
               if (conflictingOwner || seenNames.has(nameKey)) { pageSkipped += 1; continue; }
               seenNames.add(nameKey);
+              const linkedGroup = existingId ? existing.rows.find((owner) => owner.id === existingId) : undefined;
               let groupId = existingId;
               let groupChanged = false;
               if (existingId) {
-                const linkedGroup = existing.rows.find((owner) => owner.id === existingId);
                 if (linkedGroup?.elvanto_source_id === sourceId && linkedGroup.source_system === null) { pageSkipped += 1; continue; }
-                if (!linkedGroup || linkedGroup.name !== name || (linkedGroup.description ?? "") !== description) {
-                  const changed = await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [existingId, dept, name, description]);
-                  if (!changed.rowCount) { pageSkipped += 1; continue; }
-                  groupChanged = true;
-                }
+                if (!linkedGroup || linkedGroup.source_system !== "elvanto") { pageSkipped += 1; continue; }
               } else {
                 const inserted = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,$3,'elvanto',$4) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", [dept, name, description, sourceId]);
                 if (!inserted.rowCount) { pageSkipped += 1; continue; }
@@ -2352,6 +2409,33 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
               if (!groupId) { pageSkipped += 1; continue; }
               const existingMemberships = await db.query<{ contact_id: string; role: string }>("SELECT contact_id,role FROM group_members WHERE group_id=$1", [groupId]);
+              const mappedRemoteMembers = Object.fromEntries([...new Map(elvantoGroupPeople(group).flatMap((person) => {
+                const personId = idOf(person); const role = (firstText(person.position) || "Member").slice(0, 80);
+                return personId && contactIdBySource.has(personId) ? [[personId, role] as const] : [];
+              }))]);
+              const remoteSnapshot = elvantoGroupSnapshot(name, description, mappedRemoteMembers);
+              const syncState = syncStateBySource.get(sourceId);
+              if (existingId && linkedGroup?.source_system === "elvanto") {
+                if (!syncState || new Date(syncState.pending_preview_at).getTime() !== previewTime) throw new Error("The group preview is missing a current conflict snapshot. Run a fresh complete Groups preview.");
+                if (elvantoGroupSnapshotHash(remoteSnapshot) !== syncState.pending_remote_hash) throw new Error("Elvanto changed a group after conflict review. Run a fresh complete Groups preview.");
+                const localMappedMembers = Object.fromEntries(existingMemberships.rows.flatMap((membership) => {
+                  const personId = personSourceByContact.get(membership.contact_id);
+                  return personId ? [[personId, membership.role] as const] : [];
+                }));
+                const localSnapshot = elvantoGroupSnapshot(linkedGroup.name, linkedGroup.description ?? "", localMappedMembers);
+                if (elvantoGroupSnapshotHash(localSnapshot) !== elvantoGroupSnapshotHash(syncState.pending_local)) throw new Error("A local group changed after conflict review. Run a fresh complete Groups preview.");
+                if (syncState.requires_review && !syncState.resolution) throw new Error("Review every Groups conflict before importing.");
+                if (syncState.resolution === "keep_local") {
+                  await db.query("UPDATE elvanto_group_sync_state SET baseline=$3::jsonb,pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,requires_review=FALSE,resolution=NULL,updated_at=now() WHERE department_id=$1 AND source_id=$2", [dept, sourceId, JSON.stringify(remoteSnapshot)]);
+                  pageSkipped += 1;
+                  continue;
+                }
+              }
+              if (existingId && (!linkedGroup || linkedGroup.name !== name || (linkedGroup.description ?? "") !== description)) {
+                const changed = await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [existingId, dept, name, description]);
+                if (!changed.rowCount) { pageSkipped += 1; continue; }
+                groupChanged = true;
+              }
               const memberRolesByContact = new Map(existingMemberships.rows.map((membership) => [membership.contact_id, membership.role]));
               const memberIds = new Set<string>();
               for (const person of elvantoGroupPeople(group)) {
@@ -2360,9 +2444,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 memberIds.add(contactId);
                 const role = firstText(person.position) || "Member";
                 if (existingId && memberRolesByContact.get(contactId) !== role) groupChanged = true;
-                await db.query("INSERT INTO group_members (group_id,contact_id,role,status) VALUES ($1,$2,$3,'active') ON CONFLICT (group_id,contact_id) DO UPDATE SET role=EXCLUDED.role,status='active'", [groupId, contactId, role.slice(0, 80)]);
+                await db.query("INSERT INTO group_members (group_id,contact_id,role,status) VALUES ($1,$2,$3,'active') ON CONFLICT (group_id,contact_id) DO UPDATE SET role=EXCLUDED.role", [groupId, contactId, role.slice(0, 80)]);
                 memberRolesByContact.set(contactId, role);
               }
+              await db.query("INSERT INTO elvanto_group_sync_state(department_id,source_id,baseline,updated_at) VALUES($1,$2,$3::jsonb,now()) ON CONFLICT(department_id,source_id) DO UPDATE SET baseline=EXCLUDED.baseline,pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,requires_review=FALSE,resolution=NULL,updated_at=now()", [dept, sourceId, JSON.stringify(remoteSnapshot)]);
               if (groupChanged) pageUpdated += 1;
             }
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped;
