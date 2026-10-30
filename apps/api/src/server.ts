@@ -6,7 +6,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
@@ -484,17 +484,52 @@ const serviceEventProperties = {
   room: { type: "string", maxLength: 160 },
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
   positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } },
-  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 } } } },
+  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" }, position: { type: "string", maxLength: 80 } } } },
   registrationEnabled: { type: "boolean" },
   registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
   recurrence: { type: "object", additionalProperties: false, required: ["interval", "endDate"], properties: { interval: { type: "string", enum: ["weekly", "biweekly", "monthly"] }, endDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" } } },
 };
+
+const songArrangementSchema = { type: "object", additionalProperties: false, required: ["name"], properties: { id: { type: "string", format: "uuid" }, name: { type: "string", minLength: 1, maxLength: 160 }, key: { type: "string", maxLength: 16 }, chartUrl: { type: "string", maxLength: 2048 }, audioUrl: { type: "string", maxLength: 2048 }, active: { type: "boolean" } } };
+const worshipSongBodySchema = { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 200 }, authors: { type: "string", maxLength: 500 }, defaultKey: { type: "string", maxLength: 16 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, arrangements: { type: "array", maxItems: 40, items: songArrangementSchema } } };
+const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
 const serviceEventBodySchema = {
   type: "object",
   additionalProperties: false,
   required: ["title", "kind", "eventDate", "startTime", "location"],
   properties: serviceEventProperties,
 };
+
+type WorshipSongInput = { title: string; authors?: string; defaultKey?: string; notes?: string; arrangements?: Array<{ id?: string; name: string; key?: string; chartUrl?: string; audioUrl?: string }> };
+type ServicePlanTemplateInput = { name: string; description?: string; positions?: Array<{ name: string }>; items?: NonNullable<CreateServiceEvent["timePlan"]> };
+
+function validHttpsLink(value: string | undefined) {
+  if (!value?.trim()) return true;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "https:" && !url.username && !url.password;
+  } catch { return false; }
+}
+
+function validateWorshipSongInput(input: WorshipSongInput) {
+  if (!input.title.trim()) return "Enter a song title.";
+  if ((input.arrangements ?? []).some((arrangement) => !arrangement.name.trim())) return "Enter a name for each arrangement.";
+  const arrangementIds = (input.arrangements ?? []).flatMap((arrangement) => arrangement.id ? [arrangement.id] : []);
+  if (new Set(arrangementIds).size !== arrangementIds.length) return "Each arrangement can only appear once.";
+  if (!(input.arrangements ?? []).every((arrangement) => validHttpsLink(arrangement.chartUrl) && validHttpsLink(arrangement.audioUrl))) {
+    return "Chart and audio links must use HTTPS.";
+  }
+  return null;
+}
+
+function validateServicePlanTemplateInput(input: ServicePlanTemplateInput) {
+  if (!input.name.trim()) return "Enter a service-plan template name.";
+  if ((input.positions ?? []).some((position) => !position.name.trim())) return "Enter a name for each volunteer position.";
+  if ((input.items ?? []).some((item) => !item.title.trim())) return "Enter a title for each service-plan item.";
+  const positions = new Set((input.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
+  if ((input.items ?? []).some((item) => item.position && !positions.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
+  return null;
+}
 
 function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
   return {
@@ -567,7 +602,30 @@ function recurrenceDates(startDate: string, endDate: string, interval: "weekly" 
   return dates;
 }
 
+async function validateServicePlanSongs(departmentId: string, items: NonNullable<CreateServiceEvent["timePlan"]>) {
+  if (items.some((item) => item.arrangementId && !item.songId)) return "Choose a song for each selected arrangement.";
+  const songIds = [...new Set(items.flatMap((item) => item.songId ? [item.songId] : []))];
+  if (songIds.length) {
+    const songs = await pool!.query("SELECT id FROM worship_songs WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, songIds]);
+    if (songs.rowCount !== songIds.length) return "One or more selected songs do not belong to this site.";
+  }
+  const arrangementRows = items.flatMap((item) => item.songId && item.arrangementId ? [{ songId: item.songId, arrangementId: item.arrangementId }] : []);
+  if (arrangementRows.length) {
+    const arrangements = await pool!.query(
+      `SELECT selected."arrangementId"
+         FROM jsonb_to_recordset($2::jsonb) AS selected("songId" uuid,"arrangementId" uuid)
+         JOIN worship_songs song ON song.id=selected."songId" AND song.department_id=$1
+         JOIN worship_song_arrangements arrangement ON arrangement.id=selected."arrangementId" AND arrangement.song_id=song.id`,
+      [departmentId, JSON.stringify(arrangementRows)],
+    );
+    if (arrangements.rowCount !== arrangementRows.length) return "One or more selected arrangements do not belong to the selected song.";
+  }
+  return null;
+}
+
 async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent) {
+  const positionNames = new Set((event.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
+  if ((event.timePlan ?? []).some((item) => item.position && !positionNames.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   const assets = [...new Set(event.assetIds ?? [])];
   if (assets.length) {
     const available = await pool!.query("SELECT id FROM bookable_resources WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, assets]);
@@ -578,29 +636,204 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
     const people = await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, contacts]);
     if (people.rowCount !== contacts.length) return "One or more assigned people do not belong to this site.";
   }
-  return null;
+  return validateServicePlanSongs(departmentId, event.timePlan ?? []);
 }
 
-async function syncEventPositionResponses(client: PoolClient, eventId: string, positions: CreateServiceEvent["positions"]) {
-  const serialized = JSON.stringify(positions ?? []);
-  await client.query(
-    `DELETE FROM event_position_responses response
-      WHERE response.event_id=$1 AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
-         WHERE p.ordinal-1=response.position_index
-           AND (p.value->>'contactId')::uuid=response.contact_id
-      )`,
-    [eventId, serialized],
+async function syncEventPositionResponses(
+  client: PoolClient,
+  eventId: string,
+  positions: CreateServiceEvent["positions"],
+  previousPositions: CreateServiceEvent["positions"] = [],
+) {
+  const currentPositions = positions ?? [];
+  const oldPositions = previousPositions ?? [];
+  const existing = await client.query<{ position_index: number; contact_id: string; status: "pending" | "accepted" | "declined"; responded_at: Date | null; updated_at: Date }>(
+    "SELECT position_index,contact_id,status,responded_at,updated_at FROM event_position_responses WHERE event_id=$1 ORDER BY position_index",
+    [eventId],
   );
-  await client.query(
-    `INSERT INTO event_position_responses (event_id,position_index,contact_id)
-     SELECT $1,(position.ordinal-1)::integer,(position.value->>'contactId')::uuid
-       FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
-      WHERE p.value->>'contactId' IS NOT NULL
-     ON CONFLICT (event_id,position_index) DO NOTHING`,
-    [eventId, serialized],
-  );
+  const retained = new Map<number, typeof existing.rows[number]>();
+  const usedPositions = new Set<number>();
+  for (const response of existing.rows) {
+    const previous = oldPositions[response.position_index];
+    if (!previous?.contactId || previous.contactId !== response.contact_id) continue;
+    const oldName = previous.name.trim().toLocaleLowerCase();
+    const nextIndex = currentPositions.findIndex((position, index) =>
+      !usedPositions.has(index)
+      && position.contactId === response.contact_id
+      && position.name.trim().toLocaleLowerCase() === oldName,
+    );
+    if (nextIndex < 0) continue;
+    retained.set(nextIndex, response);
+    usedPositions.add(nextIndex);
+  }
+
+  await client.query("DELETE FROM event_position_responses WHERE event_id=$1", [eventId]);
+  for (let index = 0; index < currentPositions.length; index += 1) {
+    const contactId = currentPositions[index].contactId;
+    if (!contactId) continue;
+    const previousResponse = retained.get(index);
+    await client.query(
+      `INSERT INTO event_position_responses (event_id,position_index,contact_id,status,responded_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [eventId, index, contactId, previousResponse?.status ?? "pending", previousResponse?.responded_at ?? null, previousResponse?.updated_at ?? new Date()],
+    );
+  }
 }
+
+async function listWorshipSongs(departmentId: string, includeArchived = false): Promise<WorshipSong[]> {
+  const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; notes: string; active: boolean; arrangements: WorshipSong["arrangements"] }>(
+    `SELECT song.id,song.title,song.authors,song.default_key,song.notes,song.active,
+            COALESCE(json_agg(json_build_object('id',arrangement.id,'name',arrangement.name,'key',arrangement.musical_key,'chartUrl',arrangement.chart_url,'audioUrl',arrangement.audio_url,'active',arrangement.active) ORDER BY lower(arrangement.name)) FILTER (WHERE arrangement.id IS NOT NULL),'[]'::json) AS arrangements
+       FROM worship_songs song
+       LEFT JOIN worship_song_arrangements arrangement ON arrangement.song_id=song.id
+      WHERE song.department_id=$1 AND ($2::boolean OR song.active=true)
+      GROUP BY song.id
+      ORDER BY lower(song.title),song.id`,
+    [departmentId, includeArchived],
+  );
+  return result.rows.map((row) => ({ id: row.id, title: row.title, ...(row.authors ? { authors: row.authors } : {}), ...(row.default_key ? { defaultKey: row.default_key } : {}), ...(row.notes ? { notes: row.notes } : {}), arrangements: row.arrangements.filter((arrangement) => includeArchived || arrangement.active), active: row.active }));
+}
+
+async function persistWorshipSong(departmentId: string, id: string, input: WorshipSongInput) {
+  const clean = {
+    title: input.title.trim(), authors: input.authors?.trim() ?? "", defaultKey: input.defaultKey?.trim() ?? "", notes: input.notes?.trim() ?? "",
+    arrangements: input.arrangements ?? [],
+  };
+  const client = await pool!.connect();
+  try {
+    await client.query("BEGIN");
+    if (id) {
+      const updated = await client.query("UPDATE worship_songs SET title=$3,authors=$4,default_key=$5,notes=$6,active=true,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [id, departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes]);
+      if (!updated.rowCount) { await client.query("ROLLBACK"); return false; }
+    } else {
+      const created = await client.query<{ id: string }>("INSERT INTO worship_songs (id,department_id,title,authors,default_key,notes) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", [randomUUID(), departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes]);
+      id = created.rows[0].id;
+    }
+    const retainedIds: string[] = [];
+    for (const arrangement of clean.arrangements) {
+      const name = arrangement.name.trim();
+      if (arrangement.id) {
+        const updated = await client.query("UPDATE worship_song_arrangements SET name=$3,musical_key=$4,chart_url=$5,audio_url=$6,active=true,updated_at=now() WHERE id=$1 AND song_id=$2 RETURNING id", [arrangement.id, id, name, arrangement.key?.trim() ?? "", arrangement.chartUrl?.trim() ?? "", arrangement.audioUrl?.trim() ?? ""]);
+        if (!updated.rowCount) throw new Error("An arrangement does not belong to this song.");
+        retainedIds.push(arrangement.id);
+      } else {
+        const created = await client.query<{ id: string }>("INSERT INTO worship_song_arrangements (id,song_id,name,musical_key,chart_url,audio_url) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", [randomUUID(), id, name, arrangement.key?.trim() ?? "", arrangement.chartUrl?.trim() ?? "", arrangement.audioUrl?.trim() ?? ""]);
+        retainedIds.push(created.rows[0].id);
+      }
+    }
+    await client.query("UPDATE worship_song_arrangements SET active=false,updated_at=now() WHERE song_id=$1 AND NOT (id=ANY($2::uuid[])) AND active=true", [id, retainedIds]);
+    await client.query("COMMIT");
+    return id;
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+}
+
+async function listServicePlanTemplates(departmentId: string): Promise<ServicePlanTemplate[]> {
+  const result = await pool!.query<{ id: string; name: string; description: string; positions: ServicePlanTemplate["positions"]; items: ServicePlanTemplate["items"]; active: boolean }>(
+    "SELECT id,name,description,positions,items,active FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id", [departmentId],
+  );
+  return result.rows.map((row) => ({ ...row, ...(row.description ? {} : { description: undefined }) }));
+}
+
+async function persistServicePlanTemplate(departmentId: string, id: string, input: ServicePlanTemplateInput) {
+  const inputError = validateServicePlanTemplateInput(input);
+  if (inputError) return { error: inputError };
+  const validationError = await validateServicePlanSongs(departmentId, input.items ?? []);
+  if (validationError) return { error: validationError };
+  if (id) {
+    const result = await pool!.query(
+      "UPDATE service_plan_templates SET name=$3,description=$4,positions=$5::jsonb,items=$6::jsonb,active=true,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id",
+      [id, departmentId, input.name.trim(), input.description?.trim() ?? "", JSON.stringify(input.positions ?? []), JSON.stringify(input.items ?? [])],
+    );
+    return result.rowCount ? { id } : null;
+  }
+  id = randomUUID();
+  await pool!.query(
+    "INSERT INTO service_plan_templates (id,department_id,name,description,positions,items) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)",
+    [id, departmentId, input.name.trim(), input.description?.trim() ?? "", JSON.stringify(input.positions ?? []), JSON.stringify(input.items ?? [])],
+  );
+  return { id };
+}
+
+app.get("/api/worship/songs", async (request, reply): Promise<WorshipSong[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  return listWorshipSongs(selectedDepartmentId);
+});
+
+app.post<{ Body: WorshipSongInput }>("/api/worship/songs", { schema: { body: worshipSongBodySchema } }, async (request, reply): Promise<WorshipSong | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const invalid = validateWorshipSongInput(request.body);
+  if (invalid) return reply.code(400).send({ error: invalid });
+  try {
+    const id = await persistWorshipSong(selectedDepartmentId, "", request.body);
+    const song = (await listWorshipSongs(selectedDepartmentId, true)).find((item) => item.id === id);
+    return reply.code(201).send(song!);
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not save this song." }); }
+});
+
+app.put<{ Params: { id: string }; Body: WorshipSongInput }>("/api/worship/songs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: worshipSongBodySchema } }, async (request, reply): Promise<WorshipSong | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const invalid = validateWorshipSongInput(request.body);
+  if (invalid) return reply.code(400).send({ error: invalid });
+  try {
+    const savedId = await persistWorshipSong(selectedDepartmentId, request.params.id, request.body);
+    if (!savedId) return reply.code(404).send({ error: "Song not found." });
+    return (await listWorshipSongs(selectedDepartmentId, true)).find((item) => item.id === savedId)!;
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not save this song." }); }
+});
+
+app.delete<{ Params: { id: string } }>("/api/worship/songs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query("UPDATE worship_songs SET active=false,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, selectedDepartmentId]);
+  if (!result.rowCount) return reply.code(404).send({ error: "Song not found." });
+  return { archived: true };
+});
+
+app.get("/api/service-plan-templates", async (request, reply): Promise<ServicePlanTemplate[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  return listServicePlanTemplates(selectedDepartmentId);
+});
+
+app.post<{ Body: ServicePlanTemplateInput }>("/api/service-plan-templates", { schema: { body: servicePlanTemplateBodySchema } }, async (request, reply): Promise<ServicePlanTemplate | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const saved = await persistServicePlanTemplate(selectedDepartmentId, "", request.body);
+  if (!saved) return reply.code(400).send({ error: "Could not save this service plan." });
+  if ("error" in saved) return reply.code(400).send(saved);
+  const result = (await listServicePlanTemplates(selectedDepartmentId)).find((item) => item.id === saved.id);
+  return reply.code(201).send(result!);
+});
+
+app.put<{ Params: { id: string }; Body: ServicePlanTemplateInput }>("/api/service-plan-templates/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: servicePlanTemplateBodySchema } }, async (request, reply): Promise<ServicePlanTemplate | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const saved = await persistServicePlanTemplate(selectedDepartmentId, request.params.id, request.body);
+  if (!saved) return reply.code(404).send({ error: "Service-plan template not found." });
+  if ("error" in saved) return reply.code(400).send(saved);
+  const result = (await listServicePlanTemplates(selectedDepartmentId)).find((item) => item.id === saved.id);
+  return result ?? reply.code(404).send({ error: "Service-plan template not found." });
+});
+
+app.delete<{ Params: { id: string } }>("/api/service-plan-templates/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query("UPDATE service_plan_templates SET active=false,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, selectedDepartmentId]);
+  if (!result.rowCount) return reply.code(404).send({ error: "Service-plan template not found." });
+  return { archived: true };
+});
 
 app.get("/api/health", async () => ({
   status: databaseReady ? "ok" : "database_unavailable",
@@ -2132,6 +2365,11 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const previousPositionsResult = await client.query<{ positions: ServiceEvent["positions"] }>(
+      "SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE",
+      [request.params.id, selectedDepartmentId],
+    );
+    if (!previousPositionsResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
         SET title = $3, kind = $4, event_date = $5, is_all_day = $6, start_time = $7, end_time = $8,
@@ -2147,7 +2385,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
     [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
   );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
-    await syncEventPositionResponses(client, request.params.id, event.positions);
+    await syncEventPositionResponses(client, request.params.id, event.positions, previousPositionsResult.rows[0].positions);
     await client.query("COMMIT");
     return mapServiceEvent(result.rows[0]);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -2176,6 +2414,10 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const previousSeries = await client.query<{ id: string; positions: ServiceEvent["positions"] }>(
+      "SELECT id,positions FROM service_events WHERE department_id=$1 AND recurrence_id=$2 FOR UPDATE",
+      [selectedDepartmentId, source.rows[0].recurrence_id],
+    );
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, is_all_day=$6, start_time=$7, end_time=$8,
        location=$9, description=$10, room=$11, asset_ids=$12, positions=$13::jsonb, time_plan=$14::jsonb,
@@ -2189,7 +2431,8 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
        (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
     [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
   );
-    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions);
+    const previousPositionsByEvent = new Map(previousSeries.rows.map((row) => [row.id, row.positions]));
+    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions, previousPositionsByEvent.get(row.id));
     await client.query("COMMIT");
     return result.rows.map(mapServiceEvent);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
