@@ -199,6 +199,7 @@ function mapElvantoServices(service: JsonObject, contacts: Map<string, string>) 
     const start = elvantoTime(time.starts ?? time.start ?? time.date, baseDate);
     if (!start) return [];
     const end = elvantoTime(time.ends ?? time.end, start.date);
+    const isAllDay = time.all_day === true || time.all_day === "yes" || time.all_day === "1";
     const plan = elvantoPlanForTime(service, timeId);
     const volunteerPlan = volunteerPlans.find((plan) => String(plan.time_id ?? plan.service_time_id ?? "") === timeId);
     const volunteerPositions = objectRows((volunteerPlan?.positions as JsonObject | undefined)?.position ?? volunteerPlan?.positions);
@@ -230,7 +231,7 @@ function mapElvantoServices(service: JsonObject, contacts: Map<string, string>) 
     return [{
       sourceId: `${serviceId}:${timeId}`,
       title: `${serviceTitle}${timeName ? ` — ${timeName}` : ""}`.slice(0, 160),
-      date: start.date, start: start.time, end: end?.date === start.date && end.time > start.time ? end.time : null,
+      date: start.date, isAllDay, start: isAllDay ? "00:00" : start.time, end: isAllDay ? null : end?.date === start.date && end.time > start.time ? end.time : null,
       location: firstText(time.location?.name, time.location, service.location?.name, service.location, service.venue) || "Elvanto",
       room: firstText(time.room?.name, time.room, service.room?.name, service.room),
       description: plainDescription(firstText(service.description, service.notes)).slice(0, 2000), positions, timePlan,
@@ -248,6 +249,7 @@ function mapElvantoCalendarEvent(event: JsonObject) {
     sourceId: `calendar:${id}`,
     title: firstText(event.name, event.title).slice(0, 160),
     date: start.date,
+    isAllDay: allDay,
     start: allDay ? "00:00" : start.time,
     end: !allDay && end?.date === start.date && end.time > start.time ? end.time : null,
     location: firstText(event.where, locations.join(", ")) || "Elvanto calendar",
@@ -285,11 +287,12 @@ function localEventTimeToUtc(date: string, time: string, timeZone: string) {
   return new Date(candidate).toISOString().slice(0, 19).replace("T", " ");
 }
 function calendarEventFingerprint(event: JsonObject) {
-  return createHash("sha256").update(JSON.stringify({ id: idOf(event), name: firstText(event.name, event.title), start: event.start_date ?? event.startDate ?? event.starts ?? event.start, end: event.end_date ?? event.endDate ?? event.ends ?? event.end, calendarId: event.calendar_id ?? event.calendar?.id, organizer: event.organizer?.id ?? event.organizer, where: event.where, description: event.description, status: event.status })).digest("hex");
+  return createHash("sha256").update(JSON.stringify({ id: idOf(event), name: firstText(event.name, event.title), start: event.start_date ?? event.startDate ?? event.starts ?? event.start, end: event.end_date ?? event.endDate ?? event.ends ?? event.end, allDay: event.all_day ?? event.allDay, calendarId: event.calendar_id ?? event.calendar?.id, organizer: event.organizer?.id ?? event.organizer, where: event.where, description: event.description, status: event.status })).digest("hex");
 }
 function elvantoEventDateInTimeZone(event: JsonObject, timeZone: string) {
   const start = elvantoTime(event.start_date ?? event.startDate ?? event.starts);
   if (!start) return "";
+  if (event.all_day === true || event.all_day === "yes" || event.all_day === "1" || event.allDay === true) return start.date;
   const formatter = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
   const parts = formatter.formatToParts(new Date(`${start.date}T${start.time}:00Z`));
   const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
@@ -625,7 +628,7 @@ function mapEvents(events: JsonObject[]) {
     const agenda: JsonObject[] = Array.isArray(row.agenda?.items) ? row.agenda.items : Array.isArray(row.agendaItems) ? row.agendaItems : [];
     return [{
       sourceId, title: firstText(row.name, row.title, row.subject) || "ChurchTools service",
-      date: start.date, start: start.time, end: end?.date === start.date && end.time > start.time ? end.time : null,
+      date: start.date, isAllDay: row.isAllDay === true || row.allDay === true || row.is_all_day === true, start: row.isAllDay === true || row.allDay === true || row.is_all_day === true ? "00:00" : start.time, end: row.isAllDay === true || row.allDay === true || row.is_all_day === true ? null : end?.date === start.date && end.time > start.time ? end.time : null,
       location: firstText(row.location?.name, row.location, row.place, row.calendarName, row.calendar?.name) || "ChurchTools",
       room: firstText(row.room?.name, row.room), description: firstText(row.description, row.note).slice(0, 2000),
       positions: assignments.flatMap((item) => {
@@ -769,13 +772,13 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           for (const event of services) {
             const positions = event.positions.map((item: any) => ({ name: item.name, ...(item.personId && personMap.has(item.personId) ? { contactId: personMap.get(item.personId) } : {}) }));
             const found = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [departmentId, event.sourceId]);
-            const data = [departmentId, event.title.slice(0, 160), event.date, event.start, event.end, event.location.slice(0, 160), event.description, event.room.slice(0, 160), JSON.stringify(positions), JSON.stringify(event.timePlan), event.sourceId];
+            const data = [departmentId, event.title.slice(0, 160), event.date, event.isAllDay ?? false, event.start, event.end, event.location.slice(0, 160), event.description, event.room.slice(0, 160), JSON.stringify(positions), JSON.stringify(event.timePlan), event.sourceId];
             if (found.rowCount) {
-              await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,start_time=$5,end_time=$6,location=$7,description=$8,room=$9,positions=$10::jsonb,time_plan=$11::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [found.rows[0].id, departmentId, ...data.slice(1, 10)]);
+              await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [found.rows[0].id, departmentId, ...data.slice(1, 11)]);
             } else {
               const matching = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system IS NULL AND lower(title)=lower($2) AND event_date=$3 AND start_time=$4 ORDER BY created_at LIMIT 1 FOR UPDATE", [departmentId, event.title.slice(0, 160), event.date, event.start]);
-              if (matching.rowCount) await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,start_time=$5,end_time=$6,location=$7,description=$8,room=$9,positions=$10::jsonb,time_plan=$11::jsonb,source_system='churchtools',source_id=$12,updated_at=now() WHERE id=$1 AND department_id=$2", [matching.rows[0].id, departmentId, ...data.slice(1)]);
-              else await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'churchtools',$11)", data);
+              if (matching.rowCount) await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,source_system='churchtools',source_id=$13,updated_at=now() WHERE id=$1 AND department_id=$2", [matching.rows[0].id, departmentId, ...data.slice(1)]);
+              else await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,'churchtools',$12)", data);
             }
           }
           if (services.length) await db.query("DELETE FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id<>ALL($2::text[])", [departmentId, services.map((event: any) => event.sourceId)]);
@@ -1695,12 +1698,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               seen.add(event.sourceId);
               const linked = eventBySource.get(event.sourceId);
               if (!linked && ownedTitleDates.has(`${event.date}|${event.title.trim().toLocaleLowerCase()}`)) { pageSkipped += 1; continue; }
-              const values = [dept, event.title, event.date, event.start, event.end, event.location, event.description, event.room, JSON.stringify(event.positions), JSON.stringify(event.timePlan), event.sourceId];
+              const values = [dept, event.title, event.date, event.isAllDay ?? false, event.start, event.end, event.location, event.description, event.room, JSON.stringify(event.positions), JSON.stringify(event.timePlan), event.sourceId];
               if (linked) {
-                const changed = await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,start_time=$5,end_time=$6,location=$7,description=$8,room=$9,positions=$10::jsonb,time_plan=$11::jsonb,source_system='elvanto',source_id=$12,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values]);
+                const changed = await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,source_system='elvanto',source_id=$13,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values]);
                 if (!changed.rowCount) { pageSkipped += 1; continue; } pageUpdated += 1;
               } else {
-                const inserted = await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'elvanto',$11) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", values);
+                const inserted = await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,'elvanto',$12) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", values);
                 if (!inserted.rowCount) { pageSkipped += 1; continue; } pageCreated += 1;
               }
             }
@@ -1956,8 +1959,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (!organizer) return reply.code(400).send({ error: "Choose a valid Elvanto event organizer." });
         const timeZone = profile.rows[0]?.time_zone;
         if (!timeZone) return reply.code(400).send({ error: "The location time zone is not configured." });
-        const local = await pool!.query<{ id: string; title: string; event_date: string; start_time: string; end_time: string | null; location: string; description: string | null; source_id: string | null; source_system: string | null; updated_at: string }>(
-          "SELECT id,title,event_date::text,start_time::text,end_time::text,location,description,source_id,source_system,updated_at::text FROM service_events WHERE department_id=$1 AND event_date BETWEEN $2::date AND $3::date AND (source_system IS NULL OR (source_system='elvanto' AND source_id LIKE 'calendar-export:%')) ORDER BY event_date,start_time,id LIMIT 20001", [dept, request.body.startDate, request.body.endDate],
+        const local = await pool!.query<{ id: string; title: string; event_date: string; is_all_day: boolean; start_time: string; end_time: string | null; location: string; description: string | null; source_id: string | null; source_system: string | null; updated_at: string }>(
+          "SELECT id,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,source_id,source_system,updated_at::text FROM service_events WHERE department_id=$1 AND event_date BETWEEN $2::date AND $3::date AND (source_system IS NULL OR (source_system='elvanto' AND source_id LIKE 'calendar-export:%')) ORDER BY event_date,start_time,id LIMIT 20001", [dept, request.body.startDate, request.body.endDate],
         );
         if (local.rows.length > 20000) return reply.code(413).send({ error: "Calendar export previews support up to 20,000 local events at a time. Narrow the events included in the local schedule before creating a preview." });
         const minDate = local.rows[0]?.event_date ?? new Date().toISOString().slice(0, 10);
@@ -1980,15 +1983,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const remote = linkedRemoteId ? byRemoteId.get(linkedRemoteId) : undefined;
           let action = "create"; let start: string | null = null; let end: string | null = null;
           try {
-            if (!event.title.trim() || !event.end_time) throw new Error("An event needs a title, start time, and end time to export.");
-            start = localEventTimeToUtc(event.event_date, event.start_time.slice(0, 5), timeZone);
-            end = localEventTimeToUtc(event.event_date, event.end_time.slice(0, 5), timeZone);
+            if (!event.title.trim() || (!event.is_all_day && !event.end_time)) throw new Error("An event needs a title, start time, and end time to export.");
+            start = event.is_all_day ? `${event.event_date} 00:00:00` : localEventTimeToUtc(event.event_date, event.start_time.slice(0, 5), timeZone);
+            end = event.is_all_day ? `${shiftDate(event.event_date, 1)} 00:00:00` : localEventTimeToUtc(event.event_date, event.end_time!.slice(0, 5), timeZone);
             if (end <= start) throw new Error("The event end time must be later than its start time.");
             if (linkedRemoteId && !remote) action = "review_missing_remote";
             else if (remote) action = "update";
             else if (remoteNames.has(`${event.event_date}|${event.title.trim().toLocaleLowerCase()}`)) action = "review_conflict";
           } catch { action = "invalid"; }
-          return { eventId: event.id, updatedAt: event.updated_at, sourceId: linkedRemoteId, action, title: event.title, date: event.event_date, start, end, location: event.location, description: event.description ?? "", remoteHash: remote ? calendarEventFingerprint(remote) : null };
+          return { eventId: event.id, updatedAt: event.updated_at, sourceId: linkedRemoteId, action, title: event.title, date: event.event_date, isAllDay: event.is_all_day, start, end, location: event.location, description: event.description ?? "", remoteHash: remote ? calendarEventFingerprint(remote) : null };
         });
         const changed = await pool!.query(`UPDATE elvanto_sync_settings SET calendar_export_calendar_id=$2,calendar_export_organizer_id=$3,calendar_export_preview_at=now(),calendar_export_preview_rows=$4::jsonb,calendar_export_page=0,calendar_export_created_count=0,calendar_export_updated_count=0,calendar_export_skipped_count=0,calendar_export_complete=FALSE,updated_at=now()
           WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, request.body.calendarId, request.body.organizerId, JSON.stringify(rows), row.updated_at]);
@@ -2042,7 +2045,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const remote = linkedRemoteId ? remoteById.get(linkedRemoteId) : undefined;
           if (linkedRemoteId && (!remote || calendarEventFingerprint(remote) !== item.remoteHash)) return reply.code(409).send({ error: "An Elvanto event changed or disappeared after preview. Run a fresh Calendar export preview." });
           if (!linkedRemoteId && remoteEventList.some((event) => elvantoEventDateInTimeZone(event, timeZone) === item.date && firstText(event.name, event.title).trim().toLocaleLowerCase() === String(item.title).trim().toLocaleLowerCase())) return reply.code(409).send({ error: "A matching Elvanto calendar event appeared after preview. Run a fresh Calendar export preview." });
-          const body = { name: item.title, calendar_id: row.calendar_export_calendar_id, organizer: row.calendar_export_organizer_id, status: "private", start: item.start, end: item.end, all_day: "no", where: item.location, description: item.description };
+          const body = { name: item.title, calendar_id: row.calendar_export_calendar_id, organizer: row.calendar_export_organizer_id, status: "private", start: item.start, end: item.end, all_day: item.isAllDay ? "yes" : "no", where: item.location, description: item.description };
           if (linkedRemoteId) {
             await elvantoRequest(apiKey, "calendar/events/edit", { id: linkedRemoteId, ...body });
             updated += 1;
@@ -2144,12 +2147,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               if (!event || !event.title || !/^\d{4}-\d{2}-\d{2}$/.test(event.date) || !/^\d{2}:\d{2}$/.test(event.start) || seen.has(event.sourceId)) { pageSkipped += 1; continue; }
               seen.add(event.sourceId); const linked = bySource.get(event.sourceId);
               if (!linked && occupied.has(`${event.date}|${event.title.trim().toLocaleLowerCase()}`)) { pageSkipped += 1; continue; }
-              const values = [dept, event.title, event.date, event.start, event.end, event.location, event.description, event.room, JSON.stringify([]), JSON.stringify([]), event.sourceId];
+              const values = [dept, event.title, event.date, event.isAllDay ?? false, event.start, event.end, event.location, event.description, event.room, JSON.stringify([]), JSON.stringify([]), event.sourceId];
               if (linked) {
-                const changed = await db.query("UPDATE service_events SET title=$3,kind='other',event_date=$4,start_time=$5,end_time=$6,location=$7,description=$8,room=$9,positions=$10::jsonb,time_plan=$11::jsonb,source_system='elvanto',source_id=$12,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values]);
+                const changed = await db.query("UPDATE service_events SET title=$3,kind='other',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,source_system='elvanto',source_id=$13,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values]);
                 if (!changed.rowCount) { pageSkipped += 1; continue; } pageUpdated += 1;
               } else {
-                const inserted = await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'other',$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,'elvanto',$11) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", values);
+                const inserted = await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'other',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,'elvanto',$12) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", values);
                 if (!inserted.rowCount) { pageSkipped += 1; continue; } pageCreated += 1;
               }
             }
