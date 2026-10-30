@@ -39,6 +39,11 @@ const crosswalkTranslations: Partial<Record<UserLanguage, Locale>> = {
     "Workflow links saved.": "Workflow-Verknüpfungen gespeichert.",
     "Could not load People Flow links.": "People-Flow-Verknüpfungen konnten nicht geladen werden.",
     "Could not save People Flow links.": "People-Flow-Verknüpfungen konnten nicht gespeichert werden."
+    "Loading…": "Wird geladen …",
+    "Saving…": "Wird gespeichert …",
+    "active": "aktiv",
+    "archived": "archiviert",
+    "Remove stale link": "Veraltete Verknüpfung entfernen",
   },
   fr: {
     "Link Elvanto People Flows to local workflows": "Lier les People Flows Elvanto aux workflows locaux",
@@ -65,6 +70,11 @@ const crosswalkTranslations: Partial<Record<UserLanguage, Locale>> = {
     "Workflow links saved.": "Liens des workflows enregistrés.",
     "Could not load People Flow links.": "Impossible de charger les liens des People Flows.",
     "Could not save People Flow links.": "Impossible d’enregistrer les liens des People Flows."
+    "Loading…": "Chargement…",
+    "Saving…": "Enregistrement…",
+    "active": "actif",
+    "archived": "archivé",
+    "Remove stale link": "Supprimer le lien obsolète",
   },
   it: {
     "Link Elvanto People Flows to local workflows": "Collega i People Flow Elvanto ai workflow locali",
@@ -127,6 +137,11 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
     setLocalFlowId(selected?.localFlowId ?? "");
     setStepSelection(Object.fromEntries((selected?.stepLinks ?? []).map((link) => [link.sourceStepId, link.localStepId])));
     setNotice("");
+    "Loading…": "Caricamento…",
+    "Saving…": "Salvataggio…",
+    "active": "attivo",
+    "archived": "archiviato",
+    "Remove stale link": "Rimuovi collegamento obsoleto",
   }, [selected?.sourceFlowId, selected?.localFlowId, selected?.stepLinks]);
 
   async function save() {
@@ -163,7 +178,7 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
         {selected && <>
           <p className="sync-help">{selected.assignmentCount} people assignments · {selected.linkedAssignmentCount} linked · {selected.unmatchedAssignmentCount} unmatched</p>
           {selected.sourceMissing && <p className="sync-inline-error" role="alert">This flow no longer appears in the latest Elvanto snapshot. Its link is retained for review; no remote or local workflow was changed.</p>}
-          <label>Select a local workflow<select value={localFlowId} disabled={busy} onChange={(event) => { setLocalFlowId(event.target.value); setStepSelection({}); }}><option value="">{selected.sourceMissing ? "Remove stale link" : "Unlinked"}</option>{!selected.sourceMissing && localFlows.map((flow) => <option key={flow.id} value={flow.id}>{flow.name} · {flow.status}</option>)}</select></label>
+          <label>Select a local workflow<select value={localFlowId} disabled={busy} onChange={(event) => { setLocalFlowId(event.target.value); setStepSelection({}); }}><>{selected.sourceMissing && selected.localFlowId && <option value={selected.localFlowId} disabled>{selected.localFlowName} · Source flow missing</option>}<option value="">{selected.sourceMissing ? "Remove stale link" : "Unlinked"}</option>{!selected.sourceMissing && localFlows.map((flow) => <option key={flow.id} value={flow.id}>{flow.name} · {flow.status}</option>)}</>}</select></label>
           {selectedLocal && !selected.sourceMissing && <fieldset className="module-rights-fieldset"><legend>Map Elvanto steps to local steps</legend>{selected.remoteSteps.map((remoteStep) => <label className="module-right-option" key={remoteStep.id}><span><strong>{remoteStep.name}</strong>{!remoteStep.name && <small>{remoteStep.id}</small>}</span><select value={stepSelection[remoteStep.id] ?? ""} disabled={busy || selected.sourceMissing} onChange={(event) => setStepSelection((current) => ({ ...current, [remoteStep.id]: event.target.value }))}><option value="">No local step</option>{(selectedLocal?.steps ?? []).filter((step) => step.active).map((step) => <option key={step.id} value={step.id}>{step.title}</option>)}</select></label>)}</fieldset>}
           {selected?.stepLinks.some((link) => !link.sourceStepPresent) && <p className="sync-inline-error" role="alert">The Elvanto flow or step changed or disappeared. Refresh the imported snapshot before saving links.</p>}
           {notice && <p className="sync-feedback" role="status">{notice}</p>}
