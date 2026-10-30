@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react
 import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
 import { registeredModules } from "./module-registry";
+import { translateModuleMessage } from "./modules/translations";
+import { getActiveLanguage } from "./i18n";
 import "./LocationAccess.css";
 
 type LocationMember = {
@@ -142,11 +144,11 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
               <fieldset className="module-rights-fieldset"><legend>Location rights</legend>{locationRights.map((right) => <label className="module-right-option" key={right.value}><input type="checkbox" checked={permissions.includes(right.value)} onChange={() => toggle(right.value, permissions, setPermissions)} /><span><strong>{right.label}</strong><small>{right.description}</small></span></label>)}</fieldset>
               {enabledAccessModules.map((module) => <fieldset className="module-rights-fieldset" key={module.id}><legend>{module.accessLabel ?? module.name}</legend>{module.accessLevels!.map((level) => <label className="module-right-option" key={level.value}><input type="checkbox" checked={(modulePermissions[module.id] ?? []).includes(level.value)} onChange={() => setModulePermissions((current) => ({ ...current, [module.id]: (current[module.id] ?? []).includes(level.value) ? current[module.id].filter((value) => value !== level.value) : [...(current[module.id] ?? []), level.value] }))} /><span><strong>{level.label}</strong>{level.description && <small>{level.description}</small>}</span></label>)}</fieldset>)}
             </>}
-            {error && <p className="user-access-feedback user-access-feedback-error" role="alert">{error}</p>}{notice && <p className="user-access-feedback" role="status">{notice}</p>}
+            {error && <p className="user-access-feedback user-access-feedback-error" role="alert">{translateModuleMessage("core-admin", getActiveLanguage(), error)}</p>}{notice && <p className="user-access-feedback" role="status">{notice}</p>}
             <div className="form-actions"><button className="button button-danger" type="button" disabled={saving || selected.id === currentUserId} title={selected.id === currentUserId ? "Ask another site administrator to remove your access." : undefined} onClick={() => void removeAccess()}><Trash2 size={15} />Remove location access</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} />Save access</>}</button></div>
             <p className="modal-demo-footnote">Removing access preserves the account and all access to other locations. At least one site administrator must remain.</p>
           </> : <div className="location-access-empty"><UsersRound size={22} /><strong>Select a person</strong><p>Choose someone with access to manage their role, or add an existing account.</p></div>}
-          {error && !selected && <p className="user-access-feedback user-access-feedback-error" role="alert">{error}</p>}
+          {error && !selected && <p className="user-access-feedback user-access-feedback-error" role="alert">{translateModuleMessage("core-admin", getActiveLanguage(), error)}</p>}
         </form>
       </div>
     </section>

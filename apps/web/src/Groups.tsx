@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Check, ContactRound, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { ChurchGroup, Contact } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
-import { translate } from "./i18n";
+import { getActiveLanguage, translate } from "./i18n";
+import { translateModuleMessage } from "./modules/translations";
 
 type GroupMeeting = { id: string; date: string; title: string; attendeeCount: number; presentCount: number };
 type AttendanceEntry = { contactId: string; firstName: string; lastName: string; status: "present" | "absent" | "excused" };
@@ -237,7 +238,7 @@ export function Groups({ departmentId, contacts, canManage }: { departmentId: st
   }
 
   return <>
-    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || feedback || translate("groups.notice").replace("{place}", translate(departmentId ? "groups.yourChurch" : "groups.thisSite"))}{error && <button className="event-retry" type="button" onClick={() => void loadGroups()}>{translate("groups.tryAgain")}</button>}</div>
+    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error ? translateModuleMessage("core-groups", getActiveLanguage(), error) : feedback || translate("groups.notice").replace("{place}", translate(departmentId ? "groups.yourChurch" : "groups.thisSite"))}{error && <button className="event-retry" type="button" onClick={() => void loadGroups()}>{translate("groups.tryAgain")}</button>}</div>
     <section className="page-heading"><div><div className="eyebrow">{translate("groups.eyebrow")}</div><h1>{translate("groups.title")}</h1><p className="page-subtitle">{translate("groups.subtitle")}</p></div>{canManage && <button className="button button-primary" type="button" onClick={() => { setSelectedId(""); setName(""); setDescription(""); setEditing(false); }}><Plus size={17} />{" "}{translate("groups.new")}</button>}</section>
     <section className="community-groups-layout">
       <section className="directory-card community-group-list"><div className="directory-heading"><div><h2>{translate("groups.listTitle")}</h2><p>{(groups.length === 1 ? translate("groups.countOne") : translate("groups.count")).replace("{count}", String(groups.length))}</p></div></div>

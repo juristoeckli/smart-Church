@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { LogOut, RefreshCw, ShieldOff } from "lucide-react";
 import { formatUserDate } from "./date-format";
-import { translate } from "./i18n";
+import { getActiveLanguage, translate } from "./i18n";
+import { translateModuleMessage } from "./modules/translations";
 
 type AuthSession = {
   id: string;
@@ -59,7 +60,7 @@ export function UserSessions({ onSignedOut }: { onSignedOut: () => void | Promis
     <div>
       <h3 id="auth-sessions-title">{translate("sessions.title")}</h3>
       <p>{translate("sessions.description")}</p>
-      {error && <small className="system-notification-feedback" role="alert">{error}</small>}
+      {error && <small className="system-notification-feedback" role="alert">{translateModuleMessage("core-admin", getActiveLanguage(), error)}</small>}
     </div>
     <div className="auth-session-list">
       <div className="auth-session-toolbar"><button className="button button-secondary" type="button" onClick={() => void loadSessions()} disabled={loading}><RefreshCw size={14} />{translate("sessions.refresh")}</button></div>
