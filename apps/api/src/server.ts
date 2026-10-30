@@ -1856,6 +1856,9 @@ const contactProfileDataSchema = {
   additionalProperties: false,
   properties: {
     preferredName: { type: "string", maxLength: 80 },
+    familyId: { type: "string", maxLength: 15, pattern: "^[1-9][0-9]{0,14}$" },
+    familyRelationship: { type: "string", enum: ["Primary Contact", "Spouse", "Partner", "Child", "Sibling", "Grandfather", "Grandmother", "Other"] },
+    elvantoContact: { type: "boolean" }, elvantoVolunteer: { type: "boolean" }, elvantoArchived: { type: "boolean" },
     mobile: { type: "string", maxLength: 40 },
     birthday: { type: "string", format: "date" },
     gender: { type: "string", enum: ["Male", "Female"] },
