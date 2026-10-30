@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Pool } from "pg";
 
-export const protocolVersion = "smart-church-federation/1";
+export const protocolVersion = "smart-church-federation/2";
 const keyPath = () => process.env.SMART_CHURCH_SYNC_IDENTITY_KEY_FILE?.trim()
   || (process.env.NODE_ENV === "production"
     ? "/var/lib/smart-church/sync/identity-ed25519.pem"
