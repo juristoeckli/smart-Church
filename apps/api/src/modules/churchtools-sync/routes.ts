@@ -2156,6 +2156,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             }
             updated++;
           } else {
+            const latestSongs=await fetchElvantoPagedRows(apiKey,"songs/getAll","songs","song",{files:false});
+            if(!latestSongs.complete) throw new Error("Could not recheck the complete Elvanto song list before creating. Run a fresh preview later.");
+            if(latestSongs.rows.some((remoteSong)=>firstText(remoteSong.title).trim().toLocaleLowerCase()===song.title.trim().toLocaleLowerCase())) {
+              await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
+              return reply.code(409).send({error:"An Elvanto song now matches this title. The preview was invalidated; review a fresh preview before creating a duplicate."});
+            }
             const result=await elvantoRequest(apiKey,"songs/create",{title:song.title,arrangements:song.arrangements.map((arrangement)=>({name:arrangement.name,...(arrangement.key?{keys:[{name:arrangement.key,key_starting:arrangement.key}]}:{})}))});
             const raw=result.song; const remoteSong=Array.isArray(raw)?raw[0] as JsonObject|undefined:raw as JsonObject|undefined;
             sourceId=idOf(remoteSong ?? {});
