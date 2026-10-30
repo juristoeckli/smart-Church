@@ -149,12 +149,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const expected = comparable((input as EmailSnapshot).emailSettings);
       const expectedSnapshot = input as EmailSnapshot;
       const actualSnapshot = await collectEmailSnapshot(client, departmentId);
-      const expectedSignup = canonical({ settings: expectedSnapshot.signupSettings, requests: expectedSnapshot.signupRequests.map((row) => ({ ...row, department_id: departmentId, account_user_id: typeof row.account_user_id === "string" ? restoreContext?.userIdMap.get(row.account_user_id) ?? row.account_user_id : null, reviewed_by: typeof row.reviewed_by === "string" ? restoreContext?.userIdMap.get(row.reviewed_by) ?? row.reviewed_by : null })) });
-      const actualSignup = canonical({ settings: actualSnapshot.signupSettings, requests: actualSnapshot.signupRequests });
+      const expectedSignupSettings = canonical(expectedSnapshot.signupSettings);
+      const actualSignupSettings = canonical(actualSnapshot.signupSettings);
+      const expectedSignupRequests: Array<Record<string, unknown>> = expectedSnapshot.signupRequests.map((row) => ({ ...row, account_user_id: typeof row.account_user_id === "string" ? restoreContext?.userIdMap.get(row.account_user_id) ?? row.account_user_id : null, reviewed_by: typeof row.reviewed_by === "string" ? restoreContext?.userIdMap.get(row.reviewed_by) ?? row.reviewed_by : null }));
+      const actualSignupRequests = actualSnapshot.signupRequests;
       const actual = comparable(actualSnapshot.emailSettings);
-      return expected.length === actual.length && expected.every((row, index) => row === actual[index]) && expectedSignup === actualSignup
-        ? { ready: true, blockers: [] }
-        : { ready: false, blockers: ["Location email settings differ from the verified snapshot."] };
+      const blockers: string[] = [];
+      if (expected.length !== actual.length || expected.some((row, index) => row !== actual[index])) blockers.push("Location email delivery settings differ from the verified snapshot.");
+      if (expectedSignupSettings !== actualSignupSettings) blockers.push("Per-site self sign-up settings differ from the verified snapshot.");
+      if (canonical(expectedSignupRequests) !== canonical(actualSignupRequests)) {
+        const actualById = new Map(actualSignupRequests.map((row) => [String(row.id), row]));
+        const differingFields = new Set<string>();
+        for (const expectedRow of expectedSignupRequests) {
+          const actualRow = actualById.get(String(expectedRow.id));
+          if (!actualRow) { differingFields.add("record set"); continue; }
+          for (const key of new Set([...Object.keys(expectedRow), ...Object.keys(actualRow)])) {
+            if (canonical(expectedRow[key]) !== canonical(actualRow[key])) differingFields.add(key);
+          }
+        }
+        if (expectedSignupRequests.length !== actualSignupRequests.length) differingFields.add("record count");
+        blockers.push(`Per-site self sign-up requests differ from the verified snapshot${differingFields.size ? ` (${[...differingFields].sort().join(", ")})` : ""}.`);
+      }
+      return blockers.length ? { ready: false, blockers } : { ready: true, blockers: [] };
     },
   });
 
