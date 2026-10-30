@@ -171,7 +171,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       const result = await pool!.query(
         `SELECT e.id,e.flow_id,e.contact_id,e.status,e.due_on,e.started_at,e.completed_at,c.first_name,c.last_name,
-                COALESCE(json_agg(json_build_object('stepId',s.id,'title',s.title,'position',s.position,'required',s.required,'status',p.status,'dueOn',p.due_on,'completedAt',p.completed_at) ORDER BY s.position,s.id) FILTER (WHERE s.id IS NOT NULL AND s.active=TRUE),'[]'::json) AS steps
+                COALESCE(json_agg(json_build_object('stepId',s.id,'title',s.title,'position',s.position,'required',s.required,'active',s.active,'status',p.status,'dueOn',p.due_on,'completedAt',p.completed_at) ORDER BY s.position,s.id) FILTER (WHERE s.id IS NOT NULL),'[]'::json) AS steps
            FROM people_flow_enrollments e
            JOIN contacts c ON c.id=e.contact_id AND c.department_id=e.department_id
            LEFT JOIN people_flow_step_progress p ON p.department_id=e.department_id AND p.enrollment_id=e.id
@@ -230,8 +230,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const enrollment = await client.query<{ id: string; flow_id: string; status: string }>("SELECT id,flow_id,status FROM people_flow_enrollments WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.id]);
+        const enrollment = await client.query<{ id: string; flow_id: string; status: string; contact_id: string }>("SELECT id,flow_id,status,contact_id FROM people_flow_enrollments WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.id]);
         if (!enrollment.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Workflow assignment not found." }); }
+        if (request.body.status === "active" && enrollment.rows[0].status !== "active") {
+          const existingActive = await client.query("SELECT 1 FROM people_flow_enrollments WHERE department_id=$1 AND flow_id=$2 AND contact_id=$3 AND status='active' AND id<>$4 LIMIT 1", [departmentId, enrollment.rows[0].flow_id, enrollment.rows[0].contact_id, request.params.id]);
+          if (existingActive.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This person already has an active assignment for the workflow." }); }
+        }
         if (request.body.status === "completed") {
           const incomplete = await client.query("SELECT 1 FROM people_flow_step_progress p JOIN people_flow_steps s ON s.id=p.step_id AND s.department_id=p.department_id WHERE p.department_id=$1 AND p.enrollment_id=$2 AND s.active=TRUE AND s.required=TRUE AND p.status<>'completed' LIMIT 1", [departmentId, request.params.id]);
           if (incomplete.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Complete all required steps before completing this workflow assignment." }); }
