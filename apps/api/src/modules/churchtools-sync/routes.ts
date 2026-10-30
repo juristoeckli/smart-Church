@@ -324,7 +324,7 @@ async function fetchElvantoPagedRows(apiKey: string, endpoint: string, container
 const elvantoPeopleFields = ["gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "demographics", "service_types", "locations"];
 async function fetchElvantoPeopleCustomFields(apiKey: string) {
   const result = await fetchElvantoPagedRows(apiKey, "people/customFields/getAll", "custom_fields", "custom_field");
-  const fields = result.rows.map((field) => ({ id: idOf(field), name: firstText(field.name), type: firstText(field.type) })).filter((field) => field.id && field.name);
+  const fields = result.rows.map((field) => ({ id: idOf(field), name: firstText(field.name), type: firstText(field.type) })).filter((field) => field.id && field.name).sort((left, right) => left.id.localeCompare(right.id));
   return { fields, complete: result.complete };
 }
 function mapElvantoPeopleProfile(person: JsonObject, customFields: Array<{ id: string; name: string; type: string }>): JsonObject {
@@ -939,8 +939,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       }
       const previewComplete = complete && customFieldSnapshot.complete;
       const savedPreview = await pool!.query(
-        "UPDATE elvanto_sync_settings SET people_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_preview_complete=$2,people_preview_scanned_count=$3,people_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
-        [dept, previewComplete, people.length, total, row.updated_at],
+        "UPDATE elvanto_sync_settings SET people_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_preview_complete=$2,people_preview_scanned_count=$3,people_preview_total=$4,people_preview_custom_fields=$6::jsonb WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+        [dept, previewComplete, people.length, total, row.updated_at, JSON.stringify(customFieldSnapshot.fields)],
       );
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
       return { scannedCount: people.length, reportedTotal: total, complete: previewComplete, customFieldCount: customFieldSnapshot.fields.length, createCount, alreadyLinkedCount, emailMatchCount, ambiguousEmailCount, invalidCount, sample };
@@ -953,6 +953,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (row.directions.people === "off" || row.directions.people === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set People direction to Elvanto → Smart Church or bidirectional before importing." });
       const previewTime = row.people_preview_at ? new Date(row.people_preview_at).getTime() : 0;
       if (!row.people_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete People import preview first. Previews expire after one hour and after connection settings change." });
+      const savedFieldState = await pool!.query<{ fields: Array<{ id: string; name: string; type: string }> }>("SELECT people_preview_custom_fields AS fields FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      const previewCustomFields = Array.isArray(savedFieldState.rows[0]?.fields) ? savedFieldState.rows[0].fields : [];
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
       catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
@@ -977,8 +979,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           [dept],
         );
         const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
-        if (!customFieldSnapshot.complete) return reply.code(409).send({ error: "Elvanto custom-field pagination was incomplete. Run a new People preview before importing." });
-        const requestedPeopleFields = [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)];
+        if (!customFieldSnapshot.complete || JSON.stringify(customFieldSnapshot.fields) !== JSON.stringify(previewCustomFields)) {
+          await pool!.query("UPDATE elvanto_sync_settings SET people_preview_at=NULL,people_preview_complete=FALSE WHERE department_id=$1", [dept]);
+          return reply.code(409).send({ error: "Elvanto custom-field definitions changed after preview. Run a fresh complete People preview." });
+        }
+        const requestedPeopleFields = [...elvantoPeopleFields, ...previewCustomFields.map((field) => `custom_${field.id}`)];
         for (let pageBatch = 0; pageBatch < 5 && !complete; pageBatch += 1) {
           const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: 1000, fields: requestedPeopleFields });
           const people = elvantoCollection(payload, "people", "person");
@@ -1009,7 +1014,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const phone = rawPhone || null;
             if (!sourceId || seenIds.has(sourceId) || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) || (phone && phone.length > 40)) { pageSkipped += 1; continue; }
             seenIds.add(sourceId);
-            const profile = mapElvantoPeopleProfile(person, customFieldSnapshot.fields);
+            const profile = mapElvantoPeopleProfile(person, previewCustomFields);
             if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile }); pageUpdated += 1; continue; }
             if (email && (emails.get(email.toLocaleLowerCase()) ?? 0) > 0) { pageSkipped += 1; continue; }
             if (email) emails.set(email.toLocaleLowerCase(), 1);
