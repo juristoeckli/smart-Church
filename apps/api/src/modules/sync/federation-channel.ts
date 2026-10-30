@@ -74,6 +74,7 @@ export class FederationChannels {
   private readonly connecting = new Map<string, Promise<void>>();
   private readonly incoming = new Map<string, { socket: Socket; buffer: Buffer; lastPongAt: number; heartbeat: NodeJS.Timeout | null }>();
   private readonly pending = new Map<string, Pending>();
+  private readonly outboundErrors = new Map<string, string>();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private closed = false;
   private readonly onUpgrade = (request: IncomingMessage, socket: Socket, head: Buffer) => {
@@ -103,7 +104,11 @@ export class FederationChannels {
   status(installationId: string) {
     const outgoing = this.outgoing.get(installationId);
     const incoming = this.incoming.get(installationId);
-    return { outbound: outgoing?.readyState === WebSocket.OPEN, inbound: Boolean(incoming && !incoming.socket.destroyed) };
+    return {
+      outbound: outgoing?.readyState === WebSocket.OPEN,
+      inbound: Boolean(incoming && !incoming.socket.destroyed),
+      outboundError: this.outboundErrors.get(installationId) ?? null,
+    };
   }
 
   async start() {
@@ -174,13 +179,26 @@ export class FederationChannels {
     socket.binaryType = "arraybuffer";
     this.outgoing.set(peer.installation_id, socket);
     socket.addEventListener("message", (event) => this.receivePeerMessage(peer.installation_id, socket, event.data));
-    socket.addEventListener("close", () => { if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id); this.failPeerRequests(peer.installation_id); });
-    socket.addEventListener("error", () => { if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id); });
+    socket.addEventListener("close", (event) => {
+      if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
+      if (event.code !== 1000) this.outboundErrors.set(peer.installation_id, `The remote WebSocket closed the channel (code ${event.code}${event.reason ? `: ${event.reason}` : ""}).`);
+      this.failPeerRequests(peer.installation_id);
+    });
+    socket.addEventListener("error", (event) => {
+      if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
+      const detail = event instanceof ErrorEvent && event.message ? `: ${event.message.slice(0, 160)}` : "";
+      this.outboundErrors.set(peer.installation_id, `Could not connect to ${origin.host} over WebSocket${detail}.`);
+    });
     const attempt = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => { socket.close(); reject(new Error("The federation WebSocket connection timed out.")); }, 10_000);
+      const timeout = setTimeout(() => {
+        const reason = `The federation WebSocket connection to ${origin.host} timed out.`;
+        this.outboundErrors.set(peer.installation_id, reason);
+        socket.close();
+        reject(new Error(reason));
+      }, 10_000);
       timeout.unref();
-      socket.addEventListener("open", () => { clearTimeout(timeout); resolve(); }, { once: true });
-      socket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error("The federation WebSocket connection failed.")); }, { once: true });
+      socket.addEventListener("open", () => { clearTimeout(timeout); this.outboundErrors.delete(peer.installation_id); resolve(); }, { once: true });
+      socket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error(this.outboundErrors.get(peer.installation_id) ?? "The federation WebSocket connection failed.")); }, { once: true });
     }).finally(() => { if (this.connecting.get(peer.installation_id) === attempt) this.connecting.delete(peer.installation_id); });
     this.connecting.set(peer.installation_id, attempt);
     return attempt;

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Check, Copy, Link2, Plus, RefreshCw, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
 
 type FederationIdentity = { installationId: string; displayName: string; publicKeyPem: string; fingerprint: string; protocolVersion: string };
-type Peer = { installation_id: string; display_name: string; base_url: string | null; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; created_at: string; approved_at: string | null; last_seen_at: string | null; last_error: string | null; channels?: { inbound: boolean; outbound: boolean } };
+type Peer = { installation_id: string; display_name: string; base_url: string | null; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; created_at: string; approved_at: string | null; last_seen_at: string | null; last_error: string | null; channels?: { inbound: boolean; outbound: boolean; outboundError?: string | null } };
 type Invitation = { id: string; expires_at: string; created_at: string };
 type PeerSettings = { identity: FederationIdentity; peers: Peer[]; invitations: Invitation[] };
 type Discovery = { baseUrl: string; identity: FederationIdentity; existingTrustState: string | null };
@@ -77,13 +77,13 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
     try {
       const response = await fetch("/api/modules/sync/federation/channels", { cache: "no-store" });
       if (!response.ok) return;
-      const data = await response.json() as { channels?: Array<{ installationId: string; inbound: boolean; outbound: boolean }> };
+      const data = await response.json() as { channels?: Array<{ installationId: string; inbound: boolean; outbound: boolean; outboundError?: string | null }> };
       const statuses = new Map((data.channels ?? []).map((channel) => [channel.installationId, channel]));
       setSettings((current) => current ? {
         ...current,
         peers: current.peers.map((peer) => {
           const channel = statuses.get(peer.installation_id);
-          return channel ? { ...peer, channels: { inbound: channel.inbound, outbound: channel.outbound } } : peer;
+          return channel ? { ...peer, channels: { inbound: channel.inbound, outbound: channel.outbound, outboundError: channel.outboundError } } : peer;
         }),
       } : current);
     } catch { /* Keep the last known state until the next poll. */ }
@@ -342,7 +342,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
 
     <div className="federation-peer-section"><h3>Known servers</h3>
       {!settings?.peers.length && <p className="sync-help">No servers have been paired yet.</p>}
-      {settings?.peers.map((peer) => <article className={`federation-peer federation-peer-${peer.trust_state}`} key={peer.installation_id}><div className="federation-peer-details"><div className="federation-peer-title"><strong>{peer.display_name}</strong><span className={`federation-state federation-state-${peer.trust_state}`}>{peer.trust_state}</span><span>{peer.direction === "incoming" ? "Incoming request" : "Outgoing request"}</span></div><small>{peer.base_url ?? "No advertised URL · inbound WSS"} · {peer.installation_id}</small><code>{peer.fingerprint}</code>{peer.trust_state === "trusted" && <small>WebSocket channels · Outbound: {peer.channels?.outbound ? "Connected" : "Waiting"} · Inbound: {peer.channels?.inbound ? "Connected" : "Waiting"}</small>}{peer.last_seen_at && <small>Last checked: {new Date(peer.last_seen_at).toLocaleString()}</small>}{peer.last_error && <small className="federation-last-error">Last check failed: {peer.last_error}</small>}{remoteStates[peer.installation_id] && <small>Remote status: {remoteStates[peer.installation_id]}</small>}</div><div className="federation-peer-actions">
+      {settings?.peers.map((peer) => <article className={`federation-peer federation-peer-${peer.trust_state}`} key={peer.installation_id}><div className="federation-peer-details"><div className="federation-peer-title"><strong>{peer.display_name}</strong><span className={`federation-state federation-state-${peer.trust_state}`}>{peer.trust_state}</span><span>{peer.direction === "incoming" ? "Incoming request" : "Outgoing request"}</span></div><small>{peer.base_url ?? "No advertised URL · inbound WSS"} · {peer.installation_id}</small><code>{peer.fingerprint}</code>{peer.trust_state === "trusted" && <small>WebSocket channels · Outbound: {peer.channels?.outbound ? "Connected" : "Waiting"} · Inbound: {peer.channels?.inbound ? "Connected" : "Waiting"}</small>}{peer.trust_state === "trusted" && !peer.channels?.outbound && peer.channels?.outboundError && <small className="federation-last-error">Outbound channel: {peer.channels.outboundError}</small>}{peer.last_seen_at && <small>Last checked: {new Date(peer.last_seen_at).toLocaleString()}</small>}{peer.last_error && <small className="federation-last-error">Last check failed: {peer.last_error}</small>}{remoteStates[peer.installation_id] && <small>Remote status: {remoteStates[peer.installation_id]}</small>}</div><div className="federation-peer-actions">
         {peer.trust_state !== "revoked" && <button type="button" className="button button-secondary" onClick={() => void checkPeer(peer)} disabled={Boolean(busy) || (peer.trust_state !== "trusted" && !peer.base_url)} title={peer.trust_state !== "trusted" && !peer.base_url ? "A pending server needs its HTTPS pairing address for trust bootstrap." : undefined}><RefreshCw size={14} />{busy === `check:${peer.installation_id}` ? "Checking…" : "Check"}</button>}
         {peer.trust_state === "pending" && peer.direction === "incoming" && <button type="button" className="button button-primary" onClick={() => void approvePeer(peer)} disabled={Boolean(busy)}><ShieldCheck size={14} />{busy === `approve:${peer.installation_id}` ? "Approving…" : "Approve"}</button>}
         {peer.trust_state === "pending" && peer.direction === "outgoing" && <button type="button" className="button button-primary" onClick={() => void approvePeer(peer)} disabled={Boolean(busy) || remoteStates[peer.installation_id] !== "trusted"}><Check size={14} />Approve remote</button>}
