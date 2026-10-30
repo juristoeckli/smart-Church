@@ -94,12 +94,14 @@ export function Authentication({
   setupRequired,
   setupLocation,
   selfSignupEnabled,
+  selfSignupSites = [],
   unavailableMessage,
   onAuthenticated,
 }: {
   setupRequired: boolean;
   setupLocation?: string;
   selfSignupEnabled?: boolean;
+  selfSignupSites?: Array<{ id: string; name: string }>;
   unavailableMessage: string;
   onAuthenticated: (user: AuthenticatedUser) => void;
 }) {
@@ -111,10 +113,12 @@ export function Authentication({
 
   async function requestSignup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const email = String(new FormData(event.currentTarget).get("signupEmail")).trim();
+    const form = new FormData(event.currentTarget);
+    const email = String(form.get("signupEmail")).trim();
+    const departmentId = String(form.get("signupSite") ?? "");
     setIsSubmitting(true); setError(""); setSignupFeedback("");
     try {
-      const response = await fetch("/api/public/self-signup/request", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, language }) });
+      const response = await fetch("/api/public/self-signup/request", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ email, language, departmentId }) });
       const result = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(t("signupError"));
       setSignupFeedback(t("signupFallback"));
@@ -182,6 +186,7 @@ export function Authentication({
         {error && <div className="auth-message auth-message-error" role="alert">{error}</div>}
 
         {showSignup ? <form className="auth-form" onSubmit={(event) => void requestSignup(event)}>
+          <label>Site<select name="signupSite" required defaultValue=""><option value="" disabled>Choose a site</option>{selfSignupSites.map((site) => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
           <label>{t("email")}<input name="signupEmail" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" autoFocus /></label>
           {signupFeedback && <p className="auth-hint" role="status">{signupFeedback}</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage) || selfSignupEnabled === false}>{isSubmitting ? t("sending") : t("sendSignupLink")}<ArrowRight size={16} /></button>

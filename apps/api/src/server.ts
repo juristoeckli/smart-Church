@@ -57,6 +57,7 @@ const app = Fastify({
   trustProxy: trustedProxyAddresses.length ? trustedProxyAddresses : false,
 });
 let databaseReady = false;
+const emailConnector = createEmailConnector(pool ?? null, () => databaseReady);
 let firstRunSetupCode: string | null = null;
 let httpAccessMode: HttpAccessMode = "none";
 const sessionCookieName = "smart_church_session";
@@ -389,7 +390,8 @@ app.addHook("preHandler", async (request, reply) => {
     const replicatedAccountWrite = path === "/api/auth/change-password" || path === "/api/auth/preferences";
     const redundancyControl = path.startsWith("/api/modules/sync/federation/redundancy/");
     const externalWebhook = path === "/api/webhooks/resend";
-    if ((!localServerSettings || replicatedAccountWrite) && !redundancyControl && !externalWebhook && !path.startsWith("/api/modules/sync/federation/")) {
+    const publicSelfSignup = path.startsWith("/api/public/self-signup/");
+    if ((!localServerSettings || replicatedAccountWrite) && !redundancyControl && !externalWebhook && !publicSelfSignup && !path.startsWith("/api/modules/sync/federation/")) {
       const requestedDepartment = request.headers["x-department-id"];
       const queryDepartment = new URL(request.url, "http://localhost").searchParams.get("departmentId");
       const writeDepartment = typeof requestedDepartment === "string" && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(requestedDepartment)
@@ -981,11 +983,20 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   const count = await pool.query("SELECT count(*)::int AS total FROM app_users");
-  const signup = await pool.query<{ enabled: boolean }>("SELECT settings.enabled FROM installation_self_signup_settings settings JOIN installations installation ON installation.id=settings.installation_id WHERE installation.is_current=true");
+  const signupCandidates = await pool.query<{ id: string; name: string }>(
+    `SELECT department.id,department.name FROM departments department
+       JOIN department_self_signup_settings settings ON settings.department_id=department.id AND settings.enabled=true
+      WHERE department.installation_id=(SELECT id FROM installations WHERE is_current=true) ORDER BY department.name`,
+  );
+  const selfSignupSites: Array<{ id: string; name: string }> = [];
+  for (const site of signupCandidates.rows) {
+    if (await emailConnector.isConfigured(site.id)) selfSignupSites.push(site);
+  }
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
-    selfSignupEnabled: signup.rows[0]?.enabled ?? false,
+    selfSignupEnabled: selfSignupSites.length > 0,
+    selfSignupSites,
     httpAccessMode,
     httpsOrigin: configuredHttpsOrigin(),
     ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
@@ -1941,6 +1952,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
        RETURNING id,name,time_zone,enabled_modules`,
       [id, installationId, location, timeZone],
     );
+    await client.query("INSERT INTO department_self_signup_settings(department_id) VALUES($1) ON CONFLICT(department_id) DO NOTHING", [id]);
     const redundancyTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
     if (redundancyTable.rows[0]?.table_name) {
       await client.query(
@@ -2802,7 +2814,7 @@ try {
     resolveDepartmentId: activeDepartmentId,
     validateMutation: validModuleMutation,
     getVideoWorker: () => videoWorker,
-    email: createEmailConnector(pool ?? null, () => databaseReady),
+    email: emailConnector,
   });
   app.setNotFoundHandler(async (request, reply) => {
     if ((request.method !== "GET" && request.method !== "HEAD") || request.url === "/api" || request.url.startsWith("/api/")) {

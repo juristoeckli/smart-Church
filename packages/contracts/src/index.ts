@@ -309,6 +309,7 @@ export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
   selfSignupEnabled?: boolean;
+  selfSignupSites?: Array<{ id: string; name: string }>;
   httpAccessMode?: HttpAccessMode;
   httpsOrigin?: string | null;
   setupLocation?: string;

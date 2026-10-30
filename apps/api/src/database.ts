@@ -47,6 +47,9 @@ export async function initializeDatabase() {
        ON CONFLICT (id) DO NOTHING`,
       [departmentId, installationId, departmentName],
     );
+    await client.query("UPDATE self_signup_requests SET department_id=$1 WHERE department_id IS NULL", [departmentId]);
+    await client.query("ALTER TABLE self_signup_requests ALTER COLUMN department_id SET NOT NULL");
+    await client.query("INSERT INTO department_self_signup_settings(department_id) VALUES($1) ON CONFLICT(department_id) DO NOTHING", [departmentId]);
     const redundancyTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
     if (redundancyTable.rows[0]?.table_name) {
       await client.query(
