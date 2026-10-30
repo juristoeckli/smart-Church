@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Check, CircleAlert, Database, RefreshCw, Trash2 } from "lucide-react";
 import { formatUserDate } from "../../date-format";
 import { ElvantoSyncSettings } from "./ElvantoSyncSettings";
+import { FederationSettings } from "./FederationSettings";
+import "./federation.css";
 
 type SyncStatus = {
   configured: boolean;
@@ -15,7 +17,8 @@ type SyncStatus = {
   resourceCount: number;
 };
 
-export function SyncModule({ departmentId, settingsPanel = false }: { departmentId: string; settingsPanel?: boolean }) {
+export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: { departmentId: string; csrfToken: string; settingsPanel?: boolean }) {
+  const [activePlatform, setActivePlatform] = useState<"churchtools" | "elvanto" | "server">("churchtools");
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [instanceUrl, setInstanceUrl] = useState("");
   const [loginToken, setLoginToken] = useState("");
@@ -79,8 +82,13 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
 
   const totalImported = (status?.peopleCount ?? 0) + (status?.groupCount ?? 0) + (status?.serviceCount ?? 0) + (status?.resourceCount ?? 0);
   return <div className={settingsPanel ? "sync-settings-panel-view" : undefined}>
+    {!settingsPanel && <section className="page-heading"><div><div className="eyebrow">INTEGRATIONS</div><h1>Sync</h1><p className="page-subtitle">Manage data connections for ChurchTools, Elvanto, and other Smart-Church servers.</p></div></section>}
+    <nav className="sync-platform-tabs" role="tablist" aria-label="Sync platforms">
+      {[{ id: "churchtools", label: "ChurchTools" }, { id: "elvanto", label: "Elvanto" }, { id: "server", label: "Server-to-server" }].map((platform) => <button key={platform.id} id={`sync-tab-${platform.id}`} type="button" role="tab" aria-controls={`sync-panel-${platform.id}`} aria-selected={activePlatform === platform.id} tabIndex={activePlatform === platform.id ? 0 : -1} className={activePlatform === platform.id ? "sync-platform-tab active" : "sync-platform-tab"} onClick={() => setActivePlatform(platform.id as typeof activePlatform)}>{platform.label}</button>)}
+    </nav>
+    {activePlatform === "server" && <div id="sync-panel-server" className="sync-platform-tabpanel" role="tabpanel" aria-labelledby="sync-tab-server" tabIndex={0}><FederationSettings csrfToken={csrfToken} departmentId={departmentId} /></div>}
+    {activePlatform === "churchtools" && <div id="sync-panel-churchtools" className="sync-platform-tabpanel" role="tabpanel" aria-labelledby="sync-tab-churchtools" tabIndex={0}>
     <div className={`demo-notice ${error || status?.lastSyncError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || status?.lastSyncError || "ChurchTools data is imported as read-only records."}</div>
-    {!settingsPanel && <section className="page-heading"><div><div className="eyebrow">INTEGRATIONS</div><h1>ChurchTools sync</h1><p className="page-subtitle">Bring people, groups and their members, services, and bookable resources into this site. Imported records follow ChurchTools and cannot be edited here.</p></div>{status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={16} />{busy ? "Working…" : "Sync now"}</button>}</section>}
     <section className="sync-summary-grid" aria-label="Imported data summary">
       {[ ["People", status?.peopleCount ?? 0], ["Groups", status?.groupCount ?? 0], ["Services & events", status?.serviceCount ?? 0], ["Resources", status?.resourceCount ?? 0] ].map(([label, count]) => <article className="stat-card" key={label}><div className="stat-icon stat-icon-blue"><Database size={18} /></div><div className="stat-content"><span>{label}</span><strong>{count}</strong><small>Imported from ChurchTools</small></div></article>)}
     </section>
@@ -96,7 +104,8 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
       {status?.lastSyncError && <p className="sync-feedback sync-feedback-error" role="alert"><CircleAlert size={15} />Last sync failed: {status.lastSyncError}</p>}
     </section>
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>Module controls</h2><p>Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? "Pause sync" : "Enable sync"}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />Remove sync and imported data</button></div></section>}
-    <ElvantoSyncSettings departmentId={departmentId} />
     <footer className="page-footer"><span>Automatically syncs every 15 minutes while enabled.</span><span>Only site administrators can manage this connection.</span></footer>
+    </div>}
+    {activePlatform === "elvanto" && <div id="sync-panel-elvanto" className="sync-platform-tabpanel" role="tabpanel" aria-labelledby="sync-tab-elvanto" tabIndex={0}><ElvantoSyncSettings departmentId={departmentId} /></div>}
   </div>;
 }

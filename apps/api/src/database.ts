@@ -47,6 +47,15 @@ export async function initializeDatabase() {
        ON CONFLICT (id) DO NOTHING`,
       [departmentId, installationId, departmentName],
     );
+    const redundancyTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (redundancyTable.rows[0]?.table_name) {
+      await client.query(
+        `INSERT INTO sync_site_redundancy(department_id,role,primary_installation_id)
+         SELECT id,'primary',installation_id FROM departments WHERE id=$1
+         ON CONFLICT(department_id) DO NOTHING`,
+        [departmentId],
+      );
+    }
   } finally {
     client.release();
   }

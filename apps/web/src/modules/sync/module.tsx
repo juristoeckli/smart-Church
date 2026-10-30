@@ -4,8 +4,8 @@ import type { ModuleRegistration, ModuleSettingsContext } from "../../module-reg
 import { translationsForModule } from "../translations";
 import { SyncModule } from "./SyncModule";
 
-function SyncSettings({ departmentId }: ModuleSettingsContext) {
-  return <SyncModule departmentId={departmentId} settingsPanel />;
+function SyncSettings({ departmentId, csrfToken }: ModuleSettingsContext) {
+  return <SyncModule departmentId={departmentId} csrfToken={csrfToken} settingsPanel />;
 }
 
 export const moduleRegistration: ModuleRegistration = {

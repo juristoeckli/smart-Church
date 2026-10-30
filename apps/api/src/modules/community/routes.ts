@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { BookableResource, ChurchGroup, LocationPermission, ResourceBooking } from "@smart-church/contracts";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 
@@ -30,6 +31,7 @@ function mapBooking(row: BookingRow): ResourceBooking {
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = dependencies;
+  registerCommunityReplication(dependencies);
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, permission?: LocationPermission) {
       if (!isDatabaseReady() || !pool) {
@@ -249,26 +251,35 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const lastName = request.body.lastName.trim();
       const email = request.body.email.trim().toLocaleLowerCase();
       if (!firstName || !lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
-      const group = await pool!.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS NULL", [request.params.token]);
-      if (!group.rowCount) return reply.code(404).send({ error: "Registration is closed for this group." });
-      const existing = await pool!.query("SELECT 1 FROM group_join_requests WHERE group_id=$1 AND lower(email)=lower($2) AND status='pending'", [group.rows[0].id, email]);
-      if (existing.rowCount) return reply.code(409).send({ error: "A request from this email is already waiting for review." });
-      const member = await pool!.query(
-        `SELECT 1 FROM group_members membership JOIN contacts person ON person.id=membership.contact_id
-          WHERE membership.group_id=$1 AND lower(person.email)=lower($2) AND membership.status='active'`,
-        [group.rows[0].id, email],
-      );
-      if (member.rowCount) return reply.code(409).send({ error: "This email is already connected to an active group member." });
+      const client = await pool!.connect();
+      let groupId = "";
+      let groupDepartmentId = "";
       try {
-        await pool!.query(
-          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email) VALUES ($1,$2,$3,$4,$5,$6)",
-          [randomUUID(), group.rows[0].department_id, group.rows[0].id, firstName, lastName, email],
+        await client.query("BEGIN");
+        const group = await client.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS NULL FOR SHARE", [request.params.token]);
+        if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this group." }); }
+        groupId = group.rows[0].id;
+        groupDepartmentId = group.rows[0].department_id;
+        if (!await dependencies.lockDepartmentForWrite(client, groupDepartmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This group's location is read-only while it is a redundancy standby or fenced site." }); }
+        const existing = await client.query("SELECT 1 FROM group_join_requests WHERE group_id=$1 AND lower(email)=lower($2) AND status='pending'", [groupId, email]);
+        if (existing.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A request from this email is already waiting for review." }); }
+        const member = await client.query(
+          `SELECT 1 FROM group_members membership JOIN contacts person ON person.id=membership.contact_id
+            WHERE membership.group_id=$1 AND lower(person.email)=lower($2) AND membership.status='active'`,
+          [groupId, email],
         );
+        if (member.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email is already connected to an active group member." }); }
+        await client.query(
+          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email) VALUES ($1,$2,$3,$4,$5,$6)",
+          [randomUUID(), groupDepartmentId, groupId, firstName, lastName, email],
+        );
+        await client.query("COMMIT");
       } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
         if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A request from this email is already waiting for review." });
         throw error;
-      }
-      realtime.publish("core:groups:changed", group.rows[0].department_id, { groupId: group.rows[0].id, action: "join-requested" });
+      } finally { client.release(); }
+      realtime.publish("core:groups:changed", groupDepartmentId, { groupId, action: "join-requested" });
       return reply.code(201).send({ status: "pending" as const });
     });
 

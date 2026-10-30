@@ -11,6 +11,33 @@ function mapDemoNote(row: DemoNoteRow) {
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  context.replication.register({
+    schemaVersion: "1",
+    inspect: async (departmentId) => {
+      if (!context.pool || !context.isDatabaseReady()) return { ready: false, blockers: ["Module Demo database is unavailable."], recordCount: 0 };
+      try {
+        const result = await context.pool.query<{ count: number; bytes: string }>("SELECT count(*)::int AS count,COALESCE(sum(pg_column_size(note)),0)::text AS bytes FROM module_demo_notes note WHERE department_id=$1", [departmentId]);
+        return Number(result.rows[0].bytes) <= 10 * 1024 * 1024
+          ? { ready: true, blockers: [], recordCount: result.rows[0].count }
+          : { ready: false, blockers: ["Module Demo notes exceed the 10 MiB snapshot limit."], recordCount: result.rows[0].count };
+      } catch { return { ready: false, blockers: ["Module Demo storage is not initialized."], recordCount: 0 }; }
+    },
+    exportSnapshot: async (client, departmentId) => ({ version: 1, notes: (await client.query("SELECT id,message,created_at FROM module_demo_notes WHERE department_id=$1 ORDER BY id", [departmentId])).rows }),
+    restoreSnapshot: async (client, departmentId, input) => {
+      const snapshot = input as { version?: unknown; notes?: Array<{ id: string; message: string; created_at: Date | string }> };
+      if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.notes) || snapshot.notes.length > 100_000) throw new Error("The Module Demo snapshot is invalid or exceeds the supported limits.");
+      await client.query("DELETE FROM module_demo_notes WHERE department_id=$1", [departmentId]);
+      for (const note of snapshot.notes) await client.query("INSERT INTO module_demo_notes(id,department_id,message,created_at) VALUES($1,$2,$3,$4)", [note.id, departmentId, note.message, note.created_at]);
+      return { recordCount: snapshot.notes.length };
+    },
+    verifySnapshot: async (client, departmentId, input) => {
+      const snapshot = input as { version?: unknown; notes?: Array<{ id: string; message: string; created_at: Date | string }> };
+      if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.notes)) return { ready: false, blockers: ["No supported Module Demo snapshot is available."] };
+      const actual = (await client.query("SELECT id,message,created_at FROM module_demo_notes WHERE department_id=$1 ORDER BY id", [departmentId])).rows;
+      const expected = [...snapshot.notes].sort((left, right) => left.id.localeCompare(right.id));
+      return JSON.stringify(actual) === JSON.stringify(expected) ? { ready: true, blockers: [] } : { ready: false, blockers: ["Module Demo notes do not match the verified snapshot."] };
+    },
+  });
   const worker = new ModuleDemoWorker((message) => app.log.error({ module: "module-demo" }, message));
   worker.setEnabled(context.activation.isEnabled());
   const removeActivationListener = context.activation.onChange((enabled) => worker.setEnabled(enabled));

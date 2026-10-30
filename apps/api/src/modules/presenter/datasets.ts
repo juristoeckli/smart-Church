@@ -1,9 +1,9 @@
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createGzip, gunzipSync } from "node:zlib";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { dirname, resolve, basename } from "node:path";
+import { dirname, resolve, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type DatasetSlide = { type: "text"; text: string; label?: string; section?: string; layout?: "lower-third" } | { type: "image"; asset: string; label: string; section?: string } | { type: "html"; asset: string; label: string; section?: string };
@@ -117,7 +117,7 @@ function tarHeader(path: string, size: number) {
   Buffer.from(octal(0, 8)).copy(header, 108);
   Buffer.from(octal(0, 8)).copy(header, 116);
   Buffer.from(octal(size, 12)).copy(header, 124);
-  Buffer.from(octal(Math.floor(Date.now() / 1000), 12)).copy(header, 136);
+  Buffer.from(octal(0, 12)).copy(header, 136);
   header.fill(0x20, 148, 156);
   header[156] = 0x30;
   Buffer.from("ustar\0").copy(header, 257);
@@ -221,6 +221,85 @@ export async function installDatasetArchive(gzipped: Buffer) {
     await rm(temp, { recursive: true, force: true });
     throw error;
   }
+}
+
+export async function replaceDatasetArchives(archives: Array<{ id: string; archive: Buffer }>) {
+  const root = datasetDirectory();
+  await mkdir(root, { recursive: true });
+  const current = await listDatasets();
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  const incoming = new Map<string, { files: Map<string, Buffer>; builtIn: boolean }>();
+  for (const item of archives) {
+    if (!idPattern.test(item.id) || incoming.has(item.id)) throw new Error("Presenter dataset inventory is invalid or contains duplicate IDs.");
+    const unpacked = unpackDatasetArchive(item.archive);
+    if (unpacked.manifest.id !== item.id) throw new Error("A Presenter dataset archive ID does not match its manifest.");
+    const existing = currentById.get(item.id);
+    const builtIn = existing?.builtIn ?? false;
+    if (builtIn) {
+      const existingArchive = await datasetArchive(item.id);
+      if (!existingArchive) throw new Error(`Built-in Presenter dataset ${item.id} is missing on the standby.`);
+      const chunks: Buffer[] = [];
+      for await (const chunk of existingArchive.stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (!Buffer.concat(chunks).equals(item.archive)) throw new Error(`Built-in Presenter dataset ${item.id} differs between servers.`);
+    }
+    incoming.set(item.id, { files: unpacked.files, builtIn });
+  }
+  const customIds = current.filter((item) => !item.builtIn).map((item) => item.id);
+  const staged = new Map<string, string>();
+  try {
+    for (const [id, item] of incoming) {
+      if (item.builtIn) continue;
+      const stage = resolve(root, `.replica-${id}-${randomUUID()}`);
+      await mkdir(stage, { recursive: true });
+      for (const [relative, content] of item.files) {
+        const target = resolve(stage, relative);
+        if (!target.startsWith(`${stage}${sep}`)) throw new Error("A Presenter dataset contains an unsafe file path.");
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, content, { flag: "wx" });
+      }
+      staged.set(id, stage);
+    }
+  } catch (error) {
+    await Promise.all([...staged.values()].map((path) => rm(path, { recursive: true, force: true })));
+    throw error;
+  }
+  const backups = new Map<string, string>();
+  const replaced = new Set<string>();
+  const backupPath = (id: string) => resolve(root, `.replica-backup-${id}-${randomUUID()}`);
+  const rollback = async () => {
+    for (const id of [...replaced].reverse()) await rm(resolve(root, id), { recursive: true, force: true });
+    for (const [id, backup] of backups) await rename(backup, resolve(root, id)).catch(() => undefined);
+    await Promise.all([...staged.values()].map((path) => rm(path, { recursive: true, force: true })));
+  };
+  try {
+    for (const id of customIds) {
+      if (incoming.has(id)) continue;
+      const backup = backupPath(id);
+      await rename(resolve(root, id), backup);
+      backups.set(id, backup);
+      replaced.add(id);
+    }
+    for (const [id, stage] of staged) {
+      const target = resolve(root, id);
+      if (currentById.has(id)) {
+        const backup = backupPath(id);
+        await rename(target, backup);
+        backups.set(id, backup);
+      }
+      await rename(stage, target);
+      replaced.add(id);
+    }
+  } catch (error) {
+    await rollback();
+    throw error;
+  }
+  return {
+    rollback,
+    commit: async () => {
+      await Promise.all([...backups.values()].map((path) => rm(path, { recursive: true, force: true })));
+      await Promise.all([...staged.values()].map((path) => rm(path, { recursive: true, force: true })));
+    },
+  };
 }
 
 export async function installPresentationDataset(filename: string, importedSlides: { label: string; html: string }[]) {

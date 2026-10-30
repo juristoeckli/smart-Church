@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 
-export function startEventDeskInspectionWorker(app: FastifyInstance, pool: Pool | null) {
+export function startEventDeskInspectionWorker(app: FastifyInstance, pool: Pool | null, isDepartmentWritable: (departmentId: string) => Promise<boolean>) {
   if (!pool) return;
   let running = false;
   const tick = async () => {
@@ -18,6 +18,7 @@ export function startEventDeskInspectionWorker(app: FastifyInstance, pool: Pool 
         WHERE s.active=true AND s.next_due_date<=CURRENT_DATE
         ORDER BY s.next_due_date LIMIT 100 FOR UPDATE OF s SKIP LOCKED`);
       for (const schedule of due.rows) {
+        if (!(await isDepartmentWritable(schedule.department_id))) continue;
         const ticketId = randomUUID();
         const dueDate = schedule.next_due_date instanceof Date ? schedule.next_due_date.toISOString().slice(0, 10) : String(schedule.next_due_date).slice(0, 10);
         await client.query(`INSERT INTO eventdesk_service_tickets
@@ -42,7 +43,7 @@ export function startEventDeskInspectionWorker(app: FastifyInstance, pool: Pool 
         await client.query(`UPDATE eventdesk_inspection_schedules SET next_due_date=GREATEST(next_due_date + interval_days,CURRENT_DATE + interval_days),updated_at=now() WHERE id=$1 AND department_id=$2`, [schedule.id, schedule.department_id]);
       }
       await client.query("COMMIT");
-      await sendDueInspectionReminders(pool);
+      await sendDueInspectionReminders(pool, isDepartmentWritable);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       app.log.error({ err: error, module: "eventdesk-inspections" }, "Inspection schedule cycle failed.");
@@ -57,7 +58,7 @@ export function startEventDeskInspectionWorker(app: FastifyInstance, pool: Pool 
   void tick();
 }
 
-async function sendDueInspectionReminders(pool: Pool) {
+async function sendDueInspectionReminders(pool: Pool, isDepartmentWritable: (departmentId: string) => Promise<boolean>) {
   const candidates = await pool.query<{ department_id: string; schedule_id: string; due_date: string; owner_user_id: string; owner_email: string; asset_name: string; serial_number: string | null }>(`SELECT s.department_id,s.id AS schedule_id,s.next_due_date::text AS due_date,s.owner_user_id,u.email AS owner_email,a.name AS asset_name,unit.serial_number
     FROM eventdesk_inspection_schedules s
     LEFT JOIN eventdesk_asset_units unit ON unit.id=s.unit_id AND unit.department_id=s.department_id
@@ -68,6 +69,7 @@ async function sendDueInspectionReminders(pool: Pool) {
       AND nullif(trim(u.email),'') IS NOT NULL
     ORDER BY s.next_due_date LIMIT 100`);
   for (const row of candidates.rows) {
+    if (!(await isDepartmentWritable(row.department_id))) continue;
     const id = randomUUID();
     const claim = await pool.query(`INSERT INTO eventdesk_inspection_reminder_attempts (id,department_id,schedule_id,inspection_due_date,recipient_email,status)
       VALUES ($1,$2,$3,$4,$5,'pending')

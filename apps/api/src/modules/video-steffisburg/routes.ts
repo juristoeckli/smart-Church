@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerVideoSteffisburgReplication } from "./replication.js";
 import { BmdConverterWorker } from "./bmd-converter-worker.js";
 import { addYoutubeVideoToPlaylist, createYoutubeBroadcast, decryptYoutubeToken, deleteYoutubeBroadcast, encryptYoutubeToken, ensureYoutubeTokenKey, exchangeYoutubeCode, refreshYoutubeAccessToken, setYoutubeVideoUnlisted, transitionYoutubeBroadcast, updateYoutubeBroadcast, youtubeApi, youtubeAuthorizationUrl, youtubeChannel, youtubeOAuthConfigured, youtubePlaylists } from "./youtube.js";
 
@@ -64,6 +65,7 @@ function youtubeMonitorUrl(embedHtml?: string) {
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, getVideoWorker, realtime } = context;
+  registerVideoSteffisburgReplication(context);
   const converterWorkers = new Map<string, BmdConverterWorker>();
   const youtubeOAuthStates = new Map<string, { departmentId: string; userId: string; username: string; redirectUri: string; expiresAt: number }>();
   let statusMonitor: ReturnType<typeof setInterval> | undefined;
@@ -213,6 +215,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     for (const [departmentId, broadcasts] of byDepartment) {
       try {
+        if (!(await context.isDepartmentWritable(departmentId))) continue;
         const accessToken = await youtubeAccessToken(departmentId);
         for (let offset = 0; offset < broadcasts.length; offset += 50) {
           const batch = broadcasts.slice(offset, offset + 50);
@@ -860,6 +863,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const state = typeof request.query.state === "string" ? youtubeOAuthStates.get(request.query.state) : undefined;
     if (!state || state.expiresAt < Date.now()) return reply.code(400).send({ error: "This YouTube connection request expired. Start again from Video overview." });
     youtubeOAuthStates.delete(request.query.state!);
+    if (!await context.isDepartmentWritable(state.departmentId)) return reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
     const overviewUrl = process.env.SMART_CHURCH_WEB_ORIGIN
       ? new URL("/#module-video-steffisburg", process.env.SMART_CHURCH_WEB_ORIGIN).toString()
       : "/#module-video-steffisburg";
@@ -874,12 +878,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const existing = await youtubeConnection(state.departmentId);
       const refreshToken = tokens.refresh_token ?? (existing ? decryptYoutubeToken(existing.encrypted_refresh_token) : "");
       if (!refreshToken) return reply.code(400).send({ error: "Google did not grant offline channel access. Disconnect the app in Google permissions, then connect again." });
-      await pool!.query(
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, state.departmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This location became read-only while the YouTube connection was being completed." }); }
+        await client.query(
         `INSERT INTO video_youtube_connections (department_id, encrypted_refresh_token, channel_id, channel_title, connected_by, oauth_client_id)
          VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (department_id) DO UPDATE SET encrypted_refresh_token=EXCLUDED.encrypted_refresh_token, channel_id=EXCLUDED.channel_id, channel_title=EXCLUDED.channel_title, connected_by=EXCLUDED.connected_by, oauth_client_id=EXCLUDED.oauth_client_id, connected_at=now(), updated_at=now()`,
         [state.departmentId, encryptYoutubeToken(refreshToken), channel.id, channel.title, state.username, oauthSettings.clientId],
-      );
+        );
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+      finally { client.release(); }
       return reply.redirect(overviewUrl);
     } catch (error) {
       request.log.warn({ err: error }, "YouTube channel connection failed.");

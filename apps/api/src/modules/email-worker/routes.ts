@@ -23,6 +23,33 @@ function publicSettings(settings: Awaited<ReturnType<typeof readEmailSettings>>)
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  context.replication.register({
+    schemaVersion: "1",
+    inspect: async () => {
+      if (!context.pool || !context.isDatabaseReady()) return { ready: false, blockers: ["Email settings database is unavailable."], recordCount: 0 };
+      const installation = await context.pool.query<{ enabled: boolean }>("SELECT COALESCE((SELECT enabled FROM installation_email_settings WHERE installation_id=(SELECT id FROM installations WHERE is_current=true)),false) AS enabled");
+      const blockers: string[] = [];
+      if (installation.rows[0]?.enabled && !await context.email.isConfigured()) blockers.push("Email delivery is enabled but credentials are unavailable on this server; reconfigure them locally before promotion.");
+      const localWorkflows = await context.pool.query<{ signup_settings_exist: boolean; signup_requests_exist: boolean }>("SELECT to_regclass('public.installation_self_signup_settings') IS NOT NULL AS signup_settings_exist,to_regclass('public.self_signup_requests') IS NOT NULL AS signup_requests_exist");
+      let pendingSignups = 0;
+      if (localWorkflows.rows[0]?.signup_settings_exist) {
+        const signupSettings = await context.pool.query<{ enabled: boolean }>("SELECT COALESCE((SELECT enabled FROM installation_self_signup_settings WHERE installation_id=(SELECT id FROM installations WHERE is_current=true)),false) AS enabled");
+        if (signupSettings.rows[0]?.enabled) blockers.push("Self-sign-up is enabled in installation settings and is not replicated. Disable it or provision the same workflow on the standby before promotion.");
+      }
+      if (localWorkflows.rows[0]?.signup_requests_exist) {
+        const requests = await context.pool.query<{ count: string }>("SELECT count(*)::text AS count FROM self_signup_requests WHERE status NOT IN ('approved','denied','expired')");
+        pendingSignups = Number(requests.rows[0]?.count ?? 0);
+        if (pendingSignups) blockers.push(`${pendingSignups} pending self-sign-up request${pendingSignups === 1 ? "" : "s"} is not replicated; resolve or export it before promotion.`);
+      }
+      return { ready: !blockers.length, blockers, recordCount: pendingSignups };
+    },
+    exportSnapshot: async () => ({ version: 1 }),
+    restoreSnapshot: async (_client, _departmentId, input) => {
+      if (!input || typeof input !== "object" || (input as { version?: unknown }).version !== 1) throw new Error("The Email Delivery snapshot is invalid.");
+      return { recordCount: 0 };
+    },
+    verifySnapshot: async () => ({ ready: true, blockers: [] }),
+  });
   registerSelfSignupRoutes(app, context);
   app.get("/api/modules/email-worker/settings", async (request, reply) => {
     if (request.authenticatedUser?.role !== "server_admin") return reply.code(403).send({ error: "Server administrator access is required." });

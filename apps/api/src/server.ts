@@ -9,7 +9,8 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
-import { getRequiredModuleDependencies, getRequiredServerModuleIds, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
+import { getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
+import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 import { createEmailConnector } from "./modules/email-worker/service.js";
@@ -165,6 +166,26 @@ function setupCodeMatches(candidate: string) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+async function isDepartmentWritable(selectedDepartmentId: string) {
+  if (!pool || !databaseReady) return false;
+  try {
+    const table = await pool.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (!table.rows[0]?.table_name) return true;
+    const state = await pool.query<{ role: string }>("SELECT role FROM sync_site_redundancy WHERE department_id=$1", [selectedDepartmentId]);
+    return state.rows[0]?.role === "primary";
+  } catch (error) {
+    app.log.error({ err: error, departmentId: selectedDepartmentId }, "Could not check the site's write-fence state.");
+    return false;
+  }
+}
+
+async function lockDepartmentForWrite(client: PoolClient, selectedDepartmentId: string) {
+  const table = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+  if (!table.rows[0]?.table_name) return true;
+  const state = await client.query<{ role: string }>("SELECT role FROM sync_site_redundancy WHERE department_id=$1 FOR SHARE", [selectedDepartmentId]);
+  return state.rows[0]?.role === "primary";
+}
+
 async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, requireSiteAdmin = false, allowQueryLocation = false, requiredPermission?: LocationPermission) {
   if (!pool) return null;
   const header = request.headers["x-department-id"];
@@ -174,6 +195,10 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
   const selectedId = typeof header === "string" ? header : typeof queryLocation === "string" ? queryLocation : departmentId;
   if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedId)) {
     reply.code(400).send({ error: "Choose a valid location." });
+    return null;
+  }
+  if (new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase()) && !await isDepartmentWritable(selectedId)) {
+    reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
     return null;
   }
   const result = await pool.query(
@@ -309,10 +334,18 @@ const realtime = new RealtimeHub(
 );
 
 app.addHook("onRequest", async (request, reply) => {
+  const federationRequest = request.url.startsWith("/api/modules/sync/federation/v1/");
   const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
+  if (process.env.NODE_ENV === "production" && federationRequest && request.protocol !== "https") {
+    return reply.code(400).send({ error: "Federation requests require HTTPS." });
+  }
   if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.url !== "/api/public/http-access" && request.protocol !== "https") {
     return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
   }
+  // Federation requests authenticate with the Sync module's Ed25519 protocol,
+  // not browser Origin headers. Module management routes still require the
+  // normal session and CSRF checks in their own handlers.
+  if (federationRequest) return;
   if (request.url === "/api/webhooks/resend") return;
   const method = request.method.toUpperCase();
   if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method)) return;
@@ -339,6 +372,24 @@ app.addHook("preHandler", async (request, reply) => {
   // on port 81. Keep static page and asset requests public so the login UI can
   // load; protect application data and actions under /api/ below.
   if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
+  // The signed federation endpoints verify peer identity, request freshness,
+  // and replay protection in the Sync module.
+  if (request.url.startsWith("/api/modules/sync/federation/v1/")) return;
+  if (new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase()) && pool && databaseReady) {
+    const path = new URL(request.url, "http://localhost").pathname;
+    const localServerSettings = path.startsWith("/api/installation/") || path.startsWith("/api/settings/") || path.startsWith("/api/auth/");
+    const replicatedAccountWrite = path === "/api/auth/change-password" || path === "/api/auth/preferences";
+    const redundancyControl = path.startsWith("/api/modules/sync/federation/redundancy/");
+    const externalWebhook = path === "/api/webhooks/resend";
+    if ((!localServerSettings || replicatedAccountWrite) && !redundancyControl && !externalWebhook && !path.startsWith("/api/modules/sync/federation/")) {
+      const requestedDepartment = request.headers["x-department-id"];
+      const queryDepartment = new URL(request.url, "http://localhost").searchParams.get("departmentId");
+      const writeDepartment = typeof requestedDepartment === "string" && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(requestedDepartment)
+        ? requestedDepartment
+        : queryDepartment && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(queryDepartment) ? queryDepartment : departmentId;
+      if (!await isDepartmentWritable(writeDepartment)) return reply.code(423).send({ error: "This location is a read-only redundancy standby or its write-fence state could not be verified." });
+    }
+  }
   if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
@@ -1597,6 +1648,15 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
        RETURNING id,name,time_zone,enabled_modules`,
       [id, installationId, location, timeZone],
     );
+    const redundancyTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (redundancyTable.rows[0]?.table_name) {
+      await client.query(
+        `INSERT INTO sync_site_redundancy(department_id,role,primary_installation_id)
+         SELECT id,'primary',installation_id FROM departments WHERE id=$1
+         ON CONFLICT(department_id) DO NOTHING`,
+        [id],
+      );
+    }
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [request.authenticatedUser!.id, id],
@@ -2247,10 +2307,11 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const event = await client.query<{ id: string; registration_capacity: number | null }>(
-      "SELECT id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
+    const event = await client.query<{ id: string; department_id: string; registration_capacity: number | null }>(
+      "SELECT id,department_id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
     );
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
+    if (!await lockDepartmentForWrite(client, event.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
     const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2)", [event.rows[0].id, email]);
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
     const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [event.rows[0].id]);
@@ -2423,6 +2484,7 @@ try {
     app.log.error({ err: error }, "Database unavailable; department data will not be saved.");
   }
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
+  if (pool && databaseReady) registerCoreReplicationAdapter(pool);
   await registerServerModules(app, {
     realtime: {
       publish: (topic, selectedDepartmentId, payload) => realtime.publish(topic, selectedDepartmentId, payload),
@@ -2431,6 +2493,8 @@ try {
     workers: { register: (id, name, getDiagnostics) => registerRuntimeWorker(id, name, getDiagnostics) },
     pool: pool ?? null,
     isDatabaseReady: () => databaseReady,
+    isDepartmentWritable,
+    lockDepartmentForWrite,
     getDefaultDepartmentId: () => departmentId,
     resolveDepartmentId: activeDepartmentId,
     validateMutation: validModuleMutation,
@@ -2460,6 +2524,10 @@ try {
     if (request.method === "HEAD") return reply.code(200).send();
     return reply.send(createReadStream(target));
   });
+  // Let module onReady hooks create their tables, then install the database
+  // fence before binding the HTTP listener so no request can race startup.
+  await app.ready();
+  if (pool && databaseReady) await installSiteWriteFenceTriggers(pool);
   await app.listen({ host, port });
   const shutdown = () => { void app.close().catch((error) => { app.log.error({ err: error }, "Server shutdown failed."); process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown);

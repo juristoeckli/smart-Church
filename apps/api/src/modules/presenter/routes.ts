@@ -6,6 +6,7 @@ import { datasetArchive, deleteDataset, installDatasetArchive, installLibraryPic
 import { deletePresenterMedia, installPresenterMedia, listPresenterMedia, readPresenterMedia } from "./media.js";
 import { readPowerPointSlides } from "./pptx-import.js";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerPresenterReplication } from "./replication.js";
 
 const presenterSessions = [
   { id: "main", name: "Main" },
@@ -18,6 +19,7 @@ const outputTokenHash = (token: string) => createHash("sha256").update(token).di
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, getDefaultDepartmentId, resolveDepartmentId, validateMutation } = dependencies;
+  registerPresenterReplication(dependencies);
   type OutputClient = { response: ServerResponse; token: string; revision: number; close: () => void };
   const outputClients = new Map<string, Set<OutputClient>>();
 
@@ -105,15 +107,19 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
     async function readPublicSession(token: string) {
       const hash = outputTokenHash(token);
-      const touched = await pool?.query(
-        `UPDATE presenter_output_sessions s SET last_seen_at = now()
-          FROM departments d
-         WHERE d.id = s.department_id AND (s.token_hash = $1 OR s.previous_token_hash = $1) AND d.enabled_modules @> ARRAY['presenter']::text[]
-           AND (s.last_seen_at IS NULL OR s.last_seen_at < now() - interval '5 seconds')
-         RETURNING s.state`,
-        [hash],
-      );
-      if (touched?.rows[0]) return touched.rows[0].state;
+      const session = await pool?.query<{ department_id: string }>(`SELECT s.department_id FROM presenter_output_sessions s JOIN departments d ON d.id=s.department_id
+        WHERE (s.token_hash=$1 OR s.previous_token_hash=$1) AND d.enabled_modules @> ARRAY['presenter']::text[]`, [hash]);
+      if (!session?.rowCount) return undefined;
+      if (await dependencies.isDepartmentWritable(session.rows[0].department_id)) {
+        const touched = await pool?.query(
+          `UPDATE presenter_output_sessions s SET last_seen_at = now()
+            WHERE s.department_id=$2 AND (s.token_hash=$1 OR s.previous_token_hash=$1)
+              AND (s.last_seen_at IS NULL OR s.last_seen_at < now() - interval '5 seconds')
+           RETURNING s.state`,
+          [hash, session.rows[0].department_id],
+        );
+        if (touched?.rows[0]) return touched.rows[0].state;
+      }
       const current = await pool?.query(
         `SELECT s.state FROM presenter_output_sessions s JOIN departments d ON d.id = s.department_id
          WHERE (s.token_hash = $1 OR s.previous_token_hash = $1) AND d.enabled_modules @> ARRAY['presenter']::text[]`,
@@ -599,13 +605,20 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
       heartbeat = setInterval(async () => {
         try {
+          const session = await pool?.query<{ department_id: string }>(`SELECT s.department_id FROM presenter_output_sessions s JOIN departments d ON d.id=s.department_id
+            WHERE (s.token_hash=$1 OR s.previous_token_hash=$1) AND d.enabled_modules @> ARRAY['presenter']::text[]`, [tokenHash]);
+          if (!session?.rowCount) return response.end();
+          if (!(await dependencies.isDepartmentWritable(session.rows[0].department_id))) {
+            response.write(": keep-alive\n\n");
+            return;
+          }
           const touched = await pool?.query(
             `UPDATE presenter_output_sessions s SET last_seen_at = now()
                FROM departments d
-              WHERE d.id = s.department_id AND (s.token_hash = $1 OR s.previous_token_hash = $1)
+              WHERE d.id = s.department_id AND s.department_id=$2 AND (s.token_hash = $1 OR s.previous_token_hash = $1)
                 AND d.enabled_modules @> ARRAY['presenter']::text[]
               RETURNING s.state`,
-            [tokenHash],
+            [tokenHash, session.rows[0].department_id],
           );
           if (!touched?.rowCount) return response.end();
           response.write(": keep-alive\n\n");

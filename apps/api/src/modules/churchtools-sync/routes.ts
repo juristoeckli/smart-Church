@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync }
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerChurchToolsSyncReplication } from "./replication.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -9,13 +10,14 @@ const elvantoAreas = ["people", "peopleFlows", "groups", "services", "songs", "c
 type ElvantoArea = typeof elvantoAreas[number];
 type ElvantoDirection = "off" | "bidirectional" | "elvanto_to_smart_church" | "smart_church_to_elvanto";
 type ElvantoDirections = Record<ElvantoArea, ElvantoDirection>;
-type ElvantoSettings = { department_id: string; encrypted_api_key: string; directions: ElvantoDirections; financial_enabled: boolean; enabled: boolean; last_connected_at: string | null; last_sync_at: string | null; last_sync_error: string | null; people_import_page: number; people_import_total: number | null; people_import_created_count: number; people_import_updated_count: number; people_import_skipped_count: number; people_import_complete: boolean; people_preview_at: string | null; people_preview_scanned_count: number; people_preview_total: number | null; people_preview_complete: boolean; people_importing: boolean; people_import_started_at: string | null; groups_import_page: number; groups_import_total: number | null; groups_import_created_count: number; groups_import_updated_count: number; groups_import_skipped_count: number; groups_import_complete: boolean; groups_preview_at: string | null; groups_preview_scanned_count: number; groups_preview_total: number | null; groups_preview_complete: boolean; groups_importing: boolean; groups_import_started_at: string | null; services_import_page: number; services_import_total: number | null; services_import_created_count: number; services_import_updated_count: number; services_import_skipped_count: number; services_import_complete: boolean; services_preview_at: string | null; services_preview_scanned_count: number; services_preview_total: number | null; services_preview_complete: boolean; services_importing: boolean; services_import_started_at: string | null; calendar_import_page: number; calendar_import_total: number | null; calendar_import_created_count: number; calendar_import_updated_count: number; calendar_import_skipped_count: number; calendar_import_complete: boolean; calendar_preview_at: string | null; calendar_preview_scanned_count: number; calendar_preview_total: number | null; calendar_preview_complete: boolean; calendar_preview_start_date: string | null; calendar_preview_end_date: string | null; calendar_import_start_date: string | null; calendar_import_end_date: string | null; calendar_importing: boolean; calendar_import_started_at: string | null; songs_import_page: number; songs_import_total: number | null; songs_import_created_count: number; songs_import_updated_count: number; songs_import_skipped_count: number; songs_import_complete: boolean; songs_preview_at: string | null; songs_preview_ids: string[]; songs_preview_complete: boolean; songs_preview_count: number; songs_imported_count: number; songs_last_import_at: string | null; songs_importing: boolean; songs_import_started_at: string | null; people_flows_import_page: number; people_flows_import_total: number | null; people_flows_import_created_count: number; people_flows_import_updated_count: number; people_flows_import_skipped_count: number; people_flows_import_complete: boolean; people_flows_preview_at: string | null; people_flows_preview_ids: string[]; people_flows_preview_complete: boolean; people_flows_preview_count: number; people_flows_imported_count: number; people_flows_last_import_at: string | null; people_flows_importing: boolean; people_flows_import_started_at: string | null; updated_at: Date | string };
+type ElvantoSettings = { department_id: string; encrypted_api_key: string; directions: ElvantoDirections; financial_enabled: boolean; enabled: boolean; last_connected_at: string | null; last_sync_at: string | null; last_sync_error: string | null; people_import_page: number; people_import_total: number | null; people_import_created_count: number; people_import_updated_count: number; people_import_skipped_count: number; people_import_complete: boolean; people_preview_at: string | null; people_preview_scanned_count: number; people_preview_total: number | null; people_preview_complete: boolean; people_importing: boolean; people_import_started_at: string | null; groups_import_page: number; groups_import_total: number | null; groups_import_created_count: number; groups_import_updated_count: number; groups_import_skipped_count: number; groups_import_complete: boolean; groups_preview_at: string | null; groups_preview_scanned_count: number; groups_preview_total: number | null; groups_preview_complete: boolean; groups_importing: boolean; groups_import_started_at: string | null; services_import_page: number; services_import_total: number | null; services_import_created_count: number; services_import_updated_count: number; services_import_skipped_count: number; services_import_complete: boolean; services_preview_at: string | null; services_preview_scanned_count: number; services_preview_total: number | null; services_preview_complete: boolean; services_importing: boolean; services_import_started_at: string | null; calendar_import_page: number; calendar_import_total: number | null; calendar_import_created_count: number; calendar_import_updated_count: number; calendar_import_skipped_count: number; calendar_import_complete: boolean; calendar_preview_at: string | null; calendar_preview_scanned_count: number; calendar_preview_total: number | null; calendar_preview_complete: boolean; calendar_preview_start_date: string | null; calendar_preview_end_date: string | null; calendar_import_start_date: string | null; calendar_import_end_date: string | null; calendar_importing: boolean; calendar_import_started_at: string | null; calendar_export_calendar_id: string | null; calendar_export_organizer_id: string | null; calendar_export_preview_at: string | null; calendar_export_preview_rows: JsonObject[]; calendar_export_page: number; calendar_export_created_count: number; calendar_export_updated_count: number; calendar_export_skipped_count: number; calendar_export_complete: boolean; songs_import_page: number; songs_import_total: number | null; songs_import_created_count: number; songs_import_updated_count: number; songs_import_skipped_count: number; songs_import_complete: boolean; songs_preview_at: string | null; songs_preview_ids: string[]; songs_preview_complete: boolean; songs_preview_count: number; songs_imported_count: number; songs_last_import_at: string | null; songs_importing: boolean; songs_import_started_at: string | null; people_flows_import_page: number; people_flows_import_total: number | null; people_flows_import_created_count: number; people_flows_import_updated_count: number; people_flows_import_skipped_count: number; people_flows_import_complete: boolean; people_flows_preview_at: string | null; people_flows_preview_ids: string[]; people_flows_preview_complete: boolean; people_flows_preview_count: number; people_flows_imported_count: number; people_flows_last_import_at: string | null; people_flows_importing: boolean; people_flows_import_started_at: string | null; updated_at: Date | string };
 const running = new Set<string>();
 const elvantoPeopleImportRunning = new Set<string>();
 const elvantoPeopleExportRunning = new Set<string>();
 const elvantoGroupsImportRunning = new Set<string>();
 const elvantoServicesImportRunning = new Set<string>();
 const elvantoCalendarImportRunning = new Set<string>();
+const elvantoCalendarExportRunning = new Set<string>();
 const elvantoPeopleFlowsImportRunning = new Set<string>();
 const elvantoSongsImportRunning = new Set<string>();
 const elvantoFinancialImportRunning = new Set<string>();
@@ -252,6 +254,51 @@ function mapElvantoCalendarEvent(event: JsonObject) {
     room: "",
     description: plainDescription(event.description).slice(0, 2000),
   };
+}
+function localEventTimeToUtc(date: string, time: string, timeZone: string) {
+  const match = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const clock = time.match(/^(\d{2}):(\d{2})$/);
+  if (!match || !clock || Number(clock[1]) > 23 || Number(clock[2]) > 59) throw new Error("An event has an invalid local date or time.");
+  const target = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(clock[1]), Number(clock[2]));
+  const formatter = new Intl.DateTimeFormat("en-GB", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  const partsAt = (instant: number) => {
+    const parts = formatter.formatToParts(new Date(instant));
+    const value = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+    return { year: value("year"), month: value("month"), day: value("day"), hour: value("hour"), minute: value("minute") };
+  };
+  let candidate = target;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const parts = partsAt(candidate);
+    const represented = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute);
+    const correction = target - represented;
+    if (!correction) break;
+    candidate += correction;
+  }
+  const resolved = partsAt(candidate);
+  if (resolved.year !== Number(match[1]) || resolved.month !== Number(match[2]) || resolved.day !== Number(match[3]) || resolved.hour !== Number(clock[1]) || resolved.minute !== Number(clock[2])) {
+    throw new Error(`The local event time ${date} ${time} does not exist in ${timeZone} because of a daylight-saving change.`);
+  }
+  const earlier = partsAt(candidate - 60 * 60 * 1000);
+  if (earlier.year === resolved.year && earlier.month === resolved.month && earlier.day === resolved.day && earlier.hour === resolved.hour && earlier.minute === resolved.minute) {
+    throw new Error(`The local event time ${date} ${time} occurs twice in ${timeZone} because of a daylight-saving change.`);
+  }
+  return new Date(candidate).toISOString().slice(0, 19).replace("T", " ");
+}
+function calendarEventFingerprint(event: JsonObject) {
+  return createHash("sha256").update(JSON.stringify({ id: idOf(event), name: firstText(event.name, event.title), start: event.start_date ?? event.startDate ?? event.starts ?? event.start, end: event.end_date ?? event.endDate ?? event.ends ?? event.end, calendarId: event.calendar_id ?? event.calendar?.id, organizer: event.organizer?.id ?? event.organizer, where: event.where, description: event.description, status: event.status })).digest("hex");
+}
+function elvantoEventDateInTimeZone(event: JsonObject, timeZone: string) {
+  const start = elvantoTime(event.start_date ?? event.startDate ?? event.starts);
+  if (!start) return "";
+  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" });
+  const parts = formatter.formatToParts(new Date(`${start.date}T${start.time}:00Z`));
+  const value = (type: string) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
+}
+function shiftDate(date: string, days: number) {
+  const shifted = new Date(`${date}T00:00:00Z`);
+  shifted.setUTCDate(shifted.getUTCDate() + days);
+  return shifted.toISOString().slice(0, 10);
 }
 function flattenElvantoFlowSteps(value: unknown, parentStepId: string | null = null): JsonObject[] {
   return objectRows(value).flatMap((step) => {
@@ -599,6 +646,7 @@ function mapEvents(events: JsonObject[]) {
 
 export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = deps;
+  registerChurchToolsSyncReplication(deps);
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, manage = false) {
       if (!pool || !isDatabaseReady()) { reply.code(503).send({ error: "The database is unavailable." }); return null; }
@@ -609,7 +657,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       return result.rows[0] ?? null;
     }
     async function elvantoSettings(departmentId: string) {
-      const result = await pool!.query<ElvantoSettings>("SELECT department_id,encrypted_api_key,directions,financial_enabled,enabled,last_connected_at,last_sync_at,last_sync_error,people_import_page,people_import_total,people_import_created_count,people_import_updated_count,people_import_skipped_count,people_import_complete,people_preview_at,people_preview_scanned_count,people_preview_total,people_preview_complete,people_importing,people_import_started_at,groups_import_page,groups_import_total,groups_import_created_count,groups_import_updated_count,groups_import_skipped_count,groups_import_complete,groups_preview_at,groups_preview_scanned_count,groups_preview_total,groups_preview_complete,groups_importing,groups_import_started_at,services_import_page,services_import_total,services_import_created_count,services_import_updated_count,services_import_skipped_count,services_import_complete,services_preview_at,services_preview_scanned_count,services_preview_total,services_preview_complete,services_importing,services_import_started_at,calendar_import_page,calendar_import_total,calendar_import_created_count,calendar_import_updated_count,calendar_import_skipped_count,calendar_import_complete,calendar_preview_at,calendar_preview_scanned_count,calendar_preview_total,calendar_preview_complete,calendar_preview_start_date::text,calendar_preview_end_date::text,calendar_import_start_date::text,calendar_import_end_date::text,calendar_importing,calendar_import_started_at,songs_import_page,songs_import_total,songs_import_created_count,songs_import_updated_count,songs_import_skipped_count,songs_import_complete,songs_preview_at,songs_preview_ids,songs_preview_complete,songs_preview_count,songs_imported_count,songs_last_import_at,songs_importing,songs_import_started_at,people_flows_import_page,people_flows_import_total,people_flows_import_created_count,people_flows_import_updated_count,people_flows_import_skipped_count,people_flows_import_complete,people_flows_preview_at,people_flows_preview_ids,people_flows_preview_complete,people_flows_preview_count,people_flows_imported_count,people_flows_last_import_at,people_flows_importing,people_flows_import_started_at,updated_at FROM elvanto_sync_settings WHERE department_id=$1", [departmentId]);
+      const result = await pool!.query<ElvantoSettings>("SELECT department_id,encrypted_api_key,directions,financial_enabled,enabled,last_connected_at,last_sync_at,last_sync_error,people_import_page,people_import_total,people_import_created_count,people_import_updated_count,people_import_skipped_count,people_import_complete,people_preview_at,people_preview_scanned_count,people_preview_total,people_preview_complete,people_importing,people_import_started_at,groups_import_page,groups_import_total,groups_import_created_count,groups_import_updated_count,groups_import_skipped_count,groups_import_complete,groups_preview_at,groups_preview_scanned_count,groups_preview_total,groups_preview_complete,groups_importing,groups_import_started_at,services_import_page,services_import_total,services_import_created_count,services_import_updated_count,services_import_skipped_count,services_import_complete,services_preview_at,services_preview_scanned_count,services_preview_total,services_preview_complete,services_importing,services_import_started_at,calendar_import_page,calendar_import_total,calendar_import_created_count,calendar_import_updated_count,calendar_import_skipped_count,calendar_import_complete,calendar_preview_at,calendar_preview_scanned_count,calendar_preview_total,calendar_preview_complete,calendar_preview_start_date::text,calendar_preview_end_date::text,calendar_import_start_date::text,calendar_import_end_date::text,calendar_importing,calendar_import_started_at,calendar_export_calendar_id,calendar_export_organizer_id,calendar_export_preview_at,calendar_export_preview_rows,calendar_export_page,calendar_export_created_count,calendar_export_updated_count,calendar_export_skipped_count,calendar_export_complete,songs_import_page,songs_import_total,songs_import_created_count,songs_import_updated_count,songs_import_skipped_count,songs_import_complete,songs_preview_at,songs_preview_ids,songs_preview_complete,songs_preview_count,songs_imported_count,songs_last_import_at,songs_importing,songs_import_started_at,people_flows_import_page,people_flows_import_total,people_flows_import_created_count,people_flows_import_updated_count,people_flows_import_skipped_count,people_flows_import_complete,people_flows_preview_at,people_flows_preview_ids,people_flows_preview_complete,people_flows_preview_count,people_flows_imported_count,people_flows_last_import_at,people_flows_importing,people_flows_import_started_at,updated_at FROM elvanto_sync_settings WHERE department_id=$1", [departmentId]);
       return result.rows[0] ?? null;
     }
     async function statusError(departmentId: string, message: string) {
@@ -796,7 +844,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const financialState = await pool!.query<{ page: number; total: number | null; created: number; updated: number; skipped: number; complete: boolean; preview_complete: boolean; preview_count: number; start_date: string | null; end_date: string | null }>("SELECT financial_import_page AS page,COALESCE(financial_import_total,financial_preview_count) AS total,financial_import_created_count AS created,financial_import_updated_count AS updated,financial_import_skipped_count AS skipped,financial_import_complete AS complete,financial_preview_complete,financial_preview_count,COALESCE(financial_import_start_date,financial_preview_start_date)::text AS start_date,COALESCE(financial_import_end_date,financial_preview_end_date)::text AS end_date FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const peopleExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT people_export_page AS page,jsonb_array_length(people_export_preview_rows)::int AS total,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped,people_export_complete AS complete,people_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const groupsExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; added: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT groups_export_page AS page,jsonb_array_length(groups_export_preview_rows)::int AS total,groups_export_created_count AS created,groups_export_updated_count AS updated,groups_export_added_members_count AS added,groups_export_skipped_count AS skipped,groups_export_complete AS complete,groups_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
-      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
+      const calendarExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null; calendar_id: string | null; organizer_id: string | null }>("SELECT calendar_export_page AS page,jsonb_array_length(calendar_export_preview_rows)::int AS total,calendar_export_created_count AS created,calendar_export_updated_count AS updated,calendar_export_skipped_count AS skipped,calendar_export_complete AS complete,calendar_export_preview_at AS preview_at,calendar_export_calendar_id AS calendar_id,calendar_export_organizer_id AS organizer_id FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, calendarExport: calendarExportState.rows[0] ? { page: calendarExportState.rows[0].page, total: calendarExportState.rows[0].total, created: calendarExportState.rows[0].created, updated: calendarExportState.rows[0].updated, skipped: calendarExportState.rows[0].skipped, complete: calendarExportState.rows[0].complete, previewAt: calendarExportState.rows[0].preview_at, calendarId: calendarExportState.rows[0].calendar_id, organizerId: calendarExportState.rows[0].organizer_id } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/financial", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -1866,6 +1915,157 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         elvantoPeopleFlowsImportRunning.delete(dept);
       }
     });
+    routes.get<{ Querystring: { page?: number } }>("/api/modules/sync/elvanto/calendar-export-options", { schema: { querystring: { type: "object", additionalProperties: false, properties: { page: { type: "integer", minimum: 1, maximum: 200 } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept); if (!row) return reply.code(404).send({ error: "Connect Elvanto before exporting calendar events." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      try {
+        const [calendarPayload, peoplePayload] = await Promise.all([
+          elvantoRequest(apiKey, "calendar/getAll"),
+          elvantoRequest(apiKey, "people/getAll", { page: request.query.page ?? 1, page_size: 1000 }),
+        ]);
+        const calendars = elvantoCollection(calendarPayload, "calendars", "calendar").map((calendar) => ({ id: idOf(calendar), name: firstText(calendar.name), published: calendar.published !== "false" && calendar.published !== false })).filter((calendar) => calendar.id && calendar.name);
+        const organizers = elvantoCollection(peoplePayload, "people", "person").map((person) => ({ id: idOf(person), name: firstText(person.preferred_name, person.firstname, person.first_name, person.lastname, person.last_name) + (firstText(person.lastname, person.last_name) && firstText(person.firstname, person.first_name, person.preferred_name) ? ` ${firstText(person.lastname, person.last_name)}` : "") })).filter((person) => person.id && person.name);
+        return { calendars, organizers, organizersPage: request.query.page ?? 1, organizersTotal: Number((peoplePayload.people as JsonObject | undefined)?.total) || organizers.length };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not load Elvanto calendars and organizers." }); }
+    });
+    routes.post<{ Body: { calendarId: string; organizerId: string; startDate: string; endDate: string } }>("/api/modules/sync/elvanto/calendar-export-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["calendarId", "organizerId", "startDate", "endDate"], properties: { calendarId: { type: "string", minLength: 1, maxLength: 100 }, organizerId: { type: "string", minLength: 1, maxLength: 100 }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before previewing calendar export." });
+      if (row.directions.calendar === "off" || row.directions.calendar === "elvanto_to_smart_church") return reply.code(400).send({ error: "Set Calendar direction to Smart Church → Elvanto or bidirectional before previewing an export." });
+      if (elvantoCalendarExportRunning.has(dept)) return reply.code(409).send({ error: "A Calendar export is already running for this location." });
+      if (request.body.startDate > request.body.endDate) return reply.code(400).send({ error: "Calendar export start date must be on or before the end date." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      try {
+        const [calendarPayload, organizerPayload, profile] = await Promise.all([
+          elvantoRequest(apiKey, "calendar/getAll"),
+          elvantoRequest(apiKey, "people/getAll", { page: 1, page_size: 1000 }),
+          pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]),
+        ]);
+        const calendar = elvantoCollection(calendarPayload, "calendars", "calendar").find((item) => idOf(item) === request.body.calendarId);
+        let organizer = elvantoCollection(organizerPayload, "people", "person").find((item) => idOf(item) === request.body.organizerId);
+        if (!calendar) return reply.code(400).send({ error: "Choose a valid Elvanto destination calendar." });
+        const peopleTotal = Number((organizerPayload.people as JsonObject | undefined)?.total) || 0;
+        for (let organizerPage = 2; !organizer && organizerPage <= Math.min(200, Math.ceil(peopleTotal / 1000)); organizerPage += 1) {
+          const pagePayload = await elvantoRequest(apiKey, "people/getAll", { page: organizerPage, page_size: 1000 });
+          organizer = elvantoCollection(pagePayload, "people", "person").find((item) => idOf(item) === request.body.organizerId);
+        }
+        if (!organizer) return reply.code(400).send({ error: "Choose a valid Elvanto event organizer." });
+        const timeZone = profile.rows[0]?.time_zone;
+        if (!timeZone) return reply.code(400).send({ error: "The location time zone is not configured." });
+        const local = await pool!.query<{ id: string; title: string; event_date: string; start_time: string; end_time: string | null; location: string; description: string | null; source_id: string | null; source_system: string | null; updated_at: string }>(
+          "SELECT id,title,event_date::text,start_time::text,end_time::text,location,description,source_id,source_system,updated_at::text FROM service_events WHERE department_id=$1 AND event_date BETWEEN $2::date AND $3::date AND (source_system IS NULL OR (source_system='elvanto' AND source_id LIKE 'calendar-export:%')) ORDER BY event_date,start_time,id LIMIT 20001", [dept, request.body.startDate, request.body.endDate],
+        );
+        if (local.rows.length > 20000) return reply.code(413).send({ error: "Calendar export previews support up to 20,000 local events at a time. Narrow the events included in the local schedule before creating a preview." });
+        const minDate = local.rows[0]?.event_date ?? new Date().toISOString().slice(0, 10);
+        const maxDate = local.rows[local.rows.length - 1]?.event_date ?? minDate;
+        const remoteEvents: JsonObject[] = []; let reportedTotal: number | null = null; let readComplete = false;
+        for (let page = 1; page <= 200; page += 1) {
+          const payload = await elvantoRequest(apiKey, "calendar/events/getAll", { page, page_size: 1000, start: shiftDate(minDate, -1), end: shiftDate(maxDate, 1) });
+          const items = elvantoCollection(payload, "events", "event"); remoteEvents.push(...items);
+          const meta = payload.events as JsonObject | undefined; const total = Number(meta?.total); if (Number.isFinite(total) && total >= 0) reportedTotal = total;
+          if (items.length === 0 || (reportedTotal !== null ? remoteEvents.length >= reportedTotal : items.length < 1000)) { readComplete = true; break; }
+        }
+        if (!readComplete) return reply.code(502).send({ error: "Could not read the complete Elvanto Calendar list. No export preview was saved." });
+        const byRemoteId = new Map(remoteEvents.map((event) => [idOf(event), event]).filter(([id]) => Boolean(id)) as Array<[string, JsonObject]>);
+        const remoteNames = new Set(remoteEvents.map((event) => {
+          const date = elvantoEventDateInTimeZone(event, timeZone);
+          return date ? `${date}|${firstText(event.name, event.title).trim().toLocaleLowerCase()}` : "";
+        }).filter(Boolean));
+        const rows = local.rows.map((event) => {
+          const linkedRemoteId = event.source_system === "elvanto" && event.source_id?.startsWith("calendar-export:") ? event.source_id.slice("calendar-export:".length) : null;
+          const remote = linkedRemoteId ? byRemoteId.get(linkedRemoteId) : undefined;
+          let action = "create"; let start: string | null = null; let end: string | null = null;
+          try {
+            if (!event.title.trim() || !event.end_time) throw new Error("An event needs a title, start time, and end time to export.");
+            start = localEventTimeToUtc(event.event_date, event.start_time.slice(0, 5), timeZone);
+            end = localEventTimeToUtc(event.event_date, event.end_time.slice(0, 5), timeZone);
+            if (end <= start) throw new Error("The event end time must be later than its start time.");
+            if (linkedRemoteId && !remote) action = "review_missing_remote";
+            else if (remote) action = "update";
+            else if (remoteNames.has(`${event.event_date}|${event.title.trim().toLocaleLowerCase()}`)) action = "review_conflict";
+          } catch { action = "invalid"; }
+          return { eventId: event.id, updatedAt: event.updated_at, sourceId: linkedRemoteId, action, title: event.title, date: event.event_date, start, end, location: event.location, description: event.description ?? "", remoteHash: remote ? calendarEventFingerprint(remote) : null };
+        });
+        const changed = await pool!.query(`UPDATE elvanto_sync_settings SET calendar_export_calendar_id=$2,calendar_export_organizer_id=$3,calendar_export_preview_at=now(),calendar_export_preview_rows=$4::jsonb,calendar_export_page=0,calendar_export_created_count=0,calendar_export_updated_count=0,calendar_export_skipped_count=0,calendar_export_complete=FALSE,updated_at=now()
+          WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, request.body.calendarId, request.body.organizerId, JSON.stringify(rows), row.updated_at]);
+        if (!changed.rowCount) return reply.code(409).send({ error: "An Elvanto operation is running or connection settings changed. Try the preview again." });
+        const completeCount = rows.filter((item) => item.action === "create" || item.action === "update").length;
+        return { complete: true, total: rows.length, create: rows.filter((item) => item.action === "create").length, update: rows.filter((item) => item.action === "update").length, review: rows.filter((item) => item.action.startsWith("review_") || item.action === "invalid").length, startDate: request.body.startDate, endDate: request.body.endDate, sample: rows.slice(0, 50).map(({ eventId, updatedAt, remoteHash, ...item }) => item), calendar: { id: idOf(calendar), name: firstText(calendar.name) }, organizer: { id: idOf(organizer), name: `${firstText(organizer.preferred_name, organizer.firstname, organizer.first_name)} ${firstText(organizer.lastname, organizer.last_name)}`.trim() }, timeZone, eligibleCount: completeCount };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not preview Elvanto Calendar export." }); }
+    });
+    routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/calendar-export", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoCalendarExportRunning.has(dept)) return reply.code(409).send({ error: "A Calendar export is already running for this location." });
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before exporting calendar events." });
+      if (row.directions.calendar === "off" || row.directions.calendar === "elvanto_to_smart_church") return reply.code(400).send({ error: "Set Calendar direction to Smart Church → Elvanto or bidirectional before exporting." });
+      const previewTime = row.calendar_export_preview_at ? new Date(row.calendar_export_preview_at).getTime() : 0;
+      if (!previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !row.calendar_export_calendar_id || !row.calendar_export_organizer_id || !Array.isArray(row.calendar_export_preview_rows)) return reply.code(409).send({ error: "Run a complete Calendar export preview first. Previews expire after one hour and after connection settings change." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoCalendarExportRunning.add(dept); let reserved = false;
+      try {
+        const reservation = await pool!.query(`UPDATE elvanto_sync_settings SET people_exporting=TRUE,people_export_started_at=now(),updated_at=now()
+          WHERE department_id=$1 AND updated_at=$2 AND calendar_export_preview_at > now()-interval '1 hour' AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+        if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another Elvanto operation is running. Run a fresh complete Calendar export preview." });
+        reserved = true;
+        let page = request.body?.restart ? 0 : row.calendar_export_page;
+        let created = request.body?.restart ? 0 : row.calendar_export_created_count;
+        let updated = request.body?.restart ? 0 : row.calendar_export_updated_count;
+        let skipped = request.body?.restart ? 0 : row.calendar_export_skipped_count;
+        let complete = request.body?.restart ? false : row.calendar_export_complete;
+        const previewRows = row.calendar_export_preview_rows;
+        const profile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
+        const timeZone = profile.rows[0]?.time_zone;
+        if (!timeZone) return reply.code(400).send({ error: "The location time zone is not configured." });
+        if (request.body?.restart) await pool!.query("UPDATE elvanto_sync_settings SET calendar_export_page=0,calendar_export_created_count=0,calendar_export_updated_count=0,calendar_export_skipped_count=0,calendar_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
+        const remoteEventList: JsonObject[] = []; let remoteTotal: number | null = null; let remoteComplete = false;
+        const remoteStart = shiftDate(previewRows[0]?.date ?? new Date().toISOString().slice(0, 10), -1); const remoteEnd = shiftDate(previewRows.at(-1)?.date ?? new Date().toISOString().slice(0, 10), 1);
+        for (let remotePage = 1; remotePage <= 200; remotePage += 1) {
+          const remotePayload = await elvantoRequest(apiKey, "calendar/events/getAll", { page: remotePage, page_size: 1000, start: remoteStart, end: remoteEnd });
+          const items = elvantoCollection(remotePayload, "events", "event"); remoteEventList.push(...items);
+          const metadata = remotePayload.events as JsonObject | undefined; const reported = Number(metadata?.total); if (Number.isFinite(reported) && reported >= 0) remoteTotal = reported;
+          if (!items.length || (remoteTotal !== null ? remoteEventList.length >= remoteTotal : items.length < 1000)) { remoteComplete = true; break; }
+        }
+        if (!remoteComplete) return reply.code(502).send({ error: "Could not verify the complete Elvanto Calendar list. No events were written." });
+        const remoteById = new Map(remoteEventList.map((event) => [idOf(event), event]));
+        const batch = previewRows.slice(page, page + 5);
+        for (const item of batch) {
+          if (item.action !== "create" && item.action !== "update") { skipped += 1; page += 1; continue; }
+          const current = await pool!.query<{ updated_at: string }>("SELECT updated_at::text FROM service_events WHERE id=$1 AND department_id=$2 AND (source_system IS NULL OR (source_system='elvanto' AND source_id LIKE 'calendar-export:%'))", [item.eventId, dept]);
+          if (!current.rowCount || current.rows[0].updated_at !== item.updatedAt) return reply.code(409).send({ error: "A local event changed after preview. Run a fresh Calendar export preview before writing." });
+          const linkedRemoteId = item.sourceId as string | null;
+          const remote = linkedRemoteId ? remoteById.get(linkedRemoteId) : undefined;
+          if (linkedRemoteId && (!remote || calendarEventFingerprint(remote) !== item.remoteHash)) return reply.code(409).send({ error: "An Elvanto event changed or disappeared after preview. Run a fresh Calendar export preview." });
+          if (!linkedRemoteId && remoteEventList.some((event) => elvantoEventDateInTimeZone(event, timeZone) === item.date && firstText(event.name, event.title).trim().toLocaleLowerCase() === String(item.title).trim().toLocaleLowerCase())) return reply.code(409).send({ error: "A matching Elvanto calendar event appeared after preview. Run a fresh Calendar export preview." });
+          const body = { name: item.title, calendar_id: row.calendar_export_calendar_id, organizer: row.calendar_export_organizer_id, status: "private", start: item.start, end: item.end, all_day: "no", where: item.location, description: item.description };
+          if (linkedRemoteId) {
+            await elvantoRequest(apiKey, "calendar/events/edit", { id: linkedRemoteId, ...body });
+            updated += 1;
+          } else {
+            const result = await elvantoRequest(apiKey, "calendar/events/create", body);
+            const remoteId = idOf(result.event as JsonObject | undefined);
+            if (!remoteId) throw new Error("Elvanto did not return the ID of the created calendar event.");
+            await pool!.query("UPDATE service_events SET source_system='elvanto',source_id=$3,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system IS NULL", [item.eventId, dept, `calendar-export:${remoteId}`]);
+            created += 1;
+          }
+          page += 1;
+        }
+        complete = page >= previewRows.length;
+        await pool!.query("UPDATE elvanto_sync_settings SET calendar_export_page=$2,calendar_export_created_count=$3,calendar_export_updated_count=$4,calendar_export_skipped_count=$5,calendar_export_complete=$6,last_sync_at=CASE WHEN $6 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, created, updated, skipped, complete]);
+        return { calendarExport: { page, total: previewRows.length, created, updated, skipped, complete } };
+      } catch (error) {
+        await pool!.query("UPDATE elvanto_sync_settings SET last_sync_error=$2 WHERE department_id=$1", [dept, (error instanceof Error ? error.message : "Calendar export failed.").slice(0, 1000)]).catch(() => {});
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Calendar export failed." });
+      } finally {
+        if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=FALSE,people_export_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        elvantoCalendarExportRunning.delete(dept);
+      }
+    });
     routes.post<{ Body: { startDate: string; endDate: string } }>("/api/modules/sync/elvanto/calendar-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       const row = await elvantoSettings(dept);
@@ -2026,6 +2226,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           people_flows_preview_at=NULL,people_flows_preview_ids='[]'::jsonb,people_flows_preview_complete=FALSE,people_flows_preview_count=0,
           people_export_preview_at=NULL,people_export_preview_rows='[]'::jsonb,people_export_page=0,people_export_created_count=0,people_export_updated_count=0,people_export_skipped_count=0,people_export_complete=FALSE,
           groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_page=0,groups_export_created_count=0,groups_export_updated_count=0,groups_export_added_members_count=0,groups_export_skipped_count=0,groups_export_complete=FALSE,
+           calendar_export_preview_at=NULL,calendar_export_preview_rows='[]'::jsonb,calendar_export_page=0,calendar_export_created_count=0,calendar_export_updated_count=0,calendar_export_skipped_count=0,calendar_export_complete=FALSE,
           people_importing=FALSE,people_import_started_at=NULL,groups_importing=FALSE,groups_import_started_at=NULL,services_importing=FALSE,services_import_started_at=NULL,calendar_importing=FALSE,calendar_import_started_at=NULL,people_flows_importing=FALSE,people_flows_import_started_at=NULL,songs_importing=FALSE,songs_import_started_at=NULL,financial_importing=FALSE,financial_import_started_at=NULL,people_exporting=FALSE,people_export_started_at=NULL,updated_at=now()
          WHERE (elvanto_sync_settings.people_importing=FALSE OR elvanto_sync_settings.people_import_started_at < now()-interval '15 minutes')
            AND (elvanto_sync_settings.groups_importing=FALSE OR elvanto_sync_settings.groups_import_started_at < now()-interval '15 minutes')

@@ -170,6 +170,55 @@ export async function listPresenterMedia(departmentId: string) {
   return items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+export async function replacePresenterMedia(departmentId: string, files: Array<{ item: PresenterMedia; data: Buffer }>) {
+  if (!idPattern.test(departmentId)) throw new Error("Invalid Presenter location.");
+  const ids = new Set<string>();
+  for (const { item, data } of files) {
+    if (!item || !idPattern.test(item.id) || ids.has(item.id) || typeof item.name !== "string" || !item.name || !(item.mimeType in mediaTypes) || item.kind !== mediaTypes[item.mimeType].kind || !data.length || data.length > maxMediaBytes || detectMediaType(item.mimeType, data) !== item.mimeType) throw new Error("The Presenter media snapshot contains an invalid file or duplicate ID.");
+    ids.add(item.id);
+  }
+  const base = mediaRoot();
+  await mkdir(base, { recursive: true, mode: 0o700 });
+  const target = departmentDirectory(departmentId);
+  const stage = resolve(base, `.replica-${departmentId}-${randomUUID()}`);
+  await mkdir(stage, { recursive: true, mode: 0o700 });
+  try {
+    for (const { item, data } of files) {
+      const directory = resolve(stage, item.id);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(resolve(directory, `media${mediaTypes[item.mimeType].extension}`), data, { flag: "wx", mode: 0o600 });
+      await writeFile(resolve(directory, "metadata.json"), `${JSON.stringify(item, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    }
+  } catch (error) {
+    await rm(stage, { recursive: true, force: true });
+    throw error;
+  }
+  const backup = resolve(base, `.replica-backup-${departmentId}-${randomUUID()}`);
+  let hadTarget = false;
+  let replaced = false;
+  const rollback = async () => {
+    if (replaced) await rm(target, { recursive: true, force: true });
+    if (hadTarget) await rename(backup, target).catch(() => undefined);
+    await rm(stage, { recursive: true, force: true });
+  };
+  try {
+    try { await stat(target); hadTarget = true; } catch (error) { if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error; }
+    if (hadTarget) await rename(target, backup);
+    await rename(stage, target);
+    replaced = true;
+  } catch (error) {
+    await rollback();
+    throw error;
+  }
+  return {
+    rollback,
+    commit: async () => {
+      if (hadTarget) await rm(backup, { recursive: true, force: true });
+      await rm(stage, { recursive: true, force: true });
+    },
+  };
+}
+
 export async function deletePresenterMedia(departmentId: string, id: string) {
   if (!idPattern.test(id)) return false;
   const target = resolve(departmentDirectory(departmentId), id);

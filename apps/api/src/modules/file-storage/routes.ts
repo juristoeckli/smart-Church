@@ -2,9 +2,16 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { StoredFile } from "@smart-church/contracts";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
+import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 const resourceLimit = 25 * 1024 * 1024;
+function canonical(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value as Record<string, unknown>).sort().map((key) => JSON.stringify(key) + ":" + canonical((value as Record<string, unknown>)[key])).join(",") + "}";
+  return JSON.stringify(value);
+}
 type ResourceRow = { id: string; title: string; category: string; file_name: string; content_type: string; file_size: number; created_at: Date | string };
 function mapResource(row: ResourceRow): StoredFile {
   return { id: row.id, title: row.title, category: row.category, fileName: row.file_name, contentType: row.content_type, fileSize: row.file_size, createdAt: new Date(row.created_at).toISOString() };
@@ -12,6 +19,41 @@ function mapResource(row: ResourceRow): StoredFile {
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = context;
+  context.replication.register({
+    schemaVersion: "1",
+    inspect: async (departmentId) => {
+      if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The file storage database is unavailable."], recordCount: 0 };
+      const result = await pool.query<{ count: string; bytes: string }>("SELECT count(*)::text,sum(file_size)::text AS bytes FROM stored_files WHERE department_id=$1", [departmentId]);
+      const count = Number(result.rows[0].count);
+      const bytes = Number(result.rows[0].bytes ?? 0);
+      return { ready: bytes <= 200 * 1024 * 1024, blockers: bytes > 200 * 1024 * 1024 ? ["Stored files exceed the current 200 MiB snapshot safety limit."] : [], recordCount: count };
+    },
+    exportSnapshot: async (client: PoolClient, departmentId) => {
+      const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
+      return { version: 1, files: files.rows };
+    },
+    restoreSnapshot: async (client: PoolClient, departmentId, input) => {
+      if (!input || typeof input !== "object" || (input as { version?: unknown }).version !== 1 || !Array.isArray((input as { files?: unknown }).files)) throw new Error("The File Storage snapshot is invalid.");
+      const files = (input as { files: Array<Record<string, unknown>> }).files;
+      await client.query("DELETE FROM stored_files WHERE department_id=$1", [departmentId]);
+      for (const file of files) {
+        if (typeof file.id !== "string" || typeof file.title !== "string" || typeof file.category !== "string" || typeof file.file_name !== "string" || typeof file.content_type !== "string" || typeof file.file_size !== "number" || typeof file.file_data !== "string" || !/^\d+$/.test(file.file_data.replace(/[\r\n]/g, ""))) throw new Error("The File Storage snapshot contains an invalid file record.");
+        const buffer = Buffer.from(file.file_data, "base64");
+        if (buffer.length !== file.file_size || buffer.length > resourceLimit) throw new Error("A replicated file does not match its declared size or exceeds 25 MiB.");
+        await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.created_at, file.updated_at]);
+      }
+      return { recordCount: files.length };
+    },
+    verifySnapshot: async (client: PoolClient, departmentId, input) => {
+      if (!input || typeof input !== "object" || (input as { version?: unknown }).version !== 1 || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
+      const expected = (input as { files: Array<Record<string, unknown>> }).files;
+      const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
+      if (actual.length !== expected.length) return { ready: false, blockers: [`Stored file count differs: expected ${expected.length}, found ${actual.length}.`] };
+      const expectedRows = expected.map(canonical).sort();
+      const actualRows = actual.map(canonical).sort();
+      return expectedRows.some((row, index) => row !== actualRows[index]) ? { ready: false, blockers: ["Stored file metadata or binary content differs after restore."] } : { ready: true, blockers: [] };
+    },
+  });
   app.register(async (routes) => {
     routes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: resourceLimit }, (_request, body, done) => done(null, body));
     async function department(request: FastifyRequest, reply: FastifyReply, requireManage = false) {

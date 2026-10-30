@@ -9,7 +9,7 @@ const money = (cents: number) => `CHF ${(cents / 100).toFixed(2)}`;
 
 type ReminderSettings = { enabled: boolean; delay_days: number[]; max_attempts: number };
 
-export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | null) {
+export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | null, isDepartmentWritable: (departmentId: string) => Promise<boolean>) {
   if (!pool) return;
   let running = false;
   const tick = async () => {
@@ -20,6 +20,7 @@ export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | 
         FROM eventdesk_reminder_settings s JOIN departments d ON d.id=s.department_id
         WHERE s.enabled=true AND 'eventdesk'=ANY(d.enabled_modules)`);
       for (const location of locations.rows) {
+        if (!(await isDepartmentWritable(location.id))) continue;
         const delayDays = location.delay_days.slice(0, Math.min(location.max_attempts, 10));
         if (!delayDays.length) continue;
         const candidates = await pool.query<{ id: string; overdue_days: number }>(`SELECT d.id,(CURRENT_DATE-d.due_date)::int AS overdue_days
@@ -31,9 +32,10 @@ export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | 
               -coalesce((SELECT sum(c.total_cents) FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status IN ('draft','sent')),0)::int > 0
           ORDER BY d.due_date,d.created_at LIMIT 100`, [location.id]);
         for (const candidate of candidates.rows) {
+          if (!(await isDepartmentWritable(location.id))) break;
           const windowIndex = delayDays.reduce((latest, delay, index) => candidate.overdue_days >= delay ? index : latest, -1);
           if (windowIndex < 0) continue;
-          await sendScheduledReminder(pool, location.id, candidate.id, windowIndex + 1, delayDays[windowIndex], delayDays.length);
+          await sendScheduledReminder(pool, location.id, candidate.id, windowIndex + 1, delayDays[windowIndex], delayDays.length, isDepartmentWritable);
         }
       }
     } catch (error) {
@@ -46,7 +48,8 @@ export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | 
   void tick();
 }
 
-async function sendScheduledReminder(pool: Pool, departmentId: string, documentId: string, attemptNo: number, delayDays: number, maxAttempts: number) {
+async function sendScheduledReminder(pool: Pool, departmentId: string, documentId: string, attemptNo: number, delayDays: number, maxAttempts: number, isDepartmentWritable: (departmentId: string) => Promise<boolean>) {
+  if (!(await isDepartmentWritable(departmentId))) return;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
