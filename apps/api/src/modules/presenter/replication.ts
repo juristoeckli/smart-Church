@@ -19,8 +19,8 @@ async function collect(client: Pick<PoolClient, "query">, departmentId: string):
   const sessions = await client.query<PresenterSession>(`SELECT session_id,display_name,token_hash,previous_token_hash,output_token,state,updated_at
     FROM presenter_output_sessions WHERE department_id=$1 ORDER BY session_id`, [departmentId]);
   const datasets: DatasetFile[] = [];
-  for (const dataset of await listDatasets()) {
-    const archive = await datasetArchive(dataset.id);
+  for (const dataset of await listDatasets(departmentId)) {
+    const archive = await datasetArchive(dataset.id, departmentId);
     if (!archive) throw new Error(`Presenter dataset ${dataset.id} could not be archived.`);
     datasets.push({ id: dataset.id, archive: (await streamBuffer(archive.stream)).toString("base64") });
   }
@@ -44,11 +44,7 @@ export function registerPresenterReplication(context: ModuleServerContext) {
       try {
         const snapshot = await collect(pool, departmentId);
         const bytes = Buffer.byteLength(JSON.stringify(snapshot));
-        const otherPresenterSites = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM departments department
-          LEFT JOIN installation_modules module ON module.installation_id=department.installation_id AND module.module_id='presenter'
-          WHERE department.id<>$1 AND ('presenter'=ANY(department.enabled_modules) OR module.enabled=TRUE AND (module.required=TRUE OR module.client_managed=FALSE))`, [departmentId]);
         const blockers = bytes > maxBytes ? ["Presenter datasets and media exceed the 200 MiB snapshot limit; split the media library or reduce its size before enabling redundancy."] : [];
-        if (Number(otherPresenterSites.rows[0]?.count ?? 0) > 0) blockers.push("Presenter datasets are installation-wide and would replace data used by another Presenter location. Make Presenter datasets location-scoped before enabling redundancy for multiple locations.");
         return { ready: !blockers.length, blockers, recordCount: snapshot.sessions.length + snapshot.datasets.length + snapshot.media.length };
       } catch (error) { return { ready: false, blockers: [error instanceof Error ? error.message.slice(0, 240) : "Presenter recovery inventory could not be read."], recordCount: 0 }; }
     },
@@ -56,7 +52,7 @@ export function registerPresenterReplication(context: ModuleServerContext) {
     restoreSnapshot: async (client, departmentId, input, restoreContext: ReplicationRestoreContext) => {
       const snapshot = input as Snapshot;
       if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.sessions) || snapshot.sessions.length > 11 || !Array.isArray(snapshot.datasets) || snapshot.datasets.length > 500 || !Array.isArray(snapshot.media) || snapshot.media.length > 5000) throw new Error("The Presenter snapshot is invalid or exceeds supported limits.");
-      const datasetRestore = await replaceDatasetArchives(snapshot.datasets.map((dataset) => ({ id: dataset.id, archive: Buffer.from(dataset.archive, "base64") })));
+      const datasetRestore = await replaceDatasetArchives(snapshot.datasets.map((dataset) => ({ id: dataset.id, archive: Buffer.from(dataset.archive, "base64") })), departmentId);
       let mediaRestore: Awaited<ReturnType<typeof replacePresenterMedia>>;
       try { mediaRestore = await replacePresenterMedia(departmentId, snapshot.media.map((file) => ({ item: file.item, data: Buffer.from(file.data, "base64") }))); }
       catch (error) { await datasetRestore.rollback(); throw error; }

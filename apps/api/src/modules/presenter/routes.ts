@@ -110,22 +110,23 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const session = await pool?.query<{ department_id: string }>(`SELECT s.department_id FROM presenter_output_sessions s JOIN departments d ON d.id=s.department_id
         WHERE (s.token_hash=$1 OR s.previous_token_hash=$1) AND d.enabled_modules @> ARRAY['presenter']::text[]`, [hash]);
       if (!session?.rowCount) return undefined;
+      const departmentId = session.rows[0].department_id;
       if (await dependencies.isDepartmentWritable(session.rows[0].department_id)) {
         const touched = await pool?.query(
           `UPDATE presenter_output_sessions s SET last_seen_at = now()
             WHERE s.department_id=$2 AND (s.token_hash=$1 OR s.previous_token_hash=$1)
               AND (s.last_seen_at IS NULL OR s.last_seen_at < now() - interval '5 seconds')
            RETURNING s.state`,
-          [hash, session.rows[0].department_id],
+          [hash, departmentId],
         );
-        if (touched?.rows[0]) return touched.rows[0].state;
+        if (touched?.rows[0]) return { departmentId, state: touched.rows[0].state };
       }
       const current = await pool?.query(
         `SELECT s.state FROM presenter_output_sessions s JOIN departments d ON d.id = s.department_id
          WHERE (s.token_hash = $1 OR s.previous_token_hash = $1) AND d.enabled_modules @> ARRAY['presenter']::text[]`,
         [hash],
       );
-      return current?.rows[0]?.state;
+      return current?.rows[0] ? { departmentId, state: current.rows[0].state } : undefined;
     }
 
     async function aktuellSchedule(department: string) {
@@ -182,14 +183,16 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     }
   
     app.get("/api/presenter/datasets", async (request, reply) => {
-      if (!await activePresenterDepartment(request, reply)) return reply;
-      return listDatasets();
+      const department = await activePresenterDepartment(request, reply);
+      if (!department) return reply;
+      return listDatasets(department);
     });
 
     app.delete<{ Params: { id: string } }>("/api/presenter/datasets/:id", async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
-      if (!await activePresenterDepartment(request, reply, "admin")) return reply;
-      const result = await deleteDataset(request.params.id);
+      const department = await activePresenterDepartment(request, reply, "admin");
+      if (!department) return reply;
+      const result = await deleteDataset(request.params.id, department);
       if (!result.deleted) {
         if (result.reason === "built-in") return reply.code(403).send({ error: "Built-in datasets cannot be deleted." });
         return reply.code(404).send({ error: "Library or presentation not found." });
@@ -199,9 +202,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const affected = await pool!.query(
         `UPDATE presenter_output_sessions
             SET state = '{"visible":false}'::jsonb
-          WHERE state->>'datasetId' = $1 OR state->>'preloadDatasetId' = $1
+          WHERE department_id=$2 AND (state->>'datasetId' = $1 OR state->>'preloadDatasetId' = $1)
           RETURNING token_hash, previous_token_hash`,
-        [request.params.id],
+        [request.params.id, department],
       );
       for (const session of affected.rows) {
         if (session.token_hash) publishOutputState(session.token_hash, { visible: false });
@@ -211,8 +214,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     });
   
     app.get<{ Params: { id: string }; Querystring: { search?: string } }>("/api/presenter/datasets/:id/songs", async (request, reply) => {
-      if (!await activePresenterDepartment(request, reply)) return reply;
-      const dataset = await readDataset(request.params.id);
+      const department = await activePresenterDepartment(request, reply);
+      if (!department) return reply;
+      const dataset = await readDataset(request.params.id, department);
       if (!dataset) return reply.code(404).send({ error: "Dataset not found." });
       if (dataset.id === "aktuell") return dataset.songs.map((song) => ({ number: song.number, sourceNumber: song.sourceNumber, name: song.name, slideCount: song.slides.length }));
       const search = (request.query.search ?? "").trim().toLocaleLowerCase();
@@ -237,13 +241,13 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     });
   
     app.get<{ Params: { id: string; number: string } }>("/api/presenter/datasets/:id/songs/:number", async (request, reply) => {
-      if (!await activePresenterDepartment(request, reply)) return reply;
-      const dataset = await readDataset(request.params.id);
+      const department = await activePresenterDepartment(request, reply);
+      if (!department) return reply;
+      const dataset = await readDataset(request.params.id, department);
       const number = Number(request.params.number);
       const song = dataset?.songs.find((item) => item.number === number);
       if (!song) return reply.code(404).send({ error: "Song not found." });
-      const activeLocationId = request.headers["x-department-id"];
-      const locationId = typeof activeLocationId === "string" ? activeLocationId : getDefaultDepartmentId();
+      const locationId = department;
       return { ...song, slides: song.slides.map((slide) => {
         if (slide.type === "text") return slide;
         const assetUrl = `/api/presenter/datasets/${dataset!.id}/assets/${encodeURIComponent(slide.asset.slice("pages/".length))}?departmentId=${encodeURIComponent(locationId)}${dataset!.id === "aktuell" ? `&v=${aktuellAssetVersion}` : ""}`;
@@ -261,8 +265,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "sandbox allow-same-origin; default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:; media-src data:").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "no-store");
         return aktuellSlideHtml(await aktuellSchedule(department));
       }
-      const html = asset.endsWith(".html") ? await readDatasetHtmlAsset(request.params.id, asset) : null;
-      const image = asset.endsWith(".png") ? await readDatasetAsset(request.params.id, asset) : null;
+      const html = asset.endsWith(".html") ? await readDatasetHtmlAsset(request.params.id, asset, department) : null;
+      const image = asset.endsWith(".png") ? await readDatasetAsset(request.params.id, asset, department) : null;
       if (!html && !image) return reply.code(404).send({ error: "Dataset asset not found." });
       if (html) reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "sandbox allow-same-origin; default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:; media-src data:").header("X-Content-Type-Options", "nosniff");
       else reply.type("image/png");
@@ -271,8 +275,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     });
   
     app.get<{ Params: { id: string } }>("/api/presenter/datasets/:id/export", async (request, reply) => {
-      if (!await activePresenterDepartment(request, reply)) return reply;
-      const archive = await datasetArchive(request.params.id);
+      const department = await activePresenterDepartment(request, reply);
+      if (!department) return reply;
+      const archive = await datasetArchive(request.params.id, department);
       if (!archive) return reply.code(404).send({ error: "Dataset not found." });
       reply.type("application/gzip").header("Content-Disposition", `attachment; filename=\"${archive.filename}\"`).header("Cache-Control", "no-store");
       return archive.stream;
@@ -280,10 +285,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   
     app.post<{ Body: Buffer }>("/api/presenter/datasets", { bodyLimit: 256 * 1024 * 1024 }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
-      if (!await activePresenterDepartment(request, reply, "admin")) return reply;
+      const department = await activePresenterDepartment(request, reply, "admin");
+      if (!department) return reply;
       if (!Buffer.isBuffer(request.body)) return reply.code(400).send({ error: "Upload a .scdataset.tar.gz package." });
       try {
-        const installed = await installDatasetArchive(request.body);
+        const installed = await installDatasetArchive(request.body, department);
         return reply.code(201).send(installed);
       } catch (error) {
         request.log.warn({ err: error }, "Presenter dataset import rejected");
@@ -293,12 +299,13 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
     app.post<{ Body: Buffer; Querystring: { filename?: string } }>("/api/presenter/library/presentations", { bodyLimit: 64 * 1024 * 1024 }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
-      if (!await activePresenterDepartment(request, reply, "admin")) return reply;
+      const department = await activePresenterDepartment(request, reply, "admin");
+      if (!department) return reply;
       if (!Buffer.isBuffer(request.body)) return reply.code(400).send({ error: "Upload a PowerPoint .pptx file." });
       try {
         const slides = await readPowerPointSlides(request.body);
         const filename = request.query.filename?.slice(0, 160) || "Imported presentation.pptx";
-        const imported = await installPresentationDataset(filename, slides);
+        const imported = await installPresentationDataset(filename, slides, department);
         return reply.code(201).send(imported);
       } catch (error) {
         request.log.warn({ err: error }, "Presenter PowerPoint import rejected");
@@ -308,11 +315,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
     app.post<{ Body: Buffer; Querystring: { filename?: string } }>("/api/presenter/library/pictures", { bodyLimit: 20 * 1024 * 1024 }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
-      if (!await activePresenterDepartment(request, reply, "admin")) return reply;
+      const department = await activePresenterDepartment(request, reply, "admin");
+      if (!department) return reply;
       if (!Buffer.isBuffer(request.body)) return reply.code(400).send({ error: "Upload a PNG picture." });
       try {
         const filename = request.query.filename?.slice(0, 160) || "Picture.png";
-        return reply.code(201).send(await installLibraryPicture(filename, request.body));
+        return reply.code(201).send(await installLibraryPicture(filename, request.body, department));
       } catch (error) {
         request.log.warn({ err: error }, "Presenter picture import rejected");
         return reply.code(400).send({ error: error instanceof Error ? error.message : "The picture could not be imported." });
@@ -455,7 +463,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!department) return reply;
       if (!sessionIds.has(request.params.id)) return reply.code(404).send({ error: "Presenter session not found." });
       await ensurePresenterSessions(department);
-      const dataset = await readDataset(request.body.datasetId);
+      const dataset = await readDataset(request.body.datasetId, department);
       const setMatches = request.body.setNumber === undefined ? [] : dataset?.songs.filter((item) => item.sourceNumber === request.body.setNumber) ?? [];
       const song = setMatches.length === 1 ? setMatches[0] : setMatches.length > 1 ? undefined : request.body.songNumber === undefined ? undefined : dataset?.songs.find((item) => item.number === request.body.songNumber);
       if (!dataset || !song) return reply.code(404).send({ error: "The selected set number could not be found or is ambiguous." });
@@ -531,7 +539,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const { datasetId, setNumber, songNumber, slideIndex } = request.body;
         if (!request.body.visible) return reply.code(400).send({ error: "A selected slide must be made visible when it is sent." });
         if (!datasetId || (setNumber === undefined && songNumber === undefined) || slideIndex === undefined) return reply.code(400).send({ error: "Choose a song and slide to send to the output." });
-        const dataset = await readDataset(datasetId);
+        const dataset = await readDataset(datasetId, department);
         const setMatches = setNumber === undefined ? [] : dataset?.songs.filter((item) => item.sourceNumber === setNumber) ?? [];
         const song = setMatches.length === 1 ? setMatches[0] : setMatches.length > 1 ? undefined : dataset?.songs.find((item) => item.number === songNumber);
         const slide = song?.slides[slideIndex];
@@ -550,7 +558,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const state = await readPublicSession(request.params.token);
       if (!state) return reply.code(404).send({ error: "This Presenter output link is no longer active." });
       reply.header("Cache-Control", "no-store");
-      return publicOutputState(state, request.params.token);
+      return publicOutputState(state.state, request.params.token);
     });
 
     app.get<{ Params: { token: string; id: string } }>("/api/modules/presenter/public/output/:token/media/:id", async (request, reply) => {
@@ -629,7 +637,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       try {
         const state = await readPublicSession(token);
         if (state && client.revision === 0 && !response.destroyed) {
-          response.write(`data: ${JSON.stringify({ state: publicOutputState(state, token), sentAt: Date.now() })}\n\n`);
+          response.write(`data: ${JSON.stringify({ state: publicOutputState(state.state, token), sentAt: Date.now() })}\n\n`);
         }
       } catch { response.end(); }
     });
@@ -638,11 +646,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const state = await readPublicSession(request.params.token);
       if (!state) return reply.code(404).send({ error: "This Presenter output link is no longer active." });
       reply.header("Cache-Control", "no-store");
-      const datasetId = state.preloadDatasetId ?? state.datasetId;
-      const setNumber = state.preloadSetNumber;
-      const songNumber = state.preloadSongNumber ?? state.songNumber;
+      const datasetId = state.state.preloadDatasetId ?? state.state.datasetId;
+      const setNumber = state.state.preloadSetNumber;
+      const songNumber = state.state.preloadSongNumber ?? state.state.songNumber;
       if (!datasetId || (!Number.isSafeInteger(setNumber) && !Number.isSafeInteger(songNumber))) return { slides: [] };
-      const dataset = await readDataset(datasetId);
+      const dataset = await readDataset(datasetId, state.departmentId);
       const matches = Number.isSafeInteger(setNumber) ? dataset?.songs.filter((item) => item.sourceNumber === setNumber) ?? [] : [];
       const song = matches.length === 1 ? matches[0] : matches.length > 1 ? undefined : dataset?.songs.find((item) => item.number === songNumber);
       if (!dataset || !song) return { slides: [] };
@@ -668,8 +676,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "sandbox allow-same-origin; default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:; media-src data:").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "no-store");
         return aktuellSlideHtml(await aktuellSchedule(found.rows[0].department_id));
       }
-      const html = asset.endsWith(".html") ? await readDatasetHtmlAsset(request.params.datasetId, asset) : null;
-      const image = asset.endsWith(".png") ? await readDatasetAsset(request.params.datasetId, asset) : null;
+      const html = asset.endsWith(".html") ? await readDatasetHtmlAsset(request.params.datasetId, asset, found.rows[0].department_id) : null;
+      const image = asset.endsWith(".png") ? await readDatasetAsset(request.params.datasetId, asset, found.rows[0].department_id) : null;
       if (!html && !image) return reply.code(404).send({ error: "Presenter output asset not found." });
       if (html) reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "sandbox allow-same-origin; default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline' data:; media-src data:").header("X-Content-Type-Options", "nosniff");
       else reply.type("image/png");
