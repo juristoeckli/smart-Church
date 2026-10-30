@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerPeopleFlowsReplication } from "./replication.js";
 
 type FlowRow = { id: string; name: string; description: string; status: "active" | "archived"; created_at: Date | string; updated_at: Date | string; step_count: number; enrollment_count: number };
 type StepRow = { id: string; title: string; instructions: string; position: number; due_after_days: number | null; required: boolean; active: boolean };
@@ -12,6 +13,7 @@ function mapFlow(row: FlowRow) {
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
+  registerPeopleFlowsReplication(context);
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, write = false) {
       if (!isDatabaseReady() || !pool) {
