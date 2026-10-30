@@ -47,7 +47,7 @@ async function formerStandbyAuthorization(pool: import("pg").Pool, departmentId:
 }
 
 async function hasApprovedPullAuthorization(pool: import("pg").Pool, departmentId: string, installationId: string, targetDepartmentId: string) {
-  const result = await pool.query("SELECT 1 FROM sync_redundancy_pull_authorizations authorization JOIN sync_site_redundancy site ON site.department_id=authorization.source_department_id AND site.site_epoch=authorization.source_epoch WHERE authorization.source_department_id=$1 AND authorization.target_installation_id=$2 AND authorization.target_department_id=$3 AND authorization.state='approved'", [departmentId, installationId, targetDepartmentId]);
+  const result = await pool.query("SELECT 1 FROM sync_redundancy_pull_authorizations pull_authorization JOIN sync_site_redundancy site ON site.department_id=pull_authorization.source_department_id AND site.site_epoch=pull_authorization.source_epoch WHERE pull_authorization.source_department_id=$1 AND pull_authorization.target_installation_id=$2 AND pull_authorization.target_department_id=$3 AND pull_authorization.state='approved'", [departmentId, installationId, targetDepartmentId]);
   return Boolean(result.rowCount);
 }
 
@@ -1308,10 +1308,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ORDER BY request.created_at DESC`, [department],
     );
     const pendingPullRequests = await pool.query<{ id: string; target_installation_id: string; target_department_id: string; target_department_name: string; source_epoch: string; target_server_name: string; created_at: Date }>(
-      `SELECT authorization.id,authorization.target_installation_id,authorization.target_department_id,authorization.target_department_name,authorization.source_epoch::text,peer.display_name AS target_server_name,authorization.created_at
-         FROM sync_redundancy_pull_authorizations authorization JOIN sync_peers peer ON peer.installation_id=authorization.target_installation_id AND peer.trust_state='trusted'
-        WHERE authorization.source_department_id=$1 AND authorization.state='pending'
-        ORDER BY authorization.created_at DESC`, [department],
+      `SELECT pull_authorization.id,pull_authorization.target_installation_id,pull_authorization.target_department_id,pull_authorization.target_department_name,pull_authorization.source_epoch::text,peer.display_name AS target_server_name,pull_authorization.created_at
+         FROM sync_redundancy_pull_authorizations pull_authorization JOIN sync_peers peer ON peer.installation_id=pull_authorization.target_installation_id AND peer.trust_state='trusted'
+        WHERE pull_authorization.source_department_id=$1 AND pull_authorization.state='pending'
+        ORDER BY pull_authorization.created_at DESC`, [department],
     );
     const reason = !modulesReady
       ? "Every enabled module and the core site-data adapter must pass local recovery checks before a snapshot can be promoted."
