@@ -5,6 +5,23 @@ import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
 import { canonicalRequest, protocolVersion, signBytes, verifyBytes, type LocalIdentity } from "./federation-crypto.js";
 
+// Node's built-in WebSocket dispatches ErrorEvent on failed connections, but
+// some Node 24 builds do not expose ErrorEvent globally. Without this small
+// compatibility class, an unreachable peer can crash the API process.
+if (typeof globalThis.ErrorEvent !== "function") {
+  class NodeErrorEvent extends Event {
+    readonly error: unknown;
+    readonly message: string;
+
+    constructor(type: string, init: { error?: unknown; message?: string; cancelable?: boolean } = {}) {
+      super(type, { cancelable: init.cancelable });
+      this.error = init.error;
+      this.message = init.message ?? "";
+    }
+  }
+  Object.defineProperty(globalThis, "ErrorEvent", { configurable: true, writable: true, value: NodeErrorEvent });
+}
+
 const path = "/api/modules/sync/federation/v1/channel";
 const websocketGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const maxTextMessageBytes = 900 * 1024;
