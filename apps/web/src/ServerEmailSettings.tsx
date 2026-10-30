@@ -1,4 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { ModuleTranslationHost } from "./module-registry";
+import { getActiveLanguage } from "./i18n";
+import { translationsForModule } from "./modules/translations";
 
 type EmailSettings = {
   mode: "direct" | "smtp";
@@ -63,9 +66,9 @@ export function ServerEmailSettings({ refreshCsrfToken, departmentId, department
     } finally { setSaving(false); }
   }
 
-  if (loading) return <p className="server-settings-empty">Loading email server settings…</p>;
+  if (loading) return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><p className="server-settings-empty">Loading email server settings…</p></ModuleTranslationHost>;
 
-  return <form className="server-email-settings" onSubmit={(event) => void save(event)}>
+  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><form className="server-email-settings" onSubmit={(event) => void save(event)}>
     <div className="server-admin-panel-heading"><h3>Email delivery · {departmentName}</h3><p>Configure email delivery used by this site's notifications. Self sign-up continues to use the server's default site.</p></div>
     <label className="global-admin-option"><input type="checkbox" checked={draft.enabled} onChange={(event) => update("enabled", event.target.checked)} /><span><strong>{draft.enabled ? "Email delivery enabled" : "Email delivery disabled"}</strong><small>When enabled and configured, applications can send email through this server.</small></span></label>
     <label>Delivery mode<select value={draft.mode} onChange={(event) => update("mode", event.target.value as Draft["mode"])}><option value="direct">Direct delivery</option><option value="smtp">SMTP through a server</option></select></label>
@@ -77,5 +80,5 @@ export function ServerEmailSettings({ refreshCsrfToken, departmentId, department
     <div className="server-email-grid"><label>Sender name<input required value={draft.fromName} maxLength={120} onChange={(event) => update("fromName", event.target.value)} /></label><label>Sender email address<input type="email" required={draft.enabled} value={draft.fromEmail} maxLength={254} onChange={(event) => update("fromEmail", event.target.value)} placeholder="noreply@example.org" /></label></div>
     {feedback && <p className={`user-access-feedback ${feedback.error ? "user-access-feedback-error" : ""}`} role={feedback.error ? "alert" : "status"}>{feedback.message}</p>}
     <div className="form-actions"><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save email settings"}</button></div>
-  </form>;
+  </form></ModuleTranslationHost>;
 }
