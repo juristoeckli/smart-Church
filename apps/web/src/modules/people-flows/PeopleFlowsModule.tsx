@@ -107,9 +107,9 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
 
   useEffect(() => { void refresh(""); }, [departmentId]);
 
-  async function run(action: () => Promise<void>, success: string) {
+  async function run(action: () => Promise<void | string>, success: string) {
     setBusy(true); setError(""); setFeedback("");
-    try { await action(); await refresh(selectedFlowId); setFeedback(success); }
+    try { const actionFeedback = await action(); await refresh(selectedFlowId); setFeedback(actionFeedback ?? success); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "The request could not be completed."); }
     finally { setBusy(false); }
   }
@@ -152,7 +152,7 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
     await run(async () => {
       const result = await api(`/api/people-flows/${selectedFlow.id}/assignments`, "POST", { contactIds: selectedContacts, dueOn: assignmentDueOn || null }) as { created: number; skipped: number };
       setSelectedContacts([]); setAssignmentDueOn("");
-      setFeedback(assignmentSummary(language, result.created, result.skipped));
+      return assignmentSummary(language, result.created, result.skipped);
     }, "Assignments updated.");
   }
 
