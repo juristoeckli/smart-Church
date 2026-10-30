@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS people_flow_enrollments (
   completed_at TIMESTAMPTZ,
   created_by UUID,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (department_id,id),
   FOREIGN KEY (department_id,flow_id) REFERENCES people_flows(department_id,id) ON DELETE CASCADE
 );
 
