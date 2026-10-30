@@ -3,7 +3,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check, Clipboa
 import type { BookableResource, Contact, CreateServiceEvent, EventRegistration, ServiceEvent, ServiceEventCheckIn, ServiceEventKind, ServicePlanItem, ServicePlanTemplate, ServicePosition, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
-import { ModuleTranslationHost } from "./module-registry";
+import { ModuleTranslationHost, translateModuleText } from "./module-registry";
 import { translationsForModule } from "./modules/translations";
 import { WorshipPlanning } from "./WorshipPlanning";
 
@@ -287,7 +287,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
 
   async function deleteEvent(event: ServiceEvent, wholeSeries = false) {
     const target = wholeSeries ? "the entire recurring series" : "this gathering";
-    if (!window.confirm(`Delete ${target} for “${event.title}” from the schedule?`)) return;
+    if (!window.confirm(translateModuleText(`Delete ${target} for “${event.title}” from the schedule?`, translationsForModule("core-events"), getActiveLanguage()))) return;
     try {
       const response = await fetch(`/api/events/${event.id}${wholeSeries ? "/series" : ""}`, { method: "DELETE", headers: { "x-department-id": departmentId } });
       const result = await response.json() as { error?: string; deleted?: number };

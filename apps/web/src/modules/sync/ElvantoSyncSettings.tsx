@@ -171,7 +171,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   }
 
   async function disconnect() {
-    if (!window.confirm("Disconnect Elvanto and remove the saved API key and sync directions?")) return;
+    if (!window.confirm(tr("Disconnect Elvanto and remove the saved API key and sync directions?"))) return;
     setBusy(true); setFeedback(""); setError("");
     try {
       const response = await fetch("/api/modules/sync/elvanto", { method: "DELETE", headers: { "x-department-id": departmentId } });

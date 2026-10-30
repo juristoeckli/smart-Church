@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
-import { ModuleTranslationHost, registeredModules } from "./module-registry";
+import { ModuleTranslationHost, registeredModules, translateModuleText } from "./module-registry";
 import { translateModuleMessage, translationsForModule } from "./modules/translations";
 import { getActiveLanguage } from "./i18n";
 import "./LocationAccess.css";
@@ -106,7 +106,7 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
 
   async function removeAccess() {
     if (!selected || selected.id === currentUserId) return;
-    if (!window.confirm(`Remove ${selected.displayName} from ${department.location}? This only removes access to this location.`)) return;
+    if (!window.confirm(translateModuleText(`Remove ${selected.displayName} from ${department.location}? This only removes access to this location.`, translationsForModule("core-admin"), getActiveLanguage()))) return;
     setSaving(true); setError(""); setNotice("");
     try {
       const response = await fetch(`/api/location-access/${encodeURIComponent(selected.id)}`, {
