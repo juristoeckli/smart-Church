@@ -21,6 +21,7 @@ const elvantoCalendarImportRunning = new Set<string>();
 const elvantoCalendarExportRunning = new Set<string>();
 const elvantoPeopleFlowsImportRunning = new Set<string>();
 const elvantoSongsImportRunning = new Set<string>();
+const elvantoSongsExportRunning = new Set<string>();
 const elvantoFinancialImportRunning = new Set<string>();
 const syncIntervalMs = 15 * 60 * 1000;
 
@@ -470,6 +471,39 @@ async function fetchElvantoFinancialTransactions(apiKey: string, startDate: stri
   if (ids.some((id) => !id)) throw new Error("Elvanto returned a financial transaction without a stable ID.");
   return { transactions, ids, reportedTotal, complete, pagesFetched };
 }
+function hashElvantoSong(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+function elvantoSongArrangementRows(value: unknown): JsonObject[] {
+  return Array.isArray(value) ? value.filter((item): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+}
+async function fetchElvantoSongForExport(apiKey: string, sourceId: string) {
+  const info = await elvantoRequest(apiKey, "songs/getInfo", { id: sourceId, files: false });
+  const rawSongValue = info.song;
+  const song = Array.isArray(rawSongValue) ? rawSongValue[0] as JsonObject | undefined : rawSongValue as JsonObject | undefined;
+  if (!song || idOf(song) !== sourceId) throw new Error("The linked Elvanto song is no longer available. Review a new preview.");
+  const arrangements = await fetchElvantoPagedRows(apiKey, "songs/arrangements/getAll", "arrangements", "arrangement", { song_id: sourceId, files: false });
+  if (!arrangements.complete) throw new Error("Elvanto returned an incomplete arrangements list. No song export was written.");
+  const snapshot = { id: sourceId, title: firstText(song.title), arrangements: arrangements.rows.map((item) => [idOf(item), firstText(item.name), firstText(item.key_male), firstText(item.key_female), firstText(item.date_modified)]) };
+  return { song, arrangements: arrangements.rows, hash: hashElvantoSong(snapshot) };
+}
+function elvantoLocalSongExportHash(song: { id: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }) {
+  return hashElvantoSong([song.id, song.title, song.arrangements.map((arrangement) => [arrangement.id, arrangement.name, arrangement.key])]);
+}
+async function elvantoLocalSongsForExport(departmentId: string, songIds?: string[]) {
+  const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; notes: string; arrangements: Array<{ id: string; name: string; key: string }> }>(
+    `SELECT song.id,song.title,song.authors,song.default_key,song.notes,
+            COALESCE(jsonb_agg(jsonb_build_object('id',arrangement.id,'name',arrangement.name,'key',arrangement.musical_key)
+              ORDER BY lower(arrangement.name),arrangement.id) FILTER (WHERE arrangement.id IS NOT NULL AND arrangement.active=TRUE),'[]'::jsonb) AS arrangements
+       FROM worship_songs song
+       LEFT JOIN worship_song_arrangements arrangement ON arrangement.song_id=song.id
+      WHERE song.department_id=$1 AND song.active=TRUE AND ($2::uuid[] IS NULL OR song.id=ANY($2::uuid[]))
+      GROUP BY song.id ORDER BY lower(song.title),song.id`,
+    [departmentId, songIds ?? null],
+  );
+  return result.rows;
+}
+
 async function fetchElvantoSongs(apiKey: string, songOffset = 0, songLimit = 5, includeDetails = true) {
   const songPage = await fetchElvantoPagedRows(apiKey, "songs/getAll", "songs", "song", { files: false });
   if (songPage.rows.length > 200000) throw new Error("Elvanto returned more than 200,000 songs.");
@@ -1121,7 +1155,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const peopleExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT people_export_page AS page,jsonb_array_length(people_export_preview_rows)::int AS total,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped,people_export_complete AS complete,people_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const groupsExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; added: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT groups_export_page AS page,jsonb_array_length(groups_export_preview_rows)::int AS total,groups_export_created_count AS created,groups_export_updated_count AS updated,groups_export_added_members_count AS added,groups_export_skipped_count AS skipped,groups_export_complete AS complete,groups_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const calendarExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null; calendar_id: string | null; organizer_id: string | null }>("SELECT calendar_export_page AS page,jsonb_array_length(calendar_export_preview_rows)::int AS total,calendar_export_created_count AS created,calendar_export_updated_count AS updated,calendar_export_skipped_count AS skipped,calendar_export_complete AS complete,calendar_export_preview_at AS preview_at,calendar_export_calendar_id AS calendar_id,calendar_export_organizer_id AS organizer_id FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
-      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, calendarExport: calendarExportState.rows[0] ? { page: calendarExportState.rows[0].page, total: calendarExportState.rows[0].total, created: calendarExportState.rows[0].created, updated: calendarExportState.rows[0].updated, skipped: calendarExportState.rows[0].skipped, complete: calendarExportState.rows[0].complete, previewAt: calendarExportState.rows[0].preview_at, calendarId: calendarExportState.rows[0].calendar_id, organizerId: calendarExportState.rows[0].organizer_id } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
+      const songsExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT page,jsonb_array_length(preview_rows)::int AS total,created_count AS created,updated_count AS updated,skipped_count AS skipped,complete,preview_at FROM elvanto_song_export_state WHERE department_id=$1", [dept]);
+      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, calendarExport: calendarExportState.rows[0] ? { page: calendarExportState.rows[0].page, total: calendarExportState.rows[0].total, created: calendarExportState.rows[0].created, updated: calendarExportState.rows[0].updated, skipped: calendarExportState.rows[0].skipped, complete: calendarExportState.rows[0].complete, previewAt: calendarExportState.rows[0].preview_at, calendarId: calendarExportState.rows[0].calendar_id, organizerId: calendarExportState.rows[0].organizer_id } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, songsExport: songsExportState.rows[0] ? { page: songsExportState.rows[0].page, total: songsExportState.rows[0].total, created: songsExportState.rows[0].created, updated: songsExportState.rows[0].updated, skipped: songsExportState.rows[0].skipped, complete: songsExportState.rows[0].complete, previewAt: songsExportState.rows[0].preview_at } : null, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/financial", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -2010,6 +2045,163 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const song = result.rows[0];
       if (!song) return reply.code(404).send({ error: "Imported Elvanto song was not found." });
       return { sourceId: song.source_id, title: song.title, song: song.song, arrangements: song.arrangements, importedAt: song.imported_at };
+    });
+    routes.post("/api/modules/sync/elvanto/songs-export-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings) return reply.code(404).send({ error: "Connect Elvanto before previewing a song export." });
+      if (settings.directions.songs !== "smart_church_to_elvanto" && settings.directions.songs !== "bidirectional") return reply.code(400).send({ error: "Set Songs direction to Smart Church → Elvanto or bidirectional before previewing an export." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(settings.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      try {
+        const remote = await fetchElvantoPagedRows(apiKey, "songs/getAll", "songs", "song", { files: false });
+        if (!remote.complete || remote.rows.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto Songs list. No export preview was saved." });
+        const local = await elvantoLocalSongsForExport(dept);
+        if (local.length > 200000) return reply.code(409).send({ error: "This location has more than 200,000 songs. Narrow the export scope before retrying." });
+        const links = await pool!.query<{ song_id: string; source_id: string; local_hash: string; remote_hash: string }>("SELECT song_id,source_id,local_hash,remote_hash FROM elvanto_song_links WHERE department_id=$1", [dept]);
+        const linkBySong = new Map(links.rows.map((link) => [link.song_id, link]));
+        const remoteById = new Map(remote.rows.map((song) => [idOf(song), song]));
+        const remoteByTitle = new Map<string, JsonObject[]>();
+        for (const song of remote.rows) {
+          const title = firstText(song.title).trim().toLocaleLowerCase();
+          if (title) remoteByTitle.set(title, [...(remoteByTitle.get(title) ?? []), song]);
+        }
+        const rows: Array<{ songId: string; sourceId: string | null; localHash: string; remoteHash: string | null; action: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }> = [];
+        for (const song of local) {
+          const arrangements = song.arrangements.map((item) => ({ id: item.id, name: item.name, key: item.key }));
+          const localHash = elvantoLocalSongExportHash({ id: song.id, title: song.title, arrangements });
+          const link = linkBySong.get(song.id);
+          let action = "create";
+          let remoteHash: string | null = null;
+          if (!arrangements.length) action = "needs_arrangement";
+          else if (new Set(arrangements.map((item) => item.name.trim().toLocaleLowerCase())).size !== arrangements.length) action = "review_duplicate_arrangement_names";
+          if (link) {
+            const remoteSong = remoteById.get(link.source_id);
+            if (!remoteSong) action = "review_missing_remote";
+            else {
+              const snapshot = await fetchElvantoSongForExport(apiKey, link.source_id);
+              remoteHash = snapshot.hash;
+              const localChanged = localHash !== link.local_hash;
+              const remoteChanged = remoteHash !== link.remote_hash;
+              if (remoteChanged && localChanged) action = "review_both_changed";
+              else if (remoteChanged) action = "review_remote_changed";
+              else action = localChanged ? "update" : "unchanged";
+            }
+          } else {
+            const matches = remoteByTitle.get(song.title.trim().toLocaleLowerCase()) ?? [];
+            if (matches.length === 1) action = "review_title_match";
+            else if (matches.length > 1) action = "review_ambiguous_title";
+          }
+          rows.push({ songId: song.id, sourceId: link?.source_id ?? null, localHash, remoteHash, action, title: song.title, arrangements });
+        }
+        const state = await pool!.query(
+          `INSERT INTO elvanto_song_export_state (department_id,preview_at,preview_rows,page,created_count,updated_count,skipped_count,complete,exporting,started_at,updated_at)
+           VALUES ($1,now(),$2::jsonb,0,0,0,0,FALSE,FALSE,NULL,now())
+           ON CONFLICT (department_id) DO UPDATE SET preview_at=now(),preview_rows=EXCLUDED.preview_rows,page=0,created_count=0,updated_count=0,skipped_count=0,complete=FALSE,exporting=FALSE,started_at=NULL,updated_at=now()
+           WHERE elvanto_song_export_state.exporting=FALSE OR elvanto_song_export_state.started_at < now()-interval '15 minutes'
+           RETURNING department_id`,
+          [dept, JSON.stringify(rows)],
+        );
+        if (!state.rowCount) return reply.code(409).send({ error: "A Songs export is already running for this location." });
+        return { complete: true, total: rows.length, create: rows.filter((item) => item.action === "create").length, update: rows.filter((item) => item.action === "update").length, unchanged: rows.filter((item) => item.action === "unchanged").length, review: rows.filter((item) => item.action.startsWith("review_") || item.action === "needs_arrangement" || item.action === "review_duplicate_arrangement_names"), sample: rows.slice(0, 50).map(({ title, arrangements, action }) => ({ title, arrangements: arrangements.length, action, unsupportedFields: ["authors", "notes", "chart_url", "audio_url"] })) };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not preview Elvanto song export." }); }
+    });
+    routes.post("/api/modules/sync/elvanto/songs-export", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoSongsExportRunning.has(dept)) return reply.code(409).send({ error: "A Songs export is already running for this location." });
+      const settings = await elvantoSettings(dept);
+      if (!settings) return reply.code(404).send({ error: "Connect Elvanto before exporting songs." });
+      if (settings.directions.songs !== "smart_church_to_elvanto" && settings.directions.songs !== "bidirectional") return reply.code(400).send({ error: "Set Songs direction to Smart Church → Elvanto or bidirectional before exporting." });
+      const savedResult = await pool!.query<{ preview_at: Date | string | null; preview_rows: Array<{ songId: string; sourceId: string | null; localHash: string; remoteHash: string | null; action: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }>; page: number; created_count: number; updated_count: number; skipped_count: number }>("SELECT preview_at,preview_rows,page,created_count,updated_count,skipped_count FROM elvanto_song_export_state WHERE department_id=$1", [dept]);
+      const saved = savedResult.rows[0];
+      const previewTime = saved?.preview_at ? new Date(saved.preview_at).getTime() : 0;
+      if (!saved || Date.now() - previewTime > 60 * 60 * 1000 || !Array.isArray(saved.preview_rows)) return reply.code(409).send({ error: "Run a complete Songs export preview first. Previews expire after one hour." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(settings.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoSongsExportRunning.add(dept);
+      let reserved = false; let settingsReserved = false;
+      try {
+        const settingsLock = await pool!.query("UPDATE elvanto_sync_settings SET songs_importing=TRUE,songs_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND songs_importing=FALSE AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND financial_importing=FALSE AND people_exporting=FALSE RETURNING department_id", [dept, settings.updated_at]);
+        if (!settingsLock.rowCount) return reply.code(409).send({ error: "Another Elvanto sync is running for this location." });
+        settingsReserved = true;
+        const lock = await pool!.query("UPDATE elvanto_song_export_state SET exporting=TRUE,started_at=now(),updated_at=now() WHERE department_id=$1 AND preview_at=$2 AND preview_at>now()-interval '1 hour' AND (exporting=FALSE OR started_at<now()-interval '15 minutes') RETURNING department_id", [dept, saved.preview_at]);
+        if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired or another Songs export is running. Run a new preview." });
+        reserved = true;
+        let index=saved.page, created=saved.created_count, updated=saved.updated_count, skipped=saved.skipped_count;
+        const rows=saved.preview_rows;
+        let processed=0;
+        while(index<rows.length && processed<1) {
+          const item=rows[index];
+          if(item.action!=="create" && item.action!=="update") { skipped++; index++; processed++; await pool!.query("UPDATE elvanto_song_export_state SET page=$2,skipped_count=$3,updated_at=now() WHERE department_id=$1",[dept,index,skipped]); continue; }
+          const current=await elvantoLocalSongsForExport(dept,[item.songId]);
+          const song=current[0];
+          if(!song || elvantoLocalSongExportHash({id:song.id,title:song.title,arrangements:song.arrangements})!==item.localHash) {
+            await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
+            return reply.code(409).send({error:"A local song or arrangement changed after preview. Review a fresh Songs export preview before writing."});
+          }
+          let sourceId=item.sourceId;
+          if(item.action==="update") {
+            if(!sourceId) throw new Error("The linked Elvanto song ID is missing. Run a new preview.");
+            const remote=await fetchElvantoSongForExport(apiKey,sourceId);
+            if(remote.hash!==item.remoteHash) {
+              await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
+              return reply.code(409).send({error:"The linked Elvanto song changed after preview. Review a fresh Songs export preview before writing."});
+            }
+            await elvantoRequest(apiKey,"songs/edit",{id:sourceId,title:song.title});
+            const currentArrangements=await fetchElvantoPagedRows(apiKey,"songs/arrangements/getAll","arrangements","arrangement",{song_id:sourceId,files:false});
+            if(!currentArrangements.complete) throw new Error("Elvanto returned an incomplete arrangements list; continue only after reviewing a new preview.");
+            const known=await pool!.query<{arrangement_id:string;source_id:string}>("SELECT arrangement_id,source_id FROM elvanto_song_arrangement_links WHERE department_id=$1 AND song_id=$2",[dept,song.id]);
+            const knownByLocal=new Map(known.rows.map((entry)=>[entry.arrangement_id,entry.source_id]));
+            for(const arrangement of song.arrangements) {
+              const linkedId=knownByLocal.get(arrangement.id);
+              let matches=currentArrangements.rows.filter((remoteArrangement)=>linkedId ? idOf(remoteArrangement)===linkedId : firstText(remoteArrangement.name).trim().toLocaleLowerCase()===arrangement.name.trim().toLocaleLowerCase());
+              if(matches.length>1) throw new Error(`More than one Elvanto arrangement matches “${arrangement.name}”. Resolve the duplicate before exporting.`);
+              let arrangementId=matches.length===1 ? idOf(matches[0]) : "";
+              if(arrangementId) await elvantoRequest(apiKey,"songs/arrangements/edit",{id:arrangementId,name:arrangement.name,...(arrangement.key?{key_male:arrangement.key}:{})});
+              else {
+                const result=await elvantoRequest(apiKey,"songs/arrangements/create",{song_id:sourceId,name:arrangement.name,...(arrangement.key?{key_male:arrangement.key}:{})});
+                const raw=result.arrangements; const createdArrangement=Array.isArray(raw)?raw[0] as JsonObject|undefined:raw as JsonObject|undefined;
+                arrangementId=idOf(createdArrangement ?? {});
+                if(!arrangementId) throw new Error("Elvanto did not return a stable arrangement ID. Review the song before retrying.");
+              }
+              await pool!.query("INSERT INTO elvanto_song_arrangement_links (department_id,song_id,arrangement_id,source_id,local_hash,remote_hash) VALUES ($1,$2,$3,$4,$5,'') ON CONFLICT (department_id,arrangement_id) DO UPDATE SET source_id=EXCLUDED.source_id,local_hash=EXCLUDED.local_hash,updated_at=now()",[dept,song.id,arrangement.id,arrangementId,hashElvantoSong([arrangement.name,arrangement.key])]);
+            }
+            updated++;
+          } else {
+            const latestSongs=await fetchElvantoPagedRows(apiKey,"songs/getAll","songs","song",{files:false});
+            if(!latestSongs.complete) throw new Error("Could not recheck the complete Elvanto song list before creating. Run a fresh preview later.");
+            if(latestSongs.rows.some((remoteSong)=>firstText(remoteSong.title).trim().toLocaleLowerCase()===song.title.trim().toLocaleLowerCase())) {
+              await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
+              return reply.code(409).send({error:"An Elvanto song now matches this title. The preview was invalidated; review a fresh preview before creating a duplicate."});
+            }
+            const result=await elvantoRequest(apiKey,"songs/create",{title:song.title,arrangements:song.arrangements.map((arrangement)=>({name:arrangement.name,...(arrangement.key?{keys:[{name:arrangement.key,key_starting:arrangement.key}]}:{})}))});
+            const raw=result.song; const remoteSong=Array.isArray(raw)?raw[0] as JsonObject|undefined:raw as JsonObject|undefined;
+            sourceId=idOf(remoteSong ?? {});
+            if(!sourceId) throw new Error("Elvanto did not return a stable song ID. Review the title match before retrying.");
+            const returnedArrangements=elvantoSongArrangementRows(remoteSong?.arrangements);
+            const linkedByName=new Map(returnedArrangements.map((entry,index)=>[song.arrangements[index]?.name.trim().toLocaleLowerCase(),idOf(entry)]));
+            for(const arrangement of song.arrangements) {
+              const arrangementId=linkedByName.get(arrangement.name.trim().toLocaleLowerCase());
+              if(arrangementId) await pool!.query("INSERT INTO elvanto_song_arrangement_links (department_id,song_id,arrangement_id,source_id,local_hash,remote_hash) VALUES ($1,$2,$3,$4,$5,'') ON CONFLICT (department_id,arrangement_id) DO UPDATE SET source_id=EXCLUDED.source_id,local_hash=EXCLUDED.local_hash,updated_at=now()",[dept,song.id,arrangement.id,arrangementId,hashElvantoSong([arrangement.name,arrangement.key])]);
+            }
+            created++;
+          }
+          const remote=await fetchElvantoSongForExport(apiKey,sourceId!);
+          await pool!.query("INSERT INTO elvanto_song_links (department_id,song_id,source_id,local_hash,remote_hash) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (department_id,song_id) DO UPDATE SET source_id=EXCLUDED.source_id,local_hash=EXCLUDED.local_hash,remote_hash=EXCLUDED.remote_hash,updated_at=now()",[dept,song.id,sourceId,elvantoLocalSongExportHash({id:song.id,title:song.title,arrangements:song.arrangements}),remote.hash]);
+          await pool!.query("UPDATE elvanto_song_export_state SET page=$2,created_count=$3,updated_count=$4,skipped_count=$5,updated_at=now() WHERE department_id=$1",[dept,index+1,created,updated,skipped]);
+          index++; processed++;
+        }
+        const complete=index>=rows.length;
+        await pool!.query("UPDATE elvanto_song_export_state SET complete=$2,updated_at=now() WHERE department_id=$1",[dept,complete]);
+        return { songsExport:{page:index,total:rows.length,created,updated,skipped,complete} };
+      } catch(error) {
+        await pool!.query("UPDATE elvanto_sync_settings SET last_sync_error=$2 WHERE department_id=$1",[dept,(error instanceof Error?error.message:"Song export failed.").slice(0,1000)]).catch(()=>{});
+        return reply.code(400).send({error:error instanceof Error?error.message:"Could not export Elvanto songs."});
+      } finally {
+        if(reserved) await pool!.query("UPDATE elvanto_song_export_state SET exporting=FALSE,started_at=NULL,updated_at=now() WHERE department_id=$1",[dept]).catch(()=>{});
+        if(settingsReserved) await pool!.query("UPDATE elvanto_sync_settings SET songs_importing=FALSE,songs_import_started_at=NULL,updated_at=now() WHERE department_id=$1",[dept]).catch(()=>{});
+        elvantoSongsExportRunning.delete(dept);
+      }
     });
     routes.post("/api/modules/sync/elvanto/songs-preview", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
