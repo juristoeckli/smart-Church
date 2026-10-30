@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Check, X } from "lucide-react";
-import type { ModuleRegistration } from "./module-registry";
+import { ModuleTranslationHost, type ModuleRegistration } from "./module-registry";
+import { getActiveLanguage } from "./i18n";
+import { translationsForModule } from "./modules/translations";
 
 type SignupRequest = { id: string; email: string; firstName: string; lastName: string; phone: string; street: string; streetNumber: string; postalCode: string; city: string; username: string; status: "pending_admin" | "approved_delivery_failed"; createdAt: string; lastError: string | null };
 type Site = { id: string; name: string; enabledModules?: string[] };
@@ -79,8 +81,8 @@ export function SelfSignupAdmin({ refreshCsrfToken, modules, departmentId, depar
     finally { setBusyId(""); }
   }
 
-  if (loading) return <p className="server-settings-empty">Loading self sign-up settings…</p>;
-  return <section className="self-signup-admin">
+  if (loading) return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><p className="server-settings-empty">Loading self sign-up settings…</p></ModuleTranslationHost>;
+  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><section className="self-signup-admin">
     <form className="self-signup-config" onSubmit={(event) => void saveSettings(event)}>
       <div className="server-admin-panel-heading"><h3>Self sign-up · {departmentName}</h3><p>Let people request an account for this site. Their email is verified before requests appear for review.</p></div>
       <label className="global-admin-option"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>{enabled ? "Self sign-up enabled" : "Self sign-up disabled"}</strong><small>Off by default. Email delivery must be configured first.</small></span></label>
@@ -110,5 +112,5 @@ export function SelfSignupAdmin({ refreshCsrfToken, modules, departmentId, depar
       </form></article>;
     })}</div>}
     {feedback && <p className="user-access-feedback" role="status">{feedback}</p>}
-  </section>;
+  </section></ModuleTranslationHost>;
 }
