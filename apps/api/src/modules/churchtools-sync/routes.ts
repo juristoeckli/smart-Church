@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -20,6 +20,7 @@ async function recordElvantoAudit(pool: Pool, departmentId: string, area: string
 }
 const running = new Set<string>();
 const elvantoPeopleImportRunning = new Set<string>();
+const elvantoPeopleIncrementalRunning = new Set<string>();
 const elvantoPeopleExportRunning = new Set<string>();
 const elvantoGroupsImportRunning = new Set<string>();
 const elvantoServicesImportRunning = new Set<string>();
@@ -664,6 +665,20 @@ function elvantoPeopleExportHash(contact: { id: string; first_name: string; last
 function elvantoRemotePersonHash(person: JsonObject) {
   return createHash("sha256").update(JSON.stringify([idOf(person), firstText(person.firstname), firstText(person.lastname), firstText(person.email), firstText(person.phone), person.contact === true || person.contact === 1 || person.contact === "1"])).digest("hex");
 }
+function canonicalJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as JsonObject).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonicalJson(item)]));
+}
+function elvantoPeopleSyncHash(person: { sourceId: string; firstName: string; lastName: string; email: string | null; phone: string | null; profile: JsonObject; status: string }) {
+  return createHash("sha256").update(JSON.stringify(canonicalJson([person.sourceId, person.firstName, person.lastName, person.email, person.phone, person.profile, person.status]))).digest("hex");
+}
+function elvantoPeopleModifiedAt(person: JsonObject) {
+  const value = firstText(person.date_modified, person.dateModified);
+  if (!value) return null;
+  const timestamp = Date.parse(`${value.replace(" ", "T")}Z`);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
 function elvantoGroupExportHash(group: { id: string; name: string; elvanto_source_id: string | null }, members: Array<{ contact_id: string; person_source_id: string | null; role: string; status: string }>) {
   const memberSnapshot = members.map((member) => [member.contact_id, member.person_source_id, member.role, member.status]).sort((left, right) => String(left[0]).localeCompare(String(right[0])));
   return createHash("sha256").update(JSON.stringify([group.id, group.name, memberSnapshot])).digest("hex");
@@ -1203,9 +1218,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const peopleExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT people_export_page AS page,jsonb_array_length(people_export_preview_rows)::int AS total,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped,people_export_complete AS complete,people_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const groupsExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; added: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT groups_export_page AS page,jsonb_array_length(groups_export_preview_rows)::int AS total,groups_export_created_count AS created,groups_export_updated_count AS updated,groups_export_added_members_count AS added,groups_export_skipped_count AS skipped,groups_export_complete AS complete,groups_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const calendarExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null; calendar_id: string | null; organizer_id: string | null }>("SELECT calendar_export_page AS page,jsonb_array_length(calendar_export_preview_rows)::int AS total,calendar_export_created_count AS created,calendar_export_updated_count AS updated,calendar_export_skipped_count AS skipped,calendar_export_complete AS complete,calendar_export_preview_at AS preview_at,calendar_export_calendar_id AS calendar_id,calendar_export_organizer_id AS organizer_id FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      const peopleIncrementalState = await pool!.query<{ cursor_at: Date | string | null; preview_id: string | null; preview_at: Date | string | null; preview_count: number; preview_offset: number; created_count: number; updated_count: number; skipped_count: number; review_count: number; complete: boolean }>("SELECT cursor_at,preview_id,preview_at,preview_count,preview_offset,created_count,updated_count,skipped_count,review_count,complete FROM elvanto_people_sync_state WHERE department_id=$1", [dept]);
+      const incrementalPeople = peopleIncrementalState.rows[0];
       const songsExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT page,jsonb_array_length(preview_rows)::int AS total,created_count AS created,updated_count AS updated,skipped_count AS skipped,complete,preview_at FROM elvanto_song_export_state WHERE department_id=$1", [dept]);
       const serviceAudit = await pool!.query<{ action: string; outcome: string; details: JsonObject; created_at: Date | string }>("SELECT action,outcome,details,created_at FROM elvanto_sync_audit WHERE department_id=$1 AND area='services' ORDER BY created_at DESC LIMIT 20", [dept]);
-      return { configured: Boolean(row), serviceAudit: serviceAudit.rows.map((entry) => ({ action: entry.action, outcome: entry.outcome, details: entry.details, createdAt: entry.created_at })), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, calendarExport: calendarExportState.rows[0] ? { page: calendarExportState.rows[0].page, total: calendarExportState.rows[0].total, created: calendarExportState.rows[0].created, updated: calendarExportState.rows[0].updated, skipped: calendarExportState.rows[0].skipped, complete: calendarExportState.rows[0].complete, previewAt: calendarExportState.rows[0].preview_at, calendarId: calendarExportState.rows[0].calendar_id, organizerId: calendarExportState.rows[0].organizer_id } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, songsExport: songsExportState.rows[0] ? { page: songsExportState.rows[0].page, total: songsExportState.rows[0].total, created: songsExportState.rows[0].created, updated: songsExportState.rows[0].updated, skipped: songsExportState.rows[0].skipped, complete: songsExportState.rows[0].complete, previewAt: songsExportState.rows[0].preview_at } : null, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
+      return { configured: Boolean(row), serviceAudit: serviceAudit.rows.map((entry) => ({ action: entry.action, outcome: entry.outcome, details: entry.details, createdAt: entry.created_at })), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleIncremental: incrementalPeople ? { cursorAt: incrementalPeople.cursor_at, previewId: incrementalPeople.preview_id, previewAt: incrementalPeople.preview_at, total: incrementalPeople.preview_count, processed: incrementalPeople.preview_offset, created: incrementalPeople.created_count, updated: incrementalPeople.updated_count, skipped: incrementalPeople.skipped_count, review: incrementalPeople.review_count, complete: incrementalPeople.complete } : null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, calendarExport: calendarExportState.rows[0] ? { page: calendarExportState.rows[0].page, total: calendarExportState.rows[0].total, created: calendarExportState.rows[0].created, updated: calendarExportState.rows[0].updated, skipped: calendarExportState.rows[0].skipped, complete: calendarExportState.rows[0].complete, previewAt: calendarExportState.rows[0].preview_at, calendarId: calendarExportState.rows[0].calendar_id, organizerId: calendarExportState.rows[0].organizer_id } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, songsExport: songsExportState.rows[0] ? { page: songsExportState.rows[0].page, total: songsExportState.rows[0].total, created: songsExportState.rows[0].created, updated: songsExportState.rows[0].updated, skipped: songsExportState.rows[0].skipped, complete: songsExportState.rows[0].complete, previewAt: songsExportState.rows[0].preview_at } : null, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
+    });
+    routes.get<{ Querystring: { limit?: number } }>("/api/modules/sync/elvanto/audit", { schema: { querystring: { type: "object", additionalProperties: false, properties: { limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const limit = request.query.limit ?? 50;
+      const result = await pool!.query<{ area: string; action: string; outcome: string; details: JsonObject; created_at: Date | string }>("SELECT area,action,outcome,details,created_at FROM elvanto_sync_audit WHERE department_id=$1 ORDER BY created_at DESC LIMIT $2", [dept, limit]);
+      return { entries: result.rows.map((entry) => ({ area: entry.area, action: entry.action, outcome: entry.outcome, createdAt: entry.created_at, summary: Object.fromEntries(["scanned", "processed", "created", "updated", "skipped", "review", "conflicts", "complete", "incremental"].filter((key) => typeof entry.details[key] === "number" || typeof entry.details[key] === "boolean").map((key) => [key, entry.details[key]])) })) };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/financial", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -1396,6 +1419,241 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
       return { scannedCount: people.length, reportedTotal: total, complete: previewComplete, customFieldCount: customFieldSnapshot.fields.length, createCount, alreadyLinkedCount, emailMatchCount, ambiguousEmailCount, invalidCount, sample };
     });
+    routes.post("/api/modules/sync/elvanto/people-incremental-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before previewing People changes." });
+      if (row.directions.people === "off" || row.directions.people === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set People direction to Elvanto → Smart Church or bidirectional before previewing an import." });
+      if (!row.people_import_complete) return reply.code(409).send({ error: "Complete the initial People import before starting incremental sync." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      const active = await pool!.query("SELECT 1 FROM elvanto_sync_settings WHERE department_id=$1 AND people_importing=TRUE AND people_import_started_at > now()-interval '15 minutes'", [dept]);
+      if (active.rowCount) return reply.code(409).send({ error: "A People import is running. Wait for it to finish before previewing changes." });
+      try {
+        const currentState = await pool!.query<{ cursor_at: Date | string | null; preview_id: string | null; complete: boolean }>("SELECT cursor_at,preview_id,complete FROM elvanto_people_sync_state WHERE department_id=$1", [dept]);
+        if (currentState.rows[0]?.preview_id && !currentState.rows[0].complete) return reply.code(409).send({ error: "An incremental People run is unfinished. Resume it before creating another preview." });
+        const importCursor = await pool!.query<{ completed_at: Date | string | null }>("SELECT people_import_last_completed_at AS completed_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+        const fullImportCompletedAt = importCursor.rows[0]?.completed_at;
+        if (!currentState.rows[0]?.cursor_at && !fullImportCompletedAt) return reply.code(409).send({ error: "Refresh People from Elvanto once to seed the incremental change cursor." });
+        const cursor = currentState.rows[0]?.cursor_at ? new Date(currentState.rows[0].cursor_at) : new Date(fullImportCompletedAt!);
+        if (!Number.isFinite(cursor.getTime())) return reply.code(409).send({ error: "The People change cursor is invalid. Run a fresh full People import before incremental sync." });
+        const overlapFrom = new Date(cursor.getTime() - 5 * 60_000);
+        const dateModified = overlapFrom.toISOString().slice(0, 19).replace("T", " ");
+        const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
+        if (!customFieldSnapshot.complete) return reply.code(409).send({ error: "Could not read the complete Elvanto custom-field list. No incremental preview was saved." });
+        const requestedFields = [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)];
+        const remotePeople: JsonObject[] = [];
+        let reportedTotal: number | null = null;
+        let complete = false;
+        const pageSize = 1000;
+        for (let page = 1; page <= 200; page += 1) {
+          const payload = await elvantoRequest(apiKey, "people/search", { page, page_size: pageSize, search: { date_modified: dateModified }, fields: requestedFields });
+          const batch = elvantoCollection(payload, "people", "person");
+          remotePeople.push(...batch);
+          const total = Number((payload.people as JsonObject | undefined)?.total);
+          if (Number.isFinite(total) && total >= 0) reportedTotal = total;
+          if (reportedTotal !== null && remotePeople.length >= reportedTotal || batch.length < pageSize) { complete = true; break; }
+        }
+        if (!complete || remotePeople.length > 200000) return reply.code(409).send({ error: "The incremental People result is incomplete or exceeds 200,000 records. No preview was saved." });
+        const local = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; first_name: string; last_name: string; email: string | null; phone: string | null; status: string; elvanto_profile: JsonObject | null }>(
+          "SELECT id,source_system,source_id,elvanto_source_id,first_name,last_name,email,phone,status,elvanto_profile FROM contacts WHERE department_id=$1",
+          [dept],
+        );
+        const baselineResult = await pool!.query<{ source_id: string; baseline_hash: string; remote_modified_at: Date | string | null }>("SELECT source_id,baseline_hash,remote_modified_at FROM elvanto_people_sync_baselines WHERE department_id=$1", [dept]);
+        const baselines = new Map(baselineResult.rows.map((baseline) => [baseline.source_id, baseline]));
+        const bySourceId = new Map<string, typeof local.rows[number]>();
+        const byEmail = new Map<string, typeof local.rows>();
+        for (const contact of local.rows) {
+          const sourceId = contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id;
+          if (sourceId) bySourceId.set(sourceId, contact);
+          if (contact.email?.trim()) {
+            const key = contact.email.trim().toLocaleLowerCase();
+            byEmail.set(key, [...(byEmail.get(key) ?? []), contact]);
+          }
+        }
+        const seen = new Set<string>();
+        const changes: JsonObject[] = [];
+        let created = 0; let updated = 0; let conflicts = 0; let review = 0; let skipped = 0;
+        for (const person of remotePeople) {
+          const sourceId = idOf(person);
+          const firstName = firstText(person.firstname, person.firstName, person.first_name, person.preferred_name);
+          const lastName = firstText(person.lastname, person.lastName, person.last_name);
+          const email = firstText(person.email) || null;
+          const phone = firstText(person.mobile, person.phone) || null;
+          const profile = mapElvantoPeopleProfile(person, customFieldSnapshot.fields);
+          const modifiedAt = elvantoPeopleModifiedAt(person);
+          const remote = { sourceId, firstName, lastName, email, phone, profile, status: "member" };
+          const remoteHash = elvantoPeopleSyncHash(remote);
+          if (!sourceId || !modifiedAt || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) || phone && phone.length > 40) {
+            changes.push({ sourceId: sourceId || `invalid-${changes.length}`, action: "invalid", modifiedAt, remote, local: null, resolution: null }); review += 1; continue;
+          }
+          if (seen.has(sourceId)) { changes.push({ sourceId, action: "duplicate", modifiedAt, remote, local: null, resolution: null }); review += 1; continue; }
+          seen.add(sourceId);
+          const match = bySourceId.get(sourceId);
+          if (match) {
+            const localPerson = { sourceId, firstName: match.first_name, lastName: match.last_name, email: match.email, phone: match.phone, profile: match.elvanto_profile ?? {}, status: match.status };
+            const localHash = elvantoPeopleSyncHash(localPerson);
+            const baseline = baselines.get(sourceId);
+            const hasElvantoLink = match.source_system === "elvanto" && match.source_id === sourceId || match.elvanto_source_id === sourceId;
+            const action = hasElvantoLink && baseline && baseline.baseline_hash === localHash ? "update" : "conflict";
+            changes.push({ sourceId, action, modifiedAt, contactId: match.id, remote, local: localPerson, localHash, remoteHash, resolution: null });
+            if (action === "update") updated += 1; else { conflicts += 1; review += 1; }
+            continue;
+          }
+          if (email && (byEmail.get(email.toLocaleLowerCase())?.length ?? 0) > 0) {
+            const candidates = (byEmail.get(email.toLocaleLowerCase()) ?? []).map((contact) => ({ id: contact.id, firstName: contact.first_name, lastName: contact.last_name, email: contact.email }));
+            changes.push({ sourceId, action: "review_email_match", modifiedAt, remote, candidates, resolution: null }); review += 1; continue;
+          }
+          changes.push({ sourceId, action: "create", modifiedAt, remote, local: null, remoteHash, resolution: null }); created += 1;
+        }
+        const previewId = randomUUID();
+        const previewAt = new Date().toISOString();
+        const cursorTo = previewAt;
+        const encryptedPreview = encryptElvantoFinancial({ previewId, cursorFrom: cursor.toISOString(), cursorTo, customFields: customFieldSnapshot.fields, rows: changes });
+        await pool!.query(
+          `INSERT INTO elvanto_people_sync_state (department_id,cursor_at,preview_id,preview_at,preview_cursor_to,encrypted_preview,preview_count,preview_offset,created_count,updated_count,skipped_count,review_count,complete,updated_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,0,0,0,0,$8,FALSE,now())
+           ON CONFLICT (department_id) DO UPDATE SET preview_id=EXCLUDED.preview_id,preview_at=EXCLUDED.preview_at,preview_cursor_to=EXCLUDED.preview_cursor_to,encrypted_preview=EXCLUDED.encrypted_preview,preview_count=EXCLUDED.preview_count,preview_offset=0,created_count=0,updated_count=0,skipped_count=0,review_count=EXCLUDED.review_count,complete=FALSE,updated_at=now()`,
+          [dept, cursor, previewId, previewAt, cursorTo, encryptedPreview, changes.length, review],
+        );
+        await recordElvantoAudit(pool!, dept, "people", "preview", complete ? "complete" : "incomplete", { incremental: true, scanned: remotePeople.length, created, updated, conflicts, review, cursorFrom: cursor.toISOString(), overlapFrom: overlapFrom.toISOString() });
+        const sample = changes.slice(0, 50).map(({ sourceId, action, remote, local, candidates, resolution }) => ({ sourceId, action, remote, local, candidates, resolution }));
+        return { previewId, cursorFrom: cursor.toISOString(), cursorTo, complete, scannedCount: remotePeople.length, reportedTotal, createCount: created, updateCount: updated, conflictCount: conflicts, reviewCount: review, skippedCount: skipped, sample };
+      } catch (error) {
+        await recordElvantoAudit(pool!, dept, "people", "preview", "failed", { incremental: true, message: "preview_failed" }).catch(() => {});
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Incremental People preview failed." });
+      }
+    });
+    routes.get<{ Params: { previewId: string }; Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/people-incremental-preview/:previewId", { schema: { params: { type: "object", additionalProperties: false, required: ["previewId"], properties: { previewId: { type: "string", format: "uuid" } } }, querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 50 } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const state = await pool!.query<{ preview_id: string | null; preview_at: Date | string | null; encrypted_preview: string | null; preview_count: number }>("SELECT preview_id,preview_at,encrypted_preview,preview_count FROM elvanto_people_sync_state WHERE department_id=$1", [dept]);
+      const saved = state.rows[0];
+      if (!saved?.preview_id || saved.preview_id !== request.params.previewId || !saved.preview_at || Date.now() - new Date(saved.preview_at).getTime() > 60 * 60 * 1000 || !saved.encrypted_preview) return reply.code(409).send({ error: "The incremental People preview expired or was replaced. Run a fresh preview." });
+      try {
+        const snapshot = decryptElvantoFinancial(saved.encrypted_preview);
+        const rows = Array.isArray(snapshot.rows) ? snapshot.rows as JsonObject[] : [];
+        const offset = request.query.offset ?? 0; const limit = request.query.limit ?? 50;
+        return { previewId: saved.preview_id, total: saved.preview_count, offset, rows: rows.slice(offset, offset + limit).map(({ sourceId, action, modifiedAt, remote, local, candidates, resolution }) => ({ sourceId, action, modifiedAt, remote, local, candidates, resolution })) };
+      } catch { return reply.code(409).send({ error: "The saved incremental People preview cannot be decrypted. Run a fresh preview." }); }
+    });
+    routes.put<{ Body: { previewId: string; sourceId: string; resolution: "use_elvanto" | "keep_local" | "skip" } }>("/api/modules/sync/elvanto/people-incremental-resolve", { schema: { body: { type: "object", additionalProperties: false, required: ["previewId", "sourceId", "resolution"], properties: { previewId: { type: "string", format: "uuid" }, sourceId: { type: "string", minLength: 1, maxLength: 200 }, resolution: { type: "string", enum: ["use_elvanto", "keep_local", "skip"] } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const state = await pool!.query<{ preview_id: string | null; preview_at: Date | string | null; encrypted_preview: string | null }>("SELECT preview_id,preview_at,encrypted_preview FROM elvanto_people_sync_state WHERE department_id=$1 FOR UPDATE", [dept]);
+      const saved = state.rows[0];
+      if (!saved?.preview_id || saved.preview_id !== request.body.previewId || !saved.preview_at || Date.now() - new Date(saved.preview_at).getTime() > 60 * 60 * 1000 || !saved.encrypted_preview) return reply.code(409).send({ error: "The incremental People preview expired or was replaced. Run a fresh preview." });
+      try {
+        const snapshot = decryptElvantoFinancial(saved.encrypted_preview);
+        const rows = Array.isArray(snapshot.rows) ? snapshot.rows as JsonObject[] : [];
+        const row = rows.find((item) => item.sourceId === request.body.sourceId);
+        if (!row) return reply.code(404).send({ error: "The changed Elvanto person is not in this preview." });
+        if (request.body.resolution === "use_elvanto" && row.action !== "conflict") return reply.code(400).send({ error: "Use Elvanto can only be selected for a linked-person conflict." });
+        if (request.body.resolution === "keep_local" && row.action !== "conflict") return reply.code(400).send({ error: "Keep local can only be selected for a linked-person conflict." });
+        if (request.body.resolution === "skip" && row.action !== "review_email_match" && row.action !== "invalid" && row.action !== "duplicate") return reply.code(400).send({ error: "Skip can only be selected for a record that needs manual review." });
+        row.resolution = request.body.resolution;
+        const encrypted = encryptElvantoFinancial(snapshot);
+        const updated = await pool!.query("UPDATE elvanto_people_sync_state SET encrypted_preview=$3,updated_at=now() WHERE department_id=$1 AND preview_id=$2 AND encrypted_preview=$4", [dept, request.body.previewId, encrypted, saved.encrypted_preview]);
+        if (!updated.rowCount) return reply.code(409).send({ error: "Another conflict decision was saved. Reload this preview and try again." });
+        await recordElvantoAudit(pool!, dept, "people", "conflict_resolution", "success", { sourceId: row.sourceId, resolution: row.resolution });
+        return { saved: true, sourceId: row.sourceId, resolution: row.resolution };
+      } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : "Could not save the People conflict decision." }); }
+    });
+    routes.post<{ Body: { previewId: string } }>("/api/modules/sync/elvanto/people-incremental-import", { schema: { body: { type: "object", additionalProperties: false, required: ["previewId"], properties: { previewId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoPeopleIncrementalRunning.has(dept)) return reply.code(409).send({ error: "An incremental People batch is already running for this location." });
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before importing People changes." });
+      if (row.directions.people === "off" || row.directions.people === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set People direction to Elvanto → Smart Church or bidirectional before importing." });
+      const savedResult = await pool!.query<{ preview_id: string | null; preview_at: Date | string | null; preview_cursor_to: Date | string | null; encrypted_preview: string | null; preview_count: number; preview_offset: number; created_count: number; updated_count: number; skipped_count: number; review_count: number; complete: boolean }>("SELECT preview_id,preview_at,preview_cursor_to,encrypted_preview,preview_count,preview_offset,created_count,updated_count,skipped_count,review_count,complete FROM elvanto_people_sync_state WHERE department_id=$1", [dept]);
+      const saved = savedResult.rows[0];
+      if (!saved?.preview_id || saved.preview_id !== request.body.previewId || !saved.preview_at || !saved.preview_cursor_to || !saved.encrypted_preview || saved.complete) return reply.code(409).send({ error: "Run a complete incremental People preview before importing." });
+      if (saved.preview_offset === 0 && Date.now() - new Date(saved.preview_at).getTime() > 60 * 60 * 1000) return reply.code(409).send({ error: "The incremental People preview expired. Run a fresh preview." });
+      let snapshot: JsonObject;
+      try { snapshot = decryptElvantoFinancial(saved.encrypted_preview); } catch { return reply.code(409).send({ error: "The saved incremental People preview cannot be decrypted. Run a fresh preview." }); }
+      const changes = Array.isArray(snapshot.rows) ? snapshot.rows as JsonObject[] : [];
+      if (changes.length !== saved.preview_count) return reply.code(409).send({ error: "The saved incremental People preview is incomplete. Run a fresh preview." });
+      const unresolved = changes.filter((change) => ["conflict", "review_email_match", "invalid", "duplicate"].includes(String(change.action)) && !change.resolution);
+      if (unresolved.length) return reply.code(409).send({ error: `Review or skip all ${unresolved.length} People records before importing this change batch.` });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
+      if (!customFieldSnapshot.complete || JSON.stringify(customFieldSnapshot.fields) !== JSON.stringify(snapshot.customFields)) return reply.code(409).send({ error: "Elvanto custom-field definitions changed after preview. Run a fresh incremental People preview." });
+      const requestedFields = [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)];
+      elvantoPeopleIncrementalRunning.add(dept);
+      let reserved = false;
+      try {
+        const reservation = await pool!.query(
+          "UPDATE elvanto_sync_settings SET people_importing=TRUE,people_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id",
+          [dept, row.updated_at],
+        );
+        if (!reservation.rowCount) return reply.code(409).send({ error: "Another Elvanto sync operation is running or the connection changed. Try again later." });
+        reserved = true;
+        const offset = saved.preview_offset; const batch = changes.slice(offset, offset + 25);
+        const toApply = batch.filter((change) => change.action === "create" || change.action === "update" || change.action === "conflict" && change.resolution === "use_elvanto");
+        const liveRows = await mapConcurrent(toApply, 5, async (change) => {
+          const sourceId = String(change.sourceId);
+          const payload = await elvantoRequest(apiKey, "people/getInfo", { id: sourceId, fields: requestedFields });
+          const value = payload.person;
+          const live = Array.isArray(value) ? value[0] as JsonObject | undefined : value && typeof value === "object" ? value as JsonObject : undefined;
+          if (!live || idOf(live) !== sourceId) throw new Error("An Elvanto person changed or could not be verified after preview. Run a fresh incremental People preview.");
+          const remote = { sourceId, firstName: firstText(live.firstname, live.firstName, live.first_name, live.preferred_name), lastName: firstText(live.lastname, live.lastName, live.last_name), email: firstText(live.email) || null, phone: firstText(live.mobile, live.phone) || null, profile: mapElvantoPeopleProfile(live, customFieldSnapshot.fields), status: "member" };
+          if (elvantoPeopleSyncHash(remote) !== change.remoteHash) throw new Error("An Elvanto person changed after preview. Run a fresh incremental People preview.");
+          return { sourceId, remote };
+        });
+        const liveById = new Map(liveRows.map((item) => [item.sourceId, item.remote]));
+        const db = await pool!.connect();
+        let nextCreated = saved.created_count; let nextUpdated = saved.updated_count; let nextSkipped = saved.skipped_count; let nextReview = saved.review_count;
+        let nextOffset = offset;
+        let complete = false;
+        try {
+          await db.query("BEGIN");
+          for (const change of batch) {
+            const action = String(change.action); const resolution = String(change.resolution ?? "");
+            if (action === "conflict" && resolution === "keep_local" || ["review_email_match", "invalid", "duplicate"].includes(action) && resolution === "skip") {
+              nextSkipped += 1; nextReview = Math.max(0, nextReview - 1); nextOffset += 1; continue;
+            }
+            if (action !== "create" && action !== "update" && !(action === "conflict" && resolution === "use_elvanto")) { throw new Error("A People row has no explicit resolution. Review this preview before importing."); }
+            const remote = liveById.get(String(change.sourceId));
+            if (!remote) throw new Error("Could not verify an Elvanto person after preview. Run a fresh incremental People preview.");
+            const contact = change.contactId ? await db.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; first_name: string; last_name: string; email: string | null; phone: string | null; status: string; elvanto_profile: JsonObject | null }>("SELECT id,source_system,source_id,elvanto_source_id,first_name,last_name,email,phone,status,elvanto_profile FROM contacts WHERE department_id=$1 AND id=$2 FOR UPDATE", [dept, change.contactId]) : { rows: [] as Array<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; first_name: string; last_name: string; email: string | null; phone: string | null; status: string; elvanto_profile: JsonObject | null }> };
+            if (change.contactId) {
+              const current = contact.rows[0];
+              if (!current || !(current.source_system === "elvanto" && current.source_id === String(change.sourceId) || current.elvanto_source_id === String(change.sourceId))) throw new Error("A linked local person changed after preview. Run a fresh incremental People preview.");
+              const currentHash = elvantoPeopleSyncHash({ sourceId: String(change.sourceId), firstName: current.first_name, lastName: current.last_name, email: current.email, phone: current.phone, profile: current.elvanto_profile ?? {}, status: current.status });
+              if (currentHash !== change.localHash) throw new Error("A local person changed after preview. Run a fresh incremental People preview.");
+              await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',elvanto_profile=$7::jsonb,updated_at=now() WHERE department_id=$1 AND id=$2 AND ((source_system='elvanto' AND source_id=$8) OR elvanto_source_id=$8)", [dept, current.id, remote.firstName, remote.lastName, remote.email, remote.phone, JSON.stringify(remote.profile), remote.sourceId]);
+              nextUpdated += 1;
+              if (action === "conflict") nextReview = Math.max(0, nextReview - 1);
+            } else {
+              const duplicate = await db.query("SELECT id FROM contacts WHERE department_id=$1 AND ((source_system='elvanto' AND source_id=$2) OR elvanto_source_id=$2 OR ($3::text IS NOT NULL AND lower(email)=lower($3))) LIMIT 1", [dept, remote.sourceId, remote.email]);
+              if (duplicate.rowCount) throw new Error("A local person or matching email appeared after preview. Run a fresh incremental People preview.");
+              const inserted = await db.query("INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status,source_system,source_id,elvanto_profile) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'member','elvanto',$6,$7::jsonb) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", [dept, remote.firstName, remote.lastName, remote.email, remote.phone, remote.sourceId, JSON.stringify(remote.profile)]);
+              if (!inserted.rowCount) throw new Error("Another sync linked this Elvanto person during import. Run a fresh incremental People preview.");
+              nextCreated += 1;
+            }
+            await db.query("INSERT INTO elvanto_people_sync_baselines (department_id,source_id,baseline_hash,remote_modified_at,updated_at) VALUES ($1,$2,$3,$4::timestamptz,now()) ON CONFLICT (department_id,source_id) DO UPDATE SET baseline_hash=EXCLUDED.baseline_hash,remote_modified_at=EXCLUDED.remote_modified_at,updated_at=now()", [dept, remote.sourceId, elvantoPeopleSyncHash(remote), change.modifiedAt]);
+            nextOffset += 1;
+          }
+          complete = nextOffset >= saved.preview_count;
+          await db.query(
+            `UPDATE elvanto_people_sync_state SET preview_offset=$2,created_count=$3,updated_count=$4,skipped_count=$5,review_count=$6,complete=$7,
+              cursor_at=CASE WHEN $7 THEN preview_cursor_to ELSE cursor_at END,encrypted_preview=CASE WHEN $7 THEN NULL ELSE encrypted_preview END,updated_at=now()
+             WHERE department_id=$1 AND preview_id=$8 AND preview_offset=$9`,
+            [dept, nextOffset, nextCreated, nextUpdated, nextSkipped, nextReview, complete, saved.preview_id, offset],
+          );
+          if (complete) await db.query("UPDATE elvanto_sync_settings SET last_sync_at=now(),last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept]);
+          await db.query("COMMIT");
+        } catch (error) { await db.query("ROLLBACK"); throw error; }
+        finally { db.release(); }
+        await recordElvantoAudit(pool!, dept, "people", "import", complete ? "complete" : "success", { incremental: true, processed: nextOffset - offset, created: nextCreated - saved.created_count, updated: nextUpdated - saved.updated_count, skipped: nextSkipped - saved.skipped_count, complete });
+        return { peopleIncremental: { processed: nextOffset, total: saved.preview_count, created: nextCreated, updated: nextUpdated, skipped: nextSkipped, review: nextReview, complete }, pagesProcessed: Math.ceil((nextOffset - offset) / 25) };
+      } catch (error) {
+        await recordElvantoAudit(pool!, dept, "people", "import", "failed", { incremental: true, message: "import_failed" }).catch(() => {});
+        return reply.code(409).send({ error: error instanceof Error ? error.message : "Incremental People import failed." });
+      } finally {
+        if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET people_importing=FALSE,people_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        elvantoPeopleIncrementalRunning.delete(dept);
+      }
+    });
     routes.post("/api/modules/sync/elvanto/people-export-preview", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       const row = await elvantoSettings(dept);
@@ -1584,7 +1842,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             emails.set(email, (emails.get(email) ?? 0) + 1);
           }
           const seenIds = new Set<string>();
-          const records: Array<{ source_id: string; first_name: string; last_name: string; email: string | null; phone: string | null; profile: JsonObject }> = [];
+          const records: Array<{ source_id: string; first_name: string; last_name: string; email: string | null; phone: string | null; profile: JsonObject; baseline_hash: string; remote_modified_at: string | null }> = [];
           let pageCreated = 0;
           let pageUpdated = 0;
           let pageSkipped = 0;
@@ -1599,11 +1857,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (!sourceId || seenIds.has(sourceId) || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) || (phone && phone.length > 40)) { pageSkipped += 1; continue; }
             seenIds.add(sourceId);
             const profile = mapElvantoPeopleProfile(person, previewCustomFields);
+            const syncedPerson = { sourceId, firstName, lastName, email, phone, profile, status: "member" };
+            const baselineHash = elvantoPeopleSyncHash(syncedPerson);
+            const remoteModifiedAt = elvantoPeopleModifiedAt(person);
             if (outboundLinkedIds.has(sourceId)) { pageSkipped += 1; continue; }
-            if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile }); pageUpdated += 1; continue; }
+            if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile, baseline_hash: baselineHash, remote_modified_at: remoteModifiedAt }); pageUpdated += 1; continue; }
             if (email && (emails.get(email.toLocaleLowerCase()) ?? 0) > 0) { pageSkipped += 1; continue; }
             if (email) emails.set(email.toLocaleLowerCase(), 1);
-            records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile });
+            records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile, baseline_hash: baselineHash, remote_modified_at: remoteModifiedAt });
             pageCreated += 1;
           }
           const nextPage = page + 1;
@@ -1621,12 +1882,20 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                  WHERE contacts.source_system='elvanto'`,
                 [dept, JSON.stringify(records)],
               );
+              await db.query(
+                `INSERT INTO elvanto_people_sync_baselines (department_id,source_id,baseline_hash,remote_modified_at,updated_at)
+                 SELECT $1,incoming.source_id,incoming.baseline_hash,incoming.remote_modified_at::timestamptz,now()
+                   FROM jsonb_to_recordset($2::jsonb) AS incoming(source_id text,baseline_hash text,remote_modified_at text)
+                 ON CONFLICT (department_id,source_id) DO UPDATE SET baseline_hash=EXCLUDED.baseline_hash,remote_modified_at=EXCLUDED.remote_modified_at,updated_at=now()`,
+                [dept, JSON.stringify(records)],
+              );
             }
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped;
             page = nextPage;
             await db.query(
               `UPDATE elvanto_sync_settings SET people_import_page=$2,people_import_total=$3,people_import_created_count=$4,
                 people_import_updated_count=$5,people_import_skipped_count=$6,people_import_complete=$7,
+                people_import_last_completed_at=CASE WHEN $7 THEN now() ELSE people_import_last_completed_at END,
                 last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1`,
               [dept, page, total, created, updated, skipped, complete],
             );
@@ -2727,6 +2996,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           people_import_updated_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.people_import_updated_count END,
           people_import_skipped_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.people_import_skipped_count END,
           people_import_complete=CASE WHEN $5 THEN FALSE ELSE elvanto_sync_settings.people_import_complete END,
+          people_import_last_completed_at=CASE WHEN $5 THEN NULL ELSE elvanto_sync_settings.people_import_last_completed_at END,
           groups_import_page=CASE WHEN $5 THEN 1 ELSE elvanto_sync_settings.groups_import_page END,
           groups_import_total=CASE WHEN $5 THEN NULL ELSE elvanto_sync_settings.groups_import_total END,
           groups_import_created_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.groups_import_created_count END,
@@ -2773,6 +3043,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         [dept, encryptedKey, JSON.stringify(directions), request.body.financialEnabled, Boolean(request.body.apiKey?.trim())],
       );
       if (!result.rowCount) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before changing settings." });
+      if (request.body.apiKey?.trim()) {
+        await pool!.query("DELETE FROM elvanto_people_sync_state WHERE department_id=$1", [dept]);
+        await pool!.query("DELETE FROM elvanto_people_sync_baselines WHERE department_id=$1", [dept]);
+      }
       return { saved: true, configured: true, directions, financialEnabled: request.body.financialEnabled };
     });
     routes.delete("/api/modules/sync/elvanto", async (request, reply) => {
