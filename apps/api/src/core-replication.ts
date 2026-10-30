@@ -2,13 +2,13 @@ import type { Pool, PoolClient } from "pg";
 import { registerPlatformReplicationAdapter, type ReplicationRestoreContext } from "./modules/module-sdk.js";
 
 const snapshotTableNames = [
-  "contacts", "service_events", "church_groups", "group_members", "church_teams", "team_members", "resources",
+  "contacts", "service_events", "church_groups", "group_members", "church_teams", "team_members",
   "church_team_leaders", "bookable_resources", "resource_bookings", "group_meetings",
   "group_meeting_attendance", "event_position_responses", "event_attendance_checkins",
   "event_registrations", "department_memberships", "user_phone_numbers", "user_relationships", "app_users",
 ] as const;
 type SnapshotTable = typeof snapshotTableNames[number];
-type CoreSnapshot = { version: 3; sourceDepartmentId: string; department: { name: string; time_zone: string; enabled_modules: string[] }; tables: Partial<Record<SnapshotTable, Array<Record<string, unknown>>>> };
+type CoreSnapshot = { version: 4; sourceDepartmentId: string; department: { name: string; time_zone: string; enabled_modules: string[] }; tables: Partial<Record<SnapshotTable, Array<Record<string, unknown>>>> };
 
 async function standbyReplicatedUserIds(client: Pick<PoolClient, "query">, departmentId: string) {
   const result = await client.query<{ role: string; replicated_user_ids: string[] }>("SELECT role,replicated_user_ids FROM sync_site_redundancy WHERE department_id=$1", [departmentId]);
@@ -23,7 +23,6 @@ function replicationValue(value: unknown, dataType: string | undefined) {
 
 const exportQueries: Record<SnapshotTable, string> = {
   contacts: "SELECT * FROM contacts WHERE department_id=$1 ORDER BY id",
-  resources: "SELECT id,department_id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at FROM resources WHERE department_id=$1 ORDER BY id",
   service_events: "SELECT * FROM service_events WHERE department_id=$1 ORDER BY id",
   church_groups: "SELECT * FROM church_groups WHERE department_id=$1 ORDER BY id",
   group_members: "SELECT member.* FROM group_members member JOIN church_groups parent ON parent.id=member.group_id WHERE parent.department_id=$1 ORDER BY member.group_id,member.contact_id",
@@ -56,7 +55,6 @@ const deleteQueries = [
   "DELETE FROM team_members WHERE team_id IN (SELECT id FROM church_teams WHERE department_id=$1)",
   "DELETE FROM church_team_leaders WHERE team_id IN (SELECT id FROM church_teams WHERE department_id=$1)",
   "DELETE FROM department_memberships WHERE department_id=$1",
-  "DELETE FROM resources WHERE department_id=$1",
   "DELETE FROM church_groups WHERE department_id=$1",
   "DELETE FROM church_teams WHERE department_id=$1",
   "DELETE FROM bookable_resources WHERE department_id=$1",
@@ -99,7 +97,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 3, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 4, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -116,14 +114,14 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "3",
+    schemaVersion: "4",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
     },
     exportSnapshot: (client, departmentId) => collect(client, departmentId),
     restoreSnapshot: async (client, targetDepartmentId, input, restoreContext: ReplicationRestoreContext) => {
-      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 3 || !Array.isArray((input as CoreSnapshot).tables?.contacts) || !Array.isArray((input as CoreSnapshot).tables?.resources) || !(input as CoreSnapshot).department) throw new Error("The core site snapshot is incomplete or unsupported.");
+      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 4 || !Array.isArray((input as CoreSnapshot).tables?.contacts) || !(input as CoreSnapshot).department) throw new Error("The core site snapshot is incomplete or unsupported.");
       const snapshot = input as CoreSnapshot;
       const tables = snapshot.tables;
       let recordCount = 0;
@@ -183,7 +181,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       await client.query("DELETE FROM user_relationships WHERE user_id=ANY($1::uuid[]) OR related_user_id=ANY($1::uuid[])", [usersBeingReplaced]);
       await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersBeingReplaced]);
 
-      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "resources", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "event_registrations"];
+      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "event_registrations"];
       const jsonColumns = await client.query<{ table_name: string; column_name: string; data_type: string }>(
         "SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=ANY($1::text[]) AND data_type IN ('json','jsonb')",
         [insertOrder],
@@ -193,13 +191,6 @@ export function registerCoreReplicationAdapter(pool: Pool) {
         for (const raw of tables[table] ?? []) {
           const row = { ...objectRecord(raw, table) };
           if ("department_id" in row) row.department_id = targetDepartmentId;
-          if (table === "resources") {
-            const encodedFile = row.file_data;
-            if (typeof encodedFile !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedFile)) throw new Error("The core site snapshot contains an invalid resource file.");
-            const file = Buffer.from(encodedFile, "base64");
-            if (file.length !== Number(row.file_size)) throw new Error("The core site snapshot resource file size does not match its metadata.");
-            row.file_data = file;
-          }
           if (table === "department_memberships") row.user_id = userIdMap.get(String(row.user_id)) ?? row.user_id;
           if (table === "user_phone_numbers") row.user_id = userIdMap.get(String(row.user_id)) ?? row.user_id;
           if (table === "user_relationships") {
@@ -231,7 +222,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       return { recordCount };
     },
     verifySnapshot: async (client, departmentId, input, context) => {
-      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 3) return { ready: false, blockers: ["No verified core-site snapshot is available."] };
+      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 4) return { ready: false, blockers: ["No verified core-site snapshot is available."] };
       const snapshot = input as CoreSnapshot;
       const userIdMap = context?.userIdMap ?? new Map<string, string>();
       for (const table of snapshotTableNames) {
