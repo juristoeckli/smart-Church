@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions } from "./documents.js";
+import { createDocumentEmailHtml, createDocumentPdf, jpegDimensions, validateSwissQrBillSettings, type SwissQrBillSettings } from "./documents.js";
 import { startEventDeskReminderWorker } from "./reminders.js";
 import { startEventDeskInspectionWorker } from "./inspections.js";
 import { registerEventDeskSupplyRoutes } from "./supply.js";
@@ -65,6 +65,12 @@ const partnerSchema = { body: { type: "object", additionalProperties: false, req
   postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 }, country: { type: "string", maxLength: 80 },
   notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" },
 } } };
+const directoryContactSchema = { type: "object", additionalProperties: false, required: ["kind", "name"], properties: {
+  kind: { type: "string", enum: ["company", "person"] }, name: { type: "string", minLength: 1, maxLength: 160 },
+  email: { type: "string", maxLength: 254 }, phone: { type: "string", maxLength: 40 }, street: { type: "string", maxLength: 200 },
+  postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 }, country: { type: "string", maxLength: 80 },
+  notes: { type: "string", maxLength: 2000 }, roles: { type: "array", maxItems: 8, uniqueItems: true, items: { type: "string", enum: ["customer", "supplier", "venue", "freelancer", "other"] } }, active: { type: "boolean" },
+} };
 const packageSchema = { body: { type: "object", additionalProperties: false, required: ["name", "items"], properties: {
   name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 },
   discountBps: { type: "integer", minimum: 0, maximum: 10000 },
@@ -78,6 +84,8 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
   businessName: { type: "string", maxLength: 160 }, street: { type: "string", maxLength: 200 }, postalCode: { type: "string", maxLength: 24 }, city: { type: "string", maxLength: 120 },
   country: { type: "string", maxLength: 80 }, email: { type: "string", maxLength: 254 }, phone: { type: "string", maxLength: 40 }, taxIdentifier: { type: "string", maxLength: 80 },
   paymentTerms: { type: "string", maxLength: 1000 }, footer: { type: "string", maxLength: 1000 },
+  qrBillEnabled: { type: "boolean" }, qrBillIban: { type: "string", maxLength: 34 }, qrBillReferenceType: { type: "string", enum: ["NON", "SCOR", "QRR"] },
+  qrBillStreet: { type: "string", maxLength: 70 }, qrBillBuildingNumber: { type: "string", maxLength: 16 }, qrBillCountryCode: { type: "string", maxLength: 2 },
   logoJpegBase64: { type: ["string", "null"], maxLength: 350000 },
   templates: { type: "object", additionalProperties: false, properties: Object.fromEntries(["quote", "contract", "delivery_note", "invoice", "deposit_invoice", "credit_note"].map((kind) => [kind, { type: "object", additionalProperties: false, properties: { title: { type: "string", maxLength: 120 }, intro: { type: "string", maxLength: 1000 }, footer: { type: "string", maxLength: 1000 } } }])) },
   taxProfiles: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false, required: ["id", "name", "rateBps", "legalText"], properties: { id: { type: "string", minLength: 1, maxLength: 80 }, name: { type: "string", minLength: 1, maxLength: 80 }, rateBps: { type: "integer", minimum: 0, maximum: 3000 }, legalText: { type: "string", maxLength: 1000 } } } },
@@ -355,7 +363,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await ensureDefaultWarehouse(departmentId);
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
       const canCrew = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true;
-      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases, serviceTickets, inspectionSchedules, staff] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases, serviceTickets, inspectionSchedules, staff, directoryContacts] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
@@ -416,7 +424,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        LEFT JOIN eventdesk_document_payments p
                          ON p.document_id=d.id AND p.department_id=d.department_id
                       WHERE d.department_id=$1 AND $2::boolean GROUP BY d.id,j.title,original.document_number ORDER BY d.issue_date DESC, d.created_at DESC`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true]),
-        pool!.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles
+        pool!.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles,
+                            qr_bill_enabled,qr_bill_iban,qr_bill_reference_type,qr_bill_street,qr_bill_building_number,qr_bill_country_code
                        FROM eventdesk_document_settings WHERE department_id=$1 AND $2::boolean`, [departmentId, canFinance]),
         pool!.query(`SELECT x.id,x.document_id,x.recipient_email,x.subject,x.status,x.provider_message_id,x.error_summary,x.sent_at,x.created_at
                        FROM eventdesk_document_deliveries x JOIN eventdesk_documents d ON d.id=x.document_id AND d.department_id=x.department_id
@@ -458,6 +467,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                        LEFT JOIN app_users owner ON owner.id=s.owner_user_id
                       WHERE s.department_id=$1 AND $2::boolean ORDER BY s.next_due_date`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
         pool!.query(`SELECT u.id,u.display_name FROM department_memberships m JOIN app_users u ON u.id=m.user_id WHERE m.department_id=$1 AND $2::boolean ORDER BY lower(u.display_name)`, [departmentId, request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true]),
+        pool!.query(`SELECT c.id,c.kind,c.name,c.email,c.phone,c.street,c.postal_code,c.city,country,c.notes,c.roles,c.active,
+                            coalesce((SELECT jsonb_agg(jsonb_build_object('companyId',co.id,'companyName',co.name,'personId',pe.id,'personName',pe.name,'title',l.title) ORDER BY lower(co.name),lower(pe.name))
+                              FROM eventdesk_contact_company_links l JOIN eventdesk_contacts co ON co.id=l.company_id AND co.department_id=l.department_id JOIN eventdesk_contacts pe ON pe.id=l.person_id AND pe.department_id=l.department_id
+                              WHERE l.department_id=c.department_id AND (l.company_id=c.id OR l.person_id=c.id)),'[]'::jsonb) AS company_links
+                       FROM eventdesk_contacts c WHERE c.department_id=$1 ORDER BY c.active DESC,lower(c.name)`, [departmentId]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, supplierRateCardId: row.supplier_rate_card_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
@@ -484,8 +498,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         serviceTickets: serviceTickets.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, unitId: row.unit_id, serialNumber: row.serial_number, kind: row.kind, title: row.title, fault: row.fault, priority: row.priority, status: row.status, diagnosis: row.diagnosis, parts: row.parts, workPerformed: row.work_performed, laborMinutes: row.labor_minutes, laborCostCents: row.labor_cost_cents, partsCostCents: row.parts_cost_cents, dueDate: row.due_date, openedAt: row.opened_at, completedAt: row.completed_at, ownerUserId: row.owner_user_id, ownerName: row.owner_name, attachments: row.attachments })),
         inspectionSchedules: inspectionSchedules.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, unitId: row.unit_id, serialNumber: row.serial_number, intervalDays: row.interval_days, nextDueDate: row.next_due_date, active: row.active, notes: row.notes, ownerUserId: row.owner_user_id, ownerName: row.owner_name, lastReminderStatus: row.last_reminder_status, lastReminderAt: row.last_reminder_at })),
         staff: staff.rows.map((row) => ({ id: row.id, name: row.display_name })),
+        directoryContacts: directoryContacts.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, roles: row.roles, active: row.active, companyLinks: row.company_links })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
-        documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [] } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [] },
+        documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [], qrBillEnabled: docSettings.rows[0].qr_bill_enabled, qrBillIban: docSettings.rows[0].qr_bill_iban, qrBillReferenceType: docSettings.rows[0].qr_bill_reference_type, qrBillStreet: docSettings.rows[0].qr_bill_street, qrBillBuildingNumber: docSettings.rows[0].qr_bill_building_number, qrBillCountryCode: docSettings.rows[0].qr_bill_country_code } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [], qrBillEnabled: false, qrBillIban: "", qrBillReferenceType: "NON", qrBillStreet: "", qrBillBuildingNumber: "", qrBillCountryCode: "CH" },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
       };
     });
@@ -524,7 +539,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const discountCents = Math.round(preDiscountSubtotal * discountBps / 10000);
         if (discountCents > 0) lines = [...lines, { description: `Customer discount (${(discountBps / 100).toFixed(2)}%)`, quantity: 1, unitCents: -discountCents, unitLabel: "discount", lineTotalCents: -discountCents }];
         const subtotal = request.body.kind === "delivery_note" ? 0 : lines.reduce((sum, line) => sum + line.lineTotalCents, 0);
-        const settingsResult = await client.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles FROM eventdesk_document_settings WHERE department_id=$1`, [departmentId]);
+        const settingsResult = await client.query(`SELECT business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles,
+            qr_bill_enabled,qr_bill_iban,qr_bill_reference_type,qr_bill_street,qr_bill_building_number,qr_bill_country_code
+          FROM eventdesk_document_settings WHERE department_id=$1`, [departmentId]);
         const settings = settingsResult.rows[0] ?? {};
         const taxProfiles = settings.tax_profiles ?? [];
         const taxProfile = request.body.taxProfileId ? taxProfiles.find((profile: { id: string }) => profile.id === request.body.taxProfileId) : null;
@@ -537,7 +554,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const number = `${prefix}-${new Date().getFullYear()}-${String(seq.rows[0].last_number).padStart(5, "0")}`;
         const customer = { name: job.name ?? job.customer_name, kind: job.kind ?? null, contactPerson: job.contact_person ?? "", email: job.email ?? "", phone: job.phone ?? "", street: job.street ?? "", postalCode: job.postal_code ?? "", city: job.city ?? "", country: job.country ?? "", jobTitle: job.title, venue: job.venue, startsAt: job.starts_at, endsAt: job.ends_at, jobNotes: job.notes };
         const template = settings.document_templates?.[request.body.kind] ?? {};
-        const brandingSnapshot = { businessName: settings.business_name ?? "", street: settings.street ?? "", postalCode: settings.postal_code ?? "", city: settings.city ?? "", country: settings.country ?? "", email: settings.email ?? "", phone: settings.phone ?? "", taxIdentifier: settings.tax_identifier ?? "", paymentTerms: settings.payment_terms ?? "", footer: settings.footer ?? "", template, taxProfileName: taxProfile?.name ?? "", legalText: taxProfile?.legalText ?? "" };
+        const brandingSnapshot = { businessName: settings.business_name ?? "", street: settings.street ?? "", postalCode: settings.postal_code ?? "", city: settings.city ?? "", country: settings.country ?? "", email: settings.email ?? "", phone: settings.phone ?? "", taxIdentifier: settings.tax_identifier ?? "", paymentTerms: settings.payment_terms ?? "", footer: settings.footer ?? "", template, taxProfileName: taxProfile?.name ?? "", legalText: taxProfile?.legalText ?? "", swissQrBill: { enabled: Boolean(settings.qr_bill_enabled), iban: settings.qr_bill_iban ?? "", referenceType: settings.qr_bill_reference_type ?? "NON", street: settings.qr_bill_street ?? "", buildingNumber: settings.qr_bill_building_number ?? "", countryCode: settings.qr_bill_country_code ?? "CH" } };
         const inserted = await client.query(`INSERT INTO eventdesk_documents
           (id,department_id,job_id,kind,document_number,status,due_date,customer_snapshot,lines,tax_rate_bps,subtotal_cents,tax_cents,total_cents,branding_snapshot,logo_snapshot)
           VALUES ($1,$2,$3,$4,$5,'draft',$6,$7::jsonb,$8::jsonb,$9,$10,$11,$12,$13::jsonb,$14) RETURNING id`,
@@ -622,7 +639,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "finance_manage");
       if (!departmentId) return reply;
-      const b = request.body as { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string; logoJpegBase64?: string | null; templates?: Record<string, { title?: string; intro?: string; footer?: string }>; taxProfiles?: Array<{ id: string; name: string; rateBps: number; legalText: string }> };
+      const b = request.body as { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string; logoJpegBase64?: string | null; templates?: Record<string, { title?: string; intro?: string; footer?: string }>; taxProfiles?: Array<{ id: string; name: string; rateBps: number; legalText: string }>; qrBillEnabled?: boolean; qrBillIban?: string; qrBillReferenceType?: "NON" | "SCOR" | "QRR"; qrBillStreet?: string; qrBillBuildingNumber?: string; qrBillCountryCode?: string };
+      const swissQrBill: SwissQrBillSettings = { enabled: Boolean(b.qrBillEnabled), iban: (b.qrBillIban ?? "").trim(), referenceType: b.qrBillReferenceType ?? "NON", street: (b.qrBillStreet ?? "").trim(), buildingNumber: (b.qrBillBuildingNumber ?? "").trim(), countryCode: (b.qrBillCountryCode ?? "CH").trim().toUpperCase() };
+      const qrBillError = validateSwissQrBillSettings(swissQrBill, { name: b.businessName, postalCode: b.postalCode, city: b.city });
+      if (qrBillError) return reply.code(400).send({ error: qrBillError });
       let logo: Buffer | null = null;
       if (b.logoJpegBase64) {
         if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b.logoJpegBase64)) return reply.code(400).send({ error: "The logo must be a valid JPEG image." });
@@ -632,10 +652,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const profiles = b.taxProfiles ?? [];
       if (new Set(profiles.map((profile) => profile.id)).size !== profiles.length) return reply.code(400).send({ error: "Tax profile IDs must be unique." });
-      await pool!.query(`INSERT INTO eventdesk_document_settings (department_id,business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb) ON CONFLICT (department_id) DO UPDATE SET
-          business_name=excluded.business_name,street=excluded.street,postal_code=excluded.postal_code,city=excluded.city,country=excluded.country,email=excluded.email,phone=excluded.phone,tax_identifier=excluded.tax_identifier,payment_terms=excluded.payment_terms,footer=excluded.footer,logo_jpeg=excluded.logo_jpeg,document_templates=excluded.document_templates,tax_profiles=excluded.tax_profiles,updated_at=now()`,
-        [departmentId, b.businessName.trim(), b.street.trim(), b.postalCode.trim(), b.city.trim(), b.country.trim(), b.email.trim(), b.phone.trim(), b.taxIdentifier.trim(), b.paymentTerms.trim(), b.footer.trim(), logo, JSON.stringify(b.templates ?? {}), JSON.stringify(profiles)]);
+      await pool!.query(`INSERT INTO eventdesk_document_settings (department_id,business_name,street,postal_code,city,country,email,phone,tax_identifier,payment_terms,footer,logo_jpeg,document_templates,tax_profiles,qr_bill_enabled,qr_bill_iban,qr_bill_reference_type,qr_bill_street,qr_bill_building_number,qr_bill_country_code)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20) ON CONFLICT (department_id) DO UPDATE SET
+          business_name=excluded.business_name,street=excluded.street,postal_code=excluded.postal_code,city=excluded.city,country=excluded.country,email=excluded.email,phone=excluded.phone,tax_identifier=excluded.tax_identifier,payment_terms=excluded.payment_terms,footer=excluded.footer,logo_jpeg=excluded.logo_jpeg,document_templates=excluded.document_templates,tax_profiles=excluded.tax_profiles,qr_bill_enabled=excluded.qr_bill_enabled,qr_bill_iban=excluded.qr_bill_iban,qr_bill_reference_type=excluded.qr_bill_reference_type,qr_bill_street=excluded.qr_bill_street,qr_bill_building_number=excluded.qr_bill_building_number,qr_bill_country_code=excluded.qr_bill_country_code,updated_at=now()`,
+        [departmentId, b.businessName.trim(), b.street.trim(), b.postalCode.trim(), b.city.trim(), b.country.trim(), b.email.trim(), b.phone.trim(), b.taxIdentifier.trim(), b.paymentTerms.trim(), b.footer.trim(), logo, JSON.stringify(b.templates ?? {}), JSON.stringify(profiles), swissQrBill.enabled, swissQrBill.iban.replace(/\s+/g, "").toUpperCase(), swissQrBill.referenceType, swissQrBill.street, swissQrBill.buildingNumber, swissQrBill.countryCode]);
       return { ok: true };
     });
 
@@ -685,7 +705,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "finance_manage");
       if (!departmentId) return reply;
-      const result = await pool!.query(`SELECT d.document_number,d.kind,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,d.branding_snapshot,d.logo_snapshot,j.title AS job_title,original.document_number AS related_document_number,
+      const result = await pool!.query(`SELECT d.id,d.document_number,d.kind,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,
+          d.total_cents-coalesce((SELECT sum(p.amount_cents) FROM eventdesk_document_payments p WHERE p.document_id=d.id AND p.department_id=d.department_id),0)::int
+            -coalesce((SELECT sum(c.total_cents) FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status IN ('draft','sent')),0)::int AS balance_cents,
+          d.branding_snapshot,d.logo_snapshot,j.title AS job_title,original.document_number AS related_document_number,
           coalesce(s.business_name,'') AS business_name,coalesce(s.street,'') AS street,coalesce(s.postal_code,'') AS postal_code,coalesce(s.city,'') AS city,coalesce(s.country,'') AS country,
           coalesce(s.email,'') AS email,coalesce(s.phone,'') AS phone,coalesce(s.tax_identifier,'') AS tax_identifier,coalesce(s.payment_terms,'') AS payment_terms,coalesce(s.footer,'') AS footer
         FROM eventdesk_documents d JOIN eventdesk_jobs j ON j.id=d.job_id AND j.department_id=d.department_id
@@ -695,7 +718,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!result.rowCount) return reply.code(404).send({ error: "Document not found." });
       const row = result.rows[0];
       const savedBranding = row.branding_snapshot ?? {};
-      const pdf = createDocumentPdf({ number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents }, { businessName: savedBranding.businessName ?? row.business_name, street: savedBranding.street ?? row.street, postalCode: savedBranding.postalCode ?? row.postal_code, city: savedBranding.city ?? row.city, country: savedBranding.country ?? row.country, email: savedBranding.email ?? row.email, phone: savedBranding.phone ?? row.phone, taxIdentifier: savedBranding.taxIdentifier ?? row.tax_identifier, paymentTerms: savedBranding.paymentTerms ?? row.payment_terms, footer: savedBranding.footer ?? row.footer, template: savedBranding.template, taxProfileName: savedBranding.taxProfileName, legalText: savedBranding.legalText, logoJpeg: row.logo_snapshot ? Buffer.from(row.logo_snapshot) : null });
+      const pdf = createDocumentPdf({ id: row.id, number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, balanceCents: Number(row.balance_cents) }, { businessName: savedBranding.businessName ?? row.business_name, street: savedBranding.street ?? row.street, postalCode: savedBranding.postalCode ?? row.postal_code, city: savedBranding.city ?? row.city, country: savedBranding.country ?? row.country, email: savedBranding.email ?? row.email, phone: savedBranding.phone ?? row.phone, taxIdentifier: savedBranding.taxIdentifier ?? row.tax_identifier, paymentTerms: savedBranding.paymentTerms ?? row.payment_terms, footer: savedBranding.footer ?? row.footer, template: savedBranding.template, taxProfileName: savedBranding.taxProfileName, legalText: savedBranding.legalText, swissQrBill: savedBranding.swissQrBill, logoJpeg: row.logo_snapshot ? Buffer.from(row.logo_snapshot) : null });
       return reply.header("content-type", "application/pdf").header("content-disposition", `attachment; filename="${row.document_number}.pdf"`).send(pdf);
     });
 
@@ -714,7 +737,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const recipientEmail = request.body.recipientEmail.trim().toLocaleLowerCase("en-US");
       const subject = request.body.subject.trim();
       if (!subject) return reply.code(400).send({ error: "Enter an email subject." });
-      const result = await pool!.query(`SELECT d.id,d.department_id,d.document_number,d.kind,d.status,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,d.branding_snapshot,d.logo_snapshot,j.title AS job_title,original.document_number AS related_document_number,
+      const result = await pool!.query(`SELECT d.id,d.department_id,d.document_number,d.kind,d.status,d.issue_date,d.due_date,d.customer_snapshot,d.lines,d.tax_rate_bps,d.subtotal_cents,d.tax_cents,d.total_cents,
+          d.total_cents-coalesce((SELECT sum(p.amount_cents) FROM eventdesk_document_payments p WHERE p.document_id=d.id AND p.department_id=d.department_id),0)::int
+            -coalesce((SELECT sum(c.total_cents) FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status IN ('draft','sent')),0)::int AS balance_cents,
+          d.branding_snapshot,d.logo_snapshot,j.title AS job_title,original.document_number AS related_document_number,
           coalesce(s.business_name,'') AS business_name,coalesce(s.street,'') AS street,coalesce(s.postal_code,'') AS postal_code,coalesce(s.city,'') AS city,coalesce(s.country,'') AS country,
           coalesce(s.email,'') AS email,coalesce(s.phone,'') AS phone,coalesce(s.tax_identifier,'') AS tax_identifier,coalesce(s.payment_terms,'') AS payment_terms,coalesce(s.footer,'') AS footer
         FROM eventdesk_documents d JOIN eventdesk_jobs j ON j.id=d.job_id AND j.department_id=d.department_id
@@ -736,9 +762,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!reminder.rowCount || !["sent", "partial"].includes(reminder.rows[0].status) || !reminder.rows[0].overdue || Number(reminder.rows[0].balance_cents) <= 0) return reply.code(409).send({ error: "This invoice is not overdue with an outstanding balance." });
         balanceCents = Number(reminder.rows[0].balance_cents);
       }
-      const document = { number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, ...(balanceCents === undefined ? {} : { balanceCents }) };
+      const document = { id: row.id, number: row.document_number, kind: row.kind, issueDate: row.issue_date, dueDate: row.due_date, relatedDocumentNumber: row.related_document_number, customer: row.customer_snapshot, jobTitle: row.job_title, lines: row.lines, taxRateBps: row.tax_rate_bps, subtotalCents: row.subtotal_cents, taxCents: row.tax_cents, totalCents: row.total_cents, balanceCents: balanceCents ?? Number(row.balance_cents) };
       const savedBranding = row.branding_snapshot ?? {};
-      const branding = { businessName: savedBranding.businessName ?? row.business_name, street: savedBranding.street ?? row.street, postalCode: savedBranding.postalCode ?? row.postal_code, city: savedBranding.city ?? row.city, country: savedBranding.country ?? row.country, email: savedBranding.email ?? row.email, phone: savedBranding.phone ?? row.phone, taxIdentifier: savedBranding.taxIdentifier ?? row.tax_identifier, paymentTerms: savedBranding.paymentTerms ?? row.payment_terms, footer: savedBranding.footer ?? row.footer, template: savedBranding.template, taxProfileName: savedBranding.taxProfileName, legalText: savedBranding.legalText, logoJpeg: row.logo_snapshot ? Buffer.from(row.logo_snapshot) : null };
+      const branding = { businessName: savedBranding.businessName ?? row.business_name, street: savedBranding.street ?? row.street, postalCode: savedBranding.postalCode ?? row.postal_code, city: savedBranding.city ?? row.city, country: savedBranding.country ?? row.country, email: savedBranding.email ?? row.email, phone: savedBranding.phone ?? row.phone, taxIdentifier: savedBranding.taxIdentifier ?? row.tax_identifier, paymentTerms: savedBranding.paymentTerms ?? row.payment_terms, footer: savedBranding.footer ?? row.footer, template: savedBranding.template, taxProfileName: savedBranding.taxProfileName, legalText: savedBranding.legalText, swissQrBill: savedBranding.swissQrBill, logoJpeg: row.logo_snapshot ? Buffer.from(row.logo_snapshot) : null };
       const pdf = createDocumentPdf(document, branding);
       const providerResponse = await fetch("https://api.resend.com/emails", {
         method: "POST", headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
@@ -893,6 +919,46 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query(`UPDATE eventdesk_partners SET name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),updated_at=now()
         WHERE id=$1 AND department_id=$2 AND kind=$3 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
       return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Supplier or venue not found, or its type does not match." });
+    });
+
+    routes.post<{ Body: { kind: "company" | "person"; name: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; roles?: string[]; active?: boolean } }>("/api/eventdesk/directory-contacts", { schema: { body: directoryContactSchema } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "customers_manage");
+      if (!departmentId) return reply;
+      const b = request.body;
+      const result = await pool!.query(`INSERT INTO eventdesk_contacts(id,department_id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.roles ?? [], b.active ?? true]);
+      return reply.code(201).send({ id: result.rows[0].id });
+    });
+
+    routes.put<{ Params: { id: string }; Body: { kind: "company" | "person"; name: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; roles?: string[]; active?: boolean } }>("/api/eventdesk/directory-contacts/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: directoryContactSchema } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "customers_manage");
+      if (!departmentId) return reply;
+      const b = request.body;
+      const result = await pool!.query(`UPDATE eventdesk_contacts SET kind=$3,name=$4,email=$5,phone=$6,street=$7,postal_code=$8,city=$9,country=$10,notes=$11,roles=$12,active=$13,updated_at=now()
+        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.roles ?? [], b.active ?? true]);
+      return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Contact not found." });
+    });
+
+    routes.post<{ Params: { id: string }; Body: { companyId: string; title?: string } }>("/api/eventdesk/directory-contacts/:id/companies", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["companyId"], properties: { companyId: { type: "string", format: "uuid" }, title: { type: "string", maxLength: 120 } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "customers_manage");
+      if (!departmentId) return reply;
+      const relation = await pool!.query(`SELECT company.id AS company_id,person.id AS person_id FROM eventdesk_contacts company,eventdesk_contacts person
+        WHERE company.id=$1 AND company.department_id=$3 AND company.kind='company' AND person.id=$2 AND person.department_id=$3 AND person.kind='person'`, [request.body.companyId, request.params.id, departmentId]);
+      if (!relation.rowCount) return reply.code(400).send({ error: "Choose a company and a person from this location." });
+      await pool!.query(`INSERT INTO eventdesk_contact_company_links(department_id,company_id,person_id,title) VALUES($1,$2,$3,$4)
+        ON CONFLICT(department_id,company_id,person_id) DO UPDATE SET title=EXCLUDED.title`, [departmentId, request.body.companyId, request.params.id, request.body.title?.trim() ?? ""]);
+      return reply.code(201).send({ companyId: request.body.companyId, personId: request.params.id });
+    });
+
+    routes.delete<{ Params: { companyId: string; personId: string } }>("/api/eventdesk/directory-contacts/:companyId/companies/:personId", { schema: { params: { type: "object", required: ["companyId", "personId"], properties: { companyId: { type: "string", format: "uuid" }, personId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "customers_manage");
+      if (!departmentId) return reply;
+      const result = await pool!.query("DELETE FROM eventdesk_contact_company_links WHERE department_id=$1 AND company_id=$2 AND person_id=$3 RETURNING company_id", [departmentId, request.params.companyId, request.params.personId]);
+      return result.rowCount ? { removed: true } : reply.code(404).send({ error: "Company relationship not found." });
     });
 
     routes.post<{ Body: { supplierId: string; name: string; validFrom: string; validTo?: string | null; lines: { assetId?: string; category?: string; dailyRateCents: number }[] } }>("/api/eventdesk/rate-cards", { schema: supplierRateCardSchema }, async (request, reply) => {

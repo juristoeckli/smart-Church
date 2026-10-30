@@ -3,7 +3,6 @@ import { ArrowUpRight, BriefcaseBusiness, CalendarDays, Check, ChevronRight, Clo
 import { ServiceDeskSection, type InspectionSchedule, type ServiceTicket } from "./ServiceDeskSection.js";
 import { SupplySection } from "./SupplySection.js";
 import { DataReportsSection } from "./DataReportsSection.js";
-
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
 type MaintenanceStatus = "scheduled" | "in_progress" | "completed" | "cancelled";
@@ -11,13 +10,16 @@ type CrewStatus = "requested" | "assigned" | "invited" | "confirmed" | "declined
 type Job = { id: string; title: string; customerName: string; customerId: string | null; linkedEventId: string | null; linkedEventTitle: string | null; startsAt: string; endsAt: string; venue: string; venueId: string | null; supplierRateCardId: string | null; status: JobStatus; notes: string; discountBps: number };
 type Customer = { id: string; kind: "company" | "person"; name: string; contactPerson: string; email: string; phone: string; street: string; postalCode: string; city: string; country: string; notes: string; active: boolean; defaultDiscountBps: number };
 type CustomerDraft = Omit<Customer, "id">;
+type DirectoryLink = { companyId: string; companyName: string; personId: string; personName: string; title: string };
+type DirectoryContact = { id: string; kind: "company" | "person"; name: string; email: string; phone: string; street: string; postalCode: string; city: string; country: string; notes: string; roles: string[]; active: boolean; companyLinks: DirectoryLink[] };
+type DirectoryContactDraft = Omit<DirectoryContact, "id" | "companyLinks">;
 type Partner = { id: string; kind: "supplier" | "venue"; name: string; contactPerson: string; email: string; phone: string; street: string; postalCode: string; city: string; country: string; notes: string; active: boolean };
 type PartnerDraft = Omit<Partner, "id">;
 type DocumentLine = { description: string; quantity: number; unitCents: number; unitLabel: string; lineTotalCents: number };
 type DocumentLineDraft = Omit<DocumentLine, "lineTotalCents">;
 type TaxProfile = { id: string; name: string; rateBps: number; legalText: string };
 type DocumentTemplate = { title: string; intro: string; footer: string };
-type DocumentSettings = { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string; logoJpegBase64: string | null; templates: Record<string, DocumentTemplate>; taxProfiles: TaxProfile[] };
+type DocumentSettings = { businessName: string; street: string; postalCode: string; city: string; country: string; email: string; phone: string; taxIdentifier: string; paymentTerms: string; footer: string; logoJpegBase64: string | null; templates: Record<string, DocumentTemplate>; taxProfiles: TaxProfile[]; qrBillEnabled: boolean; qrBillIban: string; qrBillReferenceType: "NON" | "SCOR" | "QRR"; qrBillStreet: string; qrBillBuildingNumber: string; qrBillCountryCode: string };
 type EventDeskDocument = { id: string; jobId: string; jobTitle: string; kind: "quote" | "invoice" | "deposit_invoice" | "credit_note" | "contract" | "delivery_note"; number: string; relatedDocumentId: string | null; relatedDocumentNumber: string | null; status: string; issueDate: string; dueDate: string | null; remindersPaused: boolean; customer: { name: string; email: string; street: string; postalCode: string; city: string; country: string; venue: string; startsAt: string; endsAt: string; jobNotes: string }; lines: DocumentLine[]; taxRateBps: number; subtotalCents: number; taxCents: number; totalCents: number; paidCents: number; creditedCents: number; pendingCreditCents: number; payments: { amountCents: number; paidAt: string; note: string }[] };
 type Asset = { id: string; name: string; category: string; quantity: number; dailyRateCents: number; active: boolean; notes: string; barcode: string; supplierId: string | null; supplierName: string | null };
 type PackageComponent = { assetId: string; assetName: string; quantity: number };
@@ -41,8 +43,7 @@ type ChurchEvent = { id: string; title: string; eventDate: string; startTime: st
 type Delivery = { id: string; documentId: string; recipientEmail: string; subject: string; status: "sent" | "failed"; providerMessageId: string; errorSummary: string; sentAt: string | null; createdAt: string };
 type ReminderSettings = { enabled: boolean; delayDays: number[]; maxAttempts: number };
 type ReminderAttempt = { id: string; documentId: string; attemptNo: number; delayDays: number; recipientEmail: string; status: "pending" | "sent" | "failed" | "skipped"; providerMessageId: string | null; errorSummary: string | null; sentAt: string | null; createdAt: string };
-type State = { jobs: Job[]; assets: Asset[]; packages: RentalPackage[]; rateCards: SupplierRateCard[]; bookings: Booking[]; maintenance: Maintenance[]; crew: Crew[]; contacts: Contact[]; freelancers: Freelancer[]; freelancerUnavailability: FreelancerUnavailability[]; events: ChurchEvent[]; customers: Customer[]; partners: Partner[]; documents: EventDeskDocument[]; documentDeliveries: Delivery[]; reminderSettings: ReminderSettings; reminderAttempts: ReminderAttempt[]; warehouses: Warehouse[]; assetUnits: AssetUnit[]; warehouseTransfers: WarehouseTransfer[]; assetCases: AssetCase[]; serviceTickets: ServiceTicket[]; inspectionSchedules: InspectionSchedule[]; staff: StaffMember[]; emailDelivery: { configured: boolean; from: string }; documentSettings: DocumentSettings; permissions: { jobs: boolean; customers: boolean; inventory: boolean; crew: boolean; finance: boolean; partners: boolean } };
-
+type State = { jobs: Job[]; assets: Asset[]; packages: RentalPackage[]; rateCards: SupplierRateCard[]; bookings: Booking[]; maintenance: Maintenance[]; crew: Crew[]; contacts: Contact[]; directoryContacts: DirectoryContact[]; freelancers: Freelancer[]; freelancerUnavailability: FreelancerUnavailability[]; events: ChurchEvent[]; customers: Customer[]; partners: Partner[]; documents: EventDeskDocument[]; documentDeliveries: Delivery[]; reminderSettings: ReminderSettings; reminderAttempts: ReminderAttempt[]; warehouses: Warehouse[]; assetUnits: AssetUnit[]; warehouseTransfers: WarehouseTransfer[]; assetCases: AssetCase[]; serviceTickets: ServiceTicket[]; inspectionSchedules: InspectionSchedule[]; staff: StaffMember[]; emailDelivery: { configured: boolean; from: string }; documentSettings: DocumentSettings; permissions: { jobs: boolean; customers: boolean; inventory: boolean; crew: boolean; finance: boolean; partners: boolean } };
 const statusLabels: Record<JobStatus, string> = { lead: "Lead", quoted: "Quoted", confirmed: "Confirmed", in_progress: "In progress", completed: "Completed", cancelled: "Cancelled" };
 const jobStatuses: JobStatus[] = ["lead", "quoted", "confirmed", "in_progress", "completed", "cancelled"];
 const money = (cents: number) => new Intl.NumberFormat("en-CH", { style: "currency", currency: "CHF", maximumFractionDigits: 2 }).format(cents / 100);
@@ -54,15 +55,13 @@ const documentLabel = (kind: EventDeskDocument["kind"]) => ({ quote: "Quote", in
 const invoiceBalance = (document: EventDeskDocument) => Math.max(0, document.totalCents - document.paidCents - document.creditedCents - document.pendingCreditCents);
 const isOverdueInvoice = (document: EventDeskDocument) => ["invoice", "deposit_invoice"].includes(document.kind) && ["sent", "partial"].includes(document.status) && Boolean(document.dueDate && document.dueDate < new Date().toISOString().slice(0, 10)) && invoiceBalance(document) > 0;
 const documentKinds = ["quote", "contract", "delivery_note", "invoice", "deposit_invoice", "credit_note"] as const;
-const emptyDocumentSettings: DocumentSettings = { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [] };
-
+const emptyDocumentSettings: DocumentSettings = { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [], qrBillEnabled: false, qrBillIban: "", qrBillReferenceType: "NON", qrBillStreet: "", qrBillBuildingNumber: "", qrBillCountryCode: "CH" };
 async function send<T>(url: string, departmentId: string, csrfToken: string, method = "GET", body?: unknown): Promise<T> {
   const response = await fetch(url, { method, headers: { "x-department-id": departmentId, ...(method === "GET" ? {} : { "content-type": "application/json", "x-csrf-token": csrfToken }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   const result = await response.json() as T | { error?: string };
   if (!response.ok) throw new Error((result as { error?: string }).error || "EventDesk could not complete that action.");
   return result as T;
 }
-
 function WarehouseSection({ jobs, bookings, selectedJobId, barcode, action, busy, canManage, onJobChange, onBarcodeChange, onActionChange, onScan }: {
   jobs: Job[]; bookings: Booking[]; selectedJobId: string; barcode: string; action: "out" | "in"; busy: boolean; canManage: boolean;
   onJobChange: (value: string) => void; onBarcodeChange: (value: string) => void; onActionChange: (value: "out" | "in") => void; onScan: (event: FormEvent<HTMLFormElement>) => void;
@@ -71,7 +70,6 @@ function WarehouseSection({ jobs, bookings, selectedJobId, barcode, action, busy
   const lines = bookings.filter((booking) => booking.jobId === selectedJobId);
   return <div className="eventdesk-warehouse"><section className="eventdesk-panel eventdesk-warehouse-controls"><div className="eventdesk-panel-heading"><div><h2>Warehouse scan</h2><p>Scan a catalog barcode once for each unit going out or coming back.</p></div></div><form className="eventdesk-warehouse-form" onSubmit={onScan}><label>Job<select required value={selectedJobId} onChange={(event) => onJobChange(event.target.value)}><option value="">Choose a job…</option>{jobs.filter((item) => !["cancelled", "completed"].includes(item.status)).map((item) => <option key={item.id} value={item.id}>{item.title} · {item.customerName || "No customer"}</option>)}</select></label><label>Action<select value={action} onChange={(event) => onActionChange(event.target.value as "out" | "in")}><option value="out">Check out</option><option value="in">Check in</option></select></label><label>Scan barcode<input autoFocus aria-label="Scan equipment barcode" autoComplete="off" value={barcode} onChange={(event) => onBarcodeChange(event.target.value)} placeholder="Scan barcode and press Enter" /></label><button className="button button-primary" disabled={!canManage || busy || !selectedJobId || !barcode.trim()}><Check size={15} /> {action === "out" ? "Check out" : "Check in"}</button></form>{!canManage && <p className="eventdesk-muted">You have view-only access to warehouse operations.</p>}</section><section className="eventdesk-panel eventdesk-picklist"><div className="eventdesk-panel-heading"><div><h2>Pick list{job ? ` · ${job.title}` : ""}</h2><p>{job ? `${formatDate(job.startsAt)} · ${job.venue || "Venue not set"}` : "Select a job to prepare its equipment."}</p></div>{job && <button className="button button-secondary eventdesk-print-button" type="button" onClick={() => window.print()}>Print pick list</button>}</div>{job && <div className="eventdesk-picklist-body">{lines.map((line) => <article className="eventdesk-asset-row" key={line.id}><span className="eventdesk-job-icon"><Package size={17} /></span><div className="eventdesk-job-main"><strong>{line.assetName}</strong><small>Barcode: {line.barcode || "Not set"} · {line.checkedOutQuantity} of {line.quantity} checked out</small></div><span className={`eventdesk-status eventdesk-status-${line.checkedOutQuantity > 0 ? "checked_out" : line.status}`}>{line.status === "cancelled" ? "cancelled" : `${line.checkedOutQuantity}/${line.quantity} out`}</span></article>)}{!lines.length && <p className="eventdesk-empty">No equipment has been booked for this job.</p>}</div>}</section></div>;
 }
-
 function WarehouseStockSection({ warehouses, units, transfers, cases, assets, busy, canManage, onAddWarehouse, onAddUnit, onCreateTransfer, onTransferStatus, onCreateCase, onCheckCase }: {
   warehouses: Warehouse[]; units: AssetUnit[]; transfers: WarehouseTransfer[]; cases: AssetCase[]; assets: Asset[]; busy: boolean; canManage: boolean;
   onAddWarehouse: (name: string) => void; onAddUnit: (assetId: string, serialNumber: string, barcode: string, warehouseId: string) => void;
@@ -105,7 +103,6 @@ function WarehouseStockSection({ warehouses, units, transfers, cases, assets, bu
     <div className="eventdesk-detail-section"><h3>Transfers</h3>{transfers.map((transfer) => <article className="eventdesk-asset-row" key={transfer.id}><div className="eventdesk-job-main"><strong>{transfer.sourceName} → {transfer.destinationName}</strong><small>{transfer.lines.map((line) => `${line.quantity} × ${line.assetName}`).join(" · ")} · {transfer.createdAt.slice(0, 10)}</small></div><span className={`eventdesk-status eventdesk-status-${transfer.status}`}>{transfer.status}</span>{canManage && transfer.status === "draft" && <button className="button button-secondary" disabled={busy} onClick={() => onTransferStatus(transfer.id, "in_transit")}>Dispatch</button>}{canManage && transfer.status === "in_transit" && <button className="button button-secondary" disabled={busy} onClick={() => onTransferStatus(transfer.id, "received")}>Receive</button>}</article>)}{!transfers.length && <p className="eventdesk-muted">No warehouse transfers recorded.</p>}</div>
   </section>;
 }
-
 function WorkshopSection({ assets, maintenance, form, busy, canManage, onFormChange, onSubmit, onStatus }: {
   assets: Asset[]; maintenance: Maintenance[]; form: { assetId: string; startsAt: string; endsAt: string; quantity: number; notes: string }; busy: boolean; canManage: boolean;
   onFormChange: (form: { assetId: string; startsAt: string; endsAt: string; quantity: number; notes: string }) => void;
@@ -113,7 +110,6 @@ function WorkshopSection({ assets, maintenance, form, busy, canManage, onFormCha
 }) {
   return <div className="eventdesk-workspace"><section className="eventdesk-panel eventdesk-jobs-panel"><div className="eventdesk-panel-heading"><div><h2>Workshop schedule</h2><p>{maintenance.length} maintenance records</p></div></div>{maintenance.map((item) => <article className="eventdesk-asset-row" key={item.id}><span className="eventdesk-job-icon"><Package size={17} /></span><div className="eventdesk-job-main"><strong>{item.assetName} · {item.quantity} unit{item.quantity === 1 ? "" : "s"}</strong><small>{formatDate(item.startsAt)} – {formatDate(item.endsAt)}{item.notes ? ` · ${item.notes}` : ""}</small></div><span className={`eventdesk-status eventdesk-status-${item.status}`}>{item.status.replace("_", " ")}</span>{canManage && ["scheduled", "in_progress"].includes(item.status) && <select aria-label={`Update maintenance for ${item.assetName}`} value={item.status} disabled={busy} onChange={(event) => onStatus(item, event.target.value as "in_progress" | "completed" | "cancelled")}><option value="in_progress">In progress</option>{item.status === "scheduled" && <option value="scheduled">Scheduled</option>}<option value="completed">Completed</option><option value="cancelled">Cancelled</option></select>}</article>)}{!maintenance.length && <p className="eventdesk-empty">No workshop maintenance is scheduled.</p>}</section><section className="eventdesk-panel eventdesk-detail-panel"><form className="eventdesk-document-create" onSubmit={onSubmit}><h2>Schedule maintenance</h2><label>Equipment<select required value={form.assetId} onChange={(event) => onFormChange({ ...form, assetId: event.target.value })}><option value="">Choose equipment…</option>{assets.filter((asset) => asset.active).map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · stock {asset.quantity}</option>)}</select></label><label>Units unavailable<input required type="number" min="1" max={assets.find((asset) => asset.id === form.assetId)?.quantity ?? 1} value={form.quantity} onChange={(event) => onFormChange({ ...form, quantity: Number(event.target.value) })} /></label><div className="eventdesk-form-grid"><label>Starts<input required type="datetime-local" value={form.startsAt} onChange={(event) => onFormChange({ ...form, startsAt: event.target.value })} /></label><label>Ends<input required type="datetime-local" value={form.endsAt} onChange={(event) => onFormChange({ ...form, endsAt: event.target.value })} /></label></div><label>Workshop notes<input maxLength={1000} value={form.notes} onChange={(event) => onFormChange({ ...form, notes: event.target.value })} placeholder="Repair, inspection, service…" /></label><button className="button button-primary" disabled={!canManage || busy || !form.assetId}><Plus size={15} /> Schedule maintenance</button>{!canManage && <p className="eventdesk-muted">You have view-only access to workshop operations.</p>}</form></section></div>;
 }
-
 function FreelancersSection({ freelancers, unavailability, busy, canManage, onSave, onToggle, onAddUnavailability, onDeleteUnavailability }: {
   freelancers: Freelancer[]; unavailability: FreelancerUnavailability[]; busy: boolean; canManage: boolean;
   onSave: (draft: FreelancerDraft, id?: string) => void; onToggle: (freelancer: Freelancer) => void;
@@ -141,14 +137,12 @@ function FreelancersSection({ freelancers, unavailability, busy, canManage, onSa
   }
   return <div className="eventdesk-workspace"><section className="eventdesk-panel eventdesk-jobs-panel"><div className="eventdesk-panel-heading"><div><h2>Freelancer roster</h2><p>{freelancers.filter((person) => person.active).length} active · {freelancers.length} total</p></div></div>{freelancers.map((person) => <article className="eventdesk-asset-row" key={person.id}><span className="eventdesk-job-icon"><Users size={17} /></span><div className="eventdesk-job-main"><strong>{person.name}</strong><small>{[person.roles.join(", "), person.email, money(person.hourlyRateCents) + "/hr"].filter(Boolean).join(" · ")}</small></div><span className={`eventdesk-status eventdesk-status-${person.active ? "confirmed" : "cancelled"}`}>{person.active ? "active" : "inactive"}</span>{canManage && <div className="eventdesk-inline-actions"><button className="button button-secondary" type="button" onClick={() => edit(person)}>Edit</button><button className="button button-secondary" type="button" disabled={busy} onClick={() => onToggle(person)}>{person.active ? "Deactivate" : "Activate"}</button></div>}</article>)}{!freelancers.length && <p className="eventdesk-empty">Add external crew here. They stay separate from Smart-Church contacts.</p>}</section><div className="eventdesk-stack"><section className="eventdesk-panel eventdesk-detail-panel"><form className="eventdesk-document-create" onSubmit={submitProfile}><h2>{editing ? "Edit freelancer" : "Add freelancer"}</h2><label>Name<input required maxLength={160} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label><div className="eventdesk-form-grid"><label>Email<input type="email" maxLength={254} value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></label><label>Phone<input type="tel" maxLength={40} value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></label></div><label>Roles and skills <span className="optional-label">Comma separated</span><input maxLength={2000} value={rolesText} onChange={(event) => setRolesText(event.target.value)} placeholder="Sound engineer, lighting technician" /></label><label>Default hourly rate (CHF)<input type="number" min="0" step="0.01" value={(draft.hourlyRateCents / 100).toFixed(2)} onChange={(event) => setDraft({ ...draft, hourlyRateCents: Math.round(Number(event.target.value || 0) * 100) })} /></label><label>Notes<textarea rows={2} maxLength={2000} value={draft.notes} onChange={(event) => setDraft({ ...draft, notes: event.target.value })} /></label><div className="form-actions">{editing && <button className="button button-secondary" type="button" onClick={() => { setEditing(null); setDraft({ name: "", email: "", phone: "", roles: [], hourlyRateCents: 0, notes: "", active: true }); setRolesText(""); }}>Cancel edit</button>}<button className="button button-primary" disabled={busy || !draft.name.trim()}><Check size={14} /> {editing ? "Save freelancer" : "Add freelancer"}</button></div></form></section><section className="eventdesk-panel eventdesk-detail-panel"><div className="eventdesk-panel-heading"><div><h2>Availability</h2><p>Record dates when a freelancer cannot take a job.</p></div></div><div className="eventdesk-panel-body"><label>Freelancer<select value={selected?.id ?? ""} onChange={(event) => setSelectedId(event.target.value)}><option value="">Choose a freelancer</option>{freelancers.map((person) => <option key={person.id} value={person.id}>{person.name}{person.active ? "" : " (inactive)"}</option>)}</select></label>{canManage && selected && <form className="eventdesk-document-create" onSubmit={submitBlock}><div className="eventdesk-form-grid"><label>Unavailable from<input required type="datetime-local" value={block.startsAt} onChange={(event) => setBlock({ ...block, startsAt: event.target.value })} /></label><label>Until<input required type="datetime-local" value={block.endsAt} onChange={(event) => setBlock({ ...block, endsAt: event.target.value })} /></label></div><label>Reason<input maxLength={240} value={block.reason} onChange={(event) => setBlock({ ...block, reason: event.target.value })} placeholder="Holiday or another booking" /></label><button className="button button-secondary" disabled={busy}><Plus size={14} /> Add unavailable time</button></form>}{blocks.map((item) => <article className="eventdesk-asset-row" key={item.id}><div className="eventdesk-job-main"><strong>{formatDate(item.startsAt)} – {formatDate(item.endsAt)}</strong><small>{item.reason || "Unavailable"}</small></div>{canManage && <button className="icon-button" type="button" aria-label="Remove availability block" disabled={busy} onClick={() => onDeleteUnavailability(item)}><Trash2 size={15} /></button>}</article>)}{selected && !blocks.length && <p className="eventdesk-muted">No future unavailable times are recorded.</p>}</div></section></div></div>;
 }
-
 function PartnersSection({ partners, kind, canManage, onKindChange, onEdit, onAdd }: {
   partners: Partner[]; kind: "supplier" | "venue"; canManage: boolean; onKindChange: (kind: "supplier" | "venue") => void; onEdit: (partner: Partner) => void; onAdd: () => void;
 }) {
   const rows = partners.filter((partner) => partner.kind === kind);
   return <section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>{kind === "supplier" ? "Suppliers" : "Venues"}</h2><p>{rows.length} records · link suppliers to equipment and venues to jobs</p></div><div className="eventdesk-partner-actions"><select aria-label="Directory type" value={kind} onChange={(event) => onKindChange(event.target.value as "supplier" | "venue")}><option value="supplier">Suppliers</option><option value="venue">Venues</option></select>{canManage && <button className="button button-primary" type="button" onClick={onAdd}><Plus size={15} /> Add {kind}</button>}</div></div>{rows.map((partner) => <article className="eventdesk-asset-row" key={partner.id}><span className="eventdesk-job-icon"><Users size={17} /></span><div className="eventdesk-job-main"><strong>{partner.name}</strong><small>{partner.contactPerson}{partner.email ? ` · ${partner.email}` : ""}{partner.phone ? ` · ${partner.phone}` : ""}</small><small>{[partner.street, partner.postalCode, partner.city, partner.country].filter(Boolean).join(", ") || partner.notes}</small></div><span className={`eventdesk-active-pill ${partner.active ? "" : "eventdesk-inactive"}`}>{partner.active ? "Active" : "Inactive"}</span>{canManage && <button className="eventdesk-row-edit" type="button" onClick={() => onEdit(partner)}>Edit</button>}</article>)}{!rows.length && <p className="eventdesk-empty">No {kind} records yet.</p>}</section>;
 }
-
 function DocumentDraftEditor({ document, busy, onSave }: { document: EventDeskDocument; busy: boolean; onSave: (body: { lines: DocumentLineDraft[]; taxRateBps: number; dueDate?: string | null }) => void }) {
   const [lines, setLines] = useState<DocumentLineDraft[]>(document.lines.map(({ description, quantity, unitCents, unitLabel }) => ({ description, quantity, unitCents, unitLabel })));
   const [taxRate, setTaxRate] = useState((document.taxRateBps / 100).toFixed(2));
@@ -156,7 +150,6 @@ function DocumentDraftEditor({ document, busy, onSave }: { document: EventDeskDo
   const updateLine = (index: number, key: keyof DocumentLineDraft, value: string) => setLines((current) => current.map((line, lineIndex) => lineIndex !== index ? line : { ...line, [key]: key === "quantity" || key === "unitCents" ? Number(value) : value }));
   return <form className="eventdesk-draft-editor" onSubmit={(event) => { event.preventDefault(); onSave({ lines, taxRateBps: document.kind === "delivery_note" ? 0 : Math.round(Number(taxRate || 0) * 100), ...(["invoice", "deposit_invoice"].includes(document.kind) ? { dueDate: dueDate || null } : {}) }); }}><div className="eventdesk-section-title"><h3>Edit draft items</h3><button type="button" className="eventdesk-text-button" onClick={() => setLines((current) => [...current, { description: "", quantity: 1, unitCents: 0, unitLabel: "unit" }])}><Plus size={14} /> Add line</button></div>{lines.map((line, index) => <div className="eventdesk-draft-line" key={index}><input required aria-label={`Line ${index + 1} description`} maxLength={160} placeholder="Description" value={line.description} onChange={(event) => updateLine(index, "description", event.target.value)} /><input required aria-label={`Line ${index + 1} quantity`} type="number" min="0.01" step="0.25" value={line.quantity} onChange={(event) => updateLine(index, "quantity", event.target.value)} /><input aria-label={`Line ${index + 1} unit price CHF`} type="number" min="0" step="0.01" value={(line.unitCents / 100).toFixed(2)} disabled={document.kind === "delivery_note"} onChange={(event) => updateLine(index, "unitCents", String(Math.round(Number(event.target.value) * 100)))} /><input aria-label={`Line ${index + 1} unit`} maxLength={24} value={line.unitLabel} disabled={document.kind === "delivery_note"} onChange={(event) => updateLine(index, "unitLabel", event.target.value)} /><button type="button" className="eventdesk-row-edit" aria-label={`Remove line ${index + 1}`} onClick={() => setLines((current) => current.filter((_, lineIndex) => lineIndex !== index))}>Remove</button></div>)}<div className="eventdesk-form-grid">{document.kind !== "delivery_note" && <label>Tax rate (%)<input type="number" min="0" max="30" step="0.01" value={taxRate} onChange={(event) => setTaxRate(event.target.value)} /></label>}{["invoice", "deposit_invoice"].includes(document.kind) && <label>Due date<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>}</div><div className="form-actions"><button className="button button-primary" disabled={busy || !lines.length}><Check size={15} /> Save draft</button></div></form>;
 }
-
 function DocumentSettingsForm({ settings, busy, onSave }: { settings: DocumentSettings; busy: boolean; onSave: (settings: DocumentSettings) => void }) {
   const [draft, setDraft] = useState(settings);
   const [previewKind, setPreviewKind] = useState<typeof documentKinds[number]>("quote");
@@ -192,15 +185,15 @@ function DocumentSettingsForm({ settings, busy, onSave }: { settings: DocumentSe
     <div className="eventdesk-form-grid"><label>Country<input maxLength={80} value={draft.country} onChange={(event) => setDraft({ ...draft, country: event.target.value })} /></label><label>Tax ID<input maxLength={80} value={draft.taxIdentifier} onChange={(event) => setDraft({ ...draft, taxIdentifier: event.target.value })} /></label></div>
     <div className="eventdesk-form-grid"><label>Email<input type="email" maxLength={254} value={draft.email} onChange={(event) => setDraft({ ...draft, email: event.target.value })} /></label><label>Phone<input type="tel" maxLength={40} value={draft.phone} onChange={(event) => setDraft({ ...draft, phone: event.target.value })} /></label></div>
     <label>Payment terms<textarea rows={2} maxLength={1000} value={draft.paymentTerms} onChange={(event) => setDraft({ ...draft, paymentTerms: event.target.value })} /></label>
+    <div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Swiss QR-bill</h3></div><label><input type="checkbox" checked={draft.qrBillEnabled} onChange={(event) => setDraft({ ...draft, qrBillEnabled: event.target.checked })} /> Add a Swiss QR payment part to invoices and deposit invoices</label><p className="eventdesk-muted">Use the account holder’s CH or LI IBAN. The QR-bill details are saved with each new invoice so later settings changes do not alter existing invoices.</p>{draft.qrBillEnabled && <><label>IBAN or QR-IBAN<input required maxLength={34} value={draft.qrBillIban} onChange={(event) => setDraft({ ...draft, qrBillIban: event.target.value.toUpperCase() })} placeholder="CH00 0000 0000 0000 0000 0" /></label><div className="eventdesk-form-grid"><label>Payment reference<select value={draft.qrBillReferenceType} onChange={(event) => setDraft({ ...draft, qrBillReferenceType: event.target.value as DocumentSettings["qrBillReferenceType"] })}><option value="NON">No reference (normal IBAN)</option><option value="SCOR">ISO creditor reference (normal IBAN)</option><option value="QRR">QR reference (QR-IBAN)</option></select></label><label>Creditor country code<input required minLength={2} maxLength={2} value={draft.qrBillCountryCode} onChange={(event) => setDraft({ ...draft, qrBillCountryCode: event.target.value.toUpperCase() })} placeholder="CH" /></label></div><p className="eventdesk-muted">QRR requires a QR-IBAN with QR-IID 30000–31999. Standard IBANs use SCOR or no reference.</p><label>Creditor street<input required maxLength={70} value={draft.qrBillStreet} onChange={(event) => setDraft({ ...draft, qrBillStreet: event.target.value })} placeholder="Street name, without house number" /></label><div className="eventdesk-form-grid"><label>Building number <span className="optional-label">Optional</span><input maxLength={16} value={draft.qrBillBuildingNumber} onChange={(event) => setDraft({ ...draft, qrBillBuildingNumber: event.target.value })} /></label><label>Account holder<input required maxLength={70} value={draft.businessName} onChange={(event) => setDraft({ ...draft, businessName: event.target.value })} /></label></div><p className="eventdesk-muted">The QR-bill uses the business name, postal code, and town above as the creditor details. Keep them aligned with the account holder information registered at your bank.</p></>}</div>
     <label>Default document footer<textarea rows={2} maxLength={1000} value={draft.footer} onChange={(event) => setDraft({ ...draft, footer: event.target.value })} /></label>
     <div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Document templates</h3></div><label>Preview template<select value={previewKind} onChange={(event) => setPreviewKind(event.target.value as typeof documentKinds[number])}>{documentKinds.map((kind) => <option key={kind} value={kind}>{documentLabel(kind)}</option>)}</select></label><label>Document title<input maxLength={120} value={previewTemplate.title} onChange={(event) => updateTemplate("title", event.target.value)} placeholder={documentLabel(previewKind)} /></label><label>Introduction<textarea rows={2} maxLength={1000} value={previewTemplate.intro} onChange={(event) => updateTemplate("intro", event.target.value)} /></label><label>Template footer<textarea rows={2} maxLength={1000} value={previewTemplate.footer} onChange={(event) => updateTemplate("footer", event.target.value)} placeholder="Uses default footer when empty" /></label><article className="eventdesk-template-preview"><div>{draft.logoJpegBase64 && <img alt="" src={`data:image/jpeg;base64,${draft.logoJpegBase64}`} />}<strong>{draft.businessName || "Your organization"}</strong><small>{[draft.street, draft.city].filter(Boolean).join(" · ")}</small></div><h4>{previewTemplate.title || documentLabel(previewKind)} · PREVIEW</h4><p>{previewTemplate.intro || "This is a preview of the selected document template."}</p><hr /><small>{previewTemplate.footer || draft.footer || "Document footer"}</small></article></div>
     <div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Tax profiles</h3><button className="eventdesk-text-button" type="button" onClick={() => setDraft((current) => ({ ...current, taxProfiles: [...current.taxProfiles, { id: crypto.randomUUID(), name: "New tax profile", rateBps: 0, legalText: "" }] }))}><Plus size={14} /> Add profile</button></div>{draft.taxProfiles.map((profile) => <div className="eventdesk-tax-profile" key={profile.id}><div className="eventdesk-form-grid"><label>Profile name<input maxLength={80} value={profile.name} onChange={(event) => updateTaxProfile(profile.id, "name", event.target.value)} /></label><label>Tax rate (%)<input type="number" min="0" max="30" step="0.01" value={(profile.rateBps / 100).toFixed(2)} onChange={(event) => updateTaxProfile(profile.id, "rateBps", event.target.value)} /></label></div><label>Legal disclosure<textarea rows={2} maxLength={1000} value={profile.legalText} onChange={(event) => updateTaxProfile(profile.id, "legalText", event.target.value)} /></label><button className="eventdesk-row-edit" type="button" onClick={() => setDraft({ ...draft, taxProfiles: draft.taxProfiles.filter((item) => item.id !== profile.id) })}>Remove profile</button></div>)}</div>
     <button className="button button-secondary" disabled={busy || Boolean(logoError)}><Check size={14} /> Save branding and templates</button>
   </form>;
 }
-
 export function EventDeskModule({ departmentId, csrfToken, canManageSite, section, onSectionChange }: { departmentId: string; csrfToken: string; canManageSite: boolean; section: string; onSectionChange: (state: string) => void }) {
-  const [state, setState] = useState<State>({ jobs: [], assets: [], packages: [], rateCards: [], bookings: [], maintenance: [], crew: [], contacts: [], freelancers: [], freelancerUnavailability: [], events: [], customers: [], partners: [], documents: [], documentDeliveries: [], reminderSettings: { enabled: false, delayDays: [3, 7, 14], maxAttempts: 3 }, reminderAttempts: [], warehouses: [], assetUnits: [], warehouseTransfers: [], assetCases: [], serviceTickets: [], inspectionSchedules: [], staff: [], emailDelivery: { configured: false, from: "" }, documentSettings: emptyDocumentSettings, permissions: { jobs: false, customers: false, inventory: false, crew: false, finance: false, partners: false } });
+  const [state, setState] = useState<State>({ jobs: [], assets: [], packages: [], rateCards: [], bookings: [], maintenance: [], crew: [], contacts: [], directoryContacts: [], freelancers: [], freelancerUnavailability: [], events: [], customers: [], partners: [], documents: [], documentDeliveries: [], reminderSettings: { enabled: false, delayDays: [3, 7, 14], maxAttempts: 3 }, reminderAttempts: [], warehouses: [], assetUnits: [], warehouseTransfers: [], assetCases: [], serviceTickets: [], inspectionSchedules: [], staff: [], emailDelivery: { configured: false, from: "" }, documentSettings: emptyDocumentSettings, permissions: { jobs: false, customers: false, inventory: false, crew: false, finance: false, partners: false } });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [warehouseNotice, setWarehouseNotice] = useState("");
@@ -209,6 +202,9 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
   const [showAssetForm, setShowAssetForm] = useState(false);
   const [showPackageForm, setShowPackageForm] = useState(false);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
+  const [directoryDraft, setDirectoryDraft] = useState<DirectoryContactDraft>({ kind: "company", name: "", email: "", phone: "", street: "", postalCode: "", city: "", country: "", notes: "", roles: [], active: true });
+  const [editingDirectoryContactId, setEditingDirectoryContactId] = useState<string | null>(null);
+  const [directoryLinkCompany, setDirectoryLinkCompany] = useState<Record<string, string>>({});
   const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
   const [showPartnerForm, setShowPartnerForm] = useState(false);
   const [editingPartner, setEditingPartner] = useState<Partner | null>(null);
@@ -251,7 +247,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
   const [calendarFrom, setCalendarFrom] = useState(localDate());
   const [calendarTo, setCalendarTo] = useState(localDate(new Date(Date.now() + 90 * 86_400_000)));
   const [calendarRole, setCalendarRole] = useState("");
-
   async function load() {
     setLoading(true);
     try {
@@ -264,7 +259,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load EventDesk."); }
     finally { setLoading(false); }
   }
-
   useEffect(() => { void load(); }, [departmentId]);
   useEffect(() => {
     let active = true;
@@ -277,7 +271,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
     }).catch(() => undefined);
     return () => { active = false; };
   }, [departmentId, csrfToken]);
-
   const canJobs = canManageSite || state.permissions.jobs;
   const canCustomers = canManageSite || state.permissions.customers;
   const canPartners = canManageSite || state.permissions.partners;
@@ -304,14 +297,12 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
     state.freelancerUnavailability.some((block) => block.freelancerId === freelancerId && new Date(block.startsAt) < new Date(selectedJob.endsAt) && new Date(block.endsAt) > new Date(selectedJob.startsAt))
     || state.crew.some((person) => person.freelancerId === freelancerId && ["assigned", "invited", "confirmed"].includes(person.status) && state.jobs.some((job) => job.id === person.jobId && !["cancelled", "completed"].includes(job.status) && new Date(job.startsAt) < new Date(selectedJob.endsAt) && new Date(job.endsAt) > new Date(selectedJob.startsAt)))
   ));
-
   async function action(fn: () => Promise<unknown>) {
     setBusy(true); setError("");
     try { await fn(); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "EventDesk could not complete that action."); }
     finally { setBusy(false); }
   }
-
   async function createJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -320,7 +311,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setJobForm({ title: "", customerId: "", customerName: "", linkedEventId: "", venueId: "", supplierRateCardId: "", startsAt: localInputDate(), endsAt: localInputDate(new Date(Date.now() + 3_600_000)), venue: "", notes: "" });
     });
   }
-
   async function saveCustomer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -330,13 +320,31 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setCustomerForm({ kind: "company", name: "", contactPerson: "", email: "", phone: "", street: "", postalCode: "", city: "", country: "", notes: "", active: true, defaultDiscountBps: 0 });
     });
   }
-
+  async function saveDirectoryContact(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    await action(async () => {
+      await send(editingDirectoryContactId ? `/api/eventdesk/directory-contacts/${editingDirectoryContactId}` : "/api/eventdesk/directory-contacts", departmentId, csrfToken, editingDirectoryContactId ? "PUT" : "POST", directoryDraft);
+      setDirectoryDraft({ kind: "company", name: "", email: "", phone: "", street: "", postalCode: "", city: "", country: "", notes: "", roles: [], active: true });
+      setEditingDirectoryContactId(null);
+    });
+  }
+  function editDirectoryContact(contact: DirectoryContact) {
+    setEditingDirectoryContactId(contact.id);
+    setDirectoryDraft({ kind: contact.kind, name: contact.name, email: contact.email, phone: contact.phone, street: contact.street, postalCode: contact.postalCode, city: contact.city, country: contact.country, notes: contact.notes, roles: contact.roles, active: contact.active });
+  }
+  async function linkDirectoryPerson(personId: string, companyId: string) {
+    if (!companyId) return;
+    await action(() => send(`/api/eventdesk/directory-contacts/${personId}/companies`, departmentId, csrfToken, "POST", { companyId }));
+    setDirectoryLinkCompany((current) => ({ ...current, [personId]: "" }));
+  }
+  async function unlinkDirectoryPerson(link: DirectoryLink) {
+    await action(() => send(`/api/eventdesk/directory-contacts/${link.companyId}/companies/${link.personId}`, departmentId, csrfToken, "DELETE"));
+  }
   function openCustomerForm(customer?: Customer) {
     setEditingCustomer(customer ?? null);
     setCustomerForm(customer ? { kind: customer.kind, name: customer.name, contactPerson: customer.contactPerson, email: customer.email, phone: customer.phone, street: customer.street, postalCode: customer.postalCode, city: customer.city, country: customer.country, notes: customer.notes, active: customer.active, defaultDiscountBps: customer.defaultDiscountBps } : { kind: "company", name: "", contactPerson: "", email: "", phone: "", street: "", postalCode: "", city: "", country: "", notes: "", active: true, defaultDiscountBps: 0 });
     setShowCustomerForm(true);
   }
-
   async function savePartner(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -346,13 +354,11 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setPartnerForm({ kind: partnerKind, name: "", contactPerson: "", email: "", phone: "", street: "", postalCode: "", city: "", country: "", notes: "", active: true });
     });
   }
-
   function openPartnerForm(kind: "supplier" | "venue", partner?: Partner) {
     setPartnerKind(kind); setEditingPartner(partner ?? null);
     setPartnerForm(partner ? { kind: partner.kind, name: partner.name, contactPerson: partner.contactPerson, email: partner.email, phone: partner.phone, street: partner.street, postalCode: partner.postalCode, city: partner.city, country: partner.country, notes: partner.notes, active: partner.active } : { kind, name: "", contactPerson: "", email: "", phone: "", street: "", postalCode: "", city: "", country: "", notes: "", active: true });
     setShowPartnerForm(true);
   }
-
   async function createAsset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -362,19 +368,16 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setShowAssetForm(false); setEditingAsset(null); setAssetForm({ name: "", category: "Audio", quantity: 1, dailyRate: "", notes: "", barcode: "", supplierId: "" });
     });
   }
-
   function openAssetForm(asset?: Asset) {
     setEditingAsset(asset ?? null);
     setAssetForm(asset ? { name: asset.name, category: asset.category, quantity: asset.quantity, dailyRate: (asset.dailyRateCents / 100).toFixed(2), notes: asset.notes, barcode: asset.barcode, supplierId: asset.supplierId ?? "" } : { name: "", category: "Audio", quantity: 1, dailyRate: "", notes: "", barcode: "", supplierId: "" });
     setShowAssetForm(true);
   }
-
   function openPackageForm(rentalPackage?: RentalPackage) {
     setEditingPackage(rentalPackage ?? null);
     setPackageForm(rentalPackage ? { name: rentalPackage.name, description: rentalPackage.description, discountBps: rentalPackage.discountBps, items: rentalPackage.items.map(({ assetId, quantity }) => ({ assetId, quantity })) } : { name: "", description: "", discountBps: 0, items: [] });
     setShowPackageForm(true);
   }
-
   async function savePackage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -383,7 +386,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setShowPackageForm(false); setEditingPackage(null); setPackageForm({ name: "", description: "", discountBps: 0, items: [] });
     });
   }
-
   async function saveRateCard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -392,12 +394,10 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setRateCardForm({ supplierId: "", name: "", validFrom: localDate(), validTo: "", target: "category", assetId: "", category: "", dailyRate: "" });
     });
   }
-
   async function addBooking(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selectedJob) return;
     await action(() => send(`/api/eventdesk/jobs/${selectedJob.id}/assets`, departmentId, csrfToken, "POST", { assetId: bookingForm.assetId, quantity: Number(bookingForm.quantity), ...(bookingForm.warehouseId ? { warehouseId: bookingForm.warehouseId } : {}) }));
   }
-
   async function addPackageToJob(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selectedJob) return;
     await action(async () => {
@@ -405,7 +405,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setPackageBookingForm((current) => ({ ...current, quantity: 1 }));
     });
   }
-
   async function addCrew(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (!selectedJob) return;
     const [personType, personId] = crewForm.personId ? crewForm.personId.split(":", 2) : ["", ""];
@@ -413,27 +412,21 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
     await action(() => send(`/api/eventdesk/jobs/${selectedJob.id}/crew`, departmentId, csrfToken, "POST", { role: crewForm.role, contactId: personType === "contact" ? personId : null, freelancerId: personType === "freelancer" ? personId : null, hours: Number(crewForm.hours || 0), hourlyRateCents: crewForm.hourlyRate ? Math.round(Number(crewForm.hourlyRate) * 100) : selectedFreelancer?.hourlyRateCents ?? 0 }));
     setCrewForm({ role: "", personId: "", hours: "", hourlyRate: "" });
   }
-
   async function saveFreelancer(draft: FreelancerDraft, id?: string) {
     await action(() => send(id ? `/api/eventdesk/freelancers/${id}` : "/api/eventdesk/freelancers", departmentId, csrfToken, id ? "PUT" : "POST", draft));
   }
-
   async function toggleFreelancer(freelancer: Freelancer) {
     await action(() => send(`/api/eventdesk/freelancers/${freelancer.id}`, departmentId, csrfToken, "PUT", { active: !freelancer.active }));
   }
-
   async function addFreelancerUnavailability(freelancerId: string, body: { startsAt: string; endsAt: string; reason: string }) {
     await action(() => send(`/api/eventdesk/freelancers/${freelancerId}/unavailability`, departmentId, csrfToken, "POST", body));
   }
-
   async function deleteFreelancerUnavailability(item: FreelancerUnavailability) {
     await action(() => send(`/api/eventdesk/freelancer-unavailability/${item.id}`, departmentId, csrfToken, "DELETE"));
   }
-
   async function updateJobStatus(job: Job, status: JobStatus) {
     await action(() => send(`/api/eventdesk/jobs/${job.id}/status`, departmentId, csrfToken, "PUT", { status }));
   }
-
   async function createDocument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!documentJobId) return;
@@ -444,11 +437,9 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setReminderMode(false);
     });
   }
-
   async function updateDocumentStatus(document: EventDeskDocument, status: "sent" | "accepted" | "signed" | "rejected" | "cancelled" | "returned") {
     await action(() => send(`/api/eventdesk/documents/${document.id}/status`, departmentId, csrfToken, "PUT", { status }));
   }
-
   async function sendDocument(event: FormEvent<HTMLFormElement>, document: EventDeskDocument) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -463,7 +454,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setError(message);
     } finally { setBusy(false); }
   }
-
   async function downloadDocumentPdf(document: EventDeskDocument) {
     await action(async () => {
       const response = await fetch(`/api/eventdesk/documents/${document.id}/pdf`, { headers: { "x-department-id": departmentId } });
@@ -472,15 +462,12 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       const link = window.document.createElement("a"); link.href = url; link.download = `${document.number}.pdf`; link.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
-
   async function saveDocumentDraft(document: EventDeskDocument, body: { lines: DocumentLineDraft[]; taxRateBps: number; dueDate?: string | null }) {
     await action(() => send(`/api/eventdesk/documents/${document.id}`, departmentId, csrfToken, "PUT", body));
   }
-
   async function saveDocumentSettings(settings: DocumentSettings) {
     await action(() => send("/api/eventdesk/document-settings", departmentId, csrfToken, "PUT", settings));
   }
-
   async function saveReminderSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const delayDays = reminderDelayInput.split(",").map((value) => Number(value.trim()));
@@ -489,11 +476,9 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setState((current) => ({ ...current, reminderSettings: settings }));
     });
   }
-
   async function toggleDocumentReminders(document: EventDeskDocument) {
     await action(() => send(`/api/eventdesk/documents/${document.id}/reminders`, departmentId, csrfToken, "PUT", { paused: !document.remindersPaused }));
   }
-
   async function previewReminder(document: EventDeskDocument) {
     await action(async () => {
       const preview = await send<{ message: string; balanceCents: number; eligible: boolean }>(`/api/eventdesk/documents/${document.id}/reminder-preview`, departmentId, csrfToken);
@@ -501,7 +486,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       if (preview.eligible) setReminderMode(true);
     });
   }
-
   async function recordPayment(event: FormEvent<HTMLFormElement>, document: EventDeskDocument) {
     event.preventDefault();
     await action(async () => {
@@ -509,7 +493,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setPaymentAmount(""); setPaymentNote("");
     });
   }
-
   async function createCreditNote(event: FormEvent<HTMLFormElement>, document: EventDeskDocument) {
     event.preventDefault();
     await action(async () => {
@@ -517,7 +500,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setSelectedDocumentId(created.id); setCreditAmount(""); setCreditReason(""); setReminderMode(false);
     });
   }
-
   async function exportAccountingCsv() {
     await action(async () => {
       const query = new URLSearchParams({ from: exportFrom, to: exportTo });
@@ -535,25 +517,20 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       URL.revokeObjectURL(url);
     });
   }
-
   async function assignCrew(person: Crew, personKey: string) {
     const [personType, personId] = personKey ? personKey.split(":", 2) : ["", ""];
     const freelancer = personType === "freelancer" ? state.freelancers.find((item) => item.id === personId) : undefined;
     await action(() => send(`/api/eventdesk/crew/${person.id}`, departmentId, csrfToken, "PUT", { contactId: personType === "contact" ? personId : null, freelancerId: personType === "freelancer" ? personId : null, ...(freelancer && person.hourlyRateCents === 0 ? { hourlyRateCents: freelancer.hourlyRateCents } : {}), status: personId ? "assigned" : "requested" }));
   }
-
   async function updateCrewStatus(person: Crew, status: CrewStatus) {
     await action(() => send(`/api/eventdesk/crew/${person.id}`, departmentId, csrfToken, "PUT", { status }));
   }
-
   async function sendCrewRequest(person: Crew) {
     await action(() => send(`/api/eventdesk/crew/${person.id}/send-request`, departmentId, csrfToken, "POST", {}));
   }
-
   async function updateBooking(booking: Booking, status: BookingStatus) {
     await action(() => send(`/api/eventdesk/bookings/${booking.id}/status`, departmentId, csrfToken, "PUT", { status }));
   }
-
   async function scanWarehouse(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!warehouseJobId || !warehouseBarcode.trim()) return;
@@ -563,35 +540,27 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setWarehouseBarcode("");
     });
   }
-
   async function addWarehouse(name: string) {
     await action(() => send("/api/eventdesk/warehouses", departmentId, csrfToken, "POST", { name }));
   }
-
   async function addAssetUnit(assetId: string, serialNumber: string, barcode: string, warehouseId: string) {
     await action(() => send(`/api/eventdesk/assets/${assetId}/units`, departmentId, csrfToken, "POST", { serialNumber, barcode, ...(warehouseId ? { warehouseId } : {}) }));
   }
-
   async function createWarehouseTransfer(sourceWarehouseId: string, destinationWarehouseId: string, assetId: string, quantity: number) {
     await action(() => send("/api/eventdesk/warehouse-transfers", departmentId, csrfToken, "POST", { sourceWarehouseId, destinationWarehouseId, lines: [{ assetId, quantity }] }));
   }
-
   async function updateWarehouseTransfer(id: string, status: "in_transit" | "received") {
     await action(() => send(`/api/eventdesk/warehouse-transfers/${id}/status`, departmentId, csrfToken, "PUT", { status }));
   }
-
   async function createServiceTicket(body: Record<string, unknown>) {
     await action(() => send("/api/eventdesk/service-tickets", departmentId, csrfToken, "POST", body));
   }
-
   async function updateServiceTicket(id: string, body: Record<string, unknown>) {
     await action(() => send(`/api/eventdesk/service-tickets/${id}`, departmentId, csrfToken, "PUT", body));
   }
-
   async function scheduleInspection(assetId: string, body: Record<string, unknown>) {
     await action(() => send(`/api/eventdesk/assets/${assetId}/inspection-schedule`, departmentId, csrfToken, "POST", body));
   }
-
   async function uploadServiceAttachment(ticketId: string, file: File) {
     if (file.size > 2 * 1024 * 1024) { setError("Choose an attachment no larger than 2 MiB."); return; }
     const base64 = await new Promise<string>((resolve, reject) => {
@@ -602,7 +571,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
     });
     await action(() => send(`/api/eventdesk/service-tickets/${ticketId}/attachments`, departmentId, csrfToken, "POST", { fileName: file.name, mediaType: file.type, base64 }));
   }
-
   async function downloadServiceAttachment(id: string, fileName: string) {
     await action(async () => {
       const response = await fetch(`/api/eventdesk/service-ticket-attachments/${id}`, { headers: { "x-department-id": departmentId } });
@@ -612,11 +580,9 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
   }
-
   async function createAssetCase(name: string, barcode: string, warehouseId: string, items: { assetId: string; quantity: number }[]) {
     await action(() => send("/api/eventdesk/asset-cases", departmentId, csrfToken, "POST", { name, barcode, warehouseId, items }));
   }
-
   async function checkAssetCase(id: string, scannedBarcodes: string[]) {
     setBusy(true);
     try {
@@ -625,7 +591,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       return result;
     } finally { setBusy(false); }
   }
-
   async function createMaintenance(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     await action(async () => {
@@ -633,11 +598,9 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
       setMaintenanceForm((form) => ({ ...form, notes: "" }));
     });
   }
-
   async function updateMaintenanceStatus(item: Maintenance, status: "in_progress" | "completed" | "cancelled") {
     await action(() => send(`/api/eventdesk/maintenance/${item.id}/status`, departmentId, csrfToken, "PUT", { status }));
   }
-
   const estimateBeforeDiscount = (job: Job) => {
     const days = daysBetween(job.startsAt, job.endsAt);
     const equipment = state.bookings.filter((line) => line.jobId === job.id && line.status !== "cancelled").reduce((sum, line) => sum + line.quantity * line.dailyRateCents * days, 0);
@@ -646,7 +609,6 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
   };
   const discountEstimate = (job: Job) => Math.round(estimateBeforeDiscount(job) * job.discountBps / 10000);
   const estimate = (job: Job) => estimateBeforeDiscount(job) - discountEstimate(job);
-
   return <div className="eventdesk-shell">
     <div className={`eventdesk-notice ${error ? "eventdesk-notice-error" : ""}`}><span className="demo-dot" />{error || warehouseNotice || "Plan jobs, reserve equipment, and coordinate the crew in one workspace."}{error && <button className="eventdesk-text-button" type="button" onClick={() => void load()}>Retry</button>}</div>
     <header className="eventdesk-heading"><div><span className="eyebrow">EVENT OPERATIONS</span><h1>{section === "Overview" ? "EventDesk" : section}</h1><p className="page-subtitle">{section === "Overview" ? "Keep projects, customers, equipment, and people moving together." : `Manage ${section.toLocaleLowerCase()} for your location.`}</p></div><div className="eventdesk-heading-actions">{section === "Jobs" && canJobs && <button className="button button-primary" type="button" onClick={() => setShowJobForm(true)}><Plus size={16} /> New job</button>}{section === "Customers" && canCustomers && <button className="button button-primary" type="button" onClick={() => openCustomerForm()}><Plus size={16} /> Add customer</button>}{section === "Suppliers & venues" && canPartners && <button className="button button-primary" type="button" onClick={() => openPartnerForm(partnerKind)}><Plus size={16} /> Add {partnerKind}</button>}{section === "Equipment" && canInventory && <button className="button button-primary" type="button" onClick={() => openAssetForm()}><Plus size={16} /> Add equipment</button>}</div></header>
@@ -660,6 +622,7 @@ export function EventDeskModule({ departmentId, csrfToken, canManageSite, sectio
         {subrentalCosts[selectedJob.id] > 0 && <div className="eventdesk-estimate-row"><span>Committed supply cost · projected job margin</span><strong>{money(subrentalCosts[selectedJob.id])} · {money(estimate(selectedJob)-subrentalCosts[selectedJob.id])}</strong></div>}<div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Equipment plan</h3><span>{jobBookings.length} lines</span></div>{jobBookings.map((line) => <div className="eventdesk-booking-row" key={line.id}><div><strong>{line.quantity} × {line.assetName}</strong><small>{money(line.dailyRateCents)} per unit / day · {line.checkedOutQuantity}/{line.quantity} checked out · {line.warehouseName || "Main warehouse"}</small></div>{canInventory ? <select aria-label={`Booking status for ${line.assetName}`} value={line.status} disabled={busy} onChange={(event) => void updateBooking(line, event.target.value as BookingStatus)}><option value="reserved">Reserved</option><option value="checked_out">Checked out</option><option value="returned">Returned</option><option value="cancelled">Cancelled</option></select> : <small>{line.status.replace("_", " ")}</small>}</div>)}{canInventory && <form className="eventdesk-inline-form" onSubmit={addBooking}><select aria-label="Equipment item" required value={bookingForm.assetId} onChange={(event) => setBookingForm({ ...bookingForm, assetId: event.target.value })}><option value="">Choose equipment…</option>{availableAssets.map((asset) => <option key={asset.id} value={asset.id}>{asset.name} · {asset.quantity} available · {money(asset.dailyRateCents)}/day</option>)}</select><select aria-label="Warehouse" value={bookingForm.warehouseId} onChange={(event) => setBookingForm({ ...bookingForm, warehouseId: event.target.value })}><option value="">Default warehouse</option>{state.warehouses.filter((warehouse) => warehouse.active).map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.name}</option>)}</select><input aria-label="Quantity" type="number" min="1" value={bookingForm.quantity} onChange={(event) => setBookingForm({ ...bookingForm, quantity: Number(event.target.value) })} /><button className="button button-secondary" disabled={busy || !bookingForm.assetId}><Plus size={14} /> Add</button></form>}{canInventory && selectedJob.status !== "cancelled" && selectedJob.status !== "completed" && state.packages.length > 0 && <form className="eventdesk-inline-form eventdesk-package-booking-form" onSubmit={addPackageToJob}><select aria-label="Rental package" required value={packageBookingForm.packageId} onChange={(event) => setPackageBookingForm({ ...packageBookingForm, packageId: event.target.value })}><option value="">Choose a rental package…</option>{state.packages.map((rentalPackage) => <option key={rentalPackage.id} value={rentalPackage.id}>{rentalPackage.name} · {rentalPackage.items.length} components</option>)}</select><input aria-label="Package quantity" type="number" min="1" value={packageBookingForm.quantity} onChange={(event) => setPackageBookingForm({ ...packageBookingForm, quantity: Number(event.target.value) })} /><button className="button button-secondary" disabled={busy || !packageBookingForm.packageId}><Package size={14} /> Add package</button></form>}{!jobBookings.length && <p className="eventdesk-muted">No equipment booked to this job.</p>}</div>
         <div className="eventdesk-detail-section"><div className="eventdesk-section-title"><h3>Crew plan</h3><span>{jobCrew.length} positions</span></div>{canCrew && <p className="eventdesk-muted">Freelancers who are unavailable or booked on an overlapping job are disabled. The server checks again when you save.</p>}{jobCrew.map((person) => <div className="eventdesk-booking-row" key={person.id}><div><strong>{person.role}</strong><small>{person.hours ? `${person.hours} hours · ${money(person.hourlyRateCents)}/hr` : "Hours not estimated"}</small></div>{canCrew ? <select aria-label={`Assign ${person.role}`} value={person.freelancerId ? `freelancer:${person.freelancerId}` : person.contactId ? `contact:${person.contactId}` : ""} disabled={busy || person.status === "declined"} onChange={(event) => void assignCrew(person, event.target.value)}><option value="">Unassigned request</option><optgroup label="Smart-Church contacts">{state.contacts.map((contact) => <option key={contact.id} value={`contact:${contact.id}`}>{contact.name}</option>)}</optgroup><optgroup label="Freelancers">{state.freelancers.filter((freelancer) => freelancer.active).map((freelancer) => { const unavailable = freelancerUnavailableForSelectedJob(freelancer.id); return <option key={freelancer.id} value={`freelancer:${freelancer.id}`} disabled={unavailable}>{freelancer.name}{unavailable ? " (unavailable or overlapping)" : ""}</option>; })}</optgroup></select> : <small>{person.freelancerName || person.contactName || "Requested"}</small>}</div>)}{canCrew && <form className="eventdesk-inline-form eventdesk-crew-form" onSubmit={addCrew}><input required aria-label="Crew role" placeholder="Role (e.g. sound engineer)" value={crewForm.role} onChange={(event) => setCrewForm({ ...crewForm, role: event.target.value })} /><select aria-label="Assign person" value={crewForm.personId} onChange={(event) => setCrewForm({ ...crewForm, personId: event.target.value })}><option value="">Request, assign later...</option><optgroup label="Smart-Church contacts">{state.contacts.map((contact) => <option key={contact.id} value={`contact:${contact.id}`}>{contact.name}</option>)}</optgroup><optgroup label="Freelancers">{state.freelancers.filter((freelancer) => freelancer.active).map((freelancer) => { const unavailable = freelancerUnavailableForSelectedJob(freelancer.id); return <option key={freelancer.id} value={`freelancer:${freelancer.id}`} disabled={unavailable}>{freelancer.name}{unavailable ? " (unavailable or overlapping)" : ""}</option>; })}</optgroup></select><input aria-label="Hours" type="number" min="0" step="0.25" placeholder="Hours" value={crewForm.hours} onChange={(event) => setCrewForm({ ...crewForm, hours: event.target.value })} /><input aria-label="Hourly rate" type="number" min="0" step="0.01" placeholder="CHF/hr" value={crewForm.hourlyRate} onChange={(event) => setCrewForm({ ...crewForm, hourlyRate: event.target.value })} /><button className="button button-secondary" disabled={busy}><Plus size={14} /> Add</button></form>}{!jobCrew.length && <p className="eventdesk-muted">No crew requested for this job.</p>}</div>
       </section> : <section className="eventdesk-panel eventdesk-empty-detail"><BriefcaseBusiness size={24} /><h2>Select a job</h2><p>Choose a project from the list or create a new one.</p></section>}</div>}
+    {section === "Contacts" && <div className="eventdesk-workspace"><section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Contact directory</h2><p>{state.directoryContacts.length} contacts · companies and people can each have multiple roles</p></div></div>{canCustomers && <form className="eventdesk-document-create" onSubmit={(event) => void saveDirectoryContact(event)}><h3>{editingDirectoryContactId ? "Edit contact" : "Add a contact"}</h3><div className="eventdesk-form-grid"><label>Type<select value={directoryDraft.kind} onChange={(event) => setDirectoryDraft({ ...directoryDraft, kind: event.target.value as DirectoryContact["kind"] })}><option value="company">Company</option><option value="person">Person</option></select></label><label>Name<input required maxLength={160} value={directoryDraft.name} onChange={(event) => setDirectoryDraft({ ...directoryDraft, name: event.target.value })} /></label></div><div className="eventdesk-form-grid"><label>Email<input type="email" maxLength={254} value={directoryDraft.email} onChange={(event) => setDirectoryDraft({ ...directoryDraft, email: event.target.value })} /></label><label>Phone<input type="tel" maxLength={40} value={directoryDraft.phone} onChange={(event) => setDirectoryDraft({ ...directoryDraft, phone: event.target.value })} /></label></div><label>Roles<select multiple value={directoryDraft.roles} onChange={(event) => setDirectoryDraft({ ...directoryDraft, roles: Array.from(event.target.selectedOptions, (option) => option.value) })}><option value="customer">Customer</option><option value="supplier">Supplier</option><option value="venue">Venue</option><option value="freelancer">Freelancer</option><option value="other">Other</option></select><span className="optional-label">Use Ctrl or Command to select more than one role.</span></label><div className="eventdesk-form-grid"><label>Street<input maxLength={200} value={directoryDraft.street} onChange={(event) => setDirectoryDraft({ ...directoryDraft, street: event.target.value })} /></label><label>Postal code<input maxLength={24} value={directoryDraft.postalCode} onChange={(event) => setDirectoryDraft({ ...directoryDraft, postalCode: event.target.value })} /></label><label>City<input maxLength={120} value={directoryDraft.city} onChange={(event) => setDirectoryDraft({ ...directoryDraft, city: event.target.value })} /></label><label>Country<input maxLength={80} value={directoryDraft.country} onChange={(event) => setDirectoryDraft({ ...directoryDraft, country: event.target.value })} /></label></div><label>Notes<textarea rows={2} maxLength={2000} value={directoryDraft.notes} onChange={(event) => setDirectoryDraft({ ...directoryDraft, notes: event.target.value })} /></label><button className="button button-primary" disabled={busy || !directoryDraft.name.trim()}><Plus size={15} /> Save contact</button></form>}</section><section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Companies and people</h2><p>Link a person to multiple companies, or add several contact people to one company.</p></div></div>{state.directoryContacts.map((contact) => <article className="eventdesk-asset-row" key={contact.id}><span className="eventdesk-job-icon"><Users size={17} /></span><div className="eventdesk-job-main"><strong>{contact.name}</strong><small>{contact.kind === "company" ? "Company" : "Person"}{contact.roles.length ? ` · ${contact.roles.join(", ")}` : ""}{contact.email ? ` · ${contact.email}` : ""}{contact.phone ? ` · ${contact.phone}` : ""}</small>{contact.companyLinks.map((link) => <small key={`${link.companyId}-${link.personId}`}>{contact.kind === "person" ? `${link.companyName}${link.title ? ` · ${link.title}` : ""}` : `${link.personName}${link.title ? ` · ${link.title}` : ""}`} {canCustomers && <button className="eventdesk-text-button" type="button" onClick={() => void unlinkDirectoryPerson(link)}>Remove link</button>}</small>)}{contact.kind === "person" && canCustomers && <div className="eventdesk-inline-form"><select aria-label={`Company for ${contact.name}`} value={directoryLinkCompany[contact.id] ?? ""} onChange={(event) => setDirectoryLinkCompany((current) => ({ ...current, [contact.id]: event.target.value }))}><option value="">Link to company</option>{state.directoryContacts.filter((item) => item.kind === "company" && item.active).map((company) => <option key={company.id} value={company.id}>{company.name}</option>)}</select><button className="button button-secondary" type="button" disabled={busy || !directoryLinkCompany[contact.id]} onClick={() => void linkDirectoryPerson(contact.id, directoryLinkCompany[contact.id])}>Link</button></div>}</div><span className={`eventdesk-active-pill ${contact.active ? "" : "eventdesk-inactive"}`}>{contact.active ? "Active" : "Inactive"}</span>{canCustomers && <button className="eventdesk-row-edit" type="button" onClick={() => editDirectoryContact(contact)}>Edit</button>}</article>)}{!state.directoryContacts.length && <p className="eventdesk-empty">No contacts yet.</p>}</section></div>}
     {section === "Customers" && <section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Customer directory</h2><p>{state.customers.length} records · customers can be linked to any job</p></div></div><div className="directory-toolbar"><label className="search-field"><Users size={15} /><input aria-label="Search customers" placeholder="Search customers…" value={customerQuery} onChange={(event) => setCustomerQuery(event.target.value)} /></label></div>{loading ? <p className="eventdesk-empty">Loading customers…</p> : visibleCustomers.map((customer) => <article className="eventdesk-asset-row eventdesk-customer-row" key={customer.id}><span className="eventdesk-job-icon"><Users size={17} /></span><div className="eventdesk-job-main"><strong>{customer.name}</strong><small>{customer.kind === "company" ? "Company" : "Person"}{customer.contactPerson ? ` · ${customer.contactPerson}` : ""}{customer.email ? ` · ${customer.email}` : ""}{customer.phone ? ` · ${customer.phone}` : ""}</small><small>{[customer.street, customer.postalCode, customer.city, customer.country].filter(Boolean).join(", ") || "No address saved"}</small>{customer.defaultDiscountBps > 0 && <small>Default discount: {(customer.defaultDiscountBps / 100).toFixed(2)}%</small>}</div><span className={`eventdesk-active-pill ${customer.active ? "" : "eventdesk-inactive"}`}>{customer.active ? "Active" : "Inactive"}</span>{canCustomers && <button className="eventdesk-row-edit" type="button" onClick={() => openCustomerForm(customer)}>Edit</button>}</article>)}{!loading && !visibleCustomers.length && <p className="eventdesk-empty">{state.customers.length ? "No customers match your search." : "No customers yet. Add a customer to link them to jobs."}</p>}</section>}
     {section === "Suppliers & venues" && <><PartnersSection partners={state.partners} kind={partnerKind} canManage={canPartners} onKindChange={setPartnerKind} onEdit={(partner) => openPartnerForm(partner.kind, partner)} onAdd={() => openPartnerForm(partnerKind)} /><section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Supplier rate cards</h2><p>Apply category daily rates to jobs during their valid dates. Booked rates are saved on each job.</p></div></div>{state.rateCards.map((card) => <article className="eventdesk-asset-row" key={card.id}><span className="eventdesk-job-icon"><FileText size={17} /></span><div className="eventdesk-job-main"><strong>{card.name} · {card.supplierName}</strong><small>{card.validFrom}{card.validTo ? ` – ${card.validTo}` : " onwards"} · {card.lines.map((line) => `${line.category || state.assets.find((asset) => asset.id === line.assetId)?.name || "Equipment"}: ${money(line.dailyRateCents)}/day`).join(" · ")}</small></div><span className={`eventdesk-active-pill ${card.active ? "" : "eventdesk-inactive"}`}>{card.active ? "Active" : "Inactive"}</span>{canPartners && <button className="eventdesk-row-edit" type="button" disabled={busy} onClick={() => void action(() => send(`/api/eventdesk/rate-cards/${card.id}/status`, departmentId, csrfToken, "PUT", { active: !card.active }))}>{card.active ? "Deactivate" : "Activate"}</button>}</article>)}{canPartners && <form className="eventdesk-document-create" onSubmit={saveRateCard}><h3>Add a supplier rate card</h3><label>Supplier<select required value={rateCardForm.supplierId} onChange={(event) => setRateCardForm({ ...rateCardForm, supplierId: event.target.value })}><option value="">Choose supplier…</option>{state.partners.filter((partner) => partner.kind === "supplier" && partner.active).map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select></label><div className="eventdesk-form-grid"><label>Name<input required maxLength={160} value={rateCardForm.name} onChange={(event) => setRateCardForm({ ...rateCardForm, name: event.target.value })} /></label><label>Rate applies to<select value={rateCardForm.target} onChange={(event) => setRateCardForm({ ...rateCardForm, target: event.target.value as "asset" | "category", assetId: "" })}><option value="category">Equipment category</option><option value="asset">Specific equipment</option></select></label>{rateCardForm.target === "category" ? <label>Equipment category<input required maxLength={80} value={rateCardForm.category} onChange={(event) => setRateCardForm({ ...rateCardForm, category: event.target.value })} placeholder="Audio" /></label> : <label>Equipment item<select required value={rateCardForm.assetId} onChange={(event) => setRateCardForm({ ...rateCardForm, assetId: event.target.value })}><option value="">Choose equipment…</option>{state.assets.filter((asset) => asset.active && asset.supplierId === rateCardForm.supplierId).map((asset) => <option key={asset.id} value={asset.id}>{asset.name}</option>)}</select></label>}</div><div className="eventdesk-form-grid"><label>Valid from<input type="date" required value={rateCardForm.validFrom} onChange={(event) => setRateCardForm({ ...rateCardForm, validFrom: event.target.value })} /></label><label>Valid to <span className="optional-label">Optional</span><input type="date" min={rateCardForm.validFrom} value={rateCardForm.validTo} onChange={(event) => setRateCardForm({ ...rateCardForm, validTo: event.target.value })} /></label></div><label>Daily rate (CHF)<input required type="number" min="0" step="0.01" value={rateCardForm.dailyRate} onChange={(event) => setRateCardForm({ ...rateCardForm, dailyRate: event.target.value })} /></label><button className="button button-primary" disabled={busy || !rateCardForm.supplierId || (rateCardForm.target === "category" ? !rateCardForm.category.trim() : !rateCardForm.assetId)}><Plus size={15} /> Create rate card</button></form>}</section></>}
     {section === "Equipment" && <div className="eventdesk-workspace eventdesk-equipment-workspace"><section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Rental packages</h2><p>{state.packages.length} reusable kits · components reserve as normal equipment</p></div>{canInventory && <button className="button button-secondary" type="button" onClick={() => openPackageForm()}><Plus size={14} /> Add package</button>}</div>{state.packages.map((rentalPackage) => <article className="eventdesk-asset-row" key={rentalPackage.id}><span className="eventdesk-job-icon"><Package size={17} /></span><div className="eventdesk-job-main"><strong>{rentalPackage.name}</strong><small>{rentalPackage.items.map((item) => item.quantity + " × " + item.assetName).join(" · ")}{rentalPackage.description ? " · " + rentalPackage.description : ""}</small></div>{canInventory && <button className="eventdesk-row-edit" type="button" onClick={() => openPackageForm(rentalPackage)}>Edit</button>}</article>)}{!state.packages.length && <p className="eventdesk-empty">No packages yet. Create a reusable kit from equipment in the catalog.</p>}</section><section className="eventdesk-panel"><div className="eventdesk-panel-heading"><div><h2>Equipment catalog</h2><p>{state.assets.length} items · availability is checked against active job dates</p></div></div>{loading ? <p className="eventdesk-empty">Loading equipment…</p> : state.assets.map((asset) => <article className="eventdesk-asset-row" key={asset.id}><span className="eventdesk-job-icon"><Package size={17} /></span><div className="eventdesk-job-main"><strong>{asset.name}</strong><small>{asset.category} · stock {asset.quantity} · {money(asset.dailyRateCents)}/day · barcode {asset.barcode || "not set"} · supplier {asset.supplierName || "not linked"}</small></div><span className={asset.active ? "eventdesk-active-pill" : "eventdesk-active-pill eventdesk-inactive"}>{asset.active ? "Active" : "Inactive"}</span>{canInventory && <button className="eventdesk-row-edit" type="button" onClick={() => openAssetForm(asset)}>Edit</button>}</article>)}{!state.assets.length && <p className="eventdesk-empty">The equipment catalog is empty. Add your first item to start reserving gear.</p>}</section></div>}
