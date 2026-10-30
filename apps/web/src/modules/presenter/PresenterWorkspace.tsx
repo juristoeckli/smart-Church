@@ -466,7 +466,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, realtime, language
         setNotice("Presenter link copied.");
         return;
       }
-      window.prompt("Copy Presenter output link:", link);
+      window.prompt(translateModuleText("Copy Presenter output link:", presenterTranslations, language), link);
       setNotice("Clipboard access is blocked here. Copy the link from the dialog.");
     }
   }
@@ -651,7 +651,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, realtime, language
   }
 
   function createPresentationLibrary() {
-    const name = window.prompt("Name this library");
+    const name = window.prompt(translateModuleText("Name this library", presenterTranslations, language));
     const trimmed = name?.trim();
     if (!trimmed || !capabilities.canManageLayouts) return;
     const library = { id: createLocalId(), name: trimmed.slice(0, 80), presentationIds: [] } satisfies PresentationLibrary;
