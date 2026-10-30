@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -12,6 +12,7 @@ type ElvantoDirections = Record<ElvantoArea, ElvantoDirection>;
 type ElvantoSettings = { department_id: string; encrypted_api_key: string; directions: ElvantoDirections; financial_enabled: boolean; enabled: boolean; last_connected_at: string | null; last_sync_at: string | null; last_sync_error: string | null; people_import_page: number; people_import_total: number | null; people_import_created_count: number; people_import_updated_count: number; people_import_skipped_count: number; people_import_complete: boolean; people_preview_at: string | null; people_preview_scanned_count: number; people_preview_total: number | null; people_preview_complete: boolean; people_importing: boolean; people_import_started_at: string | null; groups_import_page: number; groups_import_total: number | null; groups_import_created_count: number; groups_import_updated_count: number; groups_import_skipped_count: number; groups_import_complete: boolean; groups_preview_at: string | null; groups_preview_scanned_count: number; groups_preview_total: number | null; groups_preview_complete: boolean; groups_importing: boolean; groups_import_started_at: string | null; services_import_page: number; services_import_total: number | null; services_import_created_count: number; services_import_updated_count: number; services_import_skipped_count: number; services_import_complete: boolean; services_preview_at: string | null; services_preview_scanned_count: number; services_preview_total: number | null; services_preview_complete: boolean; services_importing: boolean; services_import_started_at: string | null; calendar_import_page: number; calendar_import_total: number | null; calendar_import_created_count: number; calendar_import_updated_count: number; calendar_import_skipped_count: number; calendar_import_complete: boolean; calendar_preview_at: string | null; calendar_preview_scanned_count: number; calendar_preview_total: number | null; calendar_preview_complete: boolean; calendar_preview_start_date: string | null; calendar_preview_end_date: string | null; calendar_import_start_date: string | null; calendar_import_end_date: string | null; calendar_importing: boolean; calendar_import_started_at: string | null; songs_import_page: number; songs_import_total: number | null; songs_import_created_count: number; songs_import_updated_count: number; songs_import_skipped_count: number; songs_import_complete: boolean; songs_preview_at: string | null; songs_preview_ids: string[]; songs_preview_complete: boolean; songs_preview_count: number; songs_imported_count: number; songs_last_import_at: string | null; songs_importing: boolean; songs_import_started_at: string | null; people_flows_import_page: number; people_flows_import_total: number | null; people_flows_import_created_count: number; people_flows_import_updated_count: number; people_flows_import_skipped_count: number; people_flows_import_complete: boolean; people_flows_preview_at: string | null; people_flows_preview_ids: string[]; people_flows_preview_complete: boolean; people_flows_preview_count: number; people_flows_imported_count: number; people_flows_last_import_at: string | null; people_flows_importing: boolean; people_flows_import_started_at: string | null; updated_at: Date | string };
 const running = new Set<string>();
 const elvantoPeopleImportRunning = new Set<string>();
+const elvantoPeopleExportRunning = new Set<string>();
 const elvantoGroupsImportRunning = new Set<string>();
 const elvantoServicesImportRunning = new Set<string>();
 const elvantoCalendarImportRunning = new Set<string>();
@@ -481,6 +482,12 @@ function idOf(row: JsonObject) {
 function firstText(...values: any[]) {
   return (values.find((value) => typeof value === "string" && value.trim()) ?? "").trim();
 }
+function elvantoPeopleExportHash(contact: { id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }) {
+  return createHash("sha256").update(JSON.stringify([contact.id, contact.first_name, contact.last_name, contact.email, contact.phone, contact.elvanto_source_id])).digest("hex");
+}
+function elvantoRemotePersonHash(person: JsonObject) {
+  return createHash("sha256").update(JSON.stringify([idOf(person), firstText(person.firstname), firstText(person.lastname), firstText(person.email), firstText(person.phone), person.contact === true || person.contact === 1 || person.contact === "1"])).digest("hex");
+}
 function plainDescription(value: unknown) {
   if (typeof value !== "string") return "";
   return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">") .replace(/\s+/g, " ").trim();
@@ -754,7 +761,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const importedSongs = await pool!.query<{ source_id: string; title: string; song: JsonObject; arrangements: JsonObject[]; imported_at: Date | string }>("SELECT source_id,title,song,arrangements,imported_at FROM elvanto_songs_import WHERE department_id=$1 ORDER BY title,source_id LIMIT 500", [dept]);
       const songCount = await pool!.query<{ count: number }>("SELECT count(*)::int AS count FROM elvanto_songs_import WHERE department_id=$1", [dept]);
       const financialState = await pool!.query<{ page: number; total: number | null; created: number; updated: number; skipped: number; complete: boolean; preview_complete: boolean; preview_count: number; start_date: string | null; end_date: string | null }>("SELECT financial_import_page AS page,COALESCE(financial_import_total,financial_preview_count) AS total,financial_import_created_count AS created,financial_import_updated_count AS updated,financial_import_skipped_count AS skipped,financial_import_complete AS complete,financial_preview_complete,financial_preview_count,COALESCE(financial_import_start_date,financial_preview_start_date)::text AS start_date,COALESCE(financial_import_end_date,financial_preview_end_date)::text AS end_date FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
-      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
+      const peopleExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT people_export_page AS page,jsonb_array_length(people_export_preview_rows)::int AS total,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped,people_export_complete AS complete,people_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/financial", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -786,7 +794,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       const lock = await pool!.query(`UPDATE elvanto_sync_settings SET financial_importing=TRUE,financial_import_started_at=now(),financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,updated_at=now()
-        WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+        WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
       if (!lock.rowCount) return reply.code(409).send({ error: "Another Elvanto import is running for this location." });
       try {
         const snapshot = await fetchElvantoFinancialTransactions(apiKey, request.body.startDate, request.body.endDate);
@@ -818,7 +826,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       elvantoFinancialImportRunning.add(dept); let reserved = false;
       try {
-        const lock = await pool!.query(`UPDATE elvanto_sync_settings SET financial_importing=TRUE,financial_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND financial_preview_complete=TRUE AND financial_preview_at > now()-interval '1 hour' AND financial_enabled=TRUE AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+        const lock = await pool!.query(`UPDATE elvanto_sync_settings SET financial_importing=TRUE,financial_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND financial_preview_complete=TRUE AND financial_preview_at > now()-interval '1 hour' AND financial_enabled=TRUE AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
         if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a new complete financial preview first." });
         reserved = true;
         const previewIds = Array.isArray(savedState.ids) ? savedState.ids : [];
@@ -878,7 +886,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
 
       const previewLock = await pool!.query(
-        "UPDATE elvanto_sync_settings SET people_importing=FALSE,people_import_started_at=NULL,people_preview_at=NULL,people_preview_complete=FALSE,people_preview_scanned_count=0,people_preview_total=NULL WHERE department_id=$1 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+        "UPDATE elvanto_sync_settings SET people_importing=FALSE,people_import_started_at=NULL,people_preview_at=NULL,people_preview_complete=FALSE,people_preview_scanned_count=0,people_preview_total=NULL WHERE department_id=$1 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id",
         [dept],
       );
       if (!previewLock.rowCount) return reply.code(409).send({ error: "A People import is running. Wait for it to finish before creating another preview." });
@@ -939,11 +947,140 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       }
       const previewComplete = complete && customFieldSnapshot.complete;
       const savedPreview = await pool!.query(
-        "UPDATE elvanto_sync_settings SET people_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_preview_complete=$2,people_preview_scanned_count=$3,people_preview_total=$4,people_preview_custom_fields=$6::jsonb WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+        "UPDATE elvanto_sync_settings SET people_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_preview_complete=$2,people_preview_scanned_count=$3,people_preview_total=$4,people_preview_custom_fields=$6::jsonb WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id",
         [dept, previewComplete, people.length, total, row.updated_at, JSON.stringify(customFieldSnapshot.fields)],
       );
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
       return { scannedCount: people.length, reportedTotal: total, complete: previewComplete, customFieldCount: customFieldSnapshot.fields.length, createCount, alreadyLinkedCount, emailMatchCount, ambiguousEmailCount, invalidCount, sample };
+    });
+    routes.post("/api/modules/sync/elvanto/people-export-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before previewing People export." });
+      if (row.directions.people !== "smart_church_to_elvanto" && row.directions.people !== "bidirectional") return reply.code(400).send({ error: "Set People direction to Smart Church → Elvanto or bidirectional before previewing an export." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      try {
+        const remote = await fetchElvantoPagedRows(apiKey, "people/getAll", "people", "person");
+        if (!remote.complete || remote.rows.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto People list. No export preview was saved." });
+        const remoteById = new Map(remote.rows.map((person) => [idOf(person), person]));
+        const remoteByEmail = new Map<string, JsonObject[]>();
+        for (const person of remote.rows) {
+          const email = firstText(person.email).toLocaleLowerCase();
+          if (email) remoteByEmail.set(email, [...(remoteByEmail.get(email) ?? []), person]);
+        }
+        const local = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }>("SELECT id,first_name,last_name,email,phone,elvanto_source_id FROM contacts WHERE department_id=$1 AND source_system IS NULL ORDER BY id", [dept]);
+        if (local.rows.length > 200000) return reply.code(409).send({ error: "This location has more than 200,000 local contacts. Narrow the export scope before retrying." });
+        const localEmailCounts = new Map<string, number>();
+        for (const person of local.rows) if (person.email?.trim()) {
+          const email = person.email.trim().toLocaleLowerCase(); localEmailCounts.set(email, (localEmailCounts.get(email) ?? 0) + 1);
+        }
+        const seenLocalEmails = new Set<string>();
+        const exportRows = local.rows.map((person) => {
+          const email = person.email?.trim().toLocaleLowerCase() ?? "";
+          const matches = email ? remoteByEmail.get(email) ?? [] : [];
+          let action: "create" | "update" | "review_email_match" | "review_ambiguous_email" | "review_duplicate_local_email" | "missing_remote";
+          if (person.elvanto_source_id) action = remoteById.has(person.elvanto_source_id) ? "update" : "missing_remote";
+          else if (email && (localEmailCounts.get(email) ?? 0) > 1 && seenLocalEmails.has(email)) action = "review_duplicate_local_email";
+          else if (email && (localEmailCounts.get(email) ?? 0) > 1) action = "review_duplicate_local_email";
+          else if (matches.length > 1) action = "review_ambiguous_email";
+          else if (matches.length === 1) action = "review_email_match";
+          else action = "create";
+          if (email) seenLocalEmails.add(email);
+          const linkedRemote = person.elvanto_source_id ? remoteById.get(person.elvanto_source_id) : undefined;
+          return { contactId: person.id, sourceId: person.elvanto_source_id, hash: elvantoPeopleExportHash(person), remoteHash: linkedRemote ? elvantoRemotePersonHash(linkedRemote) : null, action, firstName: person.first_name, lastName: person.last_name, email: person.email };
+        });
+        const counts = { create: 0, update: 0, review: 0 };
+        for (const item of exportRows) {
+          if (item.action === "create") counts.create += 1;
+          else if (item.action === "update") counts.update += 1;
+          else counts.review += 1;
+        }
+        const saved = await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=now(),people_export_preview_rows=$2::jsonb,people_export_page=0,people_export_created_count=0,people_export_updated_count=0,people_export_skipped_count=0,people_export_complete=FALSE,updated_at=now() WHERE department_id=$1 AND updated_at=$3 AND people_importing=FALSE AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, JSON.stringify(exportRows.map(({ contactId, sourceId, hash, remoteHash, action }) => ({ contactId, sourceId, hash, remoteHash, action }))), row.updated_at]);
+        if (!saved.rowCount) return reply.code(409).send({ error: "Another Elvanto import is running or the connection changed. Try the preview again." });
+        return { complete: true, total: exportRows.length, ...counts, sample: exportRows.slice(0, 50).map(({ firstName, lastName, email, action }) => ({ firstName, lastName, email, action })) };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "People export preview failed." }); }
+    });
+    routes.post("/api/modules/sync/elvanto/people-export", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoPeopleExportRunning.has(dept)) return reply.code(409).send({ error: "A People export is already running for this location." });
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before exporting People." });
+      if (row.directions.people !== "smart_church_to_elvanto" && row.directions.people !== "bidirectional") return reply.code(400).send({ error: "Set People direction to Smart Church → Elvanto or bidirectional before exporting." });
+      const state = await pool!.query<{ preview_at: string | null; rows: Array<{ contactId: string; sourceId: string | null; hash: string; remoteHash: string | null; action: string }>; page: number; created: number; updated: number; skipped: number }>("SELECT people_export_preview_at AS preview_at,people_export_preview_rows AS rows,people_export_page AS page,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      const saved = state.rows[0]; const previewTime = saved?.preview_at ? new Date(saved.preview_at).getTime() : 0;
+      if (!saved || !previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !Array.isArray(saved.rows)) return reply.code(409).send({ error: "Run a complete People export preview first. Previews expire after one hour and after connection settings change." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoPeopleExportRunning.add(dept); let reserved = false;
+      try {
+        const lock = await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=TRUE,people_export_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND people_export_preview_at > now()-interval '1 hour' AND people_importing=FALSE AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, row.updated_at]);
+        if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a new People export preview." });
+        reserved = true;
+        let index = saved.page; let created = saved.created; let updated = saved.updated; let skipped = saved.skipped; let writes = 0; let processed = 0;
+        const records = saved.rows;
+        while (index < records.length && writes < 5 && processed < 100) {
+          const item = records[index];
+          if (item.action !== "create" && item.action !== "update") {
+            skipped += 1; index += 1;
+            processed += 1;
+            await pool!.query("UPDATE elvanto_sync_settings SET people_export_page=$2,people_export_skipped_count=$3,updated_at=now() WHERE department_id=$1", [dept, index, skipped]);
+            continue;
+          }
+          const current = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }>("SELECT id,first_name,last_name,email,phone,elvanto_source_id FROM contacts WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, item.contactId]);
+          const contact = current.rows[0];
+          if (!contact || elvantoPeopleExportHash(contact) !== item.hash || contact.elvanto_source_id !== item.sourceId) {
+            await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]);
+            return reply.code(409).send({ error: "A local contact changed after preview. The export preview was invalidated; review a fresh preview before writing to Elvanto." });
+          }
+          if (item.action === "update") {
+            const remoteResult = await elvantoRequest(apiKey, "people/getInfo", { id: item.sourceId });
+            const remoteValue = remoteResult.person;
+            const remote = Array.isArray(remoteValue) ? remoteValue[0] as JsonObject | undefined : remoteValue as JsonObject | undefined;
+            if (!remote || elvantoRemotePersonHash(remote) !== item.remoteHash) {
+              await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]);
+              return reply.code(409).send({ error: "The linked Elvanto contact changed after preview. The export preview was invalidated; review a fresh preview before writing." });
+            }
+          } else if (contact.email?.trim()) {
+            const matches = await elvantoRequest(apiKey, "people/search", { search: { email: contact.email.trim() }, page: 1, page_size: 10 });
+            if (elvantoCollection(matches, "people", "person").length) {
+              await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]);
+              return reply.code(409).send({ error: "An Elvanto person now matches this email. The export preview was invalidated; review a fresh preview before writing." });
+            }
+          }
+          const body: JsonObject = { firstname: contact.first_name, lastname: contact.last_name };
+          if (item.action === "update") {
+            body.email = contact.email ?? "";
+            body.phone = contact.phone ?? "";
+          } else {
+            if (contact.email) body.email = contact.email;
+            if (contact.phone) body.phone = contact.phone;
+          }
+          let remoteId = item.sourceId;
+          const result = await elvantoRequest(apiKey, item.action === "create" ? "people/create" : "people/edit", { ...(item.action === "update" ? { id: item.sourceId } : {}), ...body });
+          if (item.action === "create") remoteId = idOf((result.person ?? {}) as JsonObject);
+          if (!remoteId) throw new Error("Elvanto accepted the request without returning a stable person ID. Run a new preview and review email matches before retrying.");
+          const client = await pool!.connect();
+          try {
+            await client.query("BEGIN");
+            if (item.action === "create") await client.query("UPDATE contacts SET elvanto_source_id=$3,updated_at=now() WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, item.contactId, remoteId]);
+            index += 1; writes += 1; processed += 1;
+            if (item.action === "create") created += 1; else updated += 1;
+            const complete = index >= records.length;
+            await client.query("UPDATE elvanto_sync_settings SET people_export_page=$2,people_export_created_count=$3,people_export_updated_count=$4,people_export_skipped_count=$5,people_export_complete=$6,last_sync_at=CASE WHEN $6 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, index, created, updated, skipped, complete]);
+            await client.query("COMMIT");
+          } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+        }
+        const complete = index >= records.length;
+        await pool!.query("UPDATE elvanto_sync_settings SET people_export_complete=$2,updated_at=now() WHERE department_id=$1", [dept, complete]);
+        return { peopleExport: { page: index, total: records.length, created, updated, skipped, complete } };
+      } catch (error) {
+        await pool!.query("UPDATE elvanto_sync_settings SET last_sync_error=$2 WHERE department_id=$1", [dept, (error instanceof Error ? error.message : "People export failed.").slice(0, 1000)]).catch(() => {});
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "People export failed." });
+      } finally {
+        if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=FALSE,people_export_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        elvantoPeopleExportRunning.delete(dept);
+      }
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/people-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -962,7 +1099,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let reserved = false;
       try {
         const reservation = await pool!.query(
-          "UPDATE elvanto_sync_settings SET people_importing=TRUE,people_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND people_preview_complete=TRUE AND people_preview_at > now()-interval '1 hour' AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+          "UPDATE elvanto_sync_settings SET people_importing=TRUE,people_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND people_preview_complete=TRUE AND people_preview_at > now()-interval '1 hour' AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id",
           [dept, row.updated_at],
         );
         if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired or settings changed. Run a fresh complete People preview before importing." });
@@ -1113,7 +1250,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (sample.length < 50) sample.push({ name, action, members: members.length, linkedMembers });
       }
       const savedPreview = await pool!.query(
-        "UPDATE elvanto_sync_settings SET groups_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,groups_preview_complete=$2,groups_preview_scanned_count=$3,groups_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
+        "UPDATE elvanto_sync_settings SET groups_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,groups_preview_complete=$2,groups_preview_scanned_count=$3,groups_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id",
         [dept, complete, groups.length, total, row.updated_at],
       );
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
@@ -1137,7 +1274,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const reservation = await pool!.query(
           `UPDATE elvanto_sync_settings SET groups_importing=TRUE,groups_import_started_at=now(),updated_at=now()
             WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_preview_complete=TRUE AND groups_preview_at > now()-interval '1 hour'
-              AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`,
+              AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`,
           [dept, row.updated_at],
         );
         if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a fresh complete Groups preview before importing." });
@@ -1258,7 +1395,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         seen.add(event.sourceId);
         if (sample.length < 50) sample.push({ title: event.title, date: event.date, action });
       }
-      const saved = await pool!.query("UPDATE elvanto_sync_settings SET services_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,services_preview_complete=$2,services_preview_scanned_count=$3,services_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, complete, events.length, total, row.updated_at]);
+      const saved = await pool!.query("UPDATE elvanto_sync_settings SET services_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,services_preview_complete=$2,services_preview_scanned_count=$3,services_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, complete, events.length, total, row.updated_at]);
       if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
       return { scannedCount: events.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, conflictCount, invalidCount, sample };
     });
@@ -1356,7 +1493,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       const reserved = await pool!.query(`UPDATE elvanto_sync_settings SET songs_preview_at=NULL,songs_preview_complete=FALSE,songs_preview_count=0,songs_preview_ids='[]'::jsonb,songs_importing=TRUE,songs_import_started_at=now(),updated_at=now()
-        WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+        WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
       if (!reserved.rowCount) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before creating a Songs preview." });
       try {
         const snapshot = await fetchElvantoSongs(apiKey, 0, 50, false);
@@ -1394,7 +1531,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const reservation = await pool!.query(`UPDATE elvanto_sync_settings SET songs_importing=TRUE,songs_import_started_at=now(),updated_at=now()
           WHERE department_id=$1 AND updated_at=$2 AND songs_preview_complete=TRUE AND songs_preview_at > now()-interval '1 hour'
             AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE
-            AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+            AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
         if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a fresh complete Songs preview before importing." });
         reserved = true;
         const previewIds = Array.isArray(row.songs_preview_ids) ? row.songs_preview_ids : [];
@@ -1453,7 +1590,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       const reserved = await pool!.query(`UPDATE elvanto_sync_settings SET people_flows_preview_at=NULL,people_flows_preview_complete=FALSE,people_flows_preview_count=0
-        WHERE department_id=$1 AND updated_at=$2 AND people_flows_importing=FALSE AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+        WHERE department_id=$1 AND updated_at=$2 AND people_flows_importing=FALSE AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
       if (!reserved.rowCount) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before creating a People Flows preview." });
       try {
         const snapshot = await fetchElvantoPeopleFlows(apiKey);
@@ -1465,7 +1602,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const sample = snapshot.flows.slice(0, 50).map((flow) => ({ name: flow.name, steps: flow.definition.steps.length, assignments: flow.members.length, action: linked.has(flow.sourceId) ? "update" : "create" }));
         const saved = await pool!.query(`UPDATE elvanto_sync_settings SET people_flows_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_flows_preview_complete=$2,people_flows_preview_count=$3,people_flows_preview_ids=$4::jsonb,
           people_flows_import_page=1,people_flows_import_total=NULL,people_flows_import_created_count=0,people_flows_import_updated_count=0,people_flows_import_skipped_count=0,people_flows_import_complete=FALSE
-          WHERE department_id=$1 AND updated_at=$5 AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, complete, snapshot.reportedFlows, JSON.stringify(snapshot.flowIds), row.updated_at]);
+          WHERE department_id=$1 AND updated_at=$5 AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, complete, snapshot.reportedFlows, JSON.stringify(snapshot.flowIds), row.updated_at]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
         return { flowCount: snapshot.flows.length, reportedFlowCount: snapshot.reportedFlows, stepCount: snapshot.stepCount, assignmentCount: snapshot.memberCount, complete, createCount, updateCount, sample };
       } catch (error) {
@@ -1488,7 +1625,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const reservation = await pool!.query(`UPDATE elvanto_sync_settings SET people_flows_importing=TRUE,people_flows_import_started_at=now(),updated_at=now()
           WHERE department_id=$1 AND updated_at=$2 AND people_flows_preview_complete=TRUE AND people_flows_preview_at > now()-interval '1 hour'
             AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE
-            AND (people_flows_importing=FALSE OR people_flows_import_started_at < now()-interval '15 minutes') AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
+            AND (people_flows_importing=FALSE OR people_flows_import_started_at < now()-interval '15 minutes') AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
         if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a fresh complete People Flows preview before importing." });
         reserved = true;
         const restart = Boolean(request.body?.restart);
@@ -1564,7 +1701,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       }
       const saved = await pool!.query(`UPDATE elvanto_sync_settings SET calendar_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,calendar_preview_complete=$2,calendar_preview_scanned_count=$3,calendar_preview_total=$4,calendar_preview_start_date=$5::date,calendar_preview_end_date=$6::date,
           calendar_import_page=1,calendar_import_total=NULL,calendar_import_created_count=0,calendar_import_updated_count=0,calendar_import_skipped_count=0,calendar_import_complete=FALSE,calendar_import_start_date=NULL,calendar_import_end_date=NULL
-        WHERE department_id=$1 AND updated_at=$7 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, complete, mapped.length, total, startDate, endDate, row.updated_at]);
+        WHERE department_id=$1 AND updated_at=$7 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, complete, mapped.length, total, startDate, endDate, row.updated_at]);
       if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
       return { scannedCount: mapped.length, reportedTotal: total, complete, startDate, endDate, createCount, alreadyLinkedCount, conflictCount, invalidCount, sample };
     });
@@ -1581,7 +1718,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       elvantoCalendarImportRunning.add(dept); let reserved = false;
       try {
         const reservation = await pool!.query(`UPDATE elvanto_sync_settings SET calendar_importing=TRUE,calendar_import_started_at=now(),calendar_import_start_date=calendar_preview_start_date,calendar_import_end_date=calendar_preview_end_date,updated_at=now()
-          WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_preview_complete=TRUE AND calendar_preview_at > now()-interval '1 hour' AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes')
+          WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_preview_complete=TRUE AND calendar_preview_at > now()-interval '1 hour' AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes')
             AND (calendar_importing=FALSE OR calendar_import_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
         if (!reservation.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a fresh complete Calendar preview before importing." });
         reserved = true;
@@ -1686,13 +1823,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           services_preview_at=NULL,services_preview_scanned_count=0,services_preview_total=NULL,services_preview_complete=FALSE,
           calendar_preview_at=NULL,calendar_preview_scanned_count=0,calendar_preview_total=NULL,calendar_preview_complete=FALSE,calendar_preview_start_date=NULL,calendar_preview_end_date=NULL,
           people_flows_preview_at=NULL,people_flows_preview_ids='[]'::jsonb,people_flows_preview_complete=FALSE,people_flows_preview_count=0,
-          people_importing=FALSE,people_import_started_at=NULL,groups_importing=FALSE,groups_import_started_at=NULL,services_importing=FALSE,services_import_started_at=NULL,calendar_importing=FALSE,calendar_import_started_at=NULL,people_flows_importing=FALSE,people_flows_import_started_at=NULL,songs_importing=FALSE,songs_import_started_at=NULL,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now()
+          people_export_preview_at=NULL,people_export_preview_rows='[]'::jsonb,people_export_page=0,people_export_created_count=0,people_export_updated_count=0,people_export_skipped_count=0,people_export_complete=FALSE,
+          people_importing=FALSE,people_import_started_at=NULL,groups_importing=FALSE,groups_import_started_at=NULL,services_importing=FALSE,services_import_started_at=NULL,calendar_importing=FALSE,calendar_import_started_at=NULL,people_flows_importing=FALSE,people_flows_import_started_at=NULL,songs_importing=FALSE,songs_import_started_at=NULL,financial_importing=FALSE,financial_import_started_at=NULL,people_exporting=FALSE,people_export_started_at=NULL,updated_at=now()
          WHERE (elvanto_sync_settings.people_importing=FALSE OR elvanto_sync_settings.people_import_started_at < now()-interval '15 minutes')
            AND (elvanto_sync_settings.groups_importing=FALSE OR elvanto_sync_settings.groups_import_started_at < now()-interval '15 minutes')
            AND (elvanto_sync_settings.services_importing=FALSE OR elvanto_sync_settings.services_import_started_at < now()-interval '15 minutes')
            AND (elvanto_sync_settings.calendar_importing=FALSE OR elvanto_sync_settings.calendar_import_started_at < now()-interval '15 minutes')
            AND (elvanto_sync_settings.people_flows_importing=FALSE OR elvanto_sync_settings.people_flows_import_started_at < now()-interval '15 minutes')
-           AND (elvanto_sync_settings.songs_importing=FALSE OR elvanto_sync_settings.songs_import_started_at < now()-interval '15 minutes') AND (elvanto_sync_settings.financial_importing=FALSE OR elvanto_sync_settings.financial_import_started_at < now()-interval '15 minutes')
+           AND (elvanto_sync_settings.songs_importing=FALSE OR elvanto_sync_settings.songs_import_started_at < now()-interval '15 minutes') AND (elvanto_sync_settings.financial_importing=FALSE OR elvanto_sync_settings.financial_import_started_at < now()-interval '15 minutes') AND (elvanto_sync_settings.people_exporting=FALSE OR elvanto_sync_settings.people_export_started_at < now()-interval '15 minutes')
          RETURNING department_id`,
         [dept, encryptedKey, JSON.stringify(directions), request.body.financialEnabled, Boolean(request.body.apiKey?.trim())],
       );
@@ -1701,7 +1839,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     });
     routes.delete("/api/modules/sync/elvanto", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
-      const result = await pool!.query("DELETE FROM elvanto_sync_settings WHERE department_id=$1 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') AND (services_importing=FALSE OR services_import_started_at < now()-interval '15 minutes') AND (calendar_importing=FALSE OR calendar_import_started_at < now()-interval '15 minutes') AND (people_flows_importing=FALSE OR people_flows_import_started_at < now()-interval '15 minutes') AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id", [dept]);
+      const result = await pool!.query("DELETE FROM elvanto_sync_settings WHERE department_id=$1 AND (people_importing=FALSE OR people_import_started_at < now()-interval '15 minutes') AND (groups_importing=FALSE OR groups_import_started_at < now()-interval '15 minutes') AND (services_importing=FALSE OR services_import_started_at < now()-interval '15 minutes') AND (calendar_importing=FALSE OR calendar_import_started_at < now()-interval '15 minutes') AND (people_flows_importing=FALSE OR people_flows_import_started_at < now()-interval '15 minutes') AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept]);
       if (!result.rowCount) {
         const existing = await elvantoSettings(dept);
         if (existing) return reply.code(409).send({ error: "An Elvanto import is running. Wait for it to finish before disconnecting Elvanto." });
@@ -1711,7 +1849,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     const timer = setInterval(() => {
       if (!pool || !isDatabaseReady()) return;
       void pool.query("SELECT department_id FROM churchtools_sync_settings WHERE enabled=true").then(async (result) => {
-        for (const row of result.rows) try { await run(row.department_id); } catch { /* Errors are recorded for the sync status page. */ }
+        for (const row of result.rows) {
+          if (!(await deps.isDepartmentWritable(row.department_id))) continue;
+          try { await run(row.department_id); } catch { /* Errors are recorded for the sync status page. */ }
+        }
       }).catch(() => {});
     }, syncIntervalMs);
     timer.unref();

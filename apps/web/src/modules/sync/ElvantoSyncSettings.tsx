@@ -12,6 +12,7 @@ type PeoplePreview = {
   createCount: number; alreadyLinkedCount: number; emailMatchCount: number; ambiguousEmailCount: number; invalidCount: number;
   sample: Array<{ firstName: string; lastName: string; email: string | null; action: string }>;
 };
+type PeopleExportPreview = { complete: boolean; total: number; create: number; update: number; review: number; sample: Array<{ firstName: string; lastName: string; email: string | null; action: string }> };
 type GroupsPreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
   createCount: number; alreadyLinkedCount: number; nameConflictCount: number; invalidCount: number;
@@ -44,7 +45,7 @@ type ImportedSong = { sourceId: string; title: string; arrangements: number; imp
 type SongDetail = { sourceId: string; title: string; song: Record<string, unknown>; arrangements: Array<Record<string, unknown>>; importedAt: string };
 type ImportedPeopleFlow = { sourceId: string; name: string; steps: number; members: number; importedAt: string };
 type PeopleFlowDetail = { sourceId: string; name: string; definition: { steps: Array<{ id: string; parentStepId: string | null; name: string; description: string; instructions: string; priority: string; due: Record<string, unknown>; admins: Array<{ id: string; role: string }> }> }; members: Array<{ stepId: string; stepName: string; personId: string; status: string; assignedAdminId: string; dueDate: string; completedDate: string; completedBy: string; contactId: string | null; contactName: string | null }>; memberOffset: number; memberTotal: number; importedAt: string };
-type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; songsImport: SongsImportProgress | null; songs: ImportedSong[]; songsTotal: number; financialImport: FinancialImportProgress | null; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
+type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleExport: (ImportProgress & { previewAt: string | null }) | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; songsImport: SongsImportProgress | null; songs: ImportedSong[]; songsTotal: number; financialImport: FinancialImportProgress | null; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
 
 function shiftUtcYear(years: number) {
   const date = new Date();
@@ -73,6 +74,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [error, setError] = useState("");
   const [permissionChecks, setPermissionChecks] = useState<PermissionCheck[] | null>(null);
   const [peoplePreview, setPeoplePreview] = useState<PeoplePreview | null>(null);
+  const [peopleExportPreview, setPeopleExportPreview] = useState<PeopleExportPreview | null>(null);
   const [groupsPreview, setGroupsPreview] = useState<GroupsPreview | null>(null);
   const [servicesPreview, setServicesPreview] = useState<ServicesPreview | null>(null);
   const [calendarStartDate, setCalendarStartDate] = useState(() => shiftUtcYear(-5));
@@ -166,6 +168,29 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       await load();
       setFeedback(result.peopleImport.complete ? "Elvanto People import is complete." : "Batch complete. Continue the import to resume.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import Elvanto people."); }
+    finally { setBusy(false); }
+  }
+
+  async function previewPeopleExport() {
+    setBusy(true); setFeedback(""); setError(""); setPeopleExportPreview(null);
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/people-export-preview", { method: "POST", headers: { "x-department-id": departmentId } });
+      const result = await response.json() as PeopleExportPreview & { error?: string };
+      if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview People export.");
+      await load(); setPeopleExportPreview(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview People export."); }
+    finally { setBusy(false); }
+  }
+
+  async function exportPeople() {
+    if (!peopleExportPreview?.complete || peopleExportPreview.create + peopleExportPreview.update <= 0) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/people-export", { method: "POST", headers: { "x-department-id": departmentId } });
+      const result = await response.json() as { peopleExport?: ImportProgress; error?: string };
+      if (!response.ok || !result.peopleExport) throw new Error(result.error ?? "Could not export People to Elvanto.");
+      await load(); setFeedback(result.peopleExport.complete ? "People export to Elvanto is complete." : "People export batch complete. Continue to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not export People to Elvanto."); }
     finally { setBusy(false); }
   }
 
@@ -383,7 +408,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
 
   return <section className="directory-card sync-settings-card elvanto-settings-card">
     <div className="directory-heading"><div><h2>Elvanto</h2><p>{status?.configured ? "Connection verified" : "Connect this location to Elvanto."}</p></div>{status?.configured && <span className="event-kind event-kind-service">Connected</span>}</div>
-    <div className="demo-notice demo-notice-error"><span className="demo-dot" /><span>Read-only People, People Flows, Groups, Services, and Calendar previews with resumable Elvanto-to-Smart-Church imports are available.</span> <span>Other data areas, exports, and bidirectional sync are still under development.</span></div>
+    <div className="demo-notice demo-notice-error"><span className="demo-dot" /><span>People supports reviewed, resumable imports and exports. People Flows, Groups, Services, Songs, Calendar, and giving currently have one-way imports.</span> <span>Other reverse-direction sync and bidirectional conflict handling remain under development.</span></div>
     <form className="sync-connection-form" onSubmit={(event) => void save(event)}>
       <label>Elvanto Secret API Key<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved key" : "Paste the Elvanto API key"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></label>
       <p className="sync-help">Find the key in Elvanto under Settings → Developers → API. It is encrypted on the server and never sent back to this screen. The connection check requires People read access.</p>
@@ -394,6 +419,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     </form>
     {status?.configured && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void checkPermissions()} disabled={busy || !areas.some(({ id }) => directions[id] !== "off" && (id !== "financial" || financialEnabled))}><RefreshCw size={15} />{busy ? "Checking permissions…" : "Check selected API permissions"}</button><span className="sync-help">Checks read access only; no Elvanto records are imported or changed.</span></div>}
     {status?.configured && directions.people !== "off" && directions.people !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewPeople()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview People import"}</button><span className="sync-help">Reads Elvanto people and compares them with this location. No records are written.</span></div>}
+    {status?.configured && directions.people !== "off" && directions.people !== "elvanto_to_smart_church" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewPeopleExport()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview People export"}</button><span className="sync-help">Reviews local contacts before creating or updating people in Elvanto. Email matches and missing remote links need review.</span></div>}
     {status?.configured && directions.peopleFlows !== "off" && directions.peopleFlows !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewPeopleFlows()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview People Flows import"}</button><span className="sync-help">Reads People Flow definitions, steps, instructions, assignments, and statuses. No records are written.</span></div>}
     {status?.configured && directions.groups !== "off" && directions.groups !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewGroups()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Groups import"}</button><span className="sync-help">Preview shows up to 50 groups. Existing Elvanto groups will refresh; only memberships for imported groups are replaced.</span></div>}
     {status?.configured && directions.services !== "off" && directions.services !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewServices()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Services import"}</button><span className="sync-help">Previews Elvanto services, service times, plans, and volunteer assignments. Same-title events on the same date are skipped for manual review.</span></div>}
@@ -424,6 +450,8 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       <small className="sync-help">Email matches are shown for review only. They will not be merged automatically.</small>
       <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importPeople()} disabled={busy || !peoplePreview.complete || (peoplePreview.createCount + peoplePreview.alreadyLinkedCount === 0)}><Check size={15} />{busy ? "Importing…" : status?.peopleImport?.complete ? "Refresh People from Elvanto" : status?.peopleImport ? "Continue People import" : "Import eligible contacts"}</button><span className="sync-help">Requires a complete preview. Work advances five Elvanto pages per batch; email matches are skipped for manual resolution.</span></div>
     </div>}
+    {status?.configured && status.peopleExport && <div className="sync-feedback" aria-live="polite"><strong>People export progress</strong><span>{status.peopleExport.complete ? "Complete" : <>Next contact: {status.peopleExport.page + 1}</>} of {status.peopleExport.total} · {status.peopleExport.created} created · {status.peopleExport.updated} updated · {status.peopleExport.skipped} needing review</span></div>}
+    {peopleExportPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>People export preview</strong><span>{peopleExportPreview.total} local contacts · {peopleExportPreview.create} new · {peopleExportPreview.update} updates · {peopleExportPreview.review} needing review</span></div>{peopleExportPreview.sample.map((person, index) => <div className="sync-feedback" key={`${person.email ?? person.firstName}-${index}`}><strong>{person.firstName} {person.lastName}</strong><span>{person.email || "No email"} · {person.action.replaceAll("_", " ")}</span></div>)}<small className="sync-help">Only local contacts are sent. Elvanto email matches and contacts missing upstream are not created or changed automatically. Each batch writes at most five records.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void exportPeople()} disabled={busy || !peopleExportPreview.complete || peopleExportPreview.create + peopleExportPreview.update === 0}><Check size={15} />{busy ? "Exporting…" : status?.peopleExport && !status.peopleExport.complete ? "Continue People export" : "Export People to Elvanto"}</button></div></div>}
     {peopleFlowsPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>People Flows import preview</strong><span>{peopleFlowsPreview.flowCount} flows scanned of {peopleFlowsPreview.reportedFlowCount} reported by Elvanto · {peopleFlowsPreview.stepCount} steps · {peopleFlowsPreview.assignmentCount} assignments{!peopleFlowsPreview.complete && <em> — preview is incomplete</em>}</span></div>
       <div className="sync-feedback"><span>{peopleFlowsPreview.createCount} new flows</span> · <span>{peopleFlowsPreview.updateCount} already imported and will refresh</span></div>
