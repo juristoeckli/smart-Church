@@ -163,7 +163,7 @@ function importedProfileValue(value: unknown): string {
     if (Array.isArray(record.customFields)) return importedProfileValue(record.customFields);
     if ("name" in record && record.name) return String(record.name);
     if ("value" in record) return String(record.value ?? "");
-    return Object.values(record).map((item) => importedProfileValue(item)).filter(Boolean).join(", ");
+    return JSON.stringify(record);
   }
   return value === null || value === undefined ? "" : String(value);
 }
