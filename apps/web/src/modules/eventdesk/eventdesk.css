@@ -75,7 +75,17 @@
 .eventdesk-row-edit{padding:6px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--green);font:inherit;font-size:11px;font-weight:650;cursor:pointer}
 .eventdesk-inactive{background:#f0f0f0;color:#737373}
 .eventdesk-form-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.eventdesk-panel-actions{display:flex;align-items:center;gap:8px}
+.eventdesk-row-select{flex:1;min-width:0;display:flex;align-items:center;gap:12px;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer}
+.eventdesk-row-select:focus-visible{outline:2px solid var(--green);outline-offset:3px;border-radius:6px}
+.eventdesk-selected-row{background:color-mix(in srgb,var(--green) 6%,var(--panel))}
+.eventdesk-readonly-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0;padding:18px}
+.eventdesk-readonly-grid>div{min-width:0;padding:11px;border:1px solid var(--line);border-radius:8px;background:color-mix(in srgb,var(--green) 2%,var(--panel))}
+.eventdesk-readonly-grid dt{margin-bottom:5px;color:var(--muted);font-size:10px}
+.eventdesk-readonly-grid dd{margin:0;font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.eventdesk-readonly-wide{grid-column:1/-1}
 .eventdesk-modal{max-height:min(88vh,780px);overflow:auto}
+.eventdesk-document-modal{width:min(100%,820px)}
 .eventdesk-modal form{display:grid;gap:12px}
 .eventdesk-modal .form-actions{margin-top:4px}
 .eventdesk-modal label{display:grid;gap:5px;font-size:11px;font-weight:600}
@@ -170,3 +180,9 @@
 @media(max-width:720px){.eventdesk-crew-form{grid-template-columns:1fr 1fr}.eventdesk-crew-form input:first-child{grid-column:1/-1}}
 .eventdesk-brand-logo{display:flex;align-items:center;gap:12px;padding:10px;border:1px solid var(--line);border-radius:10px}.eventdesk-brand-logo img,.eventdesk-template-preview img{max-width:180px;max-height:72px;object-fit:contain}.eventdesk-tax-profile{display:grid;gap:10px;padding:12px;margin:10px 0;border:1px solid var(--line);border-radius:10px}.eventdesk-template-preview{display:grid;gap:10px;padding:16px;margin-top:12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:#202b28}.eventdesk-template-preview>div{display:grid;gap:6px}.eventdesk-template-preview h4,.eventdesk-template-preview p{margin:0}.eventdesk-template-preview hr{width:100%;border:0;border-top:1px solid #ccd3cf}.eventdesk-form-error{color:#9a2f2f}
 .eventdesk-scroll-table{width:100%;overflow:auto;margin:12px 0;border:1px solid var(--line);border-radius:8px}.eventdesk-scroll-table table{width:100%;border-collapse:collapse;font-size:12px}.eventdesk-scroll-table th,.eventdesk-scroll-table td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:nowrap}.eventdesk-scroll-table th{position:sticky;top:0;background:var(--panel);text-transform:capitalize}.eventdesk-scroll-table td{max-width:340px;white-space:normal;overflow-wrap:anywhere}.eventdesk-scroll-table tr:last-child td{border-bottom:0}.eventdesk-stat-grid{margin:14px 0}.eventdesk-stat-grid .eventdesk-stat strong{font-size:20px}
+
+.eventdesk-jobs-workspace{grid-template-columns:minmax(0,1fr)}.eventdesk-job-backdrop{z-index:30}.eventdesk-job-popup{width:min(100%,1120px);max-height:calc(100vh - 36px);padding:0;display:flex;flex-direction:column}.eventdesk-job-popup>.eventdesk-panel-heading{flex:0 0 auto;padding:18px 22px;margin:0;border-bottom:1px solid var(--border)}.eventdesk-job-popup>.eventdesk-job-tabs{flex:0 0 auto}.eventdesk-job-popup>.eventdesk-job-tab-content,.eventdesk-job-popup>div[hidden]{padding:20px 22px}.eventdesk-job-popup>.eventdesk-job-tab-content:not([hidden]){overflow:auto}
+
+.eventdesk-contacts-workspace{display:grid;grid-template-columns:minmax(0,1fr)}.eventdesk-contact-links{border-top:1px solid var(--border);padding-top:14px}.eventdesk-contact-link-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--border)}.eventdesk-contact-link-row>span{display:grid;gap:3px}.eventdesk-contact-link-row small{color:var(--muted);font-size:11px}
+
+.eventdesk-contact-editor{width:min(100%,900px)}
