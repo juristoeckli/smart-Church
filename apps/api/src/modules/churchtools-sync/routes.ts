@@ -208,16 +208,17 @@ function elvantoPositionDelta(incoming: JsonObject[], existing: unknown) {
 function mergeElvantoPositionResponses(incoming: JsonObject[], existing: unknown) {
   const previous = objectRows(existing);
   return incoming.map((position) => {
-    const match = previous.find((candidate) =>
+    const name = String(position.name ?? "").trim().toLocaleLowerCase();
+    const role = elvantoPositionRole(position.name);
+    const samePerson = previous.find((candidate) =>
       (position.contactId && candidate.contactId && position.contactId === candidate.contactId)
-      || (elvantoPositionRole(position.name) && elvantoPositionRole(position.name) === elvantoPositionRole(candidate.name)),
+      || (name.includes(" — ") && name === String(candidate.name ?? "").trim().toLocaleLowerCase()),
     );
-    if (!match) return position;
+    const sameRole = previous.find((candidate) => role && role === elvantoPositionRole(candidate.name));
     return {
       ...position,
-      ...(position.contactId || !match.contactId ? {} : { contactId: match.contactId }),
-      ...(match.responseStatus ? { responseStatus: match.responseStatus } : {}),
-      ...(typeof match.canRespond === "boolean" ? { canRespond: match.canRespond } : {}),
+      ...(samePerson?.responseStatus ? { responseStatus: samePerson.responseStatus } : {}),
+      ...(typeof sameRole?.canRespond === "boolean" ? { canRespond: sameRole.canRespond } : {}),
     };
   });
 }
