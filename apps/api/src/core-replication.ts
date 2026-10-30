@@ -176,7 +176,10 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       const membershipIdsResult = await client.query<{ user_id: string }>("SELECT user_id FROM department_memberships WHERE department_id=$1", [targetDepartmentId]);
       const previousUsers = membershipIdsResult.rows.map((row) => row.user_id);
       const usersBeingReplaced = previousUsers.filter((userId) => !localServerAdminIds.has(userId));
-      await client.query("UPDATE departments SET name=$2,time_zone=$3,enabled_modules=$4 WHERE id=$1", [targetDepartmentId, snapshot.department.name, snapshot.department.time_zone, snapshot.department.enabled_modules]);
+      // Module activation is server-local: some modules depend on hardware or
+      // services reachable only from one installation. Replicate the site's
+      // identity and schedule timezone without enabling source modules here.
+      await client.query("UPDATE departments SET name=$2,time_zone=$3 WHERE id=$1", [targetDepartmentId, snapshot.department.name, snapshot.department.time_zone]);
       for (const query of deleteQueries) await client.query(query, [targetDepartmentId]);
       await client.query("DELETE FROM user_relationships WHERE user_id=ANY($1::uuid[]) OR related_user_id=ANY($1::uuid[])", [usersBeingReplaced]);
       await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersBeingReplaced]);

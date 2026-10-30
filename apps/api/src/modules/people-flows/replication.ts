@@ -77,14 +77,15 @@ export function registerPeopleFlowsReplication(context: ModuleServerContext) {
     },
     restoreSnapshot: async (client, departmentId, input, restoreContext) => {
       const snapshot = readSnapshot(input);
-      for (const descriptor of tables) {
-        const existing = await client.query(`SELECT 1 FROM ${descriptor.table} WHERE department_id=$1 LIMIT 1`, [departmentId]);
-        if (existing.rowCount) throw new Error("People Flow restore requires empty target workflow tables; existing records were preserved.");
-      }
       for (const enrollment of snapshot.enrollments) {
         if (typeof enrollment.contact_id !== "string") throw new Error("The People Flows snapshot contains an assignment without a person ID.");
         const contact = await client.query("SELECT 1 FROM contacts WHERE department_id=$1 AND id=$2", [departmentId, enrollment.contact_id]);
         if (!contact.rowCount) throw new Error("Restore People data before restoring People Flows; a referenced person is missing.");
+      }
+      // Each site snapshot replaces the full module-owned dataset. Delete
+      // dependent rows first so later updates can be applied safely too.
+      for (const descriptor of [...tables].reverse()) {
+        await client.query(`DELETE FROM ${descriptor.table} WHERE department_id=$1`, [departmentId]);
       }
       let recordCount = 0;
       for (const descriptor of tables) {
