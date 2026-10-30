@@ -6,7 +6,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, ContactProfileData, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
@@ -1851,6 +1851,67 @@ app.put<{ Body: { logoDataUrl: string | null } }>("/api/branding", {
   return { logoDataUrl: useDefaultLogo ? null : request.body.logoDataUrl };
 });
 
+const contactProfileDataSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    preferredName: { type: "string", maxLength: 80 },
+    familyId: { type: "string", maxLength: 15, pattern: "^[1-9][0-9]{0,14}$" },
+    familyRelationship: { type: "string", enum: ["Primary Contact", "Spouse", "Partner", "Child", "Sibling", "Grandfather", "Grandmother", "Other"] },
+    elvantoContact: { type: "boolean" }, elvantoVolunteer: { type: "boolean" }, elvantoArchived: { type: "boolean" },
+    mobile: { type: "string", maxLength: 40 },
+    birthday: { type: "string", format: "date" },
+    gender: { type: "string", enum: ["Male", "Female"] },
+    anniversary: { type: "string", format: "date" },
+    schoolGrade: { type: "string", maxLength: 100 },
+    maritalStatus: { type: "string", enum: ["Single", "Engaged", "Married", "Widowed", "Divorced", "Separated", "Defacto"] },
+    mailingAddress: { type: "string", maxLength: 240 },
+    developmentChild: { type: "boolean" },
+    specialNeedsChild: { type: "boolean" },
+    departments: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 160 } },
+    serviceTypes: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 160 } },
+    demographics: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 160 } },
+    locations: { type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 160 } },
+    customFields: {
+      type: "array", maxItems: 100,
+      items: {
+        type: "object", additionalProperties: false, required: ["id", "value"],
+        properties: {
+          id: { type: "string", minLength: 1, maxLength: 120, pattern: "^[A-Za-z0-9_-]+$" },
+          label: { type: "string", maxLength: 160 },
+          type: { type: "string", maxLength: 80 },
+          value: { oneOf: [{ type: "string", maxLength: 2000 }, { type: "array", maxItems: 100, items: { type: "string", maxLength: 2000 } }] },
+        },
+      },
+    },
+  },
+} as const;
+
+function normalizeContactProfileData(value: ContactProfileData | undefined) {
+  if (!value) return {};
+  const profile = JSON.parse(JSON.stringify(value)) as ContactProfileData;
+  if (JSON.stringify(profile).length > 64_000) throw new Error("People profile details cannot exceed 64 KiB.");
+  const record = profile as Record<string, unknown>;
+  for (const key of ["preferredName", "mobile", "birthday", "gender", "anniversary", "schoolGrade", "maritalStatus", "mailingAddress", "familyId", "familyRelationship"]) {
+    if (typeof record[key] === "string") {
+      const normalized = (record[key] as string).trim();
+      if (normalized) record[key] = normalized; else delete record[key];
+    }
+  }
+  const normalizeList = (items?: string[]) => items?.map((item) => item.trim()).filter(Boolean).filter((item, index, all) => all.indexOf(item) === index);
+  profile.departments = normalizeList(profile.departments);
+  profile.serviceTypes = normalizeList(profile.serviceTypes);
+  profile.demographics = normalizeList(profile.demographics);
+  profile.locations = normalizeList(profile.locations);
+  profile.customFields = profile.customFields?.map((field) => ({
+    ...field,
+    id: field.id.trim(),
+    ...(field.label ? { label: field.label.trim() } : {}),
+    value: Array.isArray(field.value) ? field.value.map((item) => item.trim()) : field.value.trim(),
+  })).filter((field) => field.id && (Array.isArray(field.value) ? field.value.length > 0 : Boolean(field.value)));
+  return profile;
+}
+
 app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: string }> => {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to enable saved contacts." });
@@ -1859,7 +1920,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
   if (!selectedDepartmentId) return reply;
 
   const result = await pool.query(
-    `SELECT id, first_name, last_name, email, phone, status, source_system, elvanto_profile
+    `SELECT id, first_name, last_name, email, phone, status, source_system, elvanto_profile, profile_data
        FROM contacts
       WHERE department_id = $1
       ORDER BY created_at DESC, last_name, first_name`,
@@ -1875,6 +1936,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     status: row.status,
     ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
     ...(canViewPrivatePeople && row.source_system === "elvanto" && row.elvanto_profile && Object.keys(row.elvanto_profile).length ? { elvantoProfile: row.elvanto_profile as Record<string, unknown> } : {}),
+    ...(canViewPrivatePeople && row.source_system === null && row.profile_data && Object.keys(row.profile_data).length ? { profileData: row.profile_data as ContactProfileData } : {}),
   }));
 });
 
@@ -1890,6 +1952,7 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
         email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         phone: { type: "string", maxLength: 40 },
         status: { type: "string", enum: ["member", "visitor"] },
+        profileData: contactProfileDataSchema,
       },
     },
   },
@@ -1904,13 +1967,16 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
   const lastName = request.body.lastName.trim();
   const email = request.body.email?.trim() || null;
   const phone = request.body.phone?.trim() || null;
+  let profileData: ContactProfileData;
+  try { profileData = normalizeContactProfileData(request.body.profileData); }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid People profile details." }); }
   if (!firstName || !lastName) return reply.code(400).send({ error: "First and last name are required." });
 
   const result = await pool.query(
-    `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, first_name, last_name, email, phone, status`,
-    [randomUUID(), selectedDepartmentId, firstName, lastName, email, phone, request.body.status],
+    `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status, profile_data)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+     RETURNING id, first_name, last_name, email, phone, status, profile_data`,
+    [randomUUID(), selectedDepartmentId, firstName, lastName, email, phone, request.body.status, JSON.stringify(profileData)],
   );
   const row = result.rows[0];
   return reply.code(201).send({
@@ -1920,6 +1986,7 @@ app.post<{ Body: CreateContact }>("/api/contacts", {
     ...(row.email ? { email: row.email } : {}),
     ...(row.phone ? { phone: row.phone } : {}),
     status: row.status,
+    ...(Object.keys(row.profile_data ?? {}).length ? { profileData: row.profile_data as ContactProfileData } : {}),
   });
 });
 
@@ -1936,6 +2003,7 @@ app.post<{ Body: { contacts: CreateContact[] } }>("/api/contacts/import", {
               firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 },
               email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }, phone: { type: "string", maxLength: 40 },
               status: { type: "string", enum: ["member", "visitor"] },
+              profileData: contactProfileDataSchema,
             },
           },
         },
@@ -1954,13 +2022,14 @@ app.post<{ Body: { contacts: CreateContact[] } }>("/api/contacts/import", {
       const firstName = item.firstName.trim();
       const lastName = item.lastName.trim();
       if (!firstName || !lastName) throw new Error("Each imported person needs a first and last name.");
+      const profileData = normalizeContactProfileData(item.profileData);
       const result = await client.query(
-        `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status)
-         VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, first_name, last_name, email, phone, status`,
-        [randomUUID(), selectedDepartmentId, firstName, lastName, item.email?.trim() || null, item.phone?.trim() || null, item.status],
+        `INSERT INTO contacts (id, department_id, first_name, last_name, email, phone, status, profile_data)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb) RETURNING id, first_name, last_name, email, phone, status, profile_data`,
+        [randomUUID(), selectedDepartmentId, firstName, lastName, item.email?.trim() || null, item.phone?.trim() || null, item.status, JSON.stringify(profileData)],
       );
       const row = result.rows[0];
-      contacts.push({ id: row.id, firstName: row.first_name, lastName: row.last_name, ...(row.email ? { email: row.email } : {}), ...(row.phone ? { phone: row.phone } : {}), status: row.status });
+      contacts.push({ id: row.id, firstName: row.first_name, lastName: row.last_name, ...(row.email ? { email: row.email } : {}), ...(row.phone ? { phone: row.phone } : {}), status: row.status, ...(Object.keys(row.profile_data ?? {}).length ? { profileData: row.profile_data as ContactProfileData } : {}) });
     }
     await client.query("COMMIT");
     return reply.code(201).send(contacts);
@@ -1980,6 +2049,7 @@ app.put<{ Params: { id: string }; Body: CreateContact }>("/api/contacts/:id", {
         firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 },
         email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }, phone: { type: "string", maxLength: 40 },
         status: { type: "string", enum: ["member", "visitor"] },
+        profileData: contactProfileDataSchema,
       },
     },
   },
@@ -1994,14 +2064,17 @@ app.put<{ Params: { id: string }; Body: CreateContact }>("/api/contacts/:id", {
   const firstName = request.body.firstName.trim();
   const lastName = request.body.lastName.trim();
   if (!firstName || !lastName) return reply.code(400).send({ error: "First and last name are required." });
+  let profileData: ContactProfileData | undefined;
+  try { if (request.body.profileData !== undefined) profileData = normalizeContactProfileData(request.body.profileData); }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid People profile details." }); }
   const result = await pool.query(
-    `UPDATE contacts SET first_name = $3, last_name = $4, email = $5, phone = $6, status = $7, updated_at = now()
-      WHERE id = $1 AND department_id = $2 RETURNING id, first_name, last_name, email, phone, status`,
-    [request.params.id, selectedDepartmentId, firstName, lastName, request.body.email?.trim() || null, request.body.phone?.trim() || null, request.body.status],
+    `UPDATE contacts SET first_name = $3, last_name = $4, email = $5, phone = $6, status = $7, profile_data=COALESCE($8::jsonb,profile_data), updated_at = now()
+      WHERE id = $1 AND department_id = $2 RETURNING id, first_name, last_name, email, phone, status, profile_data`,
+    [request.params.id, selectedDepartmentId, firstName, lastName, request.body.email?.trim() || null, request.body.phone?.trim() || null, request.body.status, profileData === undefined ? null : JSON.stringify(profileData)],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "This person could not be found." });
-  return { id: row.id, firstName: row.first_name, lastName: row.last_name, ...(row.email ? { email: row.email } : {}), ...(row.phone ? { phone: row.phone } : {}), status: row.status };
+  return { id: row.id, firstName: row.first_name, lastName: row.last_name, ...(row.email ? { email: row.email } : {}), ...(row.phone ? { phone: row.phone } : {}), status: row.status, ...(Object.keys(row.profile_data ?? {}).length ? { profileData: row.profile_data as ContactProfileData } : {}) };
 });
 
 app.delete<{ Params: { id: string } }>("/api/contacts/:id", {
@@ -2605,3 +2678,4 @@ try {
   await closeDatabase();
   process.exit(1);
 }
+

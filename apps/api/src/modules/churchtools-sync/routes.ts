@@ -399,7 +399,7 @@ async function fetchElvantoPagedRows(apiKey: string, endpoint: string, container
   }
   return { rows, reportedTotal, complete };
 }
-const elvantoPeopleFields = ["gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "demographics", "service_types", "locations"];
+const elvantoPeopleFields = ["preferred_name", "mobile", "gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "family_id", "family_relationship", "archived", "contact", "volunteer", "departments", "demographics", "service_types", "locations"];
 async function fetchElvantoPeopleCustomFields(apiKey: string) {
   const result = await fetchElvantoPagedRows(apiKey, "people/customFields/getAll", "custom_fields", "custom_field");
   const fields = result.rows.map((field) => ({ id: idOf(field), name: firstText(field.name), type: firstText(field.type) })).filter((field) => field.id && field.name).sort((left, right) => left.id.localeCompare(right.id));
@@ -419,7 +419,7 @@ function mapElvantoPeopleProfile(person: JsonObject, customFields: Array<{ id: s
     if (value) profile[key] = value;
   }
   for (const [key, source] of [["archived", "archived"], ["contact", "contact"], ["volunteer", "volunteer"]] as const) {
-    if (person[source] !== undefined && person[source] !== null) profile[key] = person[source] === true || person[source] === 1 || person[source] === "1";
+    if (person[source] !== undefined && person[source] !== null) profile[key] = person[source] === true || person[source] === 1 || ["1", "true", "yes"].includes(String(person[source]).trim().toLowerCase());
   }
   for (const [key, source] of [["developmentChild", "development_child"], ["specialNeedsChild", "special_needs_child"]] as const) {
     const value = firstText(person[source]);
@@ -559,11 +559,66 @@ function idOf(row: JsonObject) {
 function firstText(...values: any[]) {
   return (values.find((value) => typeof value === "string" && value.trim()) ?? "").trim();
 }
-function elvantoPeopleExportHash(contact: { id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }) {
-  return createHash("sha256").update(JSON.stringify([contact.id, contact.first_name, contact.last_name, contact.email, contact.phone, contact.elvanto_source_id])).digest("hex");
+function elvantoPeopleExportHash(contact: { id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null; profile_data?: JsonObject }) {
+  return createHash("sha256").update(JSON.stringify([contact.id, contact.first_name, contact.last_name, contact.email, contact.phone, contact.elvanto_source_id, contact.profile_data ?? {}])).digest("hex");
 }
 function elvantoRemotePersonHash(person: JsonObject) {
-  return createHash("sha256").update(JSON.stringify([idOf(person), firstText(person.firstname), firstText(person.lastname), firstText(person.email), firstText(person.phone), person.contact === true || person.contact === 1 || person.contact === "1"])).digest("hex");
+  const profileKeys = ["gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "family_id", "family_relationship", "archived", "volunteer", "departments", "service_types", "demographics", "locations"];
+  const profile = profileKeys.map((key) => [key, person[key] ?? null]);
+  const custom = Object.keys(person).filter((key) => /^custom_[A-Za-z0-9_-]+$/.test(key)).sort().map((key) => [key, person[key]]);
+  return createHash("sha256").update(JSON.stringify([idOf(person), firstText(person.firstname), firstText(person.preferred_name), firstText(person.lastname), firstText(person.email), firstText(person.phone), firstText(person.mobile), person.contact === true || person.contact === 1 || person.contact === "1", profile, custom])).digest("hex");
+}
+function recordsHaveStaleFieldMap(rows: Array<{ profileFieldsHash?: string }>, currentHash: string) {
+  return rows.some((row) => row.profileFieldsHash !== currentHash);
+}
+function elvantoPeopleProfileExport(profileValue: unknown, remotePerson?: JsonObject): JsonObject {
+  const profile = profileValue && typeof profileValue === "object" && !Array.isArray(profileValue) ? profileValue as JsonObject : {};
+  const body: JsonObject = {};
+  const preferredName = firstText(profile.preferredName);
+  const mobile = firstText(profile.mobile);
+  const familyId = firstText(profile.familyId);
+  const familyRelationship = firstText(profile.familyRelationship);
+  if (preferredName) body.preferred_name = preferredName;
+  if (mobile) body.mobile = mobile;
+  const numericFamilyId = Number(familyId);
+  if (/^[1-9][0-9]{0,14}$/.test(familyId) && Number.isSafeInteger(numericFamilyId)) {
+    body.family_id = numericFamilyId;
+    if (familyRelationship) body.family_relationship = familyRelationship;
+  }
+  for (const [local, remote] of [["elvantoContact", "contact"], ["elvantoVolunteer", "volunteer"], ["elvantoArchived", "archived"]]) {
+    if (typeof profile[local] === "boolean") body[remote] = profile[local] ? "Yes" : "No";
+  }
+  const fields: JsonObject = {};
+  for (const [local, remote] of [["birthday", "birthday"], ["gender", "gender"], ["anniversary", "anniversary"], ["schoolGrade", "school_grade"], ["maritalStatus", "marital_status"], ["mailingAddress", "mailing_address"]]) {
+    const value = firstText(profile[local]);
+    if (value) fields[remote] = value;
+  }
+  for (const [local, remote] of [["developmentChild", "development_child"], ["specialNeedsChild", "special_needs_child"]]) {
+    if (typeof profile[local] === "boolean") fields[remote] = profile[local] ? "Yes" : "No";
+  }
+  for (const key of ["departments", "serviceTypes", "demographics", "locations"] as const) {
+    const remoteKey = { departments: "departments", serviceTypes: "service_types", demographics: "demographics", locations: "locations" }[key];
+    const values = Array.isArray(profile[key]) ? profile[key].filter((value): value is string => typeof value === "string" && Boolean(value.trim())).map((value) => value.trim()) : [];
+    const remoteValue = remotePerson?.[remoteKey];
+    const existing = new Set((Array.isArray(remoteValue) ? remoteValue : remoteValue === undefined || remoteValue === null || remoteValue === "" ? [] : [remoteValue]).map((value) => typeof value === "string" ? value.trim().toLocaleLowerCase() : value && typeof value === "object" ? firstText((value as JsonObject).name, (value as JsonObject).title).toLocaleLowerCase() : ""));
+    const additions = [...new Set(values)].filter((value) => !existing.has(value.toLocaleLowerCase()));
+    if (additions.length) fields[remoteKey] = additions;
+  }
+  const customFields = Array.isArray(profile.customFields) ? profile.customFields : [];
+  for (const custom of customFields) {
+    if (!custom || typeof custom !== "object") continue;
+    const field = custom as JsonObject;
+    const id = firstText(field.id);
+    const value = field.value;
+    if (!/^[A-Za-z0-9_-]{1,120}$/.test(id)) continue;
+    if (typeof value === "string" && value.trim()) fields[id] = value.trim();
+    else if (Array.isArray(value)) {
+      const options = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+      if (options.length) fields[id] = [...new Set(options)];
+    }
+  }
+  if (Object.keys(fields).length) body.fields = fields;
+  return body;
 }
 function elvantoGroupExportHash(group: { id: string; name: string; elvanto_source_id: string | null }, members: Array<{ contact_id: string; person_source_id: string | null; role: string; status: string }>) {
   const memberSnapshot = members.map((member) => [member.contact_id, member.person_source_id, member.role, member.status]).sort((left, right) => String(left[0]).localeCompare(String(right[0])));
@@ -1292,7 +1347,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       try {
-        const remote = await fetchElvantoPagedRows(apiKey, "people/getAll", "people", "person");
+        const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
+        if (!customFieldSnapshot.complete) return reply.code(409).send({ error: "Elvanto returned an incomplete custom-field list. No People export preview was saved." });
+        const profileFieldsHash = createHash("sha256").update(JSON.stringify(customFieldSnapshot.fields)).digest("hex");
+        const remote = await fetchElvantoPagedRows(apiKey, "people/getAll", "people", "person", { fields: [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)] });
         if (!remote.complete || remote.rows.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto People list. No export preview was saved." });
         const remoteById = new Map(remote.rows.map((person) => [idOf(person), person]));
         const remoteByEmail = new Map<string, JsonObject[]>();
@@ -1300,7 +1358,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const email = firstText(person.email).toLocaleLowerCase();
           if (email) remoteByEmail.set(email, [...(remoteByEmail.get(email) ?? []), person]);
         }
-        const local = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }>("SELECT id,first_name,last_name,email,phone,elvanto_source_id FROM contacts WHERE department_id=$1 AND source_system IS NULL ORDER BY id", [dept]);
+        const local = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null; profile_data: JsonObject }>("SELECT id,first_name,last_name,email,phone,elvanto_source_id,profile_data FROM contacts WHERE department_id=$1 AND source_system IS NULL ORDER BY id", [dept]);
         if (local.rows.length > 200000) return reply.code(409).send({ error: "This location has more than 200,000 local contacts. Narrow the export scope before retrying." });
         const localEmailCounts = new Map<string, number>();
         for (const person of local.rows) if (person.email?.trim()) {
@@ -1319,7 +1377,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           else action = "create";
           if (email) seenLocalEmails.add(email);
           const linkedRemote = person.elvanto_source_id ? remoteById.get(person.elvanto_source_id) : undefined;
-          return { contactId: person.id, sourceId: person.elvanto_source_id, hash: elvantoPeopleExportHash(person), remoteHash: linkedRemote ? elvantoRemotePersonHash(linkedRemote) : null, action, firstName: person.first_name, lastName: person.last_name, email: person.email };
+          const requestedCustomIds = new Set(customFieldSnapshot.fields.map((field) => field.id));
+          const profile = person.profile_data ?? {};
+          const customFieldRows = Array.isArray(profile.customFields) ? profile.customFields : [];
+          const hasUnknownCustomField = customFieldRows.some((field) => !field || typeof field !== "object" || !requestedCustomIds.has(firstText((field as JsonObject).id)));
+          if (hasUnknownCustomField && (action === "create" || action === "update")) action = "review_custom_field";
+          const mappedProfile = elvantoPeopleProfileExport(profile);
+          const profileFieldCount = Object.keys(mappedProfile).filter((key) => key !== "fields").length + Object.keys((mappedProfile.fields as JsonObject | undefined) ?? {}).length;
+          const statusUpdates = Object.fromEntries(["contact", "volunteer", "archived"].filter((key) => mappedProfile[key] === "Yes" || mappedProfile[key] === "No").map((key) => [key, mappedProfile[key]]));
+          return { contactId: person.id, sourceId: person.elvanto_source_id, hash: elvantoPeopleExportHash(person), remoteHash: linkedRemote ? elvantoRemotePersonHash(linkedRemote) : null, profileFieldsHash, action, firstName: person.first_name, lastName: person.last_name, email: person.email, profileFieldCount, statusUpdates };
         });
         const counts = { create: 0, update: 0, review: 0 };
         for (const item of exportRows) {
@@ -1327,9 +1393,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           else if (item.action === "update") counts.update += 1;
           else counts.review += 1;
         }
-        const saved = await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=now(),people_export_preview_rows=$2::jsonb,people_export_page=0,people_export_created_count=0,people_export_updated_count=0,people_export_skipped_count=0,people_export_complete=FALSE,updated_at=now() WHERE department_id=$1 AND updated_at=$3 AND people_importing=FALSE AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, JSON.stringify(exportRows.map(({ contactId, sourceId, hash, remoteHash, action }) => ({ contactId, sourceId, hash, remoteHash, action }))), row.updated_at]);
+        const saved = await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=now(),people_export_preview_rows=$2::jsonb,people_export_page=0,people_export_created_count=0,people_export_updated_count=0,people_export_skipped_count=0,people_export_complete=FALSE,updated_at=now() WHERE department_id=$1 AND updated_at=$3 AND people_importing=FALSE AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, JSON.stringify(exportRows.map(({ contactId, sourceId, hash, remoteHash, profileFieldsHash, action }) => ({ contactId, sourceId, hash, remoteHash, profileFieldsHash, action }))), row.updated_at]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Another Elvanto import is running or the connection changed. Try the preview again." });
-        return { complete: true, total: exportRows.length, ...counts, sample: exportRows.slice(0, 50).map(({ firstName, lastName, email, action }) => ({ firstName, lastName, email, action })) };
+        return { complete: true, total: exportRows.length, ...counts, profileFieldCount: exportRows.reduce((total, person) => total + person.profileFieldCount, 0), sample: exportRows.slice(0, 50).map(({ firstName, lastName, email, action, profileFieldCount, statusUpdates }) => ({ firstName, lastName, email, action, profileFieldCount, statusUpdates })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "People export preview failed." }); }
     });
     routes.post("/api/modules/sync/elvanto/people-export", async (request, reply) => {
@@ -1338,7 +1404,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const row = await elvantoSettings(dept);
       if (!row) return reply.code(404).send({ error: "Connect Elvanto before exporting People." });
       if (row.directions.people !== "smart_church_to_elvanto" && row.directions.people !== "bidirectional") return reply.code(400).send({ error: "Set People direction to Smart Church → Elvanto or bidirectional before exporting." });
-      const state = await pool!.query<{ preview_at: string | null; rows: Array<{ contactId: string; sourceId: string | null; hash: string; remoteHash: string | null; action: string }>; page: number; created: number; updated: number; skipped: number }>("SELECT people_export_preview_at AS preview_at,people_export_preview_rows AS rows,people_export_page AS page,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      const state = await pool!.query<{ preview_at: string | null; rows: Array<{ contactId: string; sourceId: string | null; hash: string; remoteHash: string | null; profileFieldsHash?: string; action: string }>; page: number; created: number; updated: number; skipped: number }>("SELECT people_export_preview_at AS preview_at,people_export_preview_rows AS rows,people_export_page AS page,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const saved = state.rows[0]; const previewTime = saved?.preview_at ? new Date(saved.preview_at).getTime() : 0;
       if (!saved || !previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !Array.isArray(saved.rows)) return reply.code(409).send({ error: "Run a complete People export preview first. Previews expire after one hour and after connection settings change." });
       let apiKey: string;
@@ -1348,6 +1414,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const lock = await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=TRUE,people_export_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND people_export_preview_at > now()-interval '1 hour' AND people_importing=FALSE AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, row.updated_at]);
         if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a new People export preview." });
         reserved = true;
+        const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
+        const profileFieldsHash = createHash("sha256").update(JSON.stringify(customFieldSnapshot.fields)).digest("hex");
+        if (!customFieldSnapshot.complete || recordsHaveStaleFieldMap(saved.rows, profileFieldsHash)) {
+          await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]);
+          return reply.code(409).send({ error: "Elvanto custom fields changed after preview. Run a fresh People export preview before writing." });
+        }
         let index = saved.page; let created = saved.created; let updated = saved.updated; let skipped = saved.skipped; let writes = 0; let processed = 0;
         const records = saved.rows;
         while (index < records.length && writes < 5 && processed < 100) {
@@ -1358,17 +1430,18 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             await pool!.query("UPDATE elvanto_sync_settings SET people_export_page=$2,people_export_skipped_count=$3,updated_at=now() WHERE department_id=$1", [dept, index, skipped]);
             continue;
           }
-          const current = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }>("SELECT id,first_name,last_name,email,phone,elvanto_source_id FROM contacts WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, item.contactId]);
+          const current = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null; profile_data: JsonObject }>("SELECT id,first_name,last_name,email,phone,elvanto_source_id,profile_data FROM contacts WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, item.contactId]);
           const contact = current.rows[0];
           if (!contact || elvantoPeopleExportHash(contact) !== item.hash || contact.elvanto_source_id !== item.sourceId) {
             await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]);
             return reply.code(409).send({ error: "A local contact changed after preview. The export preview was invalidated; review a fresh preview before writing to Elvanto." });
           }
+          let remotePerson: JsonObject | undefined;
           if (item.action === "update") {
-            const remoteResult = await elvantoRequest(apiKey, "people/getInfo", { id: item.sourceId });
+            const remoteResult = await elvantoRequest(apiKey, "people/getInfo", { id: item.sourceId, fields: [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)] });
             const remoteValue = remoteResult.person;
-            const remote = Array.isArray(remoteValue) ? remoteValue[0] as JsonObject | undefined : remoteValue as JsonObject | undefined;
-            if (!remote || elvantoRemotePersonHash(remote) !== item.remoteHash) {
+            remotePerson = Array.isArray(remoteValue) ? remoteValue[0] as JsonObject | undefined : remoteValue as JsonObject | undefined;
+            if (!remotePerson || elvantoRemotePersonHash(remotePerson) !== item.remoteHash) {
               await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]);
               return reply.code(409).send({ error: "The linked Elvanto contact changed after preview. The export preview was invalidated; review a fresh preview before writing." });
             }
@@ -1387,6 +1460,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (contact.email) body.email = contact.email;
             if (contact.phone) body.phone = contact.phone;
           }
+          Object.assign(body, elvantoPeopleProfileExport(contact.profile_data, remotePerson));
+          const fieldsSent = [
+            ...Object.keys(body).filter((key) => key !== "fields"),
+            ...Object.keys((body.fields as JsonObject | undefined) ?? {}).map((key) => `field:${key}`),
+          ];
           let remoteId = item.sourceId;
           writeAttempted = true;
           const result = await elvantoRequest(apiKey, item.action === "create" ? "people/create" : "people/edit", { ...(item.action === "update" ? { id: item.sourceId } : {}), ...body });
@@ -1396,6 +1474,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           try {
             await client.query("BEGIN");
             if (item.action === "create") await client.query("UPDATE contacts SET elvanto_source_id=$3,updated_at=now() WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, item.contactId, remoteId]);
+            await client.query(
+              "INSERT INTO elvanto_people_export_audit (department_id,contact_id,source_person_id,operation,fields_sent,actor_user_id) VALUES ($1,$2,$3,$4,$5::jsonb,$6)",
+              [dept, contact.id, remoteId, item.action, JSON.stringify(fieldsSent), request.authenticatedUser?.id ?? null],
+            );
             index += 1; writes += 1; processed += 1;
             if (item.action === "create") created += 1; else updated += 1;
             const complete = index >= records.length;
@@ -1415,6 +1497,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=FALSE,people_export_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
         elvantoPeopleExportRunning.delete(dept);
       }
+    });
+    routes.get("/api/modules/sync/elvanto/people-export-audit", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const result = await pool!.query<{ source_person_id: string; operation: string; fields_sent: string[]; actor_user_id: string | null; created_at: Date | string }>(
+        "SELECT source_person_id,operation,fields_sent,actor_user_id,created_at FROM elvanto_people_export_audit WHERE department_id=$1 ORDER BY created_at DESC LIMIT 25",
+        [dept],
+      );
+      return result.rows.map((row) => ({ sourcePersonId: row.source_person_id, operation: row.operation, fieldsSent: row.fields_sent, actorUserId: row.actor_user_id, createdAt: row.created_at }));
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/people-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -2510,3 +2600,4 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     routes.addHook("onClose", async () => clearInterval(timer));
   });
 }
+
