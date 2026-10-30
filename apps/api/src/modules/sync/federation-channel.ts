@@ -192,13 +192,14 @@ export class FederationChannels {
     origin.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
     origin.pathname = path;
     origin.search = parameters.toString();
+    this.outboundErrors.delete(peer.installation_id);
     const socket = new WebSocket(origin);
     socket.binaryType = "arraybuffer";
     this.outgoing.set(peer.installation_id, socket);
     socket.addEventListener("message", (event) => this.receivePeerMessage(peer.installation_id, socket, event.data));
     socket.addEventListener("close", (event) => {
       if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
-      if (event.code !== 1000) this.outboundErrors.set(peer.installation_id, `The remote WebSocket closed the channel (code ${event.code}${event.reason ? `: ${event.reason}` : ""}).`);
+      if (event.code !== 1000 && !this.outboundErrors.has(peer.installation_id)) this.outboundErrors.set(peer.installation_id, `The remote WebSocket closed the channel (code ${event.code}${event.reason ? `: ${event.reason}` : ""}).`);
       this.failPeerRequests(peer.installation_id);
     });
     socket.addEventListener("error", (event) => {
