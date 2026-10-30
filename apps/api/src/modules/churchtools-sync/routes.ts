@@ -321,6 +321,42 @@ async function fetchElvantoPagedRows(apiKey: string, endpoint: string, container
   }
   return { rows, reportedTotal, complete };
 }
+const elvantoPeopleFields = ["gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "demographics", "service_types", "locations"];
+async function fetchElvantoPeopleCustomFields(apiKey: string) {
+  const result = await fetchElvantoPagedRows(apiKey, "people/customFields/getAll", "custom_fields", "custom_field");
+  const fields = result.rows.map((field) => ({ id: idOf(field), name: firstText(field.name), type: firstText(field.type) })).filter((field) => field.id && field.name);
+  return { fields, complete: result.complete };
+}
+function mapElvantoPeopleProfile(person: JsonObject, customFields: Array<{ id: string; name: string; type: string }>): JsonObject {
+  const profile: JsonObject = {};
+  const textFields: Record<string, string[]> = {
+    preferredName: ["preferred_name", "preferredName"], middleName: ["middle_name", "middleName"],
+    categoryId: ["category_id", "categoryId"], accountStatus: ["status"], country: ["country"], timezone: ["timezone"],
+    familyId: ["family_id", "familyId"], familyRelationship: ["family_relationship", "familyRelationship"],
+    birthday: ["birthday"], anniversary: ["anniversary"], gender: ["gender"], schoolGrade: ["school_grade"],
+    maritalStatus: ["marital_status"], mailingAddress: ["mailing_address"],
+  };
+  for (const [key, sources] of Object.entries(textFields)) {
+    const value = firstText(...sources.map((source) => person[source]));
+    if (value) profile[key] = value;
+  }
+  for (const [key, source] of [["archived", "archived"], ["contact", "contact"], ["volunteer", "volunteer"]] as const) {
+    if (person[source] !== undefined && person[source] !== null) profile[key] = person[source] === true || person[source] === 1 || person[source] === "1";
+  }
+  for (const [key, source] of [["developmentChild", "development_child"], ["specialNeedsChild", "special_needs_child"]] as const) {
+    const value = firstText(person[source]);
+    if (value) profile[key] = value;
+  }
+  for (const key of ["demographics", "service_types", "locations"] as const) {
+    if (person[key] !== undefined && person[key] !== null) profile[key === "service_types" ? "serviceTypes" : key] = person[key];
+  }
+  const custom = customFields.flatMap((field) => {
+    const value = person[`custom_${field.id}`];
+    return value === undefined || value === null || value === "" ? [] : [{ id: field.id, name: field.name, type: field.type, value }];
+  });
+  if (custom.length) profile.customFields = custom;
+  return profile;
+}
 async function fetchElvantoFinancialTransactions(apiKey: string, startDate: string, endDate: string, firstPage = 1, pageLimit = 200) {
   const transactions: JsonObject[] = [];
   let reportedTotal: number | null = null;
@@ -847,13 +883,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       );
       if (!previewLock.rowCount) return reply.code(409).send({ error: "A People import is running. Wait for it to finish before creating another preview." });
       // Build a read-only plan. The import step will use the same external IDs, but no contact is modified here.
+      const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
+      const requestedPeopleFields = [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)];
       const people: JsonObject[] = [];
       const pageSize = 1000;
       const maxPages = 200;
       let total: number | null = null;
       let complete = false;
       for (let page = 1; page <= maxPages; page += 1) {
-        const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: pageSize });
+        const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: pageSize, fields: requestedPeopleFields });
         const batch = elvantoCollection(payload, "people", "person");
         people.push(...batch);
         const container = payload.people as JsonObject | undefined;
@@ -899,12 +937,13 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (email) seenEmails.add(email.toLocaleLowerCase());
         if (sample.length < 50) sample.push({ firstName, lastName, email, action });
       }
+      const previewComplete = complete && customFieldSnapshot.complete;
       const savedPreview = await pool!.query(
         "UPDATE elvanto_sync_settings SET people_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,people_preview_complete=$2,people_preview_scanned_count=$3,people_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') RETURNING department_id",
-        [dept, complete, people.length, total, row.updated_at],
+        [dept, previewComplete, people.length, total, row.updated_at],
       );
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-      return { scannedCount: people.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, emailMatchCount, ambiguousEmailCount, invalidCount, sample };
+      return { scannedCount: people.length, reportedTotal: total, complete: previewComplete, customFieldCount: customFieldSnapshot.fields.length, createCount, alreadyLinkedCount, emailMatchCount, ambiguousEmailCount, invalidCount, sample };
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/people-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -937,8 +976,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           "UPDATE elvanto_sync_settings SET people_import_page=1,people_import_total=NULL,people_import_created_count=0,people_import_updated_count=0,people_import_skipped_count=0,people_import_complete=FALSE,updated_at=now() WHERE department_id=$1",
           [dept],
         );
+        const customFieldSnapshot = await fetchElvantoPeopleCustomFields(apiKey);
+        if (!customFieldSnapshot.complete) return reply.code(409).send({ error: "Elvanto custom-field pagination was incomplete. Run a new People preview before importing." });
+        const requestedPeopleFields = [...elvantoPeopleFields, ...customFieldSnapshot.fields.map((field) => `custom_${field.id}`)];
         for (let pageBatch = 0; pageBatch < 5 && !complete; pageBatch += 1) {
-          const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: 1000 });
+          const payload = await elvantoRequest(apiKey, "people/getAll", { page, page_size: 1000, fields: requestedPeopleFields });
           const people = elvantoCollection(payload, "people", "person");
           const reportedTotal = Number((payload.people as JsonObject | undefined)?.total);
           if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
@@ -953,7 +995,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             emails.set(email, (emails.get(email) ?? 0) + 1);
           }
           const seenIds = new Set<string>();
-          const records: Array<{ source_id: string; first_name: string; last_name: string; email: string | null; phone: string | null }> = [];
+          const records: Array<{ source_id: string; first_name: string; last_name: string; email: string | null; phone: string | null; profile: JsonObject }> = [];
           let pageCreated = 0;
           let pageUpdated = 0;
           let pageSkipped = 0;
@@ -967,10 +1009,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const phone = rawPhone || null;
             if (!sourceId || seenIds.has(sourceId) || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) || (phone && phone.length > 40)) { pageSkipped += 1; continue; }
             seenIds.add(sourceId);
-            if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone }); pageUpdated += 1; continue; }
+            const profile = mapElvantoPeopleProfile(person, customFieldSnapshot.fields);
+            if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile }); pageUpdated += 1; continue; }
             if (email && (emails.get(email.toLocaleLowerCase()) ?? 0) > 0) { pageSkipped += 1; continue; }
             if (email) emails.set(email.toLocaleLowerCase(), 1);
-            records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone });
+            records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile });
             pageCreated += 1;
           }
           const nextPage = page + 1;
@@ -980,11 +1023,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             await db.query("BEGIN");
             if (records.length) {
               await db.query(
-                `INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status,source_system,source_id)
-                 SELECT gen_random_uuid(),$1,incoming.first_name,incoming.last_name,incoming.email,incoming.phone,'member','elvanto',incoming.source_id
-                   FROM jsonb_to_recordset($2::jsonb) AS incoming(source_id text,first_name text,last_name text,email text,phone text)
+                `INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status,source_system,source_id,elvanto_profile)
+                 SELECT gen_random_uuid(),$1,incoming.first_name,incoming.last_name,incoming.email,incoming.phone,'member','elvanto',incoming.source_id,incoming.profile
+                   FROM jsonb_to_recordset($2::jsonb) AS incoming(source_id text,first_name text,last_name text,email text,phone text,profile jsonb)
                  ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL
-                 DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,email=EXCLUDED.email,phone=EXCLUDED.phone,status='member',updated_at=now()
+                 DO UPDATE SET first_name=EXCLUDED.first_name,last_name=EXCLUDED.last_name,email=EXCLUDED.email,phone=EXCLUDED.phone,status='member',elvanto_profile=EXCLUDED.elvanto_profile,updated_at=now()
                  WHERE contacts.source_system='elvanto'`,
                 [dept, JSON.stringify(records)],
               );
