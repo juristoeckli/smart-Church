@@ -38,7 +38,7 @@ const crosswalkTranslations: Partial<Record<UserLanguage, Locale>> = {
     "Choose an Elvanto flow and a local workflow.": "Wähle einen Elvanto-Flow und einen lokalen Workflow aus.",
     "Workflow links saved.": "Workflow-Verknüpfungen gespeichert.",
     "Could not load People Flow links.": "People-Flow-Verknüpfungen konnten nicht geladen werden.",
-    "Could not save People Flow links.": "People-Flow-Verknüpfungen konnten nicht gespeichert werden."
+    "Could not save People Flow links.": "People-Flow-Verknüpfungen konnten nicht gespeichert werden.",
     "Loading…": "Wird geladen …",
     "Saving…": "Wird gespeichert …",
     "active": "aktiv",
@@ -70,7 +70,7 @@ const crosswalkTranslations: Partial<Record<UserLanguage, Locale>> = {
     "Choose an Elvanto flow and a local workflow.": "Choisissez un flow Elvanto et un workflow local.",
     "Workflow links saved.": "Liens des workflows enregistrés.",
     "Could not load People Flow links.": "Impossible de charger les liens des People Flows.",
-    "Could not save People Flow links.": "Impossible d’enregistrer les liens des People Flows."
+    "Could not save People Flow links.": "Impossible d’enregistrer les liens des People Flows.",
     "Loading…": "Chargement…",
     "Saving…": "Enregistrement…",
     "active": "actif",
