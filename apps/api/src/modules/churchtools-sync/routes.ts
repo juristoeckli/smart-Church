@@ -592,8 +592,8 @@ function membershipDate(...values: unknown[]) {
 function groupMembershipSnapshot(member: JsonObject): JsonObject | null {
   const sourcePersonId = personIdOf(member);
   if (!sourcePersonId) return null;
-  const role = firstText(member.groupMemberRole?.name, member.group_member_role?.name, member.groupRole?.name, member.group_role?.name, member.role?.name, member.roleName, member.role_name, member.groupRole, member.group_role, member.role, member.groupMemberRole, member.group_member_role).slice(0, 80) || "Member";
-  const rawStatus = firstText(member.groupMemberStatus?.name, member.group_member_status?.name, member.membershipStatus?.name, member.membership_status?.name, member.status?.name, member.statusName, member.status_name, member.status);
+  const role = firstText(member.groupMemberRole?.name, member.group_member_role?.name, member.groupRole?.name, member.group_role?.name, member.role?.name, member.membership?.role?.name, member.membership?.role, member.groupMembership?.role?.name, member.group_membership?.role, member.roleName, member.role_name, member.groupRole, member.group_role, member.role, member.groupMemberRole, member.group_member_role).slice(0, 80) || "Member";
+  const rawStatus = firstText(member.groupMemberStatus?.name, member.group_member_status?.name, member.membershipStatus?.name, member.membership_status?.name, member.status?.name, member.membership?.status?.name, member.membership?.status, member.groupMembership?.status?.name, member.group_membership?.status, member.statusName, member.status_name, member.groupMemberStatus, member.group_member_status, member.status);
   const statusText = rawStatus.toLocaleLowerCase();
   const status = /wait|warteliste/.test(statusText) ? "waitlist" : /pause|inactive|passiv|ruhend/.test(statusText) ? "paused" : "active";
   const joinedOn = membershipDate(member.joinedOn, member.joined_on, member.startDate, member.start_date, member.entryDate, member.entry_date, member.dateOfEntry, member.membership?.startDate, member.membership?.start_date, member.groupMembership?.startDate, member.group_membership?.start_date);
