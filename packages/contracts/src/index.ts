@@ -1,28 +1,5 @@
 export type ContactStatus = "member" | "visitor";
 
-export interface ContactProfileData {
-  preferredName?: string;
-  mobile?: string;
-  birthday?: string;
-  gender?: "Male" | "Female";
-  anniversary?: string;
-  schoolGrade?: string;
-  maritalStatus?: "Single" | "Engaged" | "Married" | "Widowed" | "Divorced" | "Separated" | "Defacto";
-  mailingAddress?: string;
-  familyId?: string;
-  familyRelationship?: "Primary Contact" | "Spouse" | "Partner" | "Child" | "Sibling" | "Grandfather" | "Grandmother" | "Other";
-  elvantoContact?: boolean;
-  elvantoVolunteer?: boolean;
-  elvantoArchived?: boolean;
-  developmentChild?: boolean;
-  specialNeedsChild?: boolean;
-  departments?: string[];
-  serviceTypes?: string[];
-  demographics?: string[];
-  locations?: string[];
-  customFields?: Array<{ id: string; label?: string; type?: string; value: string | string[] }>;
-}
-
 export interface Contact {
   id: string;
   firstName: string;
@@ -33,7 +10,6 @@ export interface Contact {
   importedFrom?: "churchtools" | "elvanto";
   elvantoProfile?: Record<string, unknown>;
   churchtoolsProfile?: Record<string, unknown>;
-  profileData?: ContactProfileData;
 }
 
 export type CreateContact = Omit<Contact, "id">;
@@ -357,4 +333,3 @@ export interface LoginCredentials {
   identifier: string;
   password: string;
 }
-
