@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerPeopleFlowsReplication } from "./replication.js";
+import { registerElvantoPeopleFlowCrosswalkRoutes } from "./crosswalk-routes.js";
 
 type FlowRow = { id: string; name: string; description: string; status: "active" | "archived"; created_at: Date | string; updated_at: Date | string; step_count: number; enrollment_count: number };
 type StepRow = { id: string; title: string; instructions: string; position: number; due_after_days: number | null; required: boolean; active: boolean };
@@ -292,4 +293,5 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return result.rows.map((row) => ({ id: row.id, actorUserId: row.actor_user_id, action: row.action, flowId: row.flow_id, enrollmentId: row.enrollment_id, stepId: row.step_id, metadata: row.metadata, createdAt: new Date(row.created_at).toISOString() }));
     });
   });
+  registerElvantoPeopleFlowCrosswalkRoutes(app, context);
 }
