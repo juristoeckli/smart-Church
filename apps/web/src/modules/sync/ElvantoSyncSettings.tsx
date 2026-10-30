@@ -35,11 +35,15 @@ type PeopleFlowsPreview = {
 type PeopleFlowsImportProgress = ImportProgress & { lastImportAt: string | null };
 type SongsPreview = { songCount: number; reportedSongCount: number; complete: boolean; createCount: number; updateCount: number; sample: Array<{ title: string; arrangements: number; action: string }> };
 type SongsImportProgress = ImportProgress & { previewComplete: boolean; previewCount: number; importedCount: number; lastImportAt: string | null };
+type FinancialPreview = { transactionCount: number; reportedTotal: number; complete: boolean; createCount: number; updateCount: number; sample: Array<{ date: string; total: string; action: string }> };
+type FinancialItem = { sourceId: string; date: string; total: string | number; importedAt: string };
+type FinancialDetail = { sourceId: string; date: string; transaction: Record<string, unknown>; importedAt: string };
+type FinancialImportProgress = ImportProgress & { previewComplete: boolean; previewCount: number; startDate: string | null; endDate: string | null };
 type ImportedSong = { sourceId: string; title: string; arrangements: number; importedAt: string };
 type SongDetail = { sourceId: string; title: string; song: Record<string, unknown>; arrangements: Array<Record<string, unknown>>; importedAt: string };
 type ImportedPeopleFlow = { sourceId: string; name: string; steps: number; members: number; importedAt: string };
 type PeopleFlowDetail = { sourceId: string; name: string; definition: { steps: Array<{ id: string; parentStepId: string | null; name: string; description: string; instructions: string; priority: string; due: Record<string, unknown>; admins: Array<{ id: string; role: string }> }> }; members: Array<{ stepId: string; stepName: string; personId: string; status: string; assignedAdminId: string; dueDate: string; completedDate: string; completedBy: string; contactId: string | null; contactName: string | null }>; memberOffset: number; memberTotal: number; importedAt: string };
-type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; songsImport: SongsImportProgress | null; songs: ImportedSong[]; songsTotal: number; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
+type Status = { configured: boolean; directions: Directions; financialEnabled: boolean; lastConnectedAt: string | null; lastSyncAt: string | null; lastSyncError: string | null; peopleImport: ImportProgress | null; peopleFlowsImport: PeopleFlowsImportProgress | null; peopleFlows: ImportedPeopleFlow[]; songsImport: SongsImportProgress | null; songs: ImportedSong[]; songsTotal: number; financialImport: FinancialImportProgress | null; groupsImport: ImportProgress | null; servicesImport: ImportProgress | null; calendarImport: (ImportProgress & { startDate: string | null; endDate: string | null }) | null };
 
 function shiftUtcYear(years: number) {
   const date = new Date();
@@ -77,6 +81,12 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [peopleFlowDetail, setPeopleFlowDetail] = useState<PeopleFlowDetail | null>(null);
   const [songsPreview, setSongsPreview] = useState<SongsPreview | null>(null);
   const [songDetail, setSongDetail] = useState<SongDetail | null>(null);
+  const [financialStartDate, setFinancialStartDate] = useState("");
+  const [financialEndDate, setFinancialEndDate] = useState("");
+  const [financialPreview, setFinancialPreview] = useState<FinancialPreview | null>(null);
+  const [financialTransactions, setFinancialTransactions] = useState<FinancialItem[]>([]);
+  const [financialTotal, setFinancialTotal] = useState(0);
+  const [financialDetail, setFinancialDetail] = useState<FinancialDetail | null>(null);
 
   async function load() {
     try {
@@ -203,6 +213,52 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       await load();
       setFeedback(result.servicesImport.complete ? "Elvanto Services import is complete." : "Service batch complete. Continue the import to resume.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import Elvanto services."); }
+    finally { setBusy(false); }
+  }
+
+  async function previewFinancial() {
+    if (!financialStartDate || !financialEndDate) return;
+    setBusy(true); setFeedback(""); setError(""); setFinancialPreview(null);
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/financial-preview", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ startDate: financialStartDate, endDate: financialEndDate }) });
+      const result = await response.json() as FinancialPreview & { error?: string };
+      if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto financial records.");
+      await load(); setFinancialPreview(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto financial records."); }
+    finally { setBusy(false); }
+  }
+
+  async function importFinancial() {
+    if (!financialPreview?.complete || financialPreview.transactionCount <= 0) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/financial-import", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, ...(status?.financialImport?.complete ? { body: JSON.stringify({ restart: true }) } : {}) });
+      const result = await response.json() as { financialImport?: ImportProgress; error?: string };
+      if (!response.ok || !result.financialImport) throw new Error(result.error ?? "Could not import Elvanto financial records.");
+      await load(); await loadFinancialTransactions(); setFeedback(result.financialImport.complete ? "Elvanto financial import is complete." : "Financial batch complete. Continue the import to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import Elvanto financial records."); }
+    finally { setBusy(false); }
+  }
+
+  async function loadFinancialTransactions(offset = 0, append = false) {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch(`/api/modules/sync/elvanto/financial?offset=${offset}&limit=50`, { headers: { "x-department-id": departmentId } });
+      const result = await response.json() as { transactions?: FinancialItem[]; total?: number; error?: string };
+      if (!response.ok || !Array.isArray(result.transactions)) throw new Error(result.error ?? "Could not load imported giving records.");
+      setFinancialTransactions((current) => append ? [...current, ...result.transactions!] : result.transactions!); setFinancialTotal(result.total ?? 0);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load imported giving records."); }
+    finally { setBusy(false); }
+  }
+
+  async function viewFinancialTransaction(sourceId: string) {
+    setBusy(true); setError(""); setFinancialDetail(null);
+    try {
+      const response = await fetch(`/api/modules/sync/elvanto/financial/${encodeURIComponent(sourceId)}`, { headers: { "x-department-id": departmentId } });
+      const result = await response.json() as FinancialDetail & { error?: string };
+      if (!response.ok || !result.transaction) throw new Error(result.error ?? "Could not load giving record.");
+      setFinancialDetail(result);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load giving record."); }
     finally { setBusy(false); }
   }
 
@@ -341,6 +397,12 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {status?.configured && directions.groups !== "off" && directions.groups !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewGroups()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Groups import"}</button><span className="sync-help">Preview shows up to 50 groups. Existing Elvanto groups will refresh; only memberships for imported groups are replaced.</span></div>}
     {status?.configured && directions.services !== "off" && directions.services !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewServices()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Services import"}</button><span className="sync-help">Previews Elvanto services, service times, plans, and volunteer assignments. Same-title events on the same date are skipped for manual review.</span></div>}
     {status?.configured && directions.calendar !== "off" && directions.calendar !== "smart_church_to_elvanto" && <div className="sync-connection-form"><div className="form-row"><label>Calendar start date<input type="date" value={calendarStartDate} max={calendarEndDate} onChange={(event) => { setCalendarStartDate(event.target.value); setCalendarPreview(null); }} /></label><label>Calendar end date<input type="date" value={calendarEndDate} min={calendarStartDate} onChange={(event) => { setCalendarEndDate(event.target.value); setCalendarPreview(null); }} /></label></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewCalendar()} disabled={busy || !calendarStartDate || !calendarEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Calendar import"}</button><span className="sync-help">Choose the date range to import. Elvanto calendar timestamps are returned in UTC.</span></div></div>}
+    {status?.configured && status.financialEnabled && directions.financial !== "off" && directions.financial !== "smart_church_to_elvanto" && <div className="sync-connection-form"><strong>Financial and giving records</strong><small className="sync-help">Financial data is limited to authorized site administrators. Select the full date range you need; donor and payment details are encrypted in storage.</small><div className="form-row"><label>Giving start date<input type="date" value={financialStartDate} max={financialEndDate || undefined} onChange={(event) => { setFinancialStartDate(event.target.value); setFinancialPreview(null); }} /></label><label>Giving end date<input type="date" value={financialEndDate} min={financialStartDate || undefined} onChange={(event) => { setFinancialEndDate(event.target.value); setFinancialPreview(null); }} /></label></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewFinancial()} disabled={busy || !financialStartDate || !financialEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview giving import"}</button><span className="sync-help">Reads transaction dates and totals for review; no records are written.</span></div></div>}
+    {status?.configured && status.financialImport && <div className="sync-feedback" aria-live="polite"><strong>Giving import progress</strong><span>{status.financialImport.complete ? "Complete" : <>Next batch: {status.financialImport.page}</>}{status.financialImport.total !== null && <> · {status.financialImport.total} transactions</>} · {status.financialImport.created} imported · {status.financialImport.updated} refreshed · {status.financialImport.skipped} skipped {status.financialImport.startDate && status.financialImport.endDate ? `· ${status.financialImport.startDate} – ${status.financialImport.endDate}` : ""}</span></div>}
+    {financialPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Giving import preview</strong><span>{financialPreview.transactionCount} transactions scanned of {financialPreview.reportedTotal} reported by Elvanto{!financialPreview.complete && <em> — preview is incomplete</em>}</span></div><div className="sync-feedback"><span>{financialPreview.createCount} new</span> · <span>{financialPreview.updateCount} will refresh</span></div>{financialPreview.sample.slice(0, 20).map((item, index) => <div className="sync-feedback" key={`${item.date}-${index}`}><strong>{item.date}</strong><span>{item.total} · {item.action === "update" ? "Refresh" : "New"}</span></div>)}<small className="sync-help">Donor names, contact details, and payment information are encrypted at rest and visible only to site administrators when financial access is enabled.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importFinancial()} disabled={busy || !financialPreview.complete || financialPreview.transactionCount === 0}><Check size={15} />{busy ? "Importing…" : status?.financialImport?.complete ? "Refresh giving records" : status?.financialImport ? "Continue giving import" : "Import giving records"}</button></div></div>}
+    {status?.configured && status.financialEnabled && status.financialImport && <button className="button button-secondary" type="button" onClick={() => void loadFinancialTransactions()} disabled={busy}>Browse imported giving records</button>}
+    {status?.configured && status.financialEnabled && financialTransactions.length > 0 && <div className="sync-connection-form"><strong>Imported giving records ({financialTransactions.length} of {financialTotal})</strong>{financialTransactions.map((item) => <div className="sync-feedback" key={item.sourceId}><strong>{item.date}</strong><span>{String(item.total)} <button className="button button-secondary" type="button" onClick={() => void viewFinancialTransaction(item.sourceId)} disabled={busy}>View</button></span></div>)}{financialTransactions.length < financialTotal && <button className="button button-secondary" type="button" onClick={() => void loadFinancialTransactions(financialTransactions.length, true)} disabled={busy}>Load more giving records</button>}</div>}
+    {financialDetail && <div className="sync-connection-form" aria-live="polite"><h3>Giving record · {financialDetail.date}</h3><small className="sync-help">Imported {new Date(financialDetail.importedAt).toLocaleString()}</small><pre className="sync-song-json">{JSON.stringify(financialDetail.transaction, null, 2)}</pre></div>}
     {status?.configured && directions.songs !== "off" && directions.songs !== "smart_church_to_elvanto" && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewSongs()} disabled={busy}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview Songs import"}</button><span className="sync-help">Reads songs, arrangements, keys, lyrics, and chord charts. No records are written.</span></div>}
     {status?.configured && status.songsImport && <div className="sync-feedback" aria-live="polite"><strong>Songs import progress</strong><span>{status.songsImport.complete ? "Complete" : <>Next song: {status.songsImport.page}</>}{status.songsImport.total !== null && <> · {status.songsImport.total} songs</>} · {status.songsImport.created} created · {status.songsImport.updated} refreshed</span></div>}
     {status?.configured && status.songs?.length > 0 && <div className="sync-connection-form"><strong>Imported Songs</strong>{status.songs.map((song) => <div className="sync-feedback" key={song.sourceId}><strong>{song.title}</strong><span>{song.arrangements} arrangements <button className="button button-secondary" type="button" onClick={() => void viewSong(song.sourceId)} disabled={busy}>View</button></span></div>)}{status.songs.length < status.songsTotal && <button className="button button-secondary" type="button" onClick={() => void loadMoreSongs()} disabled={busy}>Load more songs ({status.songs.length} of {status.songsTotal})</button>}</div>}
