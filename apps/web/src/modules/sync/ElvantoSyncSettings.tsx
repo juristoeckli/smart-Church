@@ -188,7 +188,10 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     try {
       const response = await fetch("/api/modules/sync/elvanto/people-export", { method: "POST", headers: { "x-department-id": departmentId } });
       const result = await response.json() as { peopleExport?: ImportProgress; error?: string };
-      if (!response.ok || !result.peopleExport) throw new Error(result.error ?? "Could not export People to Elvanto.");
+      if (!response.ok || !result.peopleExport) {
+        await load(); setPeopleExportPreview(null);
+        throw new Error(result.error ?? "Could not export People to Elvanto.");
+      }
       await load(); setFeedback(result.peopleExport.complete ? "People export to Elvanto is complete." : "People export batch complete. Continue to resume.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not export People to Elvanto."); }
     finally { setBusy(false); }

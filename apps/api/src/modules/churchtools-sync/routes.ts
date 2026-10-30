@@ -92,13 +92,34 @@ async function testElvantoConnection(apiKey: string) {
   return true;
 }
 async function elvantoRequest(apiKey: string, endpoint: string, body: JsonObject = {}) {
-  const response = await fetch(`https://api.elvanto.com/v1/${endpoint}.json`, {
-    method: "POST",
-    headers: { Authorization: `Basic ${Buffer.from(`${apiKey}:x`).toString("base64")}`, Accept: "application/json", "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
-    redirect: "error",
-  });
+  const safeToRetry = !/\/(create|edit|remove)$/i.test(endpoint);
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(`https://api.elvanto.com/v1/${endpoint}.json`, {
+        method: "POST",
+        headers: { Authorization: `Basic ${Buffer.from(`${apiKey}:x`).toString("base64")}`, Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20_000),
+        redirect: "error",
+      });
+    } catch (error) {
+      const retryable = error instanceof TypeError || error instanceof Error && error.name === "TimeoutError";
+      if (!safeToRetry || !retryable || attempt === 2) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (2 ** attempt)));
+      continue;
+    }
+    if (safeToRetry && (response.status === 429 || response.status >= 500) && attempt < 2) {
+      const header = response.headers.get("retry-after");
+      const seconds = header ? Number(header) : NaN;
+      const dateDelay = header && !Number.isFinite(seconds) ? Date.parse(header) - Date.now() : NaN;
+      const delay = Number.isFinite(seconds) ? seconds * 1000 : Number.isFinite(dateDelay) ? dateDelay : 250 * (2 ** attempt);
+      await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(delay, 10_000))));
+      continue;
+    }
+    break;
+  }
+  if (!response) throw new Error("Elvanto did not return a response. Try again later.");
   const payload = await response.json() as JsonObject;
   const nestedError = payload.error && typeof payload.error === "object" ? payload.error as JsonObject : {};
   const apiMessage = [payload.message, typeof payload.error === "string" ? payload.error : "", nestedError.message, nestedError.description].filter((value): value is string => typeof value === "string").join(" ");
@@ -1012,7 +1033,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (!saved || !previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !Array.isArray(saved.rows)) return reply.code(409).send({ error: "Run a complete People export preview first. Previews expire after one hour and after connection settings change." });
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
-      elvantoPeopleExportRunning.add(dept); let reserved = false;
+      elvantoPeopleExportRunning.add(dept); let reserved = false; let writeAttempted = false;
       try {
         const lock = await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=TRUE,people_export_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND people_export_preview_at > now()-interval '1 hour' AND people_importing=FALSE AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, row.updated_at]);
         if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a new People export preview." });
@@ -1057,6 +1078,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (contact.phone) body.phone = contact.phone;
           }
           let remoteId = item.sourceId;
+          writeAttempted = true;
           const result = await elvantoRequest(apiKey, item.action === "create" ? "people/create" : "people/edit", { ...(item.action === "update" ? { id: item.sourceId } : {}), ...body });
           if (item.action === "create") remoteId = idOf((result.person ?? {}) as JsonObject);
           if (!remoteId) throw new Error("Elvanto accepted the request without returning a stable person ID. Run a new preview and review email matches before retrying.");
@@ -1069,12 +1091,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const complete = index >= records.length;
             await client.query("UPDATE elvanto_sync_settings SET people_export_page=$2,people_export_created_count=$3,people_export_updated_count=$4,people_export_skipped_count=$5,people_export_complete=$6,last_sync_at=CASE WHEN $6 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, index, created, updated, skipped, complete]);
             await client.query("COMMIT");
+            writeAttempted = false;
           } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
         }
         const complete = index >= records.length;
         await pool!.query("UPDATE elvanto_sync_settings SET people_export_complete=$2,updated_at=now() WHERE department_id=$1", [dept, complete]);
         return { peopleExport: { page: index, total: records.length, created, updated, skipped, complete } };
       } catch (error) {
+        if (writeAttempted) await pool!.query("UPDATE elvanto_sync_settings SET people_export_preview_at=NULL,people_export_complete=FALSE,people_export_preview_rows='[]'::jsonb,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
         await pool!.query("UPDATE elvanto_sync_settings SET last_sync_error=$2 WHERE department_id=$1", [dept, (error instanceof Error ? error.message : "People export failed.").slice(0, 1000)]).catch(() => {});
         return reply.code(400).send({ error: error instanceof Error ? error.message : "People export failed." });
       } finally {
