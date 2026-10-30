@@ -48,7 +48,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
     <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
     {loading ? <p className="public-registration-message">{publicText(language, "eventLoading")}</p> : error && !event ? <><h1>{publicText(language, "eventUnavailable")}</h1><p className="public-registration-message">{error}</p></> : event && <>
       <h1>{event.title}</h1>
-      <div className="public-registration-details"><span><CalendarDays size={17} />{date}</span><span><Clock3 size={17} />{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</span><span><MapPin size={17} />{event.location}</span></div>
+      <div className="public-registration-details"><span><CalendarDays size={17} />{date}</span><span><Clock3 size={17} />{event.isAllDay ? publicText(language, "allDay") : `${event.startTime}${event.endTime ? ` – ${event.endTime}` : ""}`}</span><span><MapPin size={17} />{event.location}</span></div>
       {event.description && <p className="public-registration-description">{event.description}</p>}
       {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "registered" ? "registered" : "waitlisted")}</h2><p>{publicText(language, submitted === "registered" ? "registeredHelp" : "waitlistedHelp")}</p></div></div>
         : !event.registrationOpen ? <p className="public-registration-message">{publicText(language, "registrationClosed")}</p>
