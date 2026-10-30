@@ -790,7 +790,7 @@ app.put<{ Params: { id: string }; Body: WorshipSongInput }>("/api/worship/songs/
   } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not save this song." }); }
 });
 
-app.delete<{ Params: { id: string } }>("/api/worship/songs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
+app.delete<{ Params: { id: string } }>("/api/worship/songs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
@@ -828,7 +828,7 @@ app.put<{ Params: { id: string }; Body: ServicePlanTemplateInput }>("/api/servic
   return result ?? reply.code(404).send({ error: "Service-plan template not found." });
 });
 
-app.delete<{ Params: { id: string } }>("/api/service-plan-templates/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
+app.delete<{ Params: { id: string } }>("/api/service-plan-templates/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
