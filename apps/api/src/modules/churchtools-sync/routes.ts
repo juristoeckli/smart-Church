@@ -2896,16 +2896,18 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const uniqueIds = [...new Set(snapshot.songIds)];
         const existing = await pool!.query<{ source_id: string }>("SELECT source_id FROM elvanto_songs_import WHERE department_id=$1", [dept]);
         const linked = new Set(existing.rows.map((song) => song.source_id));
+        const complete = snapshot.complete && uniqueIds.length === snapshot.songCount;
+        const remoteIds = new Set(uniqueIds);
+        const missingRemoteCount = complete ? existing.rows.filter((song) => !remoteIds.has(song.source_id)).length : 0;
         const createCount = uniqueIds.filter((id) => !linked.has(id)).length;
         const updateCount = uniqueIds.length - createCount;
-        const complete = snapshot.complete && uniqueIds.length === snapshot.songCount;
         const sample = snapshot.songs.map((song) => ({ title: song.title, arrangements: 0, action: linked.has(song.sourceId) ? "update" : "create" }));
         const saved = await pool!.query(`UPDATE elvanto_sync_settings SET songs_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,songs_preview_complete=$2,songs_preview_count=$3,songs_preview_ids=$4::jsonb,songs_preview_fingerprint=$5,
           songs_import_page=1,songs_import_total=NULL,songs_import_created_count=0,songs_import_updated_count=0,songs_import_skipped_count=0,songs_import_complete=FALSE
           WHERE department_id=$1 AND songs_importing=TRUE RETURNING department_id`, [dept, complete, uniqueIds.length, JSON.stringify(uniqueIds), snapshot.fingerprint]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Run a new preview." });
         await pool!.query("UPDATE elvanto_sync_settings SET songs_importing=FALSE,songs_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]);
-        return { songCount: uniqueIds.length, reportedSongCount: snapshot.reportedSongs, complete, createCount, updateCount, sample };
+        return { songCount: uniqueIds.length, reportedSongCount: snapshot.reportedSongs, complete, createCount, updateCount, missingRemoteCount, sample };
       } catch (error) {
         await pool!.query("UPDATE elvanto_sync_settings SET songs_preview_at=NULL,songs_preview_complete=FALSE,songs_preview_ids='[]'::jsonb,songs_preview_fingerprint=NULL,songs_importing=FALSE,songs_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
         return reply.code(400).send({ error: error instanceof Error ? error.message : "Songs preview failed." });
