@@ -64,8 +64,8 @@ export type EmailMessage = EmailContent & (
 );
 
 export interface EmailConnector {
-  isConfigured: () => Promise<boolean>;
-  send: (message: EmailMessage) => Promise<{ messageId: string }>;
+  isConfigured: (departmentId?: string) => Promise<boolean>;
+  send: (message: EmailMessage, departmentId?: string) => Promise<{ messageId: string }>;
 }
 
 export interface ModuleLoaderContext extends Omit<ModuleServerContext, "workers" | "activation" | "replication"> {

@@ -103,7 +103,8 @@ async function expireOldSignupRequests(pool: NonNullable<ModuleServerContext["po
      UPDATE self_signup_requests request SET status='pending_expiry_notification',next_expiry_notification_at=now(),updated_at=now()
        FROM stale WHERE request.id=stale.id`,
   );
-  if (!await context.email.isConfigured()) return;
+  const emailDepartmentId = context.getDefaultDepartmentId();
+  if (!await context.email.isConfigured(emailDepartmentId)) return;
 
   for (let sent = 0; sent < 20; sent += 1) {
     const client = await pool.connect();
@@ -126,7 +127,7 @@ async function expireOldSignupRequests(pool: NonNullable<ModuleServerContext["po
     if (!candidate) continue;
 
     try {
-      await context.email.send({ recipientEmail: candidate.email, ...expiredReviewEmail(candidate.language) });
+      await context.email.send({ recipientEmail: candidate.email, ...expiredReviewEmail(candidate.language) }, emailDepartmentId);
       await pool.query("DELETE FROM self_signup_requests WHERE id=$1 AND status='pending_expiry_notification'", [candidate.id]);
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 500) : "Could not send the expiry notification email.";
@@ -141,16 +142,8 @@ async function expireOldSignupRequests(pool: NonNullable<ModuleServerContext["po
 }
 
 export async function emailModuleInstallationWritable(context: ModuleServerContext) {
-  const { pool, isDatabaseReady } = context;
-  if (!pool || !isDatabaseReady()) return false;
   try {
-    const redundancy = await pool.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
-    if (!redundancy.rows[0]?.table_name) return true;
-    const sites = await pool.query<{ role: string }>(`SELECT COALESCE(redundancy.role,'primary') AS role
-      FROM departments department
-      JOIN installations installation ON installation.id=department.installation_id AND installation.is_current=TRUE
-      LEFT JOIN sync_site_redundancy redundancy ON redundancy.department_id=department.id`);
-    return sites.rows.length > 0 && sites.rows.every((site) => site.role === "primary");
+    return await context.isDepartmentWritable(context.getDefaultDepartmentId());
   } catch {
     return false;
   }
@@ -167,7 +160,8 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
   };
 
   async function deliverDueConfirmations() {
-    if (!pool || !isDatabaseReady() || !await context.email.isConfigured()) return;
+    const emailDepartmentId = context.getDefaultDepartmentId();
+    if (!pool || !isDatabaseReady() || !await context.email.isConfigured(emailDepartmentId)) return;
     for (let sent = 0; sent < 20; sent += 1) {
       const client = await pool.connect();
       try {
@@ -192,7 +186,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
           confirmationUrl.searchParams.set("token", confirmationToken);
           confirmationUrl.searchParams.set("lang", request.language);
           await client.query("UPDATE self_signup_requests SET confirmation_token_hash=$2,confirmation_expires_at=now()+interval '24 hours' WHERE id=$1", [request.id, confirmationHash]);
-          await context.email.send({ recipientEmail: request.email, ...confirmationSignupEmail(request.language, confirmationUrl.toString()) });
+          await context.email.send({ recipientEmail: request.email, ...confirmationSignupEmail(request.language, confirmationUrl.toString()) }, emailDepartmentId);
           await client.query("UPDATE self_signup_requests SET confirmation_sent_at=now(),confirmation_attempts=confirmation_attempts+1,next_confirmation_attempt_at=NULL,last_error=NULL,updated_at=now() WHERE id=$1", [request.id]);
         } catch (error) {
           const attempts = request.confirmation_attempts + 1;
@@ -225,7 +219,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
     if (!context.validateMutation(request, reply)) return reply;
     if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up settings are read-only while a location is in standby or fenced state." });
     if (!pool || !isDatabaseReady()) return reply.code(503).send({ error: "The settings database is unavailable." });
-    if (request.body.enabled && !await context.email.isConfigured()) return reply.code(400).send({ error: "Configure and enable email delivery before enabling self sign-up." });
+    if (request.body.enabled && !await context.email.isConfigured(context.getDefaultDepartmentId())) return reply.code(400).send({ error: "Configure and enable email delivery before enabling self sign-up." });
     const installation = await pool.query<{ id: string }>("SELECT id FROM installations WHERE is_current=true");
     if (!installation.rows[0]) return reply.code(503).send({ error: "The installation settings are unavailable." });
     await pool.query(
@@ -242,7 +236,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
     if (!pool || !isDatabaseReady()) return reply.code(503).send({ error: "Sign-up is temporarily unavailable." });
     if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up is temporarily unavailable while a location is in standby or fenced state." });
     const config = await signupConfig(context);
-    if (!config?.enabled || !await context.email.isConfigured()) return reply.code(404).send({ error: "Self sign-up is currently unavailable." });
+    if (!config?.enabled || !await context.email.isConfigured(context.getDefaultDepartmentId())) return reply.code(404).send({ error: "Self sign-up is currently unavailable." });
     const email = request.body.email.trim().toLowerCase();
     const language = request.body.language ?? "en";
     const genericMessages: Record<SignupLanguage, string> = {
@@ -284,7 +278,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
       const url = new URL("/signup", publicOrigin(request));
       url.searchParams.set("token", rawToken);
       url.searchParams.set("lang", language);
-      await context.email.send({ recipientEmail: email, ...initialSignupEmail(language, url.toString()) });
+      await context.email.send({ recipientEmail: email, ...initialSignupEmail(language, url.toString()) }, context.getDefaultDepartmentId());
     } catch (error) {
       request.log.warn({ err: error }, "Could not send a self sign-up start link.");
       await pool.query("UPDATE self_signup_requests SET status='expired',initial_token_hash=NULL,last_error=$2,updated_at=now() WHERE id=$1 AND status='awaiting_profile'", [requestId, error instanceof Error ? error.message.slice(0, 500) : "Email delivery failed."]);
@@ -363,19 +357,22 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
     let userId: string;
     let temporaryPassword = "";
     if (request.body.action === "retry_login") {
-      const existing = await pool.query<{ account_user_id: string; email: string; language: SignupLanguage }>("SELECT account_user_id,email,language FROM self_signup_requests WHERE id=$1 AND status='approved_delivery_failed'", [id]);
+      const existing = await pool.query<{ account_user_id: string; email: string; language: SignupLanguage; department_id: string | null }>(`SELECT request.account_user_id,request.email,request.language,membership.department_id
+        FROM self_signup_requests request LEFT JOIN department_memberships membership ON membership.user_id=request.account_user_id
+        WHERE request.id=$1 AND request.status='approved_delivery_failed' ORDER BY membership.department_id LIMIT 1`, [id]);
       if (!existing.rows[0]?.account_user_id) return reply.code(409).send({ error: "This request is not awaiting a login email retry." });
       userId = existing.rows[0].account_user_id;
       temporaryPassword = randomBytes(24).toString("base64url");
       await pool.query("UPDATE app_users SET password_hash=$2,must_change_password=true WHERE id=$1", [userId, hashPassword(temporaryPassword)]);
       const account = await pool.query<{ username: string }>("SELECT username FROM app_users WHERE id=$1", [userId]);
-      try { await sendLoginDetails(context, request, existing.rows[0].email, account.rows[0].username, temporaryPassword, existing.rows[0].language); }
+      try { await sendLoginDetails(context, request, existing.rows[0].email, account.rows[0].username, temporaryPassword, existing.rows[0].language, existing.rows[0].department_id ?? undefined); }
       catch (error) { return reply.code(502).send({ error: error instanceof Error ? `Login email could not be sent: ${error.message}` : "Login email could not be sent." }); }
       await pool.query("UPDATE self_signup_requests SET status='approved',last_error=NULL,updated_at=now() WHERE id=$1", [id]);
       return { approved: true, resent: true };
     }
     const body = request.body;
     if (!body.username || !usernamePattern.test(body.username) || !body.firstName?.trim() || !body.lastName?.trim() || !body.departmentId || !body.role) return reply.code(400).send({ error: "Enter the applicant details, username, site, and access role." });
+    if (!await context.isDepartmentWritable(body.departmentId)) return reply.code(423).send({ error: "This location is read-only while it is in redundancy standby or fenced state." });
     const permissions = body.permissions ?? [];
     if (permissions.some((permission) => !validPermissions.has(permission))) return reply.code(400).send({ error: "One or more location permissions are invalid." });
     const client = await pool.connect();
@@ -389,6 +386,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
       signupLanguage = signup.rows[0].language;
       const department = await client.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id=$1", [body.departmentId]);
       if (!department.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an existing site." }); }
+      if (!await context.lockDepartmentForWrite(client, body.departmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This location became read-only while it was in redundancy standby or fenced state." }); }
       const permittedModuleIds = new Set(department.rows[0].enabled_modules ?? []);
       if (Object.keys(body.modulePermissions ?? {}).some((moduleId) => !permittedModuleIds.has(moduleId))) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Remove rights for modules that are not enabled at this site." }); }
       const duplicate = await client.query("SELECT 1 FROM app_users WHERE lower(username)=lower($1) OR lower(email)=lower($2)", [body.username, signupEmail]);
@@ -413,7 +411,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
       if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "That username or email address is already in use." });
       throw error;
     } finally { client.release(); }
-    try { await sendLoginDetails(context, request, signupEmail, body.username!.trim().toLowerCase(), temporaryPassword, signupLanguage); }
+    try { await sendLoginDetails(context, request, signupEmail, body.username!.trim().toLowerCase(), temporaryPassword, signupLanguage, body.departmentId); }
     catch (error) { return reply.code(502).send({ error: error instanceof Error ? `Account was created, but the login email could not be sent. Retry the email from the review list. ${error.message}` : "Account was created, but the login email could not be sent. Retry the email from the review list." }); }
     await pool.query("UPDATE self_signup_requests SET status='approved',last_error=NULL,updated_at=now() WHERE id=$1", [id]);
     return { approved: true };
@@ -427,9 +425,9 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
   app.addHook("onClose", async () => { if (confirmationTimer) clearInterval(confirmationTimer); });
 }
 
-async function sendLoginDetails(context: ModuleServerContext, request: FastifyRequest, email: string, username: string, temporaryPassword: string, language: SignupLanguage) {
+async function sendLoginDetails(context: ModuleServerContext, request: FastifyRequest, email: string, username: string, temporaryPassword: string, language: SignupLanguage, departmentId = context.getDefaultDepartmentId()) {
   const login = new URL("/", publicOrigin(request));
   login.searchParams.set("lang", language);
   const loginUrl = login.toString();
-  await context.email.send({ recipientEmail: email, ...loginDetailsEmail(language, loginUrl, username, temporaryPassword) });
+  await context.email.send({ recipientEmail: email, ...loginDetailsEmail(language, loginUrl, username, temporaryPassword) }, departmentId);
 }

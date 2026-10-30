@@ -18,7 +18,7 @@ const emptySettings: Draft = {
   passwordConfigured: false, smtpPassword: "", clearPassword: false,
 };
 
-export function ServerEmailSettings({ refreshCsrfToken }: { refreshCsrfToken: () => Promise<string> }) {
+export function ServerEmailSettings({ refreshCsrfToken, departmentId, departmentName }: { refreshCsrfToken: () => Promise<string>; departmentId: string; departmentName: string }) {
   const [draft, setDraft] = useState<Draft>(emptySettings);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -26,7 +26,7 @@ export function ServerEmailSettings({ refreshCsrfToken }: { refreshCsrfToken: ()
 
   useEffect(() => {
     let active = true;
-    void fetch("/api/modules/email-worker/settings", { cache: "no-store" }).then(async (response) => {
+    void fetch("/api/modules/email-worker/settings", { headers: { "x-department-id": departmentId }, cache: "no-store" }).then(async (response) => {
       const result = await response.json() as Partial<EmailSettings> & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not load email settings.");
       if (!active) return;
@@ -35,7 +35,7 @@ export function ServerEmailSettings({ refreshCsrfToken }: { refreshCsrfToken: ()
       if (active) setFeedback({ message: error instanceof Error ? error.message : "Could not load email settings.", error: true });
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, []);
+  }, [departmentId]);
 
   function update<K extends keyof Draft>(key: K, value: Draft[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -51,7 +51,7 @@ export function ServerEmailSettings({ refreshCsrfToken }: { refreshCsrfToken: ()
       const { passwordConfigured: _passwordConfigured, ...payload } = draft;
       const response = await fetch("/api/modules/email-worker/settings", {
         method: "PUT",
-        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken, "x-department-id": departmentId },
         body: JSON.stringify(payload),
       });
       const result = await response.json() as Partial<EmailSettings> & { error?: string };
@@ -66,7 +66,7 @@ export function ServerEmailSettings({ refreshCsrfToken }: { refreshCsrfToken: ()
   if (loading) return <p className="server-settings-empty">Loading email server settings…</p>;
 
   return <form className="server-email-settings" onSubmit={(event) => void save(event)}>
-    <div className="server-admin-panel-heading"><h3>Email delivery</h3><p>Configure the shared email service used by Smart-Church modules and notifications.</p></div>
+    <div className="server-admin-panel-heading"><h3>Email delivery · {departmentName}</h3><p>Configure email delivery used by this site's notifications. Self sign-up continues to use the server's default site.</p></div>
     <label className="global-admin-option"><input type="checkbox" checked={draft.enabled} onChange={(event) => update("enabled", event.target.checked)} /><span><strong>{draft.enabled ? "Email delivery enabled" : "Email delivery disabled"}</strong><small>When enabled and configured, applications can send email through this server.</small></span></label>
     <label>Delivery mode<select value={draft.mode} onChange={(event) => update("mode", event.target.value as Draft["mode"])}><option value="direct">Direct delivery</option><option value="smtp">SMTP through a server</option></select></label>
     {draft.mode === "direct" ? <p className="server-email-help">Smart-Church looks up the recipient domain’s mail server and delivers directly. The host must allow outbound SMTP on port 25. Configure SPF and DKIM for reliable delivery.</p> : <>

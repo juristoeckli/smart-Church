@@ -18,7 +18,7 @@ type NotificationRow = {
   read_at: Date | string | null;
 };
 
-type PendingEmail = { notification_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
+type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
 type ResendWebhookPayload = { type?: string; data?: { email_id?: string; to?: string[]; [key: string]: unknown } };
 type StoredResendEvent = { provider_event_id: string; event_type: string; provider_email_id: string };
 type StoredWebhookEvent = { provider_event_id: string; event_type: string; provider_email_id: string; received_at: Date | string; processed_at: Date | string | null };
@@ -98,7 +98,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   EXISTS(SELECT 1 FROM module_notification_preferences WHERE department_id=$1 AND email_notifications_enabled) email_enabled`, [departmentId]);
         const row = result.rows[0];
         const blockers: string[] = [];
-        const ready = !row.emailEnabled || await context.email.isConfigured();
+        const ready = !row.emailEnabled || await context.email.isConfigured(departmentId);
         if (!ready) blockers.push("Email notifications are enabled for this site but the email connector is not configured on this server.");
         return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.deliveries) + Number(row.webhookEvents) };
       } catch {
@@ -260,15 +260,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   async function deliverPendingEmails() {
-    if (!pool || !isDatabaseReady() || !await context.email.isConfigured()) return;
+    if (!pool || !isDatabaseReady()) return;
     const writableIds = await writableDepartmentIds();
     if (!writableIds.length) return;
+    const configuredIds: string[] = [];
+    for (const departmentId of writableIds) if (await context.email.isConfigured(departmentId)) configuredIds.push(departmentId);
+    if (!configuredIds.length) return;
     for (let sent = 0; sent < 20; sent += 1) {
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         const result = await client.query<PendingEmail>(
-          `SELECT delivery.notification_id,notification.recipient_user_id,delivery.recipient_email,account.email AS current_email,account.language AS recipient_language,
+          `SELECT delivery.notification_id,notification.department_id,notification.recipient_user_id,delivery.recipient_email,account.email AS current_email,account.language AS recipient_language,
                   COALESCE(preference.email_notifications_enabled,false) AS email_enabled,
                   (suppressed.email IS NOT NULL) AS email_suppressed,
                   notification.title,notification.body,delivery.attempt_count
@@ -279,7 +282,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
              LEFT JOIN module_notification_email_suppressions suppressed ON suppressed.email=lower(trim(account.email))
             WHERE notification.department_id = ANY($1::uuid[]) AND delivery.status IN ('pending','failed') AND delivery.attempt_count < 8 AND delivery.next_attempt_at <= now()
             ORDER BY delivery.created_at
-            LIMIT 1 FOR UPDATE OF delivery SKIP LOCKED`, [writableIds],
+            LIMIT 1 FOR UPDATE OF delivery SKIP LOCKED`, [configuredIds],
         );
         if (!result.rowCount) { await client.query("COMMIT"); break; }
         const delivery = result.rows[0];
@@ -294,7 +297,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           const sent = await context.email.send({
             recipientUserId: delivery.recipient_user_id,
             ...emailContent,
-          });
+          }, delivery.department_id);
           await client.query("UPDATE module_notification_email_deliveries SET recipient_email=$2,provider_email_id=$3,status='sent',attempt_count=$4,sent_at=now(),last_error=NULL,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.current_email, sent.messageId, attempts]);
         } catch (error) {
           const message = error instanceof Error ? error.message.slice(0, 500) : "Email delivery failed.";
@@ -570,7 +573,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         followUpsEnabled: preferences.rows[0]?.follow_ups_enabled ?? true,
         emailEnabled: preferences.rows[0]?.email_notifications_enabled ?? false,
         emailAddress: account.rows[0]?.email ?? null,
-        emailDeliveryConfigured: await context.email.isConfigured(),
+        emailDeliveryConfigured: await context.email.isConfigured(departmentId),
         emailSuppressed: Boolean(suppression.rowCount),
         canSend: request.activeDepartmentRole === "site_admin",
       };
@@ -609,7 +612,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      if (request.body.emailEnabled && !await context.email.isConfigured()) {
+      if (request.body.emailEnabled && !await context.email.isConfigured(departmentId)) {
         const existing = await pool!.query<{ email_notifications_enabled: boolean }>("SELECT email_notifications_enabled FROM module_notification_preferences WHERE department_id=$1 AND user_id=$2", [departmentId, request.authenticatedUser!.id]);
         if (!existing.rows[0]?.email_notifications_enabled) return reply.code(503).send({ error: "Email delivery is not configured by the Smart-Church administrator." });
       }
