@@ -6,16 +6,16 @@ The Sync settings page can create a read-only preview and import a bounded snaps
 
 | ChurchTools source | Smart-Church destination | Mapping and behavior |
 | --- | --- | --- |
-| Person | Contact | Stable ChurchTools person ID is kept in the migration crosswalk. First name, last name, email, and phone are mapped. A matching email is reported for review and is never used by itself to merge people. |
+| Person | Contact | Stable ChurchTools person ID is kept in the migration crosswalk. First name, last name, email, and phone are mapped to standard fields; the complete person object returned by the configured persons endpoint is also retained as a read-only profile, including nested and custom fields, except credential-like keys. A matching email is reported for review and is never used by itself to merge people. |
 | Group | Group | Stable group ID, name, and description are mapped. Memberships are connected when the person has a migration crosswalk or an existing ChurchTools source ID. Role, normalized status, and entry date are mapped when recognized in the member response. The importer adds memberships and keeps existing local membership details. |
 | Event | Service or event | Stable event ID, title, date, start/end time, all-day state, location, room, description, volunteer positions, and time-plan JSON are mapped where the source provides them. Position holders link only when their person ID resolves locally. |
 | Resource | Bookable resource | Stable resource ID, name, supported category, description, location, capacity, approval requirement, and active state are mapped. Category values are normalized to Smart-Church's room, vehicle, equipment, or other values. |
 
-The importer does not map person profiles beyond the fields above, family or other person relationships, custom group-membership fields, planned group exit dates, membership remarks or waiting-list positions/history, event series/recurrence, event plans beyond the available JSON snapshot, or resource bookings. Resource bookings require a verified source booking schema and a safe mapping from ChurchTools users to Smart-Church accounts; they are not imported. These are known migration gaps, not silently claimed as migrated data.
+Family or other person relationships that are not included in the returned person object are not separately fetched or normalized. Custom group-membership fields, planned group exit dates, membership remarks or waiting-list positions/history, event series/recurrence, event plans beyond the available JSON snapshot, or resource bookings are also not mapped. Resource bookings require a verified source booking schema and a safe mapping from ChurchTools users to Smart-Church accounts; they are not imported. These are known migration gaps, not silently claimed as migrated data.
 
 ## Review and conflict rules
 
-- Preview lists total/create/update/review/invalid counts and a sample of up to 40 source records. Unmapped person fields are counted.
+- Preview lists total/create/update/review/invalid counts and a sample of up to 40 source records. Unmapped person field names are counted; profile values are stored only in the encrypted migration snapshot and later in the private ChurchTools profile. Credential-like keys are excluded recursively. The People API response may be permission-scoped, so this does not establish that every field configured in ChurchTools was returned.
 - Matching uses stable source IDs. Email, group name, and event title/date/time matches are conflicts for review and are skipped during import; records are not merged on those values.
 - Existing records linked by a stable ID can be updated. New migration records remain editable and are kept outside scheduled-sync cleanup.
 - Group imports add source memberships only; they do not remove existing memberships.
