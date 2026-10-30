@@ -65,7 +65,26 @@ function translateModuleText(value: string, translations: ModuleRegistration["tr
   const match = value.match(/^(\s*)([\s\S]*?)(\s*)$/);
   if (!match) return value;
   const [, before, text, after] = match;
-  return `${before}${translations?.[language]?.[text] ?? translations?.en?.[text] ?? text}${after}`;
+  const selected = translations?.[language] ?? {};
+  const english = translations?.en ?? {};
+  const exact = selected[text] ?? english[text];
+  if (exact !== undefined) return `${before}${exact}${after}`;
+
+  const templates = [...new Set([...Object.keys(selected), ...Object.keys(english)])].filter((key) => key.includes("{")).sort((left, right) => right.length - left.length);
+  for (const template of templates) {
+    const placeholders = [...template.matchAll(/\{([^{}]+)\}/g)];
+    if (!placeholders.length) continue;
+    const expression = template.split(/(\{[^{}]+\})/g).map((part) => part.startsWith("{") && part.endsWith("}")
+      ? "([\\s\\S]+?)"
+      : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("");
+    const values = text.match(new RegExp(`^${expression}$`));
+    const translated = selected[template] ?? english[template];
+    if (!values || translated === undefined) continue;
+    const replacements = new Map(placeholders.map((placeholder, index) => [placeholder[1], values[index + 1]]));
+    const result = translated.replace(/\{([^{}]+)\}/g, (token, name: string) => replacements.get(name) ?? token);
+    return `${before}${result}${after}`;
+  }
+  return value;
 }
 
 function translateModuleNode(node: ReactNode, translations: ModuleRegistration["translations"], language: UserLanguage): ReactNode {
