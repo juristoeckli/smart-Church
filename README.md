@@ -10,6 +10,7 @@ A modular application for Churches, with one shared web/desktop interface, optio
 - [Milestone 1 and later delivery plan](docs/MILESTONES.md)
 - [Interface language coverage and translation guide](docs/LANGUAGES.md)
 - [Personal date and time formats](docs/DATE_TIME_FORMATS.md)
+- [Core and module API reference](docs/API_REFERENCE.md)
 - [Implementation issues](https://github.com/juristoeckli/smart-Church/issues)
 
 ## Technology baseline
