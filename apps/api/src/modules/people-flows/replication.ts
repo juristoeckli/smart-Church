@@ -35,7 +35,7 @@ function readSnapshot(input: unknown): Snapshot {
   const keys: TableKey[] = ["flows","steps","enrollments","progress","audit"];
   if (value.version !== 1 || keys.some((key) => !Array.isArray(value[key]))) throw new Error("The People Flows snapshot has an unsupported format.");
   const rows = keys.map((key) => value[key] as Row[]);
-  if (rows.some((table) => table.length > maxRows || table.some((row) => !row || typeof row !== "object" || Array.isArray(row))) || Buffer.byteLength(JSON.stringify(input)) > maxSnapshotBytes) {
+  if (rows.reduce((count, table) => count + table.length, 0) > maxRows || rows.some((table) => table.some((row) => !row || typeof row !== "object" || Array.isArray(row))) || Buffer.byteLength(JSON.stringify(input)) > maxSnapshotBytes) {
     throw new Error("The People Flows snapshot exceeds the supported size or contains invalid rows.");
   }
   return value as Snapshot;
