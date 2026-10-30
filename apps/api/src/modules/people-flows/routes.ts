@@ -20,7 +20,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         reply.code(503).send({ error: "People Flows are unavailable because the database is not ready." });
         return null;
       }
-      return resolveDepartmentId(request, reply, false, false, write ? "people_manage" : "people_view_private");
+      if (!write) {
+        const permissions = request.activeDepartmentPermissions ?? [];
+        if (request.activeDepartmentRole !== "site_admin" && !permissions.includes("people_view_private") && !permissions.includes("people_manage")) {
+          reply.code(403).send({ error: "You need private People access to view workflows." });
+          return null;
+        }
+      }
+      return resolveDepartmentId(request, reply, false, false, write ? "people_manage" : undefined);
     }
     async function audit(departmentId: string, actorId: string | undefined, action: string, values: { flowId?: string; enrollmentId?: string; stepId?: string; metadata?: Record<string, unknown> }) {
       await pool!.query(
