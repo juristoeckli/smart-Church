@@ -118,7 +118,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
         else if (normalizedDirections[area] !== "off" && normalizedDirections[area] !== "elvanto_to_smart_church") normalizedDirections[area] = "elvanto_to_smart_church";
       }
       setStatus(result); setDirections(normalizedDirections); setFinancialEnabled(result.financialEnabled);
-      if (readOnlyAreas.some((area) => normalizedDirections[area] !== requestedDirections[area])) setFeedback("Unsupported outgoing directions were changed to Elvanto → Smart Church for read-only areas."); if (result.calendarExport?.calendarId) setCalendarExportCalendarId(result.calendarExport.calendarId); if (result.calendarExport?.organizerId) setCalendarExportOrganizerId(result.calendarExport.organizerId); setError("");
+      if (readOnlyAreas.some((area) => normalizedDirections[area] !== requestedDirections[area])) setFeedback("Unsupported directions were reset to their supported setting."); if (result.calendarExport?.calendarId) setCalendarExportCalendarId(result.calendarExport.calendarId); if (result.calendarExport?.organizerId) setCalendarExportOrganizerId(result.calendarExport.organizerId); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Elvanto settings."); }
   }
   useEffect(() => { void load(); }, [departmentId]);
