@@ -40,7 +40,7 @@ import { smartChurchBuildInfo } from "./build-info";
 import { Groups } from "./Groups";
 import { BookableResources } from "./BookableResources";
 import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleRegistryReady, moduleTranslation, registeredModules } from "./module-registry";
-import { translateModuleMessage, translationsForModule } from "./modules/translations";
+import { translateKnownModuleMessage, translateModuleMessage, translationsForModule } from "./modules/translations";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
 import { RuntimeDiagnosticsPanel } from "./RuntimeDiagnosticsPanel";
@@ -1269,7 +1269,7 @@ function WorkspaceApp() {
         </div>
       </main>
 
-      {notice && <div className="toast" role="status"><Check size={17} />{notice}<button className="toast-close" type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
+      {notice && <div className="toast" role="status"><Check size={17} />{translateKnownModuleMessage(activeLanguage, notice)}<button className="toast-close" type="button" aria-label="Dismiss notification" onClick={() => setNotice("")}><X size={15} /></button></div>}
 
       {!(systemNotificationsEnabled && systemNotificationPermission === "granted") && chatNotifications.length > 0 && <section className="chat-notification-stack" aria-label="New chat messages" aria-live="polite">{chatNotifications.map((notification) => <article className="chat-notification" key={notification.id}>
         <button className="chat-notification-open" type="button" onClick={() => { setRequestedChatConversationId(notification.conversationId); setPage(modulePage("chat")); setChatNotifications((current) => current.filter((item) => item.id !== notification.id)); }}>
