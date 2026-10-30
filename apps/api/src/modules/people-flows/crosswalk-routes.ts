@@ -150,9 +150,12 @@ export function registerElvantoPeopleFlowCrosswalkRoutes(app: FastifyInstance, c
         "SELECT definition FROM elvanto_people_flows_import WHERE department_id=$1 AND source_id=$2",
         [departmentId, sourceFlowId],
       );
-      if (!source.rowCount) return reply.code(404).send({ error: "Import this Elvanto People Flow before linking it." });
-      const sourceStepIds = new Set(remoteSteps(source.rows[0].definition).map((step) => step.id));
-      if (stepLinks.some((link) => !sourceStepIds.has(link.sourceStepId))) return reply.code(409).send({ error: "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links." });
+      if (localFlowId && !source.rowCount) return reply.code(404).send({ error: "Import this Elvanto People Flow before linking it." });
+      if (!localFlowId && stepLinks.length) return reply.code(400).send({ error: "Choose a local workflow before linking its steps." });
+      if (source.rowCount) {
+        const sourceStepIds = new Set(remoteSteps(source.rows[0].definition).map((step) => step.id));
+        if (stepLinks.some((link) => !sourceStepIds.has(link.sourceStepId))) return reply.code(409).send({ error: "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links." });
+      }
       if (localFlowId) {
         const local = await pool!.query<{ id: string }>("SELECT id FROM people_flows WHERE department_id=$1 AND id=$2", [departmentId, localFlowId]);
         if (!local.rowCount) return reply.code(404).send({ error: "The selected local workflow was not found." });
@@ -161,8 +164,6 @@ export function registerElvantoPeopleFlowCrosswalkRoutes(app: FastifyInstance, c
           [departmentId, localFlowId, stepLinks.map((link) => link.localStepId)],
         );
         if (localStepIds.rowCount !== stepLinks.length) return reply.code(400).send({ error: "Every linked local step must belong to the selected workflow." });
-      } else if (stepLinks.length) {
-        return reply.code(400).send({ error: "Choose a local workflow before linking its steps." });
       }
 
       const client = await pool!.connect();
