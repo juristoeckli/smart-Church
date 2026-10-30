@@ -5,6 +5,7 @@ const english = {
   eventEyebrow: "SMART CHURCH · EVENT REGISTRATION",
   groupEyebrow: "SMART CHURCH · GROUP SIGN-UP",
   eventLoading: "Loading event…",
+  allDay: "All day",
   groupLoading: "Loading group…",
   eventUnavailable: "Registration unavailable",
   groupUnavailable: "Group sign-up unavailable",
@@ -37,7 +38,7 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
   en: english,
   de: {
     eventEyebrow: "SMART CHURCH · VERANSTALTUNGSANMELDUNG", groupEyebrow: "SMART CHURCH · GRUPPENANMELDUNG",
-    eventLoading: "Veranstaltung wird geladen …", groupLoading: "Gruppe wird geladen …", eventUnavailable: "Anmeldung nicht verfügbar", groupUnavailable: "Gruppenanmeldung nicht verfügbar",
+    eventLoading: "Veranstaltung wird geladen …", allDay: "Ganztägig", groupLoading: "Gruppe wird geladen …", eventUnavailable: "Anmeldung nicht verfügbar", groupUnavailable: "Gruppenanmeldung nicht verfügbar",
     registered: "Du bist angemeldet", waitlisted: "Du stehst auf der Warteliste", registeredHelp: "Dein Platz ist bestätigt. Wir freuen uns auf dich.", waitlistedHelp: "Die Veranstaltung ist ausgebucht. Du stehst auf der Warteliste. Die Veranstaltenden melden sich, falls ein Platz frei wird.",
     registrationClosed: "Die Anmeldung für diese Veranstaltung ist geschlossen.", placesRemaining: "Noch {count} Plätze frei", registrationOpen: "Die Anmeldung ist geöffnet", waitlistCount: " · {count} auf der Warteliste",
     firstName: "Vorname", lastName: "Nachname", email: "E-Mail-Adresse", eventPrivacy: "Deine Angaben werden mit den Veranstaltenden geteilt, damit sie Anmeldung und Check-in verwalten können.", submitting: "Wird gesendet …", register: "Anmelden",
@@ -45,7 +46,7 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
   },
   fr: {
     eventEyebrow: "SMART CHURCH · INSCRIPTION À L’ÉVÉNEMENT", groupEyebrow: "SMART CHURCH · INSCRIPTION AU GROUPE",
-    eventLoading: "Chargement de l’événement…", groupLoading: "Chargement du groupe…", eventUnavailable: "Inscription indisponible", groupUnavailable: "Inscription au groupe indisponible",
+    eventLoading: "Chargement de l’événement…", allDay: "Toute la journée", groupLoading: "Chargement du groupe…", eventUnavailable: "Inscription indisponible", groupUnavailable: "Inscription au groupe indisponible",
     registered: "Votre inscription est confirmée", waitlisted: "Vous êtes sur la liste d’attente", registeredHelp: "Votre place est confirmée. Nous nous réjouissons de vous accueillir.", waitlistedHelp: "L’événement est complet, mais vous êtes sur la liste d’attente. Les organisateurs vous contacteront si une place se libère.",
     registrationClosed: "Les inscriptions à cet événement sont closes.", placesRemaining: "{count} places restantes", registrationOpen: "Les inscriptions sont ouvertes", waitlistCount: " · {count} sur la liste d’attente",
     firstName: "Prénom", lastName: "Nom", email: "Adresse e-mail", eventPrivacy: "Vos coordonnées sont partagées avec les organisateurs pour gérer l’inscription et l’accueil.", submitting: "Envoi en cours…", register: "S’inscrire",
@@ -53,7 +54,7 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
   },
   it: {
     eventEyebrow: "SMART CHURCH · ISCRIZIONE ALL’EVENTO", groupEyebrow: "SMART CHURCH · ISCRIZIONE AL GRUPPO",
-    eventLoading: "Caricamento dell’evento…", groupLoading: "Caricamento del gruppo…", eventUnavailable: "Iscrizione non disponibile", groupUnavailable: "Iscrizione al gruppo non disponibile",
+    eventLoading: "Caricamento dell’evento…", allDay: "Tutto il giorno", groupLoading: "Caricamento del gruppo…", eventUnavailable: "Iscrizione non disponibile", groupUnavailable: "Iscrizione al gruppo non disponibile",
     registered: "Iscrizione confermata", waitlisted: "Sei in lista d’attesa", registeredHelp: "Il tuo posto è confermato. Non vediamo l’ora di incontrarti.", waitlistedHelp: "L’evento è al completo, ma sei in lista d’attesa. Gli organizzatori ti contatteranno se si libera un posto.",
     registrationClosed: "Le iscrizioni a questo evento sono chiuse.", placesRemaining: "Ancora {count} posti disponibili", registrationOpen: "Le iscrizioni sono aperte", waitlistCount: " · {count} in lista d’attesa",
     firstName: "Nome", lastName: "Cognome", email: "Indirizzo e-mail", eventPrivacy: "I tuoi dati saranno condivisi con gli organizzatori per gestire l’iscrizione e l’accoglienza.", submitting: "Invio in corso…", register: "Iscriviti",
