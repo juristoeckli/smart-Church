@@ -478,7 +478,7 @@ const serviceEventProperties = {
   room: { type: "string", maxLength: 160 },
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
   positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } },
-  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" } } } },
+  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" }, position: { type: "string", maxLength: 80 } } } },
   registrationEnabled: { type: "boolean" },
   registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
   recurrence: { type: "object", additionalProperties: false, required: ["interval", "endDate"], properties: { interval: { type: "string", enum: ["weekly", "biweekly", "monthly"] }, endDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" } } },
@@ -520,6 +520,8 @@ function validateServicePlanTemplateInput(input: ServicePlanTemplateInput) {
   if (!input.name.trim()) return "Enter a service-plan template name.";
   if ((input.positions ?? []).some((position) => !position.name.trim())) return "Enter a name for each volunteer position.";
   if ((input.items ?? []).some((item) => !item.title.trim())) return "Enter a title for each service-plan item.";
+  const positions = new Set((input.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
+  if ((input.items ?? []).some((item) => item.position && !positions.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   return null;
 }
 
@@ -616,6 +618,8 @@ async function validateServicePlanSongs(departmentId: string, items: NonNullable
 }
 
 async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent) {
+  const positionNames = new Set((event.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
+  if ((event.timePlan ?? []).some((item) => item.position && !positionNames.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   const assets = [...new Set(event.assetIds ?? [])];
   if (assets.length) {
     const available = await pool!.query("SELECT id FROM bookable_resources WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, assets]);
