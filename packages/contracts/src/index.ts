@@ -9,6 +9,7 @@ export interface Contact {
   status: ContactStatus;
   importedFrom?: "churchtools" | "elvanto";
   elvantoProfile?: Record<string, unknown>;
+  churchtoolsProfile?: Record<string, unknown>;
 }
 
 export type CreateContact = Omit<Contact, "id">;
