@@ -20,6 +20,9 @@ function encryptionKey() {
   if (!keySource) throw new Error("Set SMART_CHURCH_EMAIL_ENCRYPTION_KEY or DATABASE_URL before configuring SMTP credentials.");
   return createHash("sha256").update(`smart-church/email-worker/v1:${keySource}`).digest();
 }
+export function emailEncryptionKeyFingerprint() {
+  return createHash("sha256").update(encryptionKey()).digest("hex");
+}
 function encrypt(value: string) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);

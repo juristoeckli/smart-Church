@@ -12,8 +12,9 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function remapReviewer(row: GroupJoinRequest, userIdMap: Map<string, string>) {
+function remapReviewer(row: GroupJoinRequest, userIdMap: Map<string, string>, departmentId?: string) {
   const copy = { ...row };
+  if (departmentId && typeof copy.department_id === "string") copy.department_id = departmentId;
   if (typeof copy.reviewed_by === "string") copy.reviewed_by = userIdMap.get(copy.reviewed_by) ?? copy.reviewed_by;
   return copy;
 }
@@ -57,7 +58,7 @@ export function registerCommunityReplication(context: ModuleServerContext) {
       if (!snapshot || snapshot.version !== 2 || !Array.isArray(snapshot.groupJoinRequests)) return { ready: false, blockers: ["No supported Community group-join request snapshot is available."] };
       const actual = (await client.query(`SELECT id,department_id,group_id,first_name,last_name,email,status,contact_id,created_at,reviewed_at,reviewed_by
         FROM group_join_requests WHERE department_id=$1 ORDER BY created_at,id`, [departmentId])).rows as GroupJoinRequest[];
-      const expectedRows = snapshot.groupJoinRequests.map((row) => canonical(remapReviewer(row, restoreContext?.userIdMap ?? new Map()))).sort();
+      const expectedRows = snapshot.groupJoinRequests.map((row) => canonical(remapReviewer(row, restoreContext?.userIdMap ?? new Map(), departmentId))).sort();
       const actualRows = actual.map(canonical).sort();
       const matches = expectedRows.length === actualRows.length && expectedRows.every((row, index) => row === actualRows[index]);
       return matches ? { ready: true, blockers: [] } : { ready: false, blockers: ["Community group-join requests differ from the source snapshot after restore."] };

@@ -51,6 +51,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (source.length !== actual.length) return `${name} row count differs.`;
         const expectedRows = source.map((row) => {
           const copy = { ...row };
+          if (typeof copy.department_id === "string") copy.department_id = departmentId;
           for (const key of userColumns) if (typeof copy[key] === "string") copy[key] = mapping.get(String(copy[key])) ?? copy[key];
           return canonical(copy);
         }).sort();
