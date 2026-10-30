@@ -11,6 +11,9 @@ export interface ContactProfileData {
   mailingAddress?: string;
   familyId?: string;
   familyRelationship?: "Primary Contact" | "Spouse" | "Partner" | "Child" | "Sibling" | "Grandfather" | "Grandmother" | "Other";
+  elvantoContact?: boolean;
+  elvantoVolunteer?: boolean;
+  elvantoArchived?: boolean;
   developmentChild?: boolean;
   specialNeedsChild?: boolean;
   departments?: string[];
