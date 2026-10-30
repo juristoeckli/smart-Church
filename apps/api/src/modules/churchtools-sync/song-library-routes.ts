@@ -3,7 +3,9 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type JsonObject = Record<string, unknown>;
-type PreviewRow = { sourceId: string; title: string; fingerprint: string; action: "import" | "update" | "already_linked" | "local_changed" | "baseline_missing" | "title_conflict" | "duplicate_source_title" | "changed" | "missing" };
+type PreviewResolution = "use_elvanto" | "keep_local" | "skip";
+type PreviewRow = { sourceId: string; title: string; fingerprint: string; linked: boolean; resolution?: PreviewResolution; action: "import" | "update" | "already_linked" | "local_changed" | "baseline_missing" | "title_conflict" | "duplicate_source_title" | "changed" | "missing" };
+const reviewActions = new Set<PreviewRow["action"]>(["local_changed", "baseline_missing", "title_conflict", "duplicate_source_title"]);
 function text(value: unknown): string {
   if (typeof value === "string") return value.trim();
   if (typeof value === "number") return String(value);
@@ -68,6 +70,29 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
       return true;
     }
 
+    routes.get("/api/modules/sync/elvanto/songs-library-preview", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (!await checkDirection(departmentId, reply)) return reply;
+      const result = await pool!.query<{ preview_id: string; rows: PreviewRow[]; cursor: number; created_count: number; updated_count: number; skipped_count: number; review_count: number; expires_at: Date | string }>(
+        "SELECT preview_id,rows,cursor,created_count,updated_count,skipped_count,review_count,expires_at FROM elvanto_worship_song_import_previews WHERE department_id=$1", [departmentId],
+      );
+      const saved = result.rows[0];
+      if (!saved || new Date(saved.expires_at).getTime() <= Date.now()) return { preview: null };
+      const rows = Array.isArray(saved.rows) ? saved.rows : [];
+      const reviewCount = rows.filter((row) => reviewActions.has(row.action)).length;
+      return {
+        preview: {
+          previewId: saved.preview_id, total: rows.length,
+          importCount: rows.filter((row) => row.action === "import").length,
+          updateCount: rows.filter((row) => row.action === "update").length,
+          alreadyLinkedCount: rows.filter((row) => row.action === "already_linked").length,
+          reviewCount, expiresAt: saved.expires_at,
+        },
+        progress: { cursor: Number(saved.cursor), total: rows.length, created: Number(saved.created_count), updated: Number(saved.updated_count), skipped: Number(saved.skipped_count), review: Number(saved.review_count), complete: Number(saved.cursor) >= rows.length, processedThisBatch: 0 },
+      };
+    });
+
     routes.post("/api/modules/sync/elvanto/songs-library-preview", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
@@ -115,11 +140,11 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
         } else if ((titleCounts.get(titleKey) ?? 0) > 1) action = "duplicate_source_title";
         else if (localTitles.has(titleKey)) action = "title_conflict";
         else action = "import";
-        return { sourceId, title, fingerprint: fingerprint(snapshot.song, snapshot.arrangements), action };
+        return { sourceId, title, fingerprint: fingerprint(snapshot.song, snapshot.arrangements), linked: Boolean(link), action };
       });
       const snapshotIds = new Set(snapshots.rows.map((snapshot) => text(snapshot.source_id)));
       for (const link of linked.rows) {
-        if (!snapshotIds.has(link.source_song_id)) previewRows.push({ sourceId: link.source_song_id, title: link.title, fingerprint: link.source_fingerprint, action: "missing" });
+        if (!snapshotIds.has(link.source_song_id)) previewRows.push({ sourceId: link.source_song_id, title: link.title, fingerprint: link.source_fingerprint, linked: true, action: "missing" });
       }
       const encoded = JSON.stringify(previewRows);
       if (Buffer.byteLength(encoded) > 50 * 1024 * 1024) return reply.code(413).send({ error: "The song import preview exceeds 50 MiB. Import fewer Elvanto songs and create a new preview." });
@@ -128,7 +153,7 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
       await pool!.query(
         `INSERT INTO elvanto_worship_song_import_previews(department_id,preview_id,rows,cursor,created_count,updated_count,review_count,expires_at,updated_at)
          VALUES($1,$2,$3::jsonb,0,0,0,0,$4,now())
-         ON CONFLICT(department_id) DO UPDATE SET preview_id=EXCLUDED.preview_id,rows=EXCLUDED.rows,cursor=0,created_count=0,updated_count=0,review_count=0,expires_at=EXCLUDED.expires_at,updated_at=now()`,
+         ON CONFLICT(department_id) DO UPDATE SET preview_id=EXCLUDED.preview_id,rows=EXCLUDED.rows,cursor=0,created_count=0,updated_count=0,skipped_count=0,review_count=0,expires_at=EXCLUDED.expires_at,updated_at=now()`,
         [departmentId, previewId, encoded, expiresAt],
       );
       const importCount = previewRows.filter((row) => row.action === "import").length;
@@ -136,6 +161,59 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
       const alreadyLinkedCount = previewRows.filter((row) => row.action === "already_linked").length;
       const reviewCount = previewRows.length - importCount - updateCount - alreadyLinkedCount;
       return { previewId, total: previewRows.length, importCount, updateCount, alreadyLinkedCount, reviewCount, expiresAt, sample: previewRows.slice(0, 50).map(({ sourceId, title, action }) => ({ sourceId, title, action })) };
+    });
+
+    routes.get<{ Params: { previewId: string }; Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/songs-library-preview/:previewId", {
+      schema: {
+        params: { type: "object", additionalProperties: false, required: ["previewId"], properties: { previewId: { type: "string", format: "uuid" } } },
+        querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 1000000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } },
+      },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (!await checkDirection(departmentId, reply)) return reply;
+      const result = await pool!.query<{ preview_id: string; rows: PreviewRow[]; cursor: number; expires_at: Date | string }>(
+        "SELECT preview_id,rows,cursor,expires_at FROM elvanto_worship_song_import_previews WHERE department_id=$1", [departmentId],
+      );
+      const preview = result.rows[0];
+      if (!preview || preview.preview_id !== request.params.previewId) return reply.code(404).send({ error: "Create a fresh song-library preview before reviewing rows." });
+      if (new Date(preview.expires_at).getTime() <= Date.now()) return reply.code(409).send({ error: "The song-library preview expired. Create a fresh preview before importing." });
+      const rows = Array.isArray(preview.rows) ? preview.rows : [];
+      const offset = request.query.offset ?? 0;
+      const limit = request.query.limit ?? 50;
+      return { previewId: preview.preview_id, offset, total: rows.length, cursor: Number(preview.cursor), rows: rows.slice(offset, offset + limit).map(({ sourceId, title, action, linked, resolution }) => ({ sourceId, title, action, linked, resolution: resolution ?? null })) };
+    });
+
+    routes.put<{ Body: { previewId: string; sourceId: string; resolution: PreviewResolution } }>("/api/modules/sync/elvanto/songs-library-resolution", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["previewId", "sourceId", "resolution"], properties: { previewId: { type: "string", format: "uuid" }, sourceId: { type: "string", minLength: 1, maxLength: 200 }, resolution: { type: "string", enum: ["use_elvanto", "keep_local", "skip"] } } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      if (!await checkDirection(departmentId, reply)) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const selected = await client.query<{ preview_id: string; rows: PreviewRow[]; cursor: number; expires_at: Date | string }>(
+          "SELECT preview_id,rows,cursor,expires_at FROM elvanto_worship_song_import_previews WHERE department_id=$1 FOR UPDATE", [departmentId],
+        );
+        const preview = selected.rows[0];
+        if (!preview || preview.preview_id !== request.body.previewId) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Create a fresh song-library preview before reviewing rows." }); }
+        if (new Date(preview.expires_at).getTime() <= Date.now()) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The song-library preview expired. Create a fresh preview before importing." }); }
+        const rows = Array.isArray(preview.rows) ? preview.rows : [];
+        const index = rows.findIndex((row) => row.sourceId === request.body.sourceId);
+        if (index < Number(preview.cursor)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This song row has already been processed. Create a fresh preview to change its resolution." }); }
+        const row = rows[index];
+        if (!row || !reviewActions.has(row.action)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "This song row does not need a conflict resolution." }); }
+        const { resolution } = request.body;
+        if (resolution === "use_elvanto" && !(row.linked && ["local_changed", "baseline_missing"].includes(row.action))) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Use Elvanto is available only for a linked song with local changes or a missing baseline." }); }
+        if (resolution === "keep_local" && !row.linked) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Keep local is available only for a song already linked to Elvanto." }); }
+        row.resolution = resolution;
+        await client.query("UPDATE elvanto_worship_song_import_previews SET rows=$2::jsonb,updated_at=now() WHERE department_id=$1", [departmentId, JSON.stringify(rows)]);
+        await client.query("COMMIT");
+        return { sourceId: row.sourceId, resolution: row.resolution };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
     });
 
     routes.post<{ Body: { previewId: string } }>("/api/modules/sync/elvanto/songs-library-import", {
@@ -148,8 +226,8 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const selected = await client.query<{ preview_id: string; rows: PreviewRow[]; cursor: number; created_count: number; updated_count: number; review_count: number; expires_at: Date | string }>(
-          "SELECT preview_id,rows,cursor,created_count,updated_count,review_count,expires_at FROM elvanto_worship_song_import_previews WHERE department_id=$1 FOR UPDATE", [departmentId],
+        const selected = await client.query<{ preview_id: string; rows: PreviewRow[]; cursor: number; created_count: number; updated_count: number; skipped_count: number; review_count: number; expires_at: Date | string }>(
+          "SELECT preview_id,rows,cursor,created_count,updated_count,skipped_count,review_count,expires_at FROM elvanto_worship_song_import_previews WHERE department_id=$1 FOR UPDATE", [departmentId],
         );
         const preview = selected.rows[0];
         if (!preview || preview.preview_id !== request.body.previewId) {
@@ -161,17 +239,21 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
           return reply.code(409).send({ error: "The song-library preview expired. Create a fresh preview before importing." });
         }
         const previewRows = Array.isArray(preview.rows) ? preview.rows : [];
+        const unresolved = previewRows.filter((row) => reviewActions.has(row.action) && !row.resolution).length;
+        if (unresolved) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Review or skip all song conflicts before importing.", unresolvedCount: unresolved }); }
         let cursor = Number(preview.cursor);
         let createdCount = Number(preview.created_count);
         let updatedCount = Number(preview.updated_count);
+        let skippedCount = Number(preview.skipped_count);
         let reviewCount = Number(preview.review_count);
         let processed = 0;
         const limit = Math.min(cursor + 5, previewRows.length);
         for (; cursor < limit; cursor += 1) {
           const row = previewRows[cursor];
           processed += 1;
+          if (row.resolution === "skip") { skippedCount += 1; continue; }
           if (row.action === "already_linked") continue;
-          if (row.action !== "import" && row.action !== "update") { reviewCount += 1; continue; }
+          if (row.action !== "import" && row.action !== "update" && !(row.linked && row.resolution === "use_elvanto")) { reviewCount += 1; continue; }
           const snapshotResult = await client.query<{ source_id: string; title: string; song: JsonObject; arrangements: JsonObject[] }>(
             "SELECT source_id,title,song,arrangements FROM elvanto_songs_import WHERE department_id=$1 AND source_id=$2 FOR SHARE", [departmentId, row.sourceId],
           );
@@ -184,6 +266,21 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
           const existingLink = await client.query("SELECT 1 FROM elvanto_worship_song_links WHERE department_id=$1 AND source_song_id=$2", [departmentId, row.sourceId]);
           if (existingLink.rowCount && row.action === "import") { row.action = "already_linked"; continue; }
 
+          const forceRemote = row.resolution === "use_elvanto";
+          if (row.resolution === "keep_local") {
+            const linkResult = await client.query<{ song_id: string }>("SELECT song_id FROM elvanto_worship_song_links WHERE department_id=$1 AND source_song_id=$2 FOR UPDATE", [departmentId, row.sourceId]);
+            const link = linkResult.rows[0];
+            if (!link) { row.action = "missing"; reviewCount += 1; continue; }
+            const localResult = await client.query<{ id: string; title: string; authors: string; default_key: string; notes: string; active: boolean }>("SELECT id,title,authors,default_key,notes,active FROM worship_songs WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, link.song_id]);
+            const localSong = localResult.rows[0];
+            if (!localSong) { row.action = "missing"; reviewCount += 1; continue; }
+            const arrangements = await client.query<{ id: string; name: string; musical_key: string; chart_url: string; audio_url: string; active: boolean }>("SELECT id,name,musical_key,chart_url,audio_url,active FROM worship_song_arrangements WHERE song_id=$1 ORDER BY lower(name),id FOR UPDATE", [localSong.id]);
+            const currentLocal = { ...localSong, arrangements: arrangements.rows as unknown as JsonObject[] };
+            await client.query("UPDATE elvanto_worship_song_links SET source_fingerprint=$3,local_fingerprint=$4 WHERE department_id=$1 AND source_song_id=$2", [departmentId, row.sourceId, row.fingerprint, localFingerprint(currentLocal)]);
+            skippedCount += 1;
+            continue;
+          }
+
           const songData = snapshot.song ?? {};
           const authors = text(songData.artist) || text(songData.author) || text(songData.authors);
           const notes = text(songData.notes).slice(0, 2000);
@@ -192,12 +289,12 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
           const firstKey = firstArrangement ? mapKeys(firstArrangement)[0] : null;
           const defaultKey = firstKey?.name.slice(0, 16) ?? "";
 
-          if (row.action === "update") {
+          if (row.action === "update" || forceRemote) {
             const linkResult = await client.query<{ song_id: string; local_fingerprint: string | null }>(
               "SELECT song_id,local_fingerprint FROM elvanto_worship_song_links WHERE department_id=$1 AND source_song_id=$2 FOR UPDATE", [departmentId, row.sourceId],
             );
             const link = linkResult.rows[0];
-            if (!link?.local_fingerprint) { row.action = "baseline_missing"; reviewCount += 1; continue; }
+            if (!link || (!link.local_fingerprint && !forceRemote)) { row.action = "baseline_missing"; reviewCount += 1; continue; }
             const currentSource = await client.query<{ source_fingerprint: string }>("SELECT source_fingerprint FROM elvanto_worship_song_links WHERE department_id=$1 AND source_song_id=$2", [departmentId, row.sourceId]);
             if (currentSource.rows[0]?.source_fingerprint === row.fingerprint) { row.action = "already_linked"; continue; }
             const localResult = await client.query<{ id: string; title: string; authors: string; default_key: string; notes: string; active: boolean }>(
@@ -209,7 +306,7 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
               "SELECT id,name,musical_key,chart_url,audio_url,active FROM worship_song_arrangements WHERE song_id=$1 ORDER BY lower(name),id FOR UPDATE", [localSong.id],
             );
             const currentLocal = { ...localSong, arrangements: localArrangementResult.rows as unknown as JsonObject[] };
-            if (localFingerprint(currentLocal) !== link.local_fingerprint) { row.action = "local_changed"; reviewCount += 1; continue; }
+            if (localFingerprint(currentLocal) !== link.local_fingerprint && !forceRemote) { row.action = "local_changed"; reviewCount += 1; continue; }
             const titleCollision = await client.query("SELECT 1 FROM worship_songs WHERE department_id=$1 AND active=TRUE AND id<>$2 AND lower(title)=lower($3) LIMIT 1", [departmentId, localSong.id, row.title]);
             if (titleCollision.rowCount) { row.action = "title_conflict"; reviewCount += 1; continue; }
 
@@ -296,11 +393,11 @@ export function registerElvantoSongLibraryRoutes(app: FastifyInstance, context: 
         }
         const complete = cursor >= previewRows.length;
         await client.query(
-          "UPDATE elvanto_worship_song_import_previews SET rows=$2::jsonb,cursor=$3,created_count=$4,updated_count=$5,review_count=$6,updated_at=now() WHERE department_id=$1",
-          [departmentId, JSON.stringify(previewRows), cursor, createdCount, updatedCount, reviewCount],
+          "UPDATE elvanto_worship_song_import_previews SET rows=$2::jsonb,cursor=$3,created_count=$4,updated_count=$5,skipped_count=$6,review_count=$7,updated_at=now() WHERE department_id=$1",
+          [departmentId, JSON.stringify(previewRows), cursor, createdCount, updatedCount, skippedCount, reviewCount],
         );
         await client.query("COMMIT");
-        return { import: { cursor, total: previewRows.length, created: createdCount, updated: updatedCount, review: reviewCount, complete, processedThisBatch: processed } };
+        return { import: { cursor, total: previewRows.length, created: createdCount, updated: updatedCount, skipped: skippedCount, review: reviewCount, complete, processedThisBatch: processed } };
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
