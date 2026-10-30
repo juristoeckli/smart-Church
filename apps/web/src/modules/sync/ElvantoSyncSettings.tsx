@@ -68,6 +68,7 @@ const areas: Array<{ id: Area; label: string }> = [
   { id: "calendar", label: "Calendar events" },
   { id: "financial", label: "Financial and giving data" },
 ];
+const readOnlyAreas: Area[] = ["peopleFlows", "services", "financial"];
 const offDirections: Directions = { people: "off", peopleFlows: "off", groups: "off", services: "off", songs: "off", calendar: "off", financial: "off" };
 
 export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) {
@@ -110,16 +111,25 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       const response = await fetch("/api/modules/sync/elvanto", { headers: { "x-department-id": departmentId } });
       const result = await response.json() as Status | { error?: string };
       if (!response.ok || !("configured" in result)) throw new Error("error" in result ? result.error ?? "Could not load Elvanto settings." : "Could not load Elvanto settings.");
-      const requestedServiceDirection = result.directions?.services ?? "off";
-      const serviceDirection = requestedServiceDirection === "off" || requestedServiceDirection === "elvanto_to_smart_church" ? requestedServiceDirection : "elvanto_to_smart_church";
-      setStatus(result); setDirections({ ...(result.directions ?? offDirections), services: serviceDirection }); setFinancialEnabled(result.financialEnabled);
-      if (serviceDirection !== requestedServiceDirection) setFeedback("Elvanto Services supports read-only sync; the saved direction was changed to Elvanto → Smart Church."); if (result.calendarExport?.calendarId) setCalendarExportCalendarId(result.calendarExport.calendarId); if (result.calendarExport?.organizerId) setCalendarExportOrganizerId(result.calendarExport.organizerId); setError("");
+      const requestedDirections = result.directions ?? offDirections;
+      const normalizedDirections = { ...requestedDirections };
+      for (const area of readOnlyAreas) {
+        if (area === "financial" && !result.financialEnabled) normalizedDirections[area] = "off";
+        else if (normalizedDirections[area] !== "off" && normalizedDirections[area] !== "elvanto_to_smart_church") normalizedDirections[area] = "elvanto_to_smart_church";
+      }
+      setStatus(result); setDirections(normalizedDirections); setFinancialEnabled(result.financialEnabled);
+      if (readOnlyAreas.some((area) => normalizedDirections[area] !== requestedDirections[area])) setFeedback("Unsupported directions were reset to their supported setting."); if (result.calendarExport?.calendarId) setCalendarExportCalendarId(result.calendarExport.calendarId); if (result.calendarExport?.organizerId) setCalendarExportOrganizerId(result.calendarExport.organizerId); setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Elvanto settings."); }
   }
   useEffect(() => { void load(); }, [departmentId]);
 
   function setAll(direction: Direction) {
-    setDirections(Object.fromEntries(areas.map(({ id }) => [id, id === "financial" && !financialEnabled ? "off" : id === "services" ? direction === "smart_church_to_elvanto" ? "off" : "elvanto_to_smart_church" : direction])) as Directions);
+    setDirections(Object.fromEntries(areas.map(({ id }) => [
+      id,
+      id === "financial" && !financialEnabled ? "off"
+        : readOnlyAreas.includes(id) ? direction === "smart_church_to_elvanto" ? "off" : "elvanto_to_smart_church"
+        : direction,
+    ])) as Directions);
   }
 
   async function save(event: FormEvent<HTMLFormElement>) {
@@ -514,8 +524,8 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     <form className="sync-connection-form" onSubmit={(event) => void save(event)}>
       <label>Elvanto Secret API Key<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved key" : "Paste the Elvanto API key"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} /></label>
       <p className="sync-help">Find the key in Elvanto under Settings → Developers → API. It is encrypted on the server and never sent back to this screen. The connection check requires People read access.</p>
-      <div className="community-inline-actions"><span>Apply direction to all areas:</span><button type="button" className="button button-secondary" disabled={busy} onClick={() => setAll("bidirectional")}>Bidirectional</button><button type="button" className="button button-secondary" disabled={busy} onClick={() => setAll("elvanto_to_smart_church")}>Elvanto → Smart Church</button><button type="button" className="button button-secondary" disabled={busy} onClick={() => setAll("smart_church_to_elvanto")}>Smart Church → Elvanto</button></div><small className="sync-help">Services are read-only: Elvanto documents service, plan, and volunteer reads but no write methods. the Bidirectional preset sets Services to Elvanto → Smart Church, and the Smart Church → Elvanto preset leaves Services disabled.</small>
-      <div className="sync-connection-form">{areas.map(({ id, label }) => <label key={id}>{label}<select value={directions[id]} disabled={busy || id === "financial" && !financialEnabled} onChange={(event) => setDirections((current) => ({ ...current, [id]: event.target.value as Direction }))}><option value="off">Disabled</option>{id === "services" ? <option value="elvanto_to_smart_church">Elvanto to Smart Church</option> : <><option value="bidirectional">Bidirectional</option><option value="elvanto_to_smart_church">Elvanto to Smart Church</option><option value="smart_church_to_elvanto">Smart Church to Elvanto</option></>}</select></label>)}</div>
+      <div className="community-inline-actions"><span>Apply direction to all areas:</span><button type="button" className="button button-secondary" disabled={busy} onClick={() => setAll("bidirectional")}>Bidirectional</button><button type="button" className="button button-secondary" disabled={busy} onClick={() => setAll("elvanto_to_smart_church")}>Elvanto → Smart Church</button><button type="button" className="button button-secondary" disabled={busy} onClick={() => setAll("smart_church_to_elvanto")}>Smart Church → Elvanto</button></div><small className="sync-help">Services, People Flows, and Financial data are currently read-only in Smart Church. Bidirectional and Smart Church → Elvanto presets keep these areas on Elvanto → Smart Church or Off.</small><small className="sync-help">Services are read-only: Elvanto documents service, plan, and volunteer reads but no write methods. the Bidirectional preset sets Services to Elvanto → Smart Church, and the Smart Church → Elvanto preset leaves Services disabled.</small>
+      <div className="sync-connection-form">{areas.map(({ id, label }) => <label key={id}>{label}<select value={directions[id]} disabled={busy || id === "financial" && !financialEnabled} onChange={(event) => setDirections((current) => ({ ...current, [id]: event.target.value as Direction }))}><option value="off">Disabled</option>{readOnlyAreas.includes(id) ? <option value="elvanto_to_smart_church">Elvanto to Smart Church</option> : <><option value="bidirectional">Bidirectional</option><option value="elvanto_to_smart_church">Elvanto to Smart Church</option><option value="smart_church_to_elvanto">Smart Church to Elvanto</option></>}</select></label>)}</div>
       <label className="community-resource-check"><input type="checkbox" checked={financialEnabled} disabled={busy} onChange={(event) => { setFinancialEnabled(event.target.checked); if (!event.target.checked) setDirections((current) => ({ ...current, financial: "off" })); }} />I explicitly authorize financial and giving data access for this location.</label>
       <div className="form-actions"><button className="button button-primary" type="submit" disabled={busy || (!apiKey.trim() && !status?.configured)}><Check size={15} />{busy ? "Verifying…" : "Test connection and save"}</button>{status?.configured && <button className="button button-danger" type="button" onClick={() => void disconnect()} disabled={busy}><Unplug size={15} />Disconnect</button>}</div>
     </form>
