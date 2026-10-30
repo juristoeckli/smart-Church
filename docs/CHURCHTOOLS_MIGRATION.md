@@ -23,7 +23,7 @@ The importer does not map person profiles beyond the fields above, family or oth
 
 ## Progress and recovery
 
-The preview snapshot is encrypted using the server's configured encryption key. Import processes at most 50 records in a database transaction and stores its page and created/updated/skipped counts. The stable crosswalk makes a repeated batch idempotent. If a batch fails, its transaction rolls back and the saved page does not advance; resolve the cause, then resume the same preview or create a fresh one if source data changed. Keep the server encryption key available until the migration is complete.
+The preview snapshot is encrypted using the server's configured encryption key. Import processes at most 50 records in a database transaction and stores its page and created/updated/skipped/failed counts. A record-level database error rolls back only that record, advances the batch, and records its area and stable source ID in the administrator-visible failure summary. Retry migration replays the same snapshot idempotently after the cause is corrected. A batch-level failure rolls back the whole transaction and does not advance the saved page. Keep the server encryption key available until the migration is complete.
 
 Preview and import require location-management permission. Use a dedicated ChurchTools login token with only the required read access. Do not put tokens in issue comments or logs. A complete production migration should first be verified against a non-production ChurchTools site and reconciled against source counts.
 
