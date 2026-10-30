@@ -1689,6 +1689,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
+        await client.query("DELETE FROM sync_site_redundancy_replicas WHERE department_id=$1", [department]);
         await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,snapshot_revision=0,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, peer.installation_id, body.sourceDepartmentId, remote.siteEpoch]);
         await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'standby_configured',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, current.rows[0].site_epoch, remote.siteEpoch, peer.installation_id, "Administrator acknowledged that the primary snapshot will replace this site's records."]);
         await client.query("COMMIT");
