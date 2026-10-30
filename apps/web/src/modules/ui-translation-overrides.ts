@@ -185,6 +185,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Volunteer request preferences": "Einstellungen für Freiwilligenanfragen",
       "Write a message for your church community…": "Schreibe eine Nachricht an deine Gemeinde …",
       "Your inbox": "Dein Posteingang", "You’re all caught up": "Du bist auf dem neuesten Stand",
+      "Announcement sent to {count} person.": "Mitteilung an {count} Person gesendet.", "Announcement sent to {count} people.": "Mitteilung an {count} Personen gesendet.",
+      "Notifications for this location · {count} unread": "Benachrichtigungen für diesen Standort · {count} ungelesen", "Send inbox notifications to {email}.": "Posteingangsbenachrichtigungen werden an {email} gesendet.",
+      "Showing your latest {count} notifications.": "Deine letzten {count} Benachrichtigungen werden angezeigt.", "Mark “{title}” as read": "„{title}“ als gelesen markieren", "Email {status}": "E-Mail {status}",
+      delayed: "verzögert", delivered: "zugestellt", bounced: "unzustellbar", complained: "beanstandet", suppressed: "unterdrückt", failed: "fehlgeschlagen", skipped: "übersprungen",
     },
     fr: {
       "A short announcement": "Une courte annonce",
@@ -208,6 +212,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Volunteer request preferences": "Préférences des demandes de bénévoles",
       "Write a message for your church community…": "Écrivez un message pour la communauté de votre église…",
       "Your inbox": "Votre boîte de réception", "You’re all caught up": "Vous êtes à jour",
+      "Announcement sent to {count} person.": "Annonce envoyée à {count} personne.", "Announcement sent to {count} people.": "Annonce envoyée à {count} personnes.",
+      "Notifications for this location · {count} unread": "Notifications de ce lieu · {count} non lues", "Send inbox notifications to {email}.": "Les notifications de la boîte de réception sont envoyées à {email}.",
+      "Showing your latest {count} notifications.": "Affichage de vos {count} dernières notifications.", "Mark “{title}” as read": "Marquer « {title} » comme lu", "Email {status}": "E-mail {status}",
+      delayed: "retardé", delivered: "distribué", bounced: "non distribué", complained: "signalé", suppressed: "bloqué", failed: "échoué", skipped: "ignoré",
     },
     it: {
       "A short announcement": "Un breve annuncio",
@@ -231,6 +239,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Volunteer request preferences": "Preferenze richieste volontari",
       "Write a message for your church community…": "Scrivi un messaggio per la comunità della tua chiesa…",
       "Your inbox": "La tua posta in arrivo", "You’re all caught up": "È tutto aggiornato",
+      "Announcement sent to {count} person.": "Annuncio inviato a {count} persona.", "Announcement sent to {count} people.": "Annuncio inviato a {count} persone.",
+      "Notifications for this location · {count} unread": "Notifiche per questa sede · {count} non lette", "Send inbox notifications to {email}.": "Le notifiche della posta in arrivo vengono inviate a {email}.",
+      "Showing your latest {count} notifications.": "Visualizzazione delle ultime {count} notifiche.", "Mark “{title}” as read": "Segna “{title}” come letto", "Email {status}": "E-mail: {status}",
+      delayed: "in ritardo", delivered: "recapitato", bounced: "non recapitato", complained: "segnalato", suppressed: "soppresso", failed: "non riuscito", skipped: "ignorato",
     },
   },
   presenter: {
