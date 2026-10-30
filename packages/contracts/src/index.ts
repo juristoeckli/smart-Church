@@ -29,6 +29,7 @@ export interface ServicePlanItem {
   notes?: string;
   songId?: string;
   arrangementId?: string;
+  position?: string;
 }
 
 export interface WorshipSongArrangement {
