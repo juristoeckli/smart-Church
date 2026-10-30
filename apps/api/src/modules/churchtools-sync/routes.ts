@@ -20,6 +20,7 @@ const elvantoCalendarImportRunning = new Set<string>();
 const elvantoCalendarExportRunning = new Set<string>();
 const elvantoPeopleFlowsImportRunning = new Set<string>();
 const elvantoSongsImportRunning = new Set<string>();
+const elvantoSongsExportRunning = new Set<string>();
 const elvantoFinancialImportRunning = new Set<string>();
 const syncIntervalMs = 15 * 60 * 1000;
 
@@ -2031,6 +2032,155 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const song = result.rows[0];
       if (!song) return reply.code(404).send({ error: "Imported Elvanto song was not found." });
       return { sourceId: song.source_id, title: song.title, song: song.song, arrangements: song.arrangements, importedAt: song.imported_at };
+    });
+    routes.post("/api/modules/sync/elvanto/songs-export-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings) return reply.code(404).send({ error: "Connect Elvanto before previewing a song export." });
+      if (settings.directions.songs !== "smart_church_to_elvanto" && settings.directions.songs !== "bidirectional") return reply.code(400).send({ error: "Set Songs direction to Smart Church → Elvanto or bidirectional before previewing an export." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(settings.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      try {
+        const remote = await fetchElvantoPagedRows(apiKey, "songs/getAll", "songs", "song", { files: false });
+        if (!remote.complete || remote.rows.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto Songs list. No export preview was saved." });
+        const local = await elvantoLocalSongsForExport(dept);
+        if (local.length > 200000) return reply.code(409).send({ error: "This location has more than 200,000 songs. Narrow the export scope before retrying." });
+        const links = await pool!.query<{ song_id: string; source_id: string; local_hash: string; remote_hash: string }>("SELECT song_id,source_id,local_hash,remote_hash FROM elvanto_song_links WHERE department_id=$1", [dept]);
+        const linkBySong = new Map(links.rows.map((link) => [link.song_id, link]));
+        const remoteById = new Map(remote.rows.map((song) => [idOf(song), song]));
+        const remoteByTitle = new Map<string, JsonObject[]>();
+        for (const song of remote.rows) {
+          const title = firstText(song.title).trim().toLocaleLowerCase();
+          if (title) remoteByTitle.set(title, [...(remoteByTitle.get(title) ?? []), song]);
+        }
+        const rows: Array<{ songId: string; sourceId: string | null; localHash: string; remoteHash: string | null; action: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }> = [];
+        for (const song of local) {
+          const arrangements = song.arrangements.map((item) => ({ id: item.id, name: item.name, key: item.key }));
+          const localHash = elvantoLocalSongExportHash({ id: song.id, title: song.title, arrangements });
+          const link = linkBySong.get(song.id);
+          let action = "create";
+          let remoteHash: string | null = null;
+          if (!arrangements.length) action = "needs_arrangement";
+          else if (new Set(arrangements.map((item) => item.name.trim().toLocaleLowerCase())).size !== arrangements.length) action = "review_duplicate_arrangement_names";
+          if (link) {
+            const remoteSong = remoteById.get(link.source_id);
+            if (!remoteSong) action = "review_missing_remote";
+            else {
+              const snapshot = await fetchElvantoSongForExport(apiKey, link.source_id);
+              remoteHash = snapshot.hash;
+              const localChanged = localHash !== link.local_hash;
+              const remoteChanged = remoteHash !== link.remote_hash;
+              if (remoteChanged && localChanged) action = "review_both_changed";
+              else if (remoteChanged) action = "review_remote_changed";
+              else action = localChanged ? "update" : "unchanged";
+            }
+          } else {
+            const matches = remoteByTitle.get(song.title.trim().toLocaleLowerCase()) ?? [];
+            if (matches.length === 1) action = "review_title_match";
+            else if (matches.length > 1) action = "review_ambiguous_title";
+          }
+          rows.push({ songId: song.id, sourceId: link?.source_id ?? null, localHash, remoteHash, action, title: song.title, arrangements });
+        }
+        const state = await pool!.query(
+          `INSERT INTO elvanto_song_export_state (department_id,preview_at,preview_rows,page,created_count,updated_count,skipped_count,complete,exporting,started_at,updated_at)
+           VALUES ($1,now(),$2::jsonb,0,0,0,0,FALSE,FALSE,NULL,now())
+           ON CONFLICT (department_id) DO UPDATE SET preview_at=now(),preview_rows=EXCLUDED.preview_rows,page=0,created_count=0,updated_count=0,skipped_count=0,complete=FALSE,exporting=FALSE,started_at=NULL,updated_at=now()
+           WHERE elvanto_song_export_state.exporting=FALSE OR elvanto_song_export_state.started_at < now()-interval '15 minutes'
+           RETURNING department_id`,
+          [dept, JSON.stringify(rows)],
+        );
+        if (!state.rowCount) return reply.code(409).send({ error: "A Songs export is already running for this location." });
+        return { complete: true, total: rows.length, create: rows.filter((item) => item.action === "create").length, update: rows.filter((item) => item.action === "update").length, unchanged: rows.filter((item) => item.action === "unchanged").length, review: rows.filter((item) => item.action.startsWith("review_") || item.action === "needs_arrangement"), sample: rows.slice(0, 50).map(({ title, arrangements, action }) => ({ title, arrangements: arrangements.length, action, unsupportedFields: ["authors", "notes", "chart_url", "audio_url"] })) };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not preview Elvanto song export." }); }
+    });
+    routes.post("/api/modules/sync/elvanto/songs-export", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoSongsExportRunning.has(dept)) return reply.code(409).send({ error: "A Songs export is already running for this location." });
+      const settings = await elvantoSettings(dept);
+      if (!settings) return reply.code(404).send({ error: "Connect Elvanto before exporting songs." });
+      if (settings.directions.songs !== "smart_church_to_elvanto" && settings.directions.songs !== "bidirectional") return reply.code(400).send({ error: "Set Songs direction to Smart Church → Elvanto or bidirectional before exporting." });
+      const savedResult = await pool!.query<{ preview_at: Date | string | null; preview_rows: Array<{ songId: string; sourceId: string | null; localHash: string; remoteHash: string | null; action: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }>; page: number; created_count: number; updated_count: number; skipped_count: number }>("SELECT preview_at,preview_rows,page,created_count,updated_count,skipped_count FROM elvanto_song_export_state WHERE department_id=$1", [dept]);
+      const saved = savedResult.rows[0];
+      const previewTime = saved?.preview_at ? new Date(saved.preview_at).getTime() : 0;
+      if (!saved || Date.now() - previewTime > 60 * 60 * 1000 || !Array.isArray(saved.preview_rows)) return reply.code(409).send({ error: "Run a complete Songs export preview first. Previews expire after one hour." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(settings.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoSongsExportRunning.add(dept);
+      let reserved = false;
+      try {
+        const lock = await pool!.query("UPDATE elvanto_song_export_state SET exporting=TRUE,started_at=now(),updated_at=now() WHERE department_id=$1 AND preview_at=$2 AND preview_at>now()-interval '1 hour' AND (exporting=FALSE OR started_at<now()-interval '15 minutes') RETURNING department_id", [dept, saved.preview_at]);
+        if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired or another Songs export is running. Run a new preview." });
+        reserved = true;
+        let index=saved.page, created=saved.created_count, updated=saved.updated_count, skipped=saved.skipped_count;
+        const rows=saved.preview_rows;
+        let processed=0;
+        while(index<rows.length && processed<3) {
+          const item=rows[index];
+          if(item.action!=="create" && item.action!=="update") { skipped++; index++; processed++; await pool!.query("UPDATE elvanto_song_export_state SET page=$2,skipped_count=$3,updated_at=now() WHERE department_id=$1",[dept,index,skipped]); continue; }
+          const current=await elvantoLocalSongsForExport(dept,[item.songId]);
+          const song=current[0];
+          if(!song || elvantoLocalSongExportHash({id:song.id,title:song.title,arrangements:song.arrangements})!==item.localHash) {
+            await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
+            return reply.code(409).send({error:"A local song or arrangement changed after preview. Review a fresh Songs export preview before writing."});
+          }
+          let sourceId=item.sourceId;
+          let sourceArrangements: Array<{id:string;name:string;key:string}>=[];
+          if(item.action==="update") {
+            if(!sourceId) throw new Error("The linked Elvanto song ID is missing. Run a new preview.");
+            const remote=await fetchElvantoSongForExport(apiKey,sourceId);
+            if(remote.hash!==item.remoteHash) {
+              await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
+              return reply.code(409).send({error:"The linked Elvanto song changed after preview. Review a fresh Songs export preview before writing."});
+            }
+            await elvantoRequest(apiKey,"songs/edit",{id:sourceId,title:song.title});
+            const currentArrangements=await fetchElvantoPagedRows(apiKey,"songs/arrangements/getAll","arrangements","arrangement",{song_id:sourceId,files:false});
+            if(!currentArrangements.complete) throw new Error("Elvanto returned an incomplete arrangements list; continue only after reviewing a new preview.");
+            const known=await pool!.query<{arrangement_id:string;source_id:string}>("SELECT arrangement_id,source_id FROM elvanto_song_arrangement_links WHERE department_id=$1 AND song_id=$2",[dept,song.id]);
+            const knownByLocal=new Map(known.rows.map((entry)=>[entry.arrangement_id,entry.source_id]));
+            for(const arrangement of song.arrangements) {
+              const linkedId=knownByLocal.get(arrangement.id);
+              let matches=currentArrangements.rows.filter((remoteArrangement)=>linkedId ? idOf(remoteArrangement)===linkedId : firstText(remoteArrangement.name).trim().toLocaleLowerCase()===arrangement.name.trim().toLocaleLowerCase());
+              if(matches.length>1) throw new Error(`More than one Elvanto arrangement matches “${arrangement.name}”. Resolve the duplicate before exporting.`);
+              let arrangementId=matches.length===1 ? idOf(matches[0]) : "";
+              if(arrangementId) await elvantoRequest(apiKey,"songs/arrangements/edit",{id:arrangementId,name:arrangement.name,...(arrangement.key?{key_male:arrangement.key}:{})});
+              else {
+                const result=await elvantoRequest(apiKey,"songs/arrangements/create",{song_id:sourceId,name:arrangement.name,...(arrangement.key?{key_male:arrangement.key}:{})});
+                const raw=result.arrangements; const createdArrangement=Array.isArray(raw)?raw[0] as JsonObject|undefined:raw as JsonObject|undefined;
+                arrangementId=idOf(createdArrangement ?? {});
+                if(!arrangementId) throw new Error("Elvanto did not return a stable arrangement ID. Review the song before retrying.");
+              }
+              sourceArrangements.push({id:arrangement.id,name:arrangement.name,key:arrangement.key});
+              await pool!.query("INSERT INTO elvanto_song_arrangement_links (department_id,song_id,arrangement_id,source_id,local_hash,remote_hash) VALUES ($1,$2,$3,$4,$5,'') ON CONFLICT (department_id,arrangement_id) DO UPDATE SET source_id=EXCLUDED.source_id,local_hash=EXCLUDED.local_hash,updated_at=now()",[dept,song.id,arrangement.id,arrangementId,hashElvantoSong([arrangement.name,arrangement.key])]);
+            }
+            updated++;
+          } else {
+            const result=await elvantoRequest(apiKey,"songs/create",{title:song.title,arrangements:song.arrangements.map((arrangement)=>({name:arrangement.name,...(arrangement.key?{keys:[{name:arrangement.key,key_starting:arrangement.key}]}:{})}))});
+            const raw=result.song; const remoteSong=Array.isArray(raw)?raw[0] as JsonObject|undefined:raw as JsonObject|undefined;
+            sourceId=idOf(remoteSong ?? {});
+            if(!sourceId) throw new Error("Elvanto did not return a stable song ID. Review the title match before retrying.");
+            const returnedArrangements=elvantoSongArrangementRows(remoteSong?.arrangements);
+            const linkedByName=new Map(returnedArrangements.map((entry,index)=>[song.arrangements[index]?.name.trim().toLocaleLowerCase(),idOf(entry)]));
+            for(const arrangement of song.arrangements) {
+              const arrangementId=linkedByName.get(arrangement.name.trim().toLocaleLowerCase());
+              if(arrangementId) await pool!.query("INSERT INTO elvanto_song_arrangement_links (department_id,song_id,arrangement_id,source_id,local_hash,remote_hash) VALUES ($1,$2,$3,$4,$5,'') ON CONFLICT (department_id,arrangement_id) DO UPDATE SET source_id=EXCLUDED.source_id,local_hash=EXCLUDED.local_hash,updated_at=now()",[dept,song.id,arrangement.id,arrangementId,hashElvantoSong([arrangement.name,arrangement.key])]);
+            }
+            created++;
+          }
+          const remote=await fetchElvantoSongForExport(apiKey,sourceId!);
+          await pool!.query("INSERT INTO elvanto_song_links (department_id,song_id,source_id,local_hash,remote_hash) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (department_id,song_id) DO UPDATE SET source_id=EXCLUDED.source_id,local_hash=EXCLUDED.local_hash,remote_hash=EXCLUDED.remote_hash,updated_at=now()",[dept,song.id,sourceId,elvantoLocalSongExportHash({id:song.id,title:song.title,arrangements:song.arrangements}),remote.hash]);
+          await pool!.query("UPDATE elvanto_song_export_state SET page=$2,created_count=$3,updated_count=$4,skipped_count=$5,updated_at=now() WHERE department_id=$1",[dept,index+1,created,updated,skipped]);
+          index++; processed++;
+        }
+        const complete=index>=rows.length;
+        await pool!.query("UPDATE elvanto_song_export_state SET complete=$2,updated_at=now() WHERE department_id=$1",[dept,complete]);
+        return { songsExport:{page:index,total:rows.length,created,updated,skipped,complete} };
+      } catch(error) {
+        await pool!.query("UPDATE elvanto_sync_settings SET last_sync_error=$2 WHERE department_id=$1",[dept,(error instanceof Error?error.message:"Song export failed.").slice(0,1000)]).catch(()=>{});
+        return reply.code(400).send({error:error instanceof Error?error.message:"Could not export Elvanto songs."});
+      } finally {
+        if(reserved) await pool!.query("UPDATE elvanto_song_export_state SET exporting=FALSE,started_at=NULL,updated_at=now() WHERE department_id=$1",[dept]).catch(()=>{});
+        elvantoSongsExportRunning.delete(dept);
+      }
     });
     routes.post("/api/modules/sync/elvanto/songs-preview", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
