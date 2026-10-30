@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { UserLanguage } from "@smart-church/contracts";
 import { getActiveLanguage } from "../../i18n";
 import { ModuleTranslationHost } from "../../module-registry";
@@ -107,9 +107,9 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
   const selected = data?.flows.find((flow) => flow.sourceFlowId === sourceFlowId) ?? null;
   const localFlows = data?.localFlows ?? [];
   const selectedLocal = localFlows.find((flow) => flow.id === localFlowId) ?? null;
-  const savedSteps = useMemo(() => new Map((selected?.stepLinks ?? []).map((link) => [link.sourceStepId, link.localStepId])), [selected]);
 
   async function load() {
+    setError("");
     try {
       const response = await fetch("/api/people-flows/elvanto-crosswalk", { headers: { "x-department-id": departmentId }, cache: "no-store" });
       const result = await response.json() as CrosswalkData | { error?: string };
@@ -157,6 +157,7 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
     <section className="sync-connection-form" aria-live="polite">
       <h3>Link Elvanto People Flows to local workflows</h3>
       <p className="sync-help">Links are explicit and use stable flow and step IDs. Imported snapshots remain read-only and never change native workflow data. People are matched only through existing Elvanto person IDs.</p>
+      {error && <p className="sync-inline-error" role="alert">{error}</p>}
       {!data ? <p className="sync-help">Loading…</p> : data.flows.length === 0 ? <p className="sync-help">No imported Elvanto People Flows are available. Import them from Elvanto first.</p> : <>
         <label>Choose an Elvanto flow<select value={sourceFlowId} onChange={(event) => setSourceFlowId(event.target.value)}>{data.flows.map((flow) => <option key={flow.sourceFlowId} value={flow.sourceFlowId}>{flow.name}{flow.sourceMissing ? " · missing" : ""}</option>)}</select></label>
         {selected && <>
@@ -165,7 +166,6 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
           <label>Select a local workflow<select value={localFlowId} disabled={busy || selected.sourceMissing} onChange={(event) => { setLocalFlowId(event.target.value); setStepSelection({}); }}><option value="">Unlinked</option>{localFlows.map((flow) => <option key={flow.id} value={flow.id}>{flow.name} · {flow.status}</option>)}</select></label>
           {selectedLocal && <fieldset className="module-rights-fieldset"><legend>Map Elvanto steps to local steps</legend>{selected.remoteSteps.map((remoteStep) => <label className="module-right-option" key={remoteStep.id}><span><strong>{remoteStep.name}</strong>{!remoteStep.name && <small>{remoteStep.id}</small>}</span><select value={stepSelection[remoteStep.id] ?? ""} disabled={busy || selected.sourceMissing} onChange={(event) => setStepSelection((current) => ({ ...current, [remoteStep.id]: event.target.value }))}><option value="">No local step</option>{(selectedLocal?.steps ?? []).filter((step) => step.active).map((step) => <option key={step.id} value={step.id}>{step.title}</option>)}</select></label>)}</fieldset>}
           {selected?.stepLinks.some((link) => !link.sourceStepPresent) && <p className="sync-inline-error" role="alert">The Elvanto flow or step changed or disappeared. Refresh the imported snapshot before saving links.</p>}
-          {error && <p className="sync-inline-error" role="alert">{error}</p>}
           {notice && <p className="sync-feedback" role="status">{notice}</p>}
           <div className="community-inline-actions"><button className="button button-primary" type="button" disabled={busy || selected.sourceMissing || !localFlowId || selected.stepLinks.some((link) => !link.sourceStepPresent)} onClick={() => void save()}>{busy ? "Saving…" : "Save links"}</button></div>
         </>}
