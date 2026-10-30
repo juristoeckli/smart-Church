@@ -7,7 +7,9 @@ export interface Contact {
   email?: string;
   phone?: string;
   status: ContactStatus;
-  importedFrom?: "churchtools";
+  importedFrom?: "churchtools" | "elvanto";
+  elvantoProfile?: Record<string, unknown>;
+  churchtoolsProfile?: Record<string, unknown>;
 }
 
 export type CreateContact = Omit<Contact, "id">;
@@ -26,6 +28,37 @@ export interface ServicePlanItem {
   startTime?: string;
   durationMinutes?: number;
   notes?: string;
+  songId?: string;
+  arrangementId?: string;
+  position?: string;
+}
+
+export interface WorshipSongArrangement {
+  id: string;
+  name: string;
+  key?: string;
+  chartUrl?: string;
+  audioUrl?: string;
+  active: boolean;
+}
+
+export interface WorshipSong {
+  id: string;
+  title: string;
+  authors?: string;
+  defaultKey?: string;
+  notes?: string;
+  arrangements: WorshipSongArrangement[];
+  active: boolean;
+}
+
+export interface ServicePlanTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  positions: Array<{ name: string }>;
+  items: ServicePlanItem[];
+  active: boolean;
 }
 
 export interface ServiceEvent {
@@ -33,6 +66,7 @@ export interface ServiceEvent {
   title: string;
   kind: ServiceEventKind;
   eventDate: string;
+  isAllDay?: boolean;
   startTime: string;
   endTime?: string;
   location: string;
@@ -49,7 +83,7 @@ export interface ServiceEvent {
   registrationToken?: string;
   registrationCount?: number;
   seriesId?: string;
-  importedFrom?: "churchtools";
+  importedFrom?: "churchtools" | "elvanto";
 }
 
 export interface ServiceEventCheckIn {
@@ -95,6 +129,7 @@ export interface EventRegistration {
 export interface PublicRegistrationEvent {
   title: string;
   eventDate: string;
+  isAllDay?: boolean;
   startTime: string;
   endTime?: string;
   location: string;
@@ -113,7 +148,9 @@ export interface ChurchGroup {
   memberIds: string[];
   memberDetails?: ChurchGroupMembership[];
   createdAt: string;
-  importedFrom?: "churchtools";
+  publicSignupEnabled?: boolean;
+  publicSignupToken?: string;
+  importedFrom?: "churchtools" | "elvanto";
 }
 
 export interface ChurchGroupMembership {
@@ -193,6 +230,7 @@ export interface DepartmentProfile {
 export type VideoPermission = "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin";
 export type PresenterPermission = "editor" | "operator" | "admin";
 export type LocationPermission = "people_view_private" | "people_manage" | "events_manage" | "groups_manage" | "resources_manage";
+export type ServerPermission = "server_view" | "server_troubleshoot" | "server_manage";
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
 
@@ -205,7 +243,14 @@ export interface AuthenticatedUser {
   displayName: string;
   role: "server_admin" | "user";
   mustChangePassword: boolean;
+  dateTimeFormat: DateTimeFormat;
+  language: UserLanguage;
+  languageIsCustom: boolean;
+  serverPermissions: ServerPermission[];
 }
+
+export type DateTimeFormat = "DD.MM.YYYY HH:MM" | "DD/MM/YYYY HH:MM" | "MM/DD/YYYY h:mm AM/PM" | "YYYY-MM-DD HH:MM";
+export type UserLanguage = "en" | "de" | "fr" | "it";
 
 export interface SiteUser {
   id: string;
@@ -220,6 +265,7 @@ export interface SiteUser {
   phoneNumbers: UserPhoneNumber[];
   relationships: UserRelationship[];
   accountRole: "server_admin" | "user";
+  serverPermissions: ServerPermission[];
   memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 
@@ -236,6 +282,7 @@ export interface CreateSiteUser {
   relationships?: UserRelationshipInput[];
   password: string;
   accountRole: "server_admin" | "user";
+  serverPermissions?: ServerPermission[];
   memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 
@@ -262,10 +309,16 @@ export interface UserRelationshipInput {
 export interface AuthStatus {
   setupRequired: boolean;
   authenticated: boolean;
+  selfSignupEnabled?: boolean;
+  selfSignupSites?: Array<{ id: string; name: string }>;
+  httpAccessMode?: HttpAccessMode;
+  httpsOrigin?: string | null;
   setupLocation?: string;
   user?: AuthenticatedUser;
   csrfToken?: string;
 }
+
+export type HttpAccessMode = "none" | "warning" | "redirect";
 
 export interface CreateAdminAccount {
   setupCode: string;

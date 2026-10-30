@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Check, CircleAlert, Database, RefreshCw, Trash2 } from "lucide-react";
+import { formatUserDate } from "../../date-format";
+import { getActiveLanguage } from "../../i18n";
+import { translateModuleMessage } from "../translations";
+import { ElvantoSyncSettings } from "./ElvantoSyncSettings";
+import { FederationSettings } from "./FederationSettings";
+import "./federation.css";
 
 type SyncStatus = {
   configured: boolean;
@@ -11,15 +17,25 @@ type SyncStatus = {
   groupCount: number;
   serviceCount: number;
   resourceCount: number;
+  migration?: { page: number; total: number; created: number; updated: number; skipped: number; failed?: number; failedRecords?: Array<{ area: string; sourceId: string }>; complete: boolean; previewAt: string; startDate: string; endDate: string } | null;
 };
+type ChurchToolsMigrationPreview = { complete: boolean; total: number; create: number; update: number; review: number; invalid: number; unmappedFields: number; startDate: string; endDate: string; sample: Array<{ area: string; name: string; email?: string | null; date?: string; action: string; unmappedFields?: string[] }> };
 
-export function SyncModule({ departmentId, settingsPanel = false }: { departmentId: string; settingsPanel?: boolean }) {
+function shiftUtcYear(years: number) {
+  const date = new Date(); date.setUTCFullYear(date.getUTCFullYear() + years); return date.toISOString().slice(0, 10);
+}
+
+export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: { departmentId: string; csrfToken: string; settingsPanel?: boolean }) {
+  const [activePlatform, setActivePlatform] = useState<"churchtools" | "elvanto" | "server">("churchtools");
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [instanceUrl, setInstanceUrl] = useState("");
   const [loginToken, setLoginToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
+  const [migrationStartDate, setMigrationStartDate] = useState(() => shiftUtcYear(-5));
+  const [migrationEndDate, setMigrationEndDate] = useState(() => shiftUtcYear(5));
+  const [migrationPreview, setMigrationPreview] = useState<ChurchToolsMigrationPreview | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -59,6 +75,27 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
     finally { setBusy(false); }
   }
 
+  async function previewMigration() {
+    setBusy(true); setFeedback(""); setError(""); setMigrationPreview(null);
+    try {
+      const result = await request("/api/modules/sync/churchtools/migration-preview", "POST", { startDate: migrationStartDate, endDate: migrationEndDate }) as unknown as ChurchToolsMigrationPreview;
+      if (!result.complete || !Array.isArray(result.sample)) throw new Error("ChurchTools did not return a complete migration preview.");
+      setMigrationPreview(result); await load();
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview the ChurchTools migration."); }
+    finally { setBusy(false); }
+  }
+
+  async function importMigration(restart = false) {
+    if (!status?.migration?.previewAt) return;
+    setBusy(true); setFeedback(""); setError("");
+    try {
+      const result = await request("/api/modules/sync/churchtools/migration", "POST", restart ? { restart: true } : undefined) as unknown as { migration?: NonNullable<SyncStatus["migration"]> };
+      if (!result.migration) throw new Error("ChurchTools did not return migration progress.");
+      await load(); setFeedback(result.migration.complete ? "ChurchTools migration is complete." : "Migration batch complete. Continue to resume.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not import the ChurchTools migration batch."); await load(); }
+    finally { setBusy(false); }
+  }
+
   async function toggle() {
     if (!status) return;
     setBusy(true); setError(""); setFeedback("");
@@ -77,13 +114,18 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
 
   const totalImported = (status?.peopleCount ?? 0) + (status?.groupCount ?? 0) + (status?.serviceCount ?? 0) + (status?.resourceCount ?? 0);
   return <div className={settingsPanel ? "sync-settings-panel-view" : undefined}>
+    {!settingsPanel && <section className="page-heading"><div><div className="eyebrow">INTEGRATIONS</div><h1>Sync</h1><p className="page-subtitle">Manage data connections for ChurchTools, Elvanto, and other Smart-Church servers.</p></div></section>}
+    <nav className="sync-platform-tabs" role="tablist" aria-label="Sync platforms">
+      {[{ id: "churchtools", label: "ChurchTools" }, { id: "elvanto", label: "Elvanto" }, { id: "server", label: "Server-to-server" }].map((platform) => <button key={platform.id} id={`sync-tab-${platform.id}`} type="button" role="tab" aria-controls={`sync-panel-${platform.id}`} aria-selected={activePlatform === platform.id} tabIndex={activePlatform === platform.id ? 0 : -1} className={activePlatform === platform.id ? "sync-platform-tab active" : "sync-platform-tab"} onClick={() => setActivePlatform(platform.id as typeof activePlatform)}>{platform.label}</button>)}
+    </nav>
+    {activePlatform === "server" && <div id="sync-panel-server" className="sync-platform-tabpanel" role="tabpanel" aria-labelledby="sync-tab-server" tabIndex={0}><FederationSettings csrfToken={csrfToken} departmentId={departmentId} /></div>}
+    {activePlatform === "churchtools" && <div id="sync-panel-churchtools" className="sync-platform-tabpanel" role="tabpanel" aria-labelledby="sync-tab-churchtools" tabIndex={0}>
     <div className={`demo-notice ${error || status?.lastSyncError ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || status?.lastSyncError || "ChurchTools data is imported as read-only records."}</div>
-    {!settingsPanel && <section className="page-heading"><div><div className="eyebrow">INTEGRATIONS</div><h1>ChurchTools sync</h1><p className="page-subtitle">Bring people, groups and their members, services, and bookable resources into this site. Imported records follow ChurchTools and cannot be edited here.</p></div>{status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={16} />{busy ? "Working…" : "Sync now"}</button>}</section>}
     <section className="sync-summary-grid" aria-label="Imported data summary">
       {[ ["People", status?.peopleCount ?? 0], ["Groups", status?.groupCount ?? 0], ["Services & events", status?.serviceCount ?? 0], ["Resources", status?.resourceCount ?? 0] ].map(([label, count]) => <article className="stat-card" key={label}><div className="stat-icon stat-icon-blue"><Database size={18} /></div><div className="stat-content"><span>{label}</span><strong>{count}</strong><small>Imported from ChurchTools</small></div></article>)}
     </section>
     <section className="directory-card sync-settings-card">
-      <div className="directory-heading"><div><h2>Connection</h2><p>{status?.configured ? `Last sync: ${status.lastSyncAt ? new Date(status.lastSyncAt).toLocaleString() : "Not yet synced"}` : "Connect a ChurchTools cloud site using a Login token."}</p></div><div className="community-inline-actions">{status?.configured && <span className={`event-kind ${status.enabled ? "event-kind-service" : "event-kind-other"}`}>{status.enabled ? "Enabled" : "Paused"}</span>}{settingsPanel && status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={15} />{busy ? "Working…" : "Sync now"}</button>}</div></div>
+      <div className="directory-heading"><div><h2>Connection</h2><p>{status?.configured ? `Last sync: ${status.lastSyncAt ? formatUserDate(status.lastSyncAt, true) : "Not yet synced"}` : "Connect a ChurchTools cloud site using a Login token."}</p></div><div className="community-inline-actions">{status?.configured && <span className={`event-kind ${status.enabled ? "event-kind-service" : "event-kind-other"}`}>{status.enabled ? "Enabled" : "Paused"}</span>}{settingsPanel && status?.configured && <button className="button button-primary" type="button" onClick={() => void syncNow()} disabled={busy || !status.enabled}><RefreshCw size={15} />{busy ? "Working…" : "Sync now"}</button>}</div></div>
       <form className="sync-connection-form" onSubmit={save}>
         <label>ChurchTools site URL<input type="url" required placeholder="https://my-church.church.tools" value={instanceUrl} onChange={(event) => setInstanceUrl(event.target.value)} /></label>
         <label>ChurchTools Login token<input type="password" autoComplete="new-password" placeholder={status?.configured ? "Leave blank to keep the saved token" : "Paste a Login token"} value={loginToken} onChange={(event) => setLoginToken(event.target.value)} /></label>
@@ -93,7 +135,17 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
       {feedback && <p className="sync-feedback" role="status"><Check size={15} />{feedback}</p>}
       {status?.lastSyncError && <p className="sync-feedback sync-feedback-error" role="alert"><CircleAlert size={15} />Last sync failed: {status.lastSyncError}</p>}
     </section>
+    {settingsPanel && status?.configured && <section className="directory-card sync-settings-card">
+      <div className="directory-heading"><div><h2>One-time ChurchTools migration</h2><p>Preview and import people, groups, services/events, and resources into this location. Imported records stay editable and are not tied to scheduled sync.</p></div></div>
+      <p className="sync-help">Matching uses stable ChurchTools IDs. Email, name, and event matches are flagged for review instead of merged. Group import only adds linked members; local-only memberships are kept. Person fields returned by ChurchTools are stored in a private read-only profile; separate relationships and resource bookings are not imported.</p>
+      <div className="form-row"><label>Events from<input type="date" value={migrationStartDate} max={migrationEndDate} onChange={(event) => { setMigrationStartDate(event.target.value); setMigrationPreview(null); }} /></label><label>Through<input type="date" value={migrationEndDate} min={migrationStartDate} onChange={(event) => { setMigrationEndDate(event.target.value); setMigrationPreview(null); }} /></label></div>
+      <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void previewMigration()} disabled={busy || !migrationStartDate || !migrationEndDate}><RefreshCw size={15} />{busy ? "Loading preview…" : "Preview migration"}</button></div>
+      {migrationPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong><span>Migration preview</span> · {migrationPreview.startDate} – {migrationPreview.endDate}</strong><span>{migrationPreview.total} <span>source records</span> · {migrationPreview.create} <span>new</span> · {migrationPreview.update} <span>linked updates</span> · {migrationPreview.review} <span>conflicts</span> · {migrationPreview.invalid} <span>invalid</span></span><small>{migrationPreview.unmappedFields} <span>source fields are not mapped.</span></small></div>{migrationPreview.sample.map((item, index) => <div className="sync-feedback" key={`${item.area}-${item.name}-${item.date ?? ""}-${index}`}><strong>{item.name || item.area}</strong><span>{item.area}{item.date ? ` · ${item.date}` : ""}{item.email ? ` · ${item.email}` : ""} · {item.action.replaceAll("_", " ")}</span>{item.unmappedFields?.length ? <small>{translateModuleMessage("sync", getActiveLanguage(), "Unsupported ChurchTools plan fields: {fields}").replace("{fields}", item.unmappedFields.join(", "))}</small> : null}</div>)}<small className="sync-help">Only the first 40 records are shown. The saved snapshot is encrypted; each import request processes at most 50 records and can resume after a reload.</small><button className="button button-primary" type="button" onClick={() => void importMigration()} disabled={busy || !migrationPreview.complete || migrationPreview.create + migrationPreview.update === 0}><Check size={15} />{busy ? "Importing…" : "Import reviewed records"}</button></div>}
+      {status.migration && <div className="sync-feedback" aria-live="polite"><strong>Migration progress</strong><span>{status.migration.complete ? "Complete" : <>{status.migration.page} of {status.migration.total} <span>records processed</span></>} · {status.migration.created} <span>created</span> · {status.migration.updated} <span>updated</span> · {status.migration.skipped} <span>skipped</span> · {status.migration.failed ?? 0} <span>failed</span></span>{!status.migration.complete && status.migration.previewAt && <button className="button button-secondary" type="button" onClick={() => void importMigration()} disabled={busy}>Continue migration</button>}{Boolean(status.migration.failed) && <><small><span>Failed source records:</span> {(status.migration.failedRecords ?? []).map((record) => `${record.area} ${record.sourceId}`).join(", ")}</small><button className="button button-secondary" type="button" onClick={() => void importMigration(true)} disabled={busy}>Retry migration</button></>}</div>}
+    </section>}
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>Module controls</h2><p>Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? "Pause sync" : "Enable sync"}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />Remove sync and imported data</button></div></section>}
     <footer className="page-footer"><span>Automatically syncs every 15 minutes while enabled.</span><span>Only site administrators can manage this connection.</span></footer>
+    </div>}
+    {activePlatform === "elvanto" && <div id="sync-panel-elvanto" className="sync-platform-tabpanel" role="tabpanel" aria-labelledby="sync-tab-elvanto" tabIndex={0}><ElvantoSyncSettings departmentId={departmentId} /></div>}
   </div>;
 }

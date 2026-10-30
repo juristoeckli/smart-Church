@@ -2,5 +2,12 @@
   "id": "community",
   "name": "Community data",
   "version": "0.1.0",
-  "serverEntry": "./routes.ts"
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": false,
+  "clientManaged": false,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
 }

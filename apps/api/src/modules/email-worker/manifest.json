@@ -1,0 +1,9 @@
+{
+  "id": "email-worker",
+  "name": "Email delivery",
+  "version": "0.1.3",
+  "serverEntry": "./routes.ts",
+  "required": true,
+  "enabledByDefault": true,
+  "clientManaged": false
+}

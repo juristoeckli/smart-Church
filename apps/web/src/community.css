@@ -114,8 +114,8 @@
 .service-asset-list small{color:var(--muted);font-size:8px}
 .service-position-list,.service-timeplan-list{display:grid;gap:6px}
 .service-position-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 32px;align-items:center;gap:7px}
-.service-position-row>input,.service-position-row>select,.service-timeplan-row>input{width:100%;min-width:0;height:33px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px}
-.service-timeplan-row{display:grid;grid-template-columns:minmax(130px,1.5fr) 100px 90px auto;align-items:center;gap:6px}
+.service-position-row>input,.service-position-row>select,.service-timeplan-row>input,.service-timeplan-row>select{width:100%;min-width:0;height:33px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px}
+.service-timeplan-row{display:grid;grid-template-columns:minmax(120px,1.1fr) minmax(110px,1fr) minmax(120px,1.1fr) minmax(130px,1.3fr) 80px 70px auto;align-items:center;gap:6px}
 .service-timeplan-order{display:flex}
 .service-timeplan-order button{width:26px;height:27px}
 .service-timeplan-order button:disabled{opacity:.35}
@@ -125,6 +125,7 @@
 .community-row-delete:hover{border-color:#e4b8bc;background:#fff0f1;color:#9b4a50}
 @media(max-width:800px){.community-groups-layout,.community-resources-layout{grid-template-columns:1fr}.community-group-options{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}.community-group-form{grid-template-columns:1fr}.group-meeting-form{grid-template-columns:1fr}.group-member-details-row{grid-template-columns:14px 30px minmax(100px,1fr)}.group-membership-controls{grid-column:3;grid-row:2;flex-wrap:wrap}.community-upcoming-item{grid-template-columns:85px minmax(0,1fr);gap:9px;padding:8px 0}.community-upcoming-item .event-kind{grid-column:2}.community-booking-form{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:520px){.community-upcoming-list{padding-left:13px;padding-right:13px}.community-upcoming-item{grid-template-columns:70px minmax(0,1fr)}.community-upcoming-item .event-kind{display:none}.community-inline-actions{flex-wrap:wrap}}
+@media(max-width:700px){.service-timeplan-row{grid-template-columns:repeat(2,minmax(0,1fr))}.service-timeplan-order{justify-content:flex-end}.service-timeplan-row .service-timeplan-notes{grid-column:1/-1}}
 :root[data-theme="dark"] .community-group-form input,
 :root[data-theme="dark"] .community-group-form textarea,
 :root[data-theme="dark"] .community-new-group input,
@@ -133,3 +134,17 @@
 :root[data-theme="dark"] .button-danger{border-color:#593b46;background:#2d222b;color:#f0a1aa}
 :root[data-theme="dark"] .button-danger:hover{background:#38252e;border-color:#70434c}
 :root[data-theme="dark"] .community-row-delete:hover{background:#38252e;color:#f0a1aa}
+.group-public-signup, .group-join-requests { display: grid; gap: 0.8rem; margin: 1rem 0; padding: 1rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.group-public-signup-toggle { display: inline-flex !important; align-items: center; gap: 0.55rem !important; white-space: nowrap; }
+.group-public-signup-toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+.group-public-signup-link { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.7rem; }
+.group-public-signup-link code { overflow-wrap: anywhere; color: var(--muted-foreground); font-size: 0.82rem; }
+.group-join-request-list { display: grid; gap: 0.65rem; }
+.group-join-request { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 230px) auto; align-items: center; gap: 0.8rem; padding: 0.8rem; border: 1px solid var(--border); border-radius: 10px; }
+.group-join-request > div:first-child { display: grid; gap: 0.2rem; }
+.group-join-request small { color: var(--muted-foreground); }
+.group-join-request > label { display: grid; gap: 0.35rem; font-size: 0.8rem; }
+.group-join-request-actions { display: flex; justify-content: flex-end; gap: 0.45rem; }
+@media (max-width: 720px) { .group-join-request { grid-template-columns: 1fr; } .group-join-request-actions { justify-content: flex-start; } }
+
+.sync-song-json{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;padding:10px;border-radius:6px;background:var(--surface,#191b22);color:var(--text-color,#e9e9ef);font-size:.78rem}

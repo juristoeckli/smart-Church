@@ -151,10 +151,10 @@ force_update_branch() {
     main|beta|dev) ;;
     *) echo "Choose main, beta, or dev before forcing a branch update." >&2; return 0 ;;
   esac
-  command -v curl >/dev/null || { echo "curl is required to resolve the selected branch." >&2; return 1; }
-  commit_sha="$(curl -fsSL --retry 3 -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/juristoeckli/smart-Church/commits/$branch" \
-    | sed -n 's/^[[:space:]]*{"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p; s/^[[:space:]]*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
+  command -v git >/dev/null || { echo "git is required to resolve the selected branch." >&2; return 1; }
+  # Avoid GitHub's unauthenticated REST API rate limit when resolving branch refs.
+  commit_sha="$(git ls-remote --exit-code https://github.com/juristoeckli/smart-Church.git "refs/heads/$branch" \
+    | awk -v ref="refs/heads/$branch" '$2 == ref { print $1; exit }')"
   [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not resolve the latest $branch commit from GitHub." >&2; return 1; }
   for image in smart-church-api smart-church-web; do
     if ! docker manifest inspect "ghcr.io/juristoeckli/$image:$commit_sha" >/dev/null 2>&1; then

@@ -1,10 +1,11 @@
 import { lazy } from "react";
 import { CalendarDays } from "lucide-react";
 import type { ModuleContext, ModuleRegistration } from "../../module-registry";
+import { translationsForModule } from "../translations";
 import "./eventdesk.css";
 
 const EventDeskPage = lazy(() => import("./EventDeskModule").then(({ EventDeskModule }) => ({ default: EventDeskModule })));
-const sections = ["Overview", "Jobs", "Customers", "Suppliers & venues", "Equipment", "Warehouse", "Workshop", "Freelancers", "Crew", "Documents"];
+const sections = ["Overview", "Jobs", "Contacts", "Customers", "Suppliers & venues", "Equipment", "Warehouse", "Workshop", "Purchasing", "Freelancers", "Crew", "Calendar", "Documents", "Reports & data"];
 
 function EventDesk(context: ModuleContext) {
   return <EventDeskPage departmentId={context.departmentId} csrfToken={context.csrfToken} canManageSite={context.canManageSite} section={sections.includes(context.state) ? context.state : "Overview"} onSectionChange={context.onStateChange} />;
@@ -18,6 +19,7 @@ function EventDeskNavigation({ context }: { context: ModuleContext }) {
 export const moduleRegistration: ModuleRegistration = {
   id: "eventdesk",
   name: "EventDesk",
+  translations: translationsForModule("eventdesk"),
   icon: CalendarDays,
   enabledByDefault: false,
   initialState: "Overview",

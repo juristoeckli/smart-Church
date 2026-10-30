@@ -17,6 +17,7 @@ export class ModuleDemoWorker {
   private startupTimer: NodeJS.Timeout | null = null;
   private restartCount = 0;
   private closing = false;
+  private enabled = true;
   private readyPromise: Promise<void> | null = null;
   private readyResolve: (() => void) | null = null;
   private readyReject: ((error: Error) => void) | null = null;
@@ -33,8 +34,48 @@ export class ModuleDemoWorker {
     };
   }
 
+  setEnabled(enabled: boolean) {
+    if (this.closing || this.enabled === enabled) return;
+    this.enabled = enabled;
+    if (enabled) return;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.startupTimer) clearTimeout(this.startupTimer);
+    this.restartTimer = null;
+    this.startupTimer = null;
+    const child = this.child;
+    this.child = null;
+    this.startedAt = null;
+    this.memory = null;
+    this.rejectPending(new Error("Module Demo is disabled for this installation."));
+    this.readyReject?.(new Error("Module Demo is disabled for this installation."));
+    this.readyPromise = null;
+    this.readyResolve = null;
+    this.readyReject = null;
+    this.status = "stopped";
+    child?.kill();
+  }
+
+  restart() {
+    if (this.closing) throw new Error("The worker supervisor is shutting down.");
+    if (!this.enabled) throw new Error("Module Demo is disabled for this installation.");
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    if (this.startupTimer) clearTimeout(this.startupTimer);
+    this.restartTimer = null;
+    this.startupTimer = null;
+    const child = this.child;
+    this.child = null;
+    child?.kill();
+    this.rejectPending(new Error("The demo worker is restarting."));
+    this.readyReject?.(new Error("The demo worker is restarting."));
+    this.readyPromise = null;
+    this.readyResolve = null;
+    this.readyReject = null;
+    this.restartCount = 0;
+    this.launch();
+  }
+
   private launch() {
-    if (this.closing || this.child) return;
+    if (this.closing || !this.enabled || this.child) return;
     this.status = "starting";
     this.error = null;
     this.startedAt = Date.now();
@@ -131,6 +172,7 @@ export class ModuleDemoWorker {
   }
 
   private async ensureReady() {
+    if (!this.enabled) throw new Error("Module Demo is disabled for this installation.");
     if (this.status === "ready" && this.child) return;
     if (!this.child && !this.closing) this.launch();
     if (!this.readyPromise) throw new Error(this.error ?? `Demo worker is ${this.status}.`);

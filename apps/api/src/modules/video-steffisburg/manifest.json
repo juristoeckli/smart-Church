@@ -1,6 +1,12 @@
 {
   "id": "video-steffisburg",
   "name": "Video & streaming",
-  "version": "0.1.0",
-  "serverEntry": "./routes.ts"
+  "version": "0.1.1",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": false,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
 }

@@ -1,0 +1,14 @@
+{
+  "id": "people-flows",
+  "name": "People Flows",
+  "version": "0.1.0",
+  "description": "Local people follow-up workflows with assigned steps and private audit history.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "clientManaged": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
+}

@@ -8,6 +8,7 @@ const migrationDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../
 const connectionString = process.env.DATABASE_URL;
 export const departmentId = process.env.SMART_CHURCH_DEPARTMENT_ID ?? "00000000-0000-4000-8000-000000000001";
 export const departmentName = process.env.SMART_CHURCH_DEPARTMENT_NAME ?? "Location not configured";
+export let installationId: string | undefined;
 export const pool = connectionString
   ? new Pool({ connectionString, connectionTimeoutMillis: 5_000, max: 10 })
   : undefined;
@@ -37,12 +38,27 @@ export async function initializeDatabase() {
         throw error;
       }
     }
+    const installation = await client.query<{ id: string }>("SELECT id FROM installations WHERE is_current = TRUE");
+    if (!installation.rows[0]) throw new Error("The installation identity could not be loaded.");
+    installationId = installation.rows[0].id;
     await client.query(
-      `INSERT INTO departments (id, name, enabled_modules)
-       VALUES ($1, $2, CASE WHEN lower($2) = 'steffisburg' THEN ARRAY['video-steffisburg']::TEXT[] ELSE '{}'::TEXT[] END)
+      `INSERT INTO departments (id, installation_id, name, enabled_modules)
+       VALUES ($1, $2, $3, ARRAY['file-storage', 'notifications']::TEXT[] || CASE WHEN lower($3) = 'steffisburg' THEN ARRAY['video-steffisburg']::TEXT[] ELSE '{}'::TEXT[] END)
        ON CONFLICT (id) DO NOTHING`,
-      [departmentId, departmentName],
+      [departmentId, installationId, departmentName],
     );
+    await client.query("UPDATE self_signup_requests SET department_id=$1 WHERE department_id IS NULL", [departmentId]);
+    await client.query("ALTER TABLE self_signup_requests ALTER COLUMN department_id SET NOT NULL");
+    await client.query("INSERT INTO department_self_signup_settings(department_id) VALUES($1) ON CONFLICT(department_id) DO NOTHING", [departmentId]);
+    const redundancyTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (redundancyTable.rows[0]?.table_name) {
+      await client.query(
+        `INSERT INTO sync_site_redundancy(department_id,role,primary_installation_id)
+         SELECT id,'primary',installation_id FROM departments WHERE id=$1
+         ON CONFLICT(department_id) DO NOTHING`,
+        [departmentId],
+      );
+    }
   } finally {
     client.release();
   }

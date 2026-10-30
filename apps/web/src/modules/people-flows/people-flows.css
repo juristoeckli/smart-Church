@@ -1,0 +1,45 @@
+.people-flows-page { display: grid; gap: 1.25rem; }
+.people-flows-heading, .people-flows-section-heading, .people-flows-step-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.people-flows-heading h1, .people-flows-section-heading h2, .people-flows-section-heading h3 { margin: .15rem 0; }
+.people-flows-heading p, .people-flows-section-heading p { margin: .25rem 0 0; color: var(--text-muted, #64748b); }
+.people-flows-layout { display: grid; grid-template-columns: minmax(230px, 300px) minmax(0, 1fr); align-items: start; gap: 1rem; }
+.people-flows-list, .people-flows-content, .people-flows-section, .people-flows-form, .people-flows-assignment, .people-flows-step { min-width: 0; border: 1px solid var(--border, #d7dce5); border-radius: 12px; background: var(--surface, #fff); }
+.people-flows-list { display: grid; gap: .65rem; padding: 1rem; }
+.people-flows-list h2 { margin: 0 0 .2rem; font-size: 1.05rem; }
+.people-flows-list-item { display: grid; gap: .25rem; width: 100%; padding: .75rem; border: 1px solid var(--border, #d7dce5); border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.people-flows-list-item:hover, .people-flows-list-item.is-selected { border-color: var(--accent, #4f46e5); background: var(--surface-tint, #f6f7ff); }
+.people-flows-list-item span, .people-flows-list-item small { color: var(--text-muted, #64748b); }
+.people-flows-content { display: grid; gap: 1rem; padding: 1rem; }
+.people-flows-section { display: grid; gap: .9rem; padding: 1rem; }
+.people-flows-form { display: grid; gap: .75rem; padding: 1rem; }
+.people-flows-form h3 { margin: 0; }
+.people-flows-form label, .people-flows-step label { display: grid; gap: .35rem; font-size: .9rem; font-weight: 600; }
+.people-flows-form input, .people-flows-form textarea, .people-flows-form select, .people-flows-step input, .people-flows-step textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: .58rem .65rem; border: 1px solid var(--border, #cbd5e1); border-radius: 7px; background: var(--surface, #fff); color: inherit; font: inherit; }
+.people-flows-form select[multiple] { min-height: 9rem; }
+.people-flows-edit { border: 0; padding: 0; }
+.people-flows-steps, .people-flows-assignments { display: grid; gap: .75rem; }
+.people-flows-step { display: grid; gap: .7rem; padding: .9rem; }
+.people-flows-step.is-inactive { opacity: .68; }
+.people-flows-step-options { display: flex; align-items: end; gap: 1rem; flex-wrap: wrap; }
+.people-flows-step-options > label:first-child { width: min(180px, 100%); }
+.people-flows-toggle { display: flex !important; align-items: center; gap: .45rem !important; }
+.people-flows-toggle input { width: auto; }
+.people-flows-assignment { display: grid; gap: .75rem; padding: 1rem; }
+.people-flows-progress { display: grid; gap: .4rem; }
+.people-flows-progress-step { padding: .5rem .65rem; border-radius: 8px; background: var(--surface-tint, #f8fafc); }
+.people-flows-progress-step label { display: flex; align-items: flex-start; gap: .6rem; }
+.people-flows-progress-step input { width: auto; margin-top: .2rem; }
+.people-flows-progress-step span { display: grid; gap: .2rem; }
+.people-flows-progress-step small, .people-flows-empty { color: var(--text-muted, #64748b); }
+.people-flows-audit { display: flex; justify-content: space-between; gap: 1rem; padding: .55rem 0; border-bottom: 1px solid var(--border, #e2e8f0); }
+.people-flows-audit span { color: var(--text-muted, #64748b); }
+.people-flows-alert, .people-flows-feedback { display: flex; align-items: center; gap: .5rem; padding: .7rem .85rem; border-radius: 8px; }
+.people-flows-alert { color: var(--danger, #b91c1c); background: var(--danger-subtle, #fef2f2); }
+.people-flows-feedback { color: var(--success, #166534); background: var(--success-subtle, #f0fdf4); }
+.people-flows-empty-state { display: grid; justify-items: center; padding: 3rem 1rem; color: var(--text-muted, #64748b); text-align: center; }
+.people-flows-empty-state h2 { margin-bottom: 0; color: var(--text, #0f172a); }
+@media (max-width: 760px) {
+  .people-flows-layout { grid-template-columns: minmax(0, 1fr); }
+  .people-flows-heading, .people-flows-section-heading { align-items: stretch; flex-direction: column; }
+  .people-flows-assignment > .people-flows-section-heading { align-items: flex-start; }
+}

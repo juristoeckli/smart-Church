@@ -1,0 +1,17 @@
+ALTER TABLE elvanto_sync_settings
+  ADD COLUMN IF NOT EXISTS calendar_import_page INTEGER NOT NULL DEFAULT 1 CHECK (calendar_import_page >= 1),
+  ADD COLUMN IF NOT EXISTS calendar_import_total INTEGER,
+  ADD COLUMN IF NOT EXISTS calendar_import_created_count INTEGER NOT NULL DEFAULT 0 CHECK (calendar_import_created_count >= 0),
+  ADD COLUMN IF NOT EXISTS calendar_import_updated_count INTEGER NOT NULL DEFAULT 0 CHECK (calendar_import_updated_count >= 0),
+  ADD COLUMN IF NOT EXISTS calendar_import_skipped_count INTEGER NOT NULL DEFAULT 0 CHECK (calendar_import_skipped_count >= 0),
+  ADD COLUMN IF NOT EXISTS calendar_import_complete BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS calendar_preview_at TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS calendar_preview_scanned_count INTEGER NOT NULL DEFAULT 0 CHECK (calendar_preview_scanned_count >= 0),
+  ADD COLUMN IF NOT EXISTS calendar_preview_total INTEGER,
+  ADD COLUMN IF NOT EXISTS calendar_preview_complete BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS calendar_preview_start_date DATE,
+  ADD COLUMN IF NOT EXISTS calendar_preview_end_date DATE,
+  ADD COLUMN IF NOT EXISTS calendar_import_start_date DATE,
+  ADD COLUMN IF NOT EXISTS calendar_import_end_date DATE,
+  ADD COLUMN IF NOT EXISTS calendar_importing BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS calendar_import_started_at TIMESTAMPTZ;

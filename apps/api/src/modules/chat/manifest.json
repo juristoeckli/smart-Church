@@ -3,5 +3,11 @@
   "name": "Chat",
   "version": "0.1.0",
   "description": "Private one-to-one messages between church members and administrators.",
-  "serverEntry": "./routes.ts"
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
 }

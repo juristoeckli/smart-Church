@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import type { PoolClient } from "pg";
 
 type ChatMessageRow = {
   id: string;
@@ -10,6 +11,13 @@ type ChatMessageRow = {
   created_at: Date | string;
   seen_by?: string[];
 };
+
+function canonical(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+  if (value && typeof value === "object") return "{" + Object.keys(value as Record<string, unknown>).sort().map((key) => JSON.stringify(key) + ":" + canonical((value as Record<string, unknown>)[key])).join(",") + "}";
+  return JSON.stringify(value);
+}
 
 const createConversationSchema = {
   body: {
@@ -58,8 +66,99 @@ const groupMemberRoleSchema = {
 };
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
-  const { pool, isDatabaseReady, resolveDepartmentId, getDefaultDepartmentId, validateMutation, realtime } = context;
+  const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
   let storageReady = false;
+
+  context.replication.register({
+    schemaVersion: "9",
+    inspect: async (departmentId) => {
+      if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Chat storage is unavailable."], recordCount: 0 };
+      try {
+        const result = await pool.query<{ schema: number | null }>("SELECT version AS schema FROM module_chat_schema_version WHERE singleton=true");
+        const counts = await pool.query<{ conversations: string; members: string; messages: string; receipts: string }>(
+          `SELECT (SELECT count(*) FROM module_chat_conversations WHERE department_id=$1)::text conversations,
+                  (SELECT count(*) FROM module_chat_conversation_members WHERE department_id=$1)::text members,
+                  (SELECT count(*) FROM module_chat_conversation_messages WHERE department_id=$1)::text messages,
+                  (SELECT count(*) FROM module_chat_read_receipts WHERE department_id=$1)::text receipts`, [departmentId]);
+        const version = result.rows[0]?.schema;
+        const row = counts.rows[0];
+        const recordCount = row ? Number(row.conversations) + Number(row.members) + Number(row.messages) + Number(row.receipts) : 0;
+        return { ready: version === 9, blockers: version === 9 ? [] : ["Chat database schema must be at version 9 on both servers."], recordCount };
+      } catch {
+        return { ready: false, blockers: ["Chat storage is not initialized on this server."], recordCount: 0 };
+      }
+    },
+    exportSnapshot: async (client: PoolClient, departmentId) => {
+      const conversations = await client.query("SELECT id,kind,name,title_suffix,direct_key,created_by,created_at FROM module_chat_conversations WHERE department_id=$1 ORDER BY id", [departmentId]);
+      const members = await client.query("SELECT conversation_id,user_id,member_role,name_suffix,joined_at FROM module_chat_conversation_members WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId]);
+      const messages = await client.query("SELECT id,conversation_id,user_id,body,created_at FROM module_chat_conversation_messages WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
+      const receipts = await client.query("SELECT conversation_id,user_id,last_read_message_id,last_read_at FROM module_chat_read_receipts WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId]);
+      return { version: 9, conversations: conversations.rows, members: members.rows, messages: messages.rows, receipts: receipts.rows };
+    },
+    restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
+      const snapshot = input as { version?: unknown; conversations?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>>; messages?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>> };
+      if (!snapshot || snapshot.version !== 9 || !Array.isArray(snapshot.conversations) || !Array.isArray(snapshot.members) || !Array.isArray(snapshot.messages) || !Array.isArray(snapshot.receipts)) throw new Error("The Chat snapshot is invalid or uses an unsupported schema.");
+      await client.query("DELETE FROM module_chat_conversations WHERE department_id=$1", [departmentId]);
+      await client.query("DELETE FROM module_chat_presence WHERE department_id=$1", [departmentId]);
+      for (const row of snapshot.conversations) {
+        const createdBy = restoreContext.userIdMap.get(String(row.created_by));
+        if (!createdBy) throw new Error("A Chat conversation owner has no matching account on the standby server.");
+        const mappedMembers = snapshot.members.filter((member) => member.conversation_id === row.id).map((member) => restoreContext.userIdMap.get(String(member.user_id))).filter((id): id is string => Boolean(id)).sort();
+        const directKey = row.kind === "direct" && mappedMembers.length === 2 ? mappedMembers.join(":") : row.direct_key;
+        await client.query("INSERT INTO module_chat_conversations(id,department_id,kind,name,title_suffix,direct_key,created_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [row.id, departmentId, row.kind, row.name, row.title_suffix, directKey, createdBy, row.created_at]);
+      }
+      for (const row of snapshot.members) {
+        const userId = restoreContext.userIdMap.get(String(row.user_id));
+        if (!userId) throw new Error("A Chat member has no matching account on the standby server.");
+        await client.query("INSERT INTO module_chat_conversation_members(conversation_id,department_id,user_id,member_role,name_suffix,joined_at) VALUES($1,$2,$3,$4,$5,$6)", [row.conversation_id, departmentId, userId, row.member_role, row.name_suffix, row.joined_at]);
+      }
+      for (const row of snapshot.messages) {
+        const userId = restoreContext.userIdMap.get(String(row.user_id));
+        if (!userId) throw new Error("A Chat message author has no matching account on the standby server.");
+        await client.query("INSERT INTO module_chat_conversation_messages(id,conversation_id,department_id,user_id,body,created_at) VALUES($1,$2,$3,$4,$5,$6)", [row.id, row.conversation_id, departmentId, userId, row.body, row.created_at]);
+      }
+      for (const row of snapshot.receipts) {
+        const userId = restoreContext.userIdMap.get(String(row.user_id));
+        if (!userId) throw new Error("A Chat read receipt has no matching account on the standby server.");
+        await client.query("INSERT INTO module_chat_read_receipts(conversation_id,department_id,user_id,last_read_message_id,last_read_at) VALUES($1,$2,$3,$4,$5)", [row.conversation_id, departmentId, userId, row.last_read_message_id, row.last_read_at]);
+      }
+      return { recordCount: snapshot.conversations.length + snapshot.members.length + snapshot.messages.length + snapshot.receipts.length };
+    },
+    verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
+      const snapshot = input as { version?: unknown; conversations?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>>; messages?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>> };
+      if (!snapshot || snapshot.version !== 9 || !snapshot.conversations || !snapshot.members || !snapshot.messages || !snapshot.receipts) return { ready: false, blockers: ["No supported Chat snapshot is available."] };
+      const actualConversations = (await client.query("SELECT id,kind,name,title_suffix,direct_key,created_by,created_at FROM module_chat_conversations WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualMembers = (await client.query("SELECT conversation_id,user_id,member_role,name_suffix,joined_at FROM module_chat_conversation_members WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualMessages = (await client.query("SELECT id,conversation_id,user_id,body,created_at FROM module_chat_conversation_messages WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualReceipts = (await client.query("SELECT conversation_id,user_id,last_read_message_id,last_read_at FROM module_chat_read_receipts WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const mapping = restoreContext?.userIdMap ?? new Map<string, string>();
+      const snapshotMembers = snapshot.members;
+      const mapped = (rows: Array<Record<string, unknown>>, fields: string[]) => rows.map((source) => {
+        const row = { ...source };
+        for (const field of fields) if (typeof row[field] === "string") row[field] = mapping.get(String(row[field])) ?? row[field];
+        return row;
+      });
+      const expectedConversations = snapshot.conversations.map((source) => {
+        const row: Record<string, unknown> = { ...source, created_by: mapping.get(String(source.created_by)) ?? source.created_by };
+        if (row.kind === "direct") {
+          const members = snapshotMembers.filter((member) => member.conversation_id === row.id).map((member) => mapping.get(String(member.user_id)) ?? String(member.user_id)).sort();
+          if (members.length === 2) row.direct_key = members.join(":");
+        }
+        return row;
+      });
+      const same = (expected: Array<Record<string, unknown>>, actual: Array<Record<string, unknown>>) => {
+        if (expected.length !== actual.length) return false;
+        const expectedRows = expected.map(canonical).sort();
+        const actualRows = actual.map(canonical).sort();
+        return expectedRows.every((row, index) => row === actualRows[index]);
+      };
+      if (!same(expectedConversations, actualConversations)
+        || !same(mapped(snapshot.members, ["user_id"]), actualMembers)
+        || !same(mapped(snapshot.messages, ["user_id"]), actualMessages)
+        || !same(mapped(snapshot.receipts, ["user_id"]), actualReceipts)) return { ready: false, blockers: ["Chat records differ from the source snapshot after restore."] };
+      return { ready: true, blockers: [] };
+    },
+  });
 
   app.register(async (routes) => {
     routes.addHook("onReady", async () => {
@@ -216,27 +315,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         reply.code(503).send({ error: "Chat is temporarily unavailable because its storage could not be initialized." });
         return null;
       }
-      if (request.authenticatedUser?.role !== "server_admin") return resolveDepartmentId(request, reply);
-      const requestedId = request.headers["x-department-id"] ?? getDefaultDepartmentId();
-      if (typeof requestedId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(requestedId)) {
-        reply.code(400).send({ error: "Choose a valid location." });
-        return null;
-      }
-      const access = await pool.query(
-        `SELECT d.id, m.role, m.permissions, m.module_permissions
-           FROM departments d
-           LEFT JOIN department_memberships m ON m.department_id = d.id AND m.user_id = $2
-          WHERE d.id = $1`,
-        [requestedId, request.authenticatedUser.id],
-      );
-      if (!access.rows[0]) {
-        reply.code(404).send({ error: "Location not found." });
-        return null;
-      }
-      request.activeDepartmentRole = access.rows[0].role ?? null;
-      request.activeDepartmentPermissions = access.rows[0].permissions ?? [];
-      request.activeDepartmentModulePermissions = access.rows[0].module_permissions ?? {};
-      return access.rows[0].id;
+      return resolveDepartmentId(request, reply);
     }
 
     async function isConversationMember(conversationId: string, departmentId: string, userId: string) {
@@ -318,7 +397,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               WHERE p.department_id = $1 AND p.user_id = u.id
                 AND p.last_seen_at > now() - interval '55 seconds'
            ) presence ON true
-          WHERE u.id <> $2 AND (m.user_id IS NOT NULL OR u.role = 'server_admin')
+          WHERE u.id <> $2 AND m.user_id IS NOT NULL
           ORDER BY u.display_name, u.id`,
         [departmentId, request.authenticatedUser!.id],
       );
@@ -486,7 +565,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           updatedAt: new Date(row.last_message_at ?? row.created_at).toISOString(),
         })),
         currentUserId: request.authenticatedUser!.id,
-        canModerate: request.activeDepartmentRole === "site_admin" || request.authenticatedUser?.role === "server_admin",
+        canModerate: request.activeDepartmentRole === "site_admin",
       };
     });
 
@@ -499,10 +578,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const contacts = await pool!.query(
         `SELECT u.id FROM app_users u
           LEFT JOIN department_memberships m ON m.department_id = $1 AND m.user_id = u.id
-         WHERE u.id = ANY($2::uuid[]) AND (m.user_id IS NOT NULL OR u.role = 'server_admin')`,
+         WHERE u.id = ANY($2::uuid[]) AND m.user_id IS NOT NULL`,
         [departmentId, request.body.userIds],
       );
-      if (contacts.rowCount !== request.body.userIds.length) return reply.code(400).send({ error: "Choose members of this location or Server Administrators." });
+      if (contacts.rowCount !== request.body.userIds.length) return reply.code(400).send({ error: "Choose members of this location." });
 
       const isDirect = request.body.userIds.length === 1;
       const directKey = isDirect ? [currentUserId, request.body.userIds[0]].sort().join(":") : null;
@@ -582,10 +661,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const contact = await pool!.query(
         `SELECT u.id FROM app_users u
           LEFT JOIN department_memberships membership ON membership.department_id = $1 AND membership.user_id = u.id
-         WHERE u.id = $2 AND (membership.user_id IS NOT NULL OR u.role = 'server_admin')`,
+         WHERE u.id = $2 AND membership.user_id IS NOT NULL`,
         [departmentId, request.body.userId],
       );
-      if (!contact.rowCount) return reply.code(400).send({ error: "Choose a member of this location or a Server Administrator." });
+      if (!contact.rowCount) return reply.code(400).send({ error: "Choose a member of this location." });
       await pool!.query(
         `INSERT INTO module_chat_conversation_members (conversation_id, department_id, user_id, member_role)
          VALUES ($1, $2, $3, 'member') ON CONFLICT (conversation_id, user_id) DO NOTHING`,
@@ -741,7 +820,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHERE id = $1 AND conversation_id = $2 AND department_id = $3
             AND (user_id = $4 OR $5 = true)
           RETURNING id`,
-        [request.params.messageId, request.params.id, departmentId, userId, request.activeDepartmentRole === "site_admin" || request.authenticatedUser?.role === "server_admin"],
+        [request.params.messageId, request.params.id, departmentId, userId, request.activeDepartmentRole === "site_admin"],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "Message not found or you cannot delete it." });
       return { deleted: true };

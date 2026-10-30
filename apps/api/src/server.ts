@@ -1,16 +1,20 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, statfs } from "node:fs/promises";
+import { cpus, freemem, totalmem } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServiceEvent, ServiceEventCheckIn, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp } from "@smart-church/contracts";
-import { closeDatabase, departmentId, departmentName, initializeDatabase, pool } from "./database.js";
+import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
+import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
-import { registerServerModules } from "./modules/module-sdk.js";
+import { getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
+import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
-import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
+import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
+import { createEmailConnector } from "./modules/email-worker/service.js";
+import { allServerPermissions, hasServerPermission as userHasServerPermission, serverPermissionsForUser } from "./server-permissions.js";
 
 if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
   delete process.env.STREAMING_CONFIG_FILE;
@@ -45,7 +49,7 @@ const runtimeLogStream = {
 };
 const app = Fastify({
   logger: {
-    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken"],
+    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken", "req.body.apiKey"],
     stream: runtimeLogStream,
   },
   bodyLimit: 3 * 1024 * 1024,
@@ -53,8 +57,18 @@ const app = Fastify({
   trustProxy: trustedProxyAddresses.length ? trustedProxyAddresses : false,
 });
 let databaseReady = false;
+const emailConnector = createEmailConnector(pool ?? null, () => databaseReady);
 let firstRunSetupCode: string | null = null;
+let httpAccessMode: HttpAccessMode = "none";
 const sessionCookieName = "smart_church_session";
+function configuredHttpsOrigin() {
+  try {
+    const origin = new URL(process.env.SMART_CHURCH_WEB_ORIGIN ?? "");
+    return origin.protocol === "https:" ? origin.origin : null;
+  } catch {
+    return null;
+  }
+}
 function sessionCookieNameFor(request: FastifyRequest) {
   return allowHttpFallback && request.protocol === "http" ? `${sessionCookieName}_http` : sessionCookieName;
 }
@@ -62,6 +76,7 @@ const sessionLifetimeSeconds = 24 * 60 * 60;
 const failedLogins = new Map<string, { count: number; resetAt: number }>();
 const maxFailedLoginBuckets = 10_000;
 let videoWorker: VideoWorkerSupervisor | null = null;
+let removeVideoActivationListener: (() => void) | null = null;
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -132,13 +147,17 @@ function clearSessionCookie(reply: { header: (name: string, value: string) => un
 async function currentUser(token: string | undefined): Promise<AuthenticatedUser | null> {
   if (!pool || !token || !/^[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.username, u.display_name, u.role, u.must_change_password
-       FROM auth_sessions s JOIN app_users u ON u.id = s.user_id
-      WHERE s.token_hash = $1 AND s.expires_at > now()`,
+    `WITH active_session AS (
+       UPDATE auth_sessions SET last_seen_at = now()
+        WHERE token_hash = $1 AND expires_at > now()
+        RETURNING user_id
+     )
+     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.date_time_format, u.language, u.language_is_custom
+       FROM active_session s JOIN app_users u ON u.id = s.user_id`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -146,6 +165,34 @@ function setupCodeMatches(candidate: string) {
   const expected = Buffer.from(firstRunSetupCode);
   const actual = Buffer.from(candidate);
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+async function isDepartmentWritable(selectedDepartmentId: string) {
+  if (!pool || !databaseReady) return false;
+  try {
+    const table = await pool.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (!table.rows[0]?.table_name) return true;
+    const state = await pool.query<{ role: string }>("SELECT role FROM sync_site_redundancy WHERE department_id=$1", [selectedDepartmentId]);
+    return state.rows[0]?.role === "primary";
+  } catch (error) {
+    app.log.error({ err: error, departmentId: selectedDepartmentId }, "Could not check the site's write-fence state.");
+    return false;
+  }
+}
+
+async function lockDepartmentForWrite(client: PoolClient, selectedDepartmentId: string) {
+  const table = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+  if (!table.rows[0]?.table_name) return true;
+  const state = await client.query<{ role: string }>("SELECT role FROM sync_site_redundancy WHERE department_id=$1 FOR SHARE", [selectedDepartmentId]);
+  return state.rows[0]?.role === "primary";
+}
+
+function isRedundancyTransitionMutation(request: FastifyRequest) {
+  if (request.method.toUpperCase() !== "POST") return false;
+  const path = request.url.split("?", 1)[0];
+  return path === "/api/modules/sync/federation/redundancy/standby"
+    || path === "/api/modules/sync/federation/redundancy/promote"
+    || path === "/api/modules/sync/federation/redundancy/fence";
 }
 
 async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, requireSiteAdmin = false, allowQueryLocation = false, requiredPermission?: LocationPermission) {
@@ -157,6 +204,10 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
   const selectedId = typeof header === "string" ? header : typeof queryLocation === "string" ? queryLocation : departmentId;
   if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedId)) {
     reply.code(400).send({ error: "Choose a valid location." });
+    return null;
+  }
+  if (new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase()) && !isRedundancyTransitionMutation(request) && !await isDepartmentWritable(selectedId)) {
+    reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
     return null;
   }
   const result = await pool.query(
@@ -190,12 +241,23 @@ function requireServerAdmin(request: FastifyRequest, reply: FastifyReply) {
   return false;
 }
 
+function hasServerPermission(request: FastifyRequest, permission: ServerPermission) {
+  return userHasServerPermission(request.authenticatedUser?.role, request.authenticatedUser?.serverPermissions, permission);
+}
+
+function requireServerPermission(request: FastifyRequest, reply: FastifyReply, permission: ServerPermission) {
+  if (hasServerPermission(request, permission)) return true;
+  reply.code(403).send({ error: `Server ${permission.replace("server_", "")} access is required.` });
+  return false;
+}
+
 async function createSession(userId: string, request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, secure: boolean) {
   const token = randomBytes(32).toString("base64url");
+  const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"].slice(0, 512) : "Unknown browser";
   await pool!.query(
-    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at)
-     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'))`,
-    [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds],
+    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, user_agent, last_seen_at)
+     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5, now())`,
+    [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds, userAgent],
   );
   setSessionCookie(reply, token, secure, sessionCookieNameFor(request));
 }
@@ -274,19 +336,25 @@ const realtime = new RealtimeHub(
   },
   async (identity, selectedDepartmentId) => {
     if (!pool || !databaseReady) return false;
-    const result = identity.role === "server_admin"
-      ? await pool.query("SELECT 1 FROM departments WHERE id = $1", [selectedDepartmentId])
-      : await pool.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, identity.id]);
+    const result = await pool.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, identity.id]);
     return (result.rowCount ?? 0) > 0;
   },
   (request, origin) => Boolean(origin && isAllowedWebOrigin({ protocol: websocketRequestProtocol(request) } as FastifyRequest, origin)),
 );
 
 app.addHook("onRequest", async (request, reply) => {
+  const federationRequest = request.url.startsWith("/api/modules/sync/federation/v1/");
   const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
-  if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.protocol !== "https") {
+  if (process.env.NODE_ENV === "production" && federationRequest && request.protocol !== "https") {
+    return reply.code(400).send({ error: "Federation requests require HTTPS." });
+  }
+  if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.url !== "/api/public/http-access" && request.protocol !== "https") {
     return reply.code(400).send({ error: "Use HTTPS to access Smart-Church." });
   }
+  // Federation requests authenticate with the Sync module's Ed25519 protocol,
+  // not browser Origin headers. Module management routes still require the
+  // normal session and CSRF checks in their own handlers.
+  if (federationRequest) return;
   if (request.url === "/api/webhooks/resend") return;
   const method = request.method.toUpperCase();
   if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method)) return;
@@ -313,7 +381,26 @@ app.addHook("preHandler", async (request, reply) => {
   // on port 81. Keep static page and asset requests public so the login UI can
   // load; protect application data and actions under /api/ below.
   if (request.url !== "/api" && !request.url.startsWith("/api/")) return;
-  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url.startsWith("/api/public/event-registrations/")) return;
+  // The signed federation endpoints verify peer identity, request freshness,
+  // and replay protection in the Sync module.
+  if (request.url.startsWith("/api/modules/sync/federation/v1/")) return;
+  if (new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase()) && pool && databaseReady) {
+    const path = new URL(request.url, "http://localhost").pathname;
+    const localServerSettings = path.startsWith("/api/installation/") || path.startsWith("/api/settings/") || path.startsWith("/api/auth/");
+    const replicatedAccountWrite = path === "/api/auth/change-password" || path === "/api/auth/preferences";
+    const redundancyControl = path.startsWith("/api/modules/sync/federation/redundancy/");
+    const externalWebhook = path === "/api/webhooks/resend";
+    const publicSelfSignup = path.startsWith("/api/public/self-signup/");
+    if ((!localServerSettings || replicatedAccountWrite) && !redundancyControl && !externalWebhook && !publicSelfSignup && !path.startsWith("/api/modules/sync/federation/")) {
+      const requestedDepartment = request.headers["x-department-id"];
+      const queryDepartment = new URL(request.url, "http://localhost").searchParams.get("departmentId");
+      const writeDepartment = typeof requestedDepartment === "string" && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(requestedDepartment)
+        ? requestedDepartment
+        : queryDepartment && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(queryDepartment) ? queryDepartment : departmentId;
+      if (!await isDepartmentWritable(writeDepartment)) return reply.code(423).send({ error: "This location is a read-only redundancy standby or its write-fence state could not be verified." });
+    }
+  }
+  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
@@ -344,6 +431,12 @@ function realtimeTopicForPath(pathname: string) {
 }
 
 app.addHook("onResponse", async (request, reply) => {
+  const route = request.routeOptions.url;
+  if (route !== "/api/admin/diagnostics" && route !== "/api/health" && (route?.startsWith("/api/") || request.url.startsWith("/api/"))) {
+    const level: RuntimeLogLevel = reply.statusCode >= 500 ? "error" : reply.statusCode >= 400 ? "warn" : "info";
+    const safeRoute = route?.startsWith("/api/") ? route : "<unmatched API route>";
+    recordRuntimeLog("api/http", level, `${request.method} ${safeRoute} ${reply.statusCode} (${Math.round(reply.elapsedTime)} ms)`);
+  }
   if (!request.authenticatedUser || reply.statusCode >= 400 || !new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase())) return;
   let pathname: string;
   try { pathname = new URL(request.url, "http://localhost").pathname; }
@@ -361,6 +454,7 @@ type ServiceEventRow = {
   title: string;
   kind: ServiceEvent["kind"];
   event_date: string;
+  is_all_day: boolean;
   start_time: string;
   end_time: string | null;
   location: string;
@@ -384,6 +478,7 @@ const serviceEventProperties = {
   title: { type: "string", minLength: 1, maxLength: 160 },
   kind: { type: "string", enum: ["service", "meeting", "community", "other"] },
   eventDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+  isAllDay: { type: "boolean" },
   startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
   endTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
   location: { type: "string", minLength: 1, maxLength: 160 },
@@ -391,11 +486,15 @@ const serviceEventProperties = {
   room: { type: "string", maxLength: 160 },
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
   positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } },
-  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 } } } },
+  timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" }, position: { type: "string", maxLength: 80 } } } },
   registrationEnabled: { type: "boolean" },
   registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
   recurrence: { type: "object", additionalProperties: false, required: ["interval", "endDate"], properties: { interval: { type: "string", enum: ["weekly", "biweekly", "monthly"] }, endDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" } } },
 };
+
+const songArrangementSchema = { type: "object", additionalProperties: false, required: ["name"], properties: { id: { type: "string", format: "uuid" }, name: { type: "string", minLength: 1, maxLength: 160 }, key: { type: "string", maxLength: 16 }, chartUrl: { type: "string", maxLength: 2048 }, audioUrl: { type: "string", maxLength: 2048 }, active: { type: "boolean" } } };
+const worshipSongBodySchema = { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 200 }, authors: { type: "string", maxLength: 500 }, defaultKey: { type: "string", maxLength: 16 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, arrangements: { type: "array", maxItems: 40, items: songArrangementSchema } } };
+const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
 const serviceEventBodySchema = {
   type: "object",
   additionalProperties: false,
@@ -403,12 +502,44 @@ const serviceEventBodySchema = {
   properties: serviceEventProperties,
 };
 
+type WorshipSongInput = { title: string; authors?: string; defaultKey?: string; notes?: string; arrangements?: Array<{ id?: string; name: string; key?: string; chartUrl?: string; audioUrl?: string }> };
+type ServicePlanTemplateInput = { name: string; description?: string; positions?: Array<{ name: string }>; items?: NonNullable<CreateServiceEvent["timePlan"]> };
+
+function validHttpsLink(value: string | undefined) {
+  if (!value?.trim()) return true;
+  try {
+    const url = new URL(value.trim());
+    return url.protocol === "https:" && !url.username && !url.password;
+  } catch { return false; }
+}
+
+function validateWorshipSongInput(input: WorshipSongInput) {
+  if (!input.title.trim()) return "Enter a song title.";
+  if ((input.arrangements ?? []).some((arrangement) => !arrangement.name.trim())) return "Enter a name for each arrangement.";
+  const arrangementIds = (input.arrangements ?? []).flatMap((arrangement) => arrangement.id ? [arrangement.id] : []);
+  if (new Set(arrangementIds).size !== arrangementIds.length) return "Each arrangement can only appear once.";
+  if (!(input.arrangements ?? []).every((arrangement) => validHttpsLink(arrangement.chartUrl) && validHttpsLink(arrangement.audioUrl))) {
+    return "Chart and audio links must use HTTPS.";
+  }
+  return null;
+}
+
+function validateServicePlanTemplateInput(input: ServicePlanTemplateInput) {
+  if (!input.name.trim()) return "Enter a service-plan template name.";
+  if ((input.positions ?? []).some((position) => !position.name.trim())) return "Enter a name for each volunteer position.";
+  if ((input.items ?? []).some((item) => !item.title.trim())) return "Enter a title for each service-plan item.";
+  const positions = new Set((input.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
+  if ((input.items ?? []).some((item) => item.position && !positions.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
+  return null;
+}
+
 function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
   return {
     id: row.id,
     title: row.title,
     kind: row.kind,
     eventDate: row.event_date,
+    isAllDay: row.is_all_day ?? false,
     startTime: row.start_time.slice(0, 5),
     ...(row.end_time ? { endTime: row.end_time.slice(0, 5) } : {}),
     location: row.location,
@@ -425,7 +556,7 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     registrationCount: row.registration_count ?? 0,
     ...(row.attendance_recorded_at ? { attendanceRecordedAt: row.attendance_recorded_at } : {}),
     ...(row.recurrence_id ? { seriesId: row.recurrence_id } : {}),
-    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
+    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
   };
 }
 
@@ -435,7 +566,7 @@ function validateServiceEvent(event: CreateServiceEvent) {
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
     return "Choose a valid event date.";
   }
-  if (event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
+  if (!event.isAllDay && event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
   if (!event.title.trim()) return "Enter an event title.";
   if (!event.location.trim()) return "Enter a location.";
   if (event.registrationCapacity !== undefined && event.registrationCapacity !== null && (!Number.isInteger(event.registrationCapacity) || event.registrationCapacity < 1 || event.registrationCapacity > 100000)) return "Registration capacity must be a positive whole number.";
@@ -473,7 +604,30 @@ function recurrenceDates(startDate: string, endDate: string, interval: "weekly" 
   return dates;
 }
 
+async function validateServicePlanSongs(departmentId: string, items: NonNullable<CreateServiceEvent["timePlan"]>) {
+  if (items.some((item) => item.arrangementId && !item.songId)) return "Choose a song for each selected arrangement.";
+  const songIds = [...new Set(items.flatMap((item) => item.songId ? [item.songId] : []))];
+  if (songIds.length) {
+    const songs = await pool!.query("SELECT id FROM worship_songs WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, songIds]);
+    if (songs.rowCount !== songIds.length) return "One or more selected songs do not belong to this site.";
+  }
+  const arrangementRows = items.flatMap((item) => item.songId && item.arrangementId ? [{ songId: item.songId, arrangementId: item.arrangementId }] : []);
+  if (arrangementRows.length) {
+    const arrangements = await pool!.query(
+      `SELECT selected."arrangementId"
+         FROM jsonb_to_recordset($2::jsonb) AS selected("songId" uuid,"arrangementId" uuid)
+         JOIN worship_songs song ON song.id=selected."songId" AND song.department_id=$1
+         JOIN worship_song_arrangements arrangement ON arrangement.id=selected."arrangementId" AND arrangement.song_id=song.id`,
+      [departmentId, JSON.stringify(arrangementRows)],
+    );
+    if (arrangements.rowCount !== arrangementRows.length) return "One or more selected arrangements do not belong to the selected song.";
+  }
+  return null;
+}
+
 async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent) {
+  const positionNames = new Set((event.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
+  if ((event.timePlan ?? []).some((item) => item.position && !positionNames.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   const assets = [...new Set(event.assetIds ?? [])];
   if (assets.length) {
     const available = await pool!.query("SELECT id FROM bookable_resources WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, assets]);
@@ -484,34 +638,214 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
     const people = await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, contacts]);
     if (people.rowCount !== contacts.length) return "One or more assigned people do not belong to this site.";
   }
-  return null;
+  return validateServicePlanSongs(departmentId, event.timePlan ?? []);
 }
 
-async function syncEventPositionResponses(client: PoolClient, eventId: string, positions: CreateServiceEvent["positions"]) {
-  const serialized = JSON.stringify(positions ?? []);
-  await client.query(
-    `DELETE FROM event_position_responses response
-      WHERE response.event_id=$1 AND NOT EXISTS (
-        SELECT 1 FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
-         WHERE p.ordinal-1=response.position_index
-           AND (p.value->>'contactId')::uuid=response.contact_id
-      )`,
-    [eventId, serialized],
+async function syncEventPositionResponses(
+  client: PoolClient,
+  eventId: string,
+  positions: CreateServiceEvent["positions"],
+  previousPositions: CreateServiceEvent["positions"] = [],
+) {
+  const currentPositions = positions ?? [];
+  const oldPositions = previousPositions ?? [];
+  const existing = await client.query<{ position_index: number; contact_id: string; status: "pending" | "accepted" | "declined"; responded_at: Date | null; updated_at: Date }>(
+    "SELECT position_index,contact_id,status,responded_at,updated_at FROM event_position_responses WHERE event_id=$1 ORDER BY position_index",
+    [eventId],
   );
-  await client.query(
-    `INSERT INTO event_position_responses (event_id,position_index,contact_id)
-     SELECT $1,(position.ordinal-1)::integer,(position.value->>'contactId')::uuid
-       FROM jsonb_array_elements($2::jsonb) WITH ORDINALITY AS p(value,ordinal)
-      WHERE p.value->>'contactId' IS NOT NULL
-     ON CONFLICT (event_id,position_index) DO NOTHING`,
-    [eventId, serialized],
-  );
+  const retained = new Map<number, typeof existing.rows[number]>();
+  const usedPositions = new Set<number>();
+  for (const response of existing.rows) {
+    const previous = oldPositions[response.position_index];
+    if (!previous?.contactId || previous.contactId !== response.contact_id) continue;
+    const oldName = previous.name.trim().toLocaleLowerCase();
+    const nextIndex = currentPositions.findIndex((position, index) =>
+      !usedPositions.has(index)
+      && position.contactId === response.contact_id
+      && position.name.trim().toLocaleLowerCase() === oldName,
+    );
+    if (nextIndex < 0) continue;
+    retained.set(nextIndex, response);
+    usedPositions.add(nextIndex);
+  }
+
+  await client.query("DELETE FROM event_position_responses WHERE event_id=$1", [eventId]);
+  for (let index = 0; index < currentPositions.length; index += 1) {
+    const contactId = currentPositions[index].contactId;
+    if (!contactId) continue;
+    const previousResponse = retained.get(index);
+    await client.query(
+      `INSERT INTO event_position_responses (event_id,position_index,contact_id,status,responded_at,updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [eventId, index, contactId, previousResponse?.status ?? "pending", previousResponse?.responded_at ?? null, previousResponse?.updated_at ?? new Date()],
+    );
+  }
 }
+
+async function listWorshipSongs(departmentId: string, includeArchived = false): Promise<WorshipSong[]> {
+  const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; notes: string; active: boolean; arrangements: WorshipSong["arrangements"] }>(
+    `SELECT song.id,song.title,song.authors,song.default_key,song.notes,song.active,
+            COALESCE(json_agg(json_build_object('id',arrangement.id,'name',arrangement.name,'key',arrangement.musical_key,'chartUrl',arrangement.chart_url,'audioUrl',arrangement.audio_url,'active',arrangement.active) ORDER BY lower(arrangement.name)) FILTER (WHERE arrangement.id IS NOT NULL),'[]'::json) AS arrangements
+       FROM worship_songs song
+       LEFT JOIN worship_song_arrangements arrangement ON arrangement.song_id=song.id
+      WHERE song.department_id=$1 AND ($2::boolean OR song.active=true)
+      GROUP BY song.id
+      ORDER BY lower(song.title),song.id`,
+    [departmentId, includeArchived],
+  );
+  return result.rows.map((row) => ({ id: row.id, title: row.title, ...(row.authors ? { authors: row.authors } : {}), ...(row.default_key ? { defaultKey: row.default_key } : {}), ...(row.notes ? { notes: row.notes } : {}), arrangements: row.arrangements.filter((arrangement) => includeArchived || arrangement.active), active: row.active }));
+}
+
+async function persistWorshipSong(departmentId: string, id: string, input: WorshipSongInput) {
+  const clean = {
+    title: input.title.trim(), authors: input.authors?.trim() ?? "", defaultKey: input.defaultKey?.trim() ?? "", notes: input.notes?.trim() ?? "",
+    arrangements: input.arrangements ?? [],
+  };
+  const client = await pool!.connect();
+  try {
+    await client.query("BEGIN");
+    if (id) {
+      const updated = await client.query("UPDATE worship_songs SET title=$3,authors=$4,default_key=$5,notes=$6,active=true,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [id, departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes]);
+      if (!updated.rowCount) { await client.query("ROLLBACK"); return false; }
+    } else {
+      const created = await client.query<{ id: string }>("INSERT INTO worship_songs (id,department_id,title,authors,default_key,notes) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", [randomUUID(), departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes]);
+      id = created.rows[0].id;
+    }
+    const retainedIds: string[] = [];
+    for (const arrangement of clean.arrangements) {
+      const name = arrangement.name.trim();
+      if (arrangement.id) {
+        const updated = await client.query("UPDATE worship_song_arrangements SET name=$3,musical_key=$4,chart_url=$5,audio_url=$6,active=true,updated_at=now() WHERE id=$1 AND song_id=$2 RETURNING id", [arrangement.id, id, name, arrangement.key?.trim() ?? "", arrangement.chartUrl?.trim() ?? "", arrangement.audioUrl?.trim() ?? ""]);
+        if (!updated.rowCount) throw new Error("An arrangement does not belong to this song.");
+        retainedIds.push(arrangement.id);
+      } else {
+        const created = await client.query<{ id: string }>("INSERT INTO worship_song_arrangements (id,song_id,name,musical_key,chart_url,audio_url) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", [randomUUID(), id, name, arrangement.key?.trim() ?? "", arrangement.chartUrl?.trim() ?? "", arrangement.audioUrl?.trim() ?? ""]);
+        retainedIds.push(created.rows[0].id);
+      }
+    }
+    await client.query("UPDATE worship_song_arrangements SET active=false,updated_at=now() WHERE song_id=$1 AND NOT (id=ANY($2::uuid[])) AND active=true", [id, retainedIds]);
+    await client.query("COMMIT");
+    return id;
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+}
+
+async function listServicePlanTemplates(departmentId: string): Promise<ServicePlanTemplate[]> {
+  const result = await pool!.query<{ id: string; name: string; description: string; positions: ServicePlanTemplate["positions"]; items: ServicePlanTemplate["items"]; active: boolean }>(
+    "SELECT id,name,description,positions,items,active FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id", [departmentId],
+  );
+  return result.rows.map((row) => ({ ...row, ...(row.description ? {} : { description: undefined }) }));
+}
+
+async function persistServicePlanTemplate(departmentId: string, id: string, input: ServicePlanTemplateInput) {
+  const inputError = validateServicePlanTemplateInput(input);
+  if (inputError) return { error: inputError };
+  const validationError = await validateServicePlanSongs(departmentId, input.items ?? []);
+  if (validationError) return { error: validationError };
+  if (id) {
+    const result = await pool!.query(
+      "UPDATE service_plan_templates SET name=$3,description=$4,positions=$5::jsonb,items=$6::jsonb,active=true,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id",
+      [id, departmentId, input.name.trim(), input.description?.trim() ?? "", JSON.stringify(input.positions ?? []), JSON.stringify(input.items ?? [])],
+    );
+    return result.rowCount ? { id } : null;
+  }
+  id = randomUUID();
+  await pool!.query(
+    "INSERT INTO service_plan_templates (id,department_id,name,description,positions,items) VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)",
+    [id, departmentId, input.name.trim(), input.description?.trim() ?? "", JSON.stringify(input.positions ?? []), JSON.stringify(input.items ?? [])],
+  );
+  return { id };
+}
+
+app.get("/api/worship/songs", async (request, reply): Promise<WorshipSong[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  return listWorshipSongs(selectedDepartmentId);
+});
+
+app.post<{ Body: WorshipSongInput }>("/api/worship/songs", { schema: { body: worshipSongBodySchema } }, async (request, reply): Promise<WorshipSong | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const invalid = validateWorshipSongInput(request.body);
+  if (invalid) return reply.code(400).send({ error: invalid });
+  try {
+    const id = await persistWorshipSong(selectedDepartmentId, "", request.body);
+    const song = (await listWorshipSongs(selectedDepartmentId, true)).find((item) => item.id === id);
+    return reply.code(201).send(song!);
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not save this song." }); }
+});
+
+app.put<{ Params: { id: string }; Body: WorshipSongInput }>("/api/worship/songs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: worshipSongBodySchema } }, async (request, reply): Promise<WorshipSong | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const invalid = validateWorshipSongInput(request.body);
+  if (invalid) return reply.code(400).send({ error: invalid });
+  try {
+    const savedId = await persistWorshipSong(selectedDepartmentId, request.params.id, request.body);
+    if (!savedId) return reply.code(404).send({ error: "Song not found." });
+    return (await listWorshipSongs(selectedDepartmentId, true)).find((item) => item.id === savedId)!;
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not save this song." }); }
+});
+
+app.delete<{ Params: { id: string } }>("/api/worship/songs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The worship library is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query("UPDATE worship_songs SET active=false,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, selectedDepartmentId]);
+  if (!result.rowCount) return reply.code(404).send({ error: "Song not found." });
+  return { archived: true };
+});
+
+app.get("/api/service-plan-templates", async (request, reply): Promise<ServicePlanTemplate[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  return listServicePlanTemplates(selectedDepartmentId);
+});
+
+app.post<{ Body: ServicePlanTemplateInput }>("/api/service-plan-templates", { schema: { body: servicePlanTemplateBodySchema } }, async (request, reply): Promise<ServicePlanTemplate | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const saved = await persistServicePlanTemplate(selectedDepartmentId, "", request.body);
+  if (!saved) return reply.code(400).send({ error: "Could not save this service plan." });
+  if ("error" in saved) return reply.code(400).send(saved);
+  const result = (await listServicePlanTemplates(selectedDepartmentId)).find((item) => item.id === saved.id);
+  return reply.code(201).send(result!);
+});
+
+app.put<{ Params: { id: string }; Body: ServicePlanTemplateInput }>("/api/service-plan-templates/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: servicePlanTemplateBodySchema } }, async (request, reply): Promise<ServicePlanTemplate | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const saved = await persistServicePlanTemplate(selectedDepartmentId, request.params.id, request.body);
+  if (!saved) return reply.code(404).send({ error: "Service-plan template not found." });
+  if ("error" in saved) return reply.code(400).send(saved);
+  const result = (await listServicePlanTemplates(selectedDepartmentId)).find((item) => item.id === saved.id);
+  return result ?? reply.code(404).send({ error: "Service-plan template not found." });
+});
+
+app.delete<{ Params: { id: string } }>("/api/service-plan-templates/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply): Promise<{ archived: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Service-plan templates are unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query("UPDATE service_plan_templates SET active=false,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, selectedDepartmentId]);
+  if (!result.rowCount) return reply.code(404).send({ error: "Service-plan template not found." });
+  return { archived: true };
+});
 
 app.get("/api/health", async () => ({
   status: databaseReady ? "ok" : "database_unavailable",
   services: { api: "ok", database: databaseReady ? "ok" : "unavailable" },
 }));
+
+app.get("/api/public/http-access", async (_request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  return { mode: httpAccessMode, httpsOrigin: configuredHttpsOrigin() };
+});
 
 async function readContainerMemory() {
   try {
@@ -519,35 +853,129 @@ async function readContainerMemory() {
       readFile("/sys/fs/cgroup/memory.current", "utf8"),
       readFile("/sys/fs/cgroup/memory.max", "utf8"),
     ]);
-    return { usageBytes: Number(usage.trim()), limitBytes: limit.trim() === "max" ? null : Number(limit.trim()) };
+    const [peak, stats] = await Promise.all([
+      readFile("/sys/fs/cgroup/memory.peak", "utf8").catch(() => ""),
+      readFile("/sys/fs/cgroup/memory.stat", "utf8").catch(() => ""),
+    ]);
+    const inactiveFile = Number(stats.match(/^inactive_file\s+(\d+)/m)?.[1] ?? 0);
+    const usageBytes = Number(usage.trim());
+    return {
+      usageBytes,
+      limitBytes: limit.trim() === "max" ? null : Number(limit.trim()),
+      peakBytes: Number(peak.trim()) || null,
+      workingSetBytes: Math.max(0, usageBytes - inactiveFile),
+    };
   } catch {
     try {
       const [usage, limit] = await Promise.all([
         readFile("/sys/fs/cgroup/memory/memory.usage_in_bytes", "utf8"),
         readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes", "utf8"),
       ]);
-      return { usageBytes: Number(usage.trim()), limitBytes: Number(limit.trim()) };
+      const [peak, stats] = await Promise.all([
+        readFile("/sys/fs/cgroup/memory/memory.max_usage_in_bytes", "utf8").catch(() => ""),
+        readFile("/sys/fs/cgroup/memory/memory.stat", "utf8").catch(() => ""),
+      ]);
+      const inactiveFile = Number(stats.match(/^(?:total_)?inactive_file\s+(\d+)/m)?.[1] ?? 0);
+      const usageBytes = Number(usage.trim());
+      return {
+        usageBytes,
+        limitBytes: Number(limit.trim()) >= Number.MAX_SAFE_INTEGER ? null : Number(limit.trim()),
+        peakBytes: Number(peak.trim()) || null,
+        workingSetBytes: Math.max(0, usageBytes - inactiveFile),
+      };
     } catch { return null; }
   }
 }
 
+async function readSystemMemory() {
+  const fallbackTotalBytes = totalmem();
+  const fallbackAvailableBytes = freemem();
+  try {
+    const info = await readFile("/proc/meminfo", "utf8");
+    const kibibytes = (key: string) => Number(info.match(new RegExp(`^${key}:\\s+(\\d+)\\s+kB$`, "m"))?.[1] ?? 0);
+    const totalBytes = (kibibytes("MemTotal") || fallbackTotalBytes / 1024) * 1024;
+    const availableBytes = (kibibytes("MemAvailable") || kibibytes("MemFree") || fallbackAvailableBytes / 1024) * 1024;
+    const freeBytes = kibibytes("MemFree") * 1024 || fallbackAvailableBytes;
+    const cacheBytes = Math.max(0, kibibytes("Buffers") + kibibytes("Cached") + kibibytes("SReclaimable") - kibibytes("Shmem")) * 1024;
+    return { totalBytes, availableBytes, usedBytes: Math.max(0, totalBytes - availableBytes), freeBytes, cacheBytes };
+  } catch {
+    return {
+      totalBytes: fallbackTotalBytes,
+      availableBytes: fallbackAvailableBytes,
+      usedBytes: Math.max(0, fallbackTotalBytes - fallbackAvailableBytes),
+      freeBytes: fallbackAvailableBytes,
+      cacheBytes: 0,
+    };
+  }
+}
+
+async function readApplicationDisk() {
+  const dataPath = process.env.SMART_CHURCH_DATA_DIR || "/var/lib/smart-church";
+  for (const path of [dataPath, process.cwd()]) {
+    try {
+      const filesystem = await statfs(path);
+      const blockSize = Number(filesystem.bsize);
+      const totalBytes = Number(filesystem.blocks) * blockSize;
+      const availableBytes = Number(filesystem.bavail) * blockSize;
+      return { path, totalBytes, usedBytes: Math.max(0, totalBytes - Number(filesystem.bfree) * blockSize), availableBytes };
+    } catch { /* Try the application directory when the persistent data volume is not mounted. */ }
+  }
+  return null;
+}
+
+let previousSystemCpuSample: { idle: number; total: number } | null = null;
+function readSystemCpuPercent() {
+  const current = cpus().reduce((totals, cpu) => {
+    const times = cpu.times;
+    totals.idle += times.idle;
+    totals.total += times.user + times.nice + times.sys + times.idle + times.irq;
+    return totals;
+  }, { idle: 0, total: 0 });
+  const previous = previousSystemCpuSample;
+  previousSystemCpuSample = current;
+  if (!previous) return null;
+  const elapsedTotal = current.total - previous.total;
+  if (elapsedTotal <= 0) return null;
+  const idleDelta = current.idle - previous.idle;
+  return Math.max(0, Math.min(100, Math.round((elapsedTotal - idleDelta) / elapsedTotal * 100)));
+}
+
 app.get("/api/admin/diagnostics", async (request, reply) => {
-  if (request.authenticatedUser?.role !== "server_admin") {
-    const selectedDepartmentId = await activeDepartmentId(request, reply, true);
-    if (!selectedDepartmentId) return reply;
+  const canView = hasServerPermission(request, "server_view");
+  const canTroubleshoot = hasServerPermission(request, "server_troubleshoot");
+  if (!canView && !canTroubleshoot) {
+    return reply.code(403).send({ error: "Server diagnostics permission required." });
   }
   const memory = process.memoryUsage();
   const containerMemory = await readContainerMemory();
+  const applicationDisk = await readApplicationDisk();
+  const systemMemory = await readSystemMemory();
   return {
     capturedAt: new Date().toISOString(),
     runtime: {
       uptimeSeconds: Math.floor(process.uptime()),
-      memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external },
+      memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external, arrayBuffersBytes: memory.arrayBuffers },
       containerMemory,
+      systemMemory,
+      cpuPercent: readSystemCpuPercent(),
+      applicationDisk,
     },
     workers: runtimeWorkerDiagnostics(),
-    logs: recentRuntimeLogs(),
+    logs: recentRuntimeLogs(500),
   };
+});
+
+app.post<{ Params: { id: string } }>("/api/admin/workers/:id/restart", { schema: {
+  params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", minLength: 1, maxLength: 120 } } },
+} }, async (request, reply) => {
+  if (!requireServerPermission(request, reply, "server_troubleshoot")) return reply;
+  if (!validModuleMutation(request, reply)) return reply;
+  try {
+    if (!await restartRuntimeWorker(request.params.id)) return reply.code(404).send({ error: "This worker does not support restart controls." });
+    return reply.code(202).send({ accepted: true });
+  } catch (error) {
+    return reply.code(409).send({ error: error instanceof Error ? error.message : "The worker could not be restarted." });
+  }
 });
 
 app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error: string }> => {
@@ -555,13 +983,48 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   const count = await pool.query("SELECT count(*)::int AS total FROM app_users");
+  const signupCandidates = await pool.query<{ id: string; name: string }>(
+    `SELECT department.id,department.name FROM departments department
+       JOIN department_self_signup_settings settings ON settings.department_id=department.id AND settings.enabled=true
+      WHERE department.installation_id=(SELECT id FROM installations WHERE is_current=true) ORDER BY department.name`,
+  );
+  const signupAvailability = await Promise.all(signupCandidates.rows.map(async (site) =>
+    await emailConnector.isConfigured(site.id) ? site : null,
+  ));
+  const selfSignupSites = signupAvailability.filter((site): site is { id: string; name: string } => site !== null);
   return {
     setupRequired: count.rows[0].total === 0,
     authenticated: user !== null,
+    selfSignupEnabled: selfSignupSites.length > 0,
+    selfSignupSites,
+    httpAccessMode,
+    httpsOrigin: configuredHttpsOrigin(),
     ...(count.rows[0].total === 0 ? { setupLocation: departmentName } : {}),
     ...(user ? { csrfToken: moduleCsrfToken(cookieValue(request.headers.cookie, sessionCookieNameFor(request))!) } : {}),
     ...(user ? { user } : {}),
   };
+});
+
+app.put<{ Body: { mode: HttpAccessMode } }>("/api/admin/web-settings/http-access", {
+  schema: {
+    body: {
+      type: "object", additionalProperties: false, required: ["mode"],
+      properties: { mode: { type: "string", enum: ["none", "warning", "redirect"] } },
+    },
+  },
+}, async (request, reply) => {
+  if (!databaseReady || !pool || !installationId) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!requireServerPermission(request, reply, "server_manage") || !validModuleMutation(request, reply)) return reply;
+  const httpsOrigin = configuredHttpsOrigin();
+  if (request.body.mode === "redirect" && !httpsOrigin) return reply.code(400).send({ error: "Configure the public HTTPS origin before enabling HTTPS redirects." });
+  await pool.query(
+    `INSERT INTO installation_http_settings (installation_id, access_mode, updated_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (installation_id) DO UPDATE SET access_mode = EXCLUDED.access_mode, updated_at = now()`,
+    [installationId, request.body.mode],
+  );
+  httpAccessMode = request.body.mode;
+  return { mode: httpAccessMode, httpsOrigin };
 });
 
 app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
@@ -620,12 +1083,12 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
     );
     if (!department.rowCount) throw new Error("The configured department could not be found.");
     const result = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role)
-       VALUES ($1, $2, $3, $4, $5, 'server_admin') RETURNING id, email, username, display_name, role`,
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, 'server_admin', false) RETURNING id, email, username, display_name, role, date_time_format, language, language_is_custom`,
       [randomUUID(), email, username, displayName, passwordHash],
     );
     const row = result.rows[0];
-    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false };
+    user = { id: row.id, email: row.email, username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: allServerPermissions };
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [user.id, departmentId],
@@ -666,7 +1129,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, display_name, password_hash, role FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, date_time_format, language, language_is_custom FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
@@ -685,7 +1148,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   for (const key of buckets) failedLogins.delete(key);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
   await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
@@ -708,14 +1171,82 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   const result = await pool.query(
-    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role",
+    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, server_permissions, date_time_format, language, language_is_custom",
     [user.id, hashPassword(request.body.password)],
   );
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
   await createSession(user.id, request, reply, request.protocol === "https");
-  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false } };
+  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } };
+});
+
+app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage | null } }>("/api/auth/preferences", {
+  schema: {
+    body: {
+      type: "object", additionalProperties: false, minProperties: 1,
+      properties: {
+        dateTimeFormat: { type: "string", enum: ["DD.MM.YYYY HH:MM", "DD/MM/YYYY HH:MM", "MM/DD/YYYY h:mm AM/PM", "YYYY-MM-DD HH:MM"] },
+        language: { anyOf: [{ type: "string", enum: ["en", "de", "fr", "it"] }, { type: "null" }] },
+      },
+    },
+  },
+}, async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!validModuleMutation(request, reply)) return;
+  await pool.query(
+    `UPDATE app_users
+        SET date_time_format = COALESCE($2, date_time_format),
+            language = CASE WHEN $3 THEN COALESCE($4, language) ELSE language END,
+            language_is_custom = CASE WHEN $3 THEN $4 IS NOT NULL ELSE language_is_custom END
+      WHERE id = $1`,
+    [user.id, request.body.dateTimeFormat ?? null, Object.hasOwn(request.body, "language"), request.body.language ?? null],
+  );
+  return { dateTimeFormat: request.body.dateTimeFormat ?? user.dateTimeFormat, language: request.body.language ?? user.language, languageIsCustom: request.body.language === undefined ? user.languageIsCustom : request.body.language !== null };
+});
+
+app.get("/api/auth/sessions", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const token = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
+  const user = await currentUser(token);
+  if (!user || !token) return reply.code(401).send({ error: "Sign in to continue." });
+  const result = await pool.query(
+    `SELECT id, user_agent, created_at, last_seen_at, expires_at, token_hash
+       FROM auth_sessions WHERE user_id = $1 AND expires_at > now()
+       ORDER BY last_seen_at DESC LIMIT 100`,
+    [user.id],
+  );
+  const currentHash = hashToken(token);
+  return { sessions: result.rows.map((row) => ({
+    id: row.id,
+    userAgent: row.user_agent,
+    createdAt: row.created_at,
+    lastSeenAt: row.last_seen_at,
+    expiresAt: row.expires_at,
+    current: row.token_hash === currentHash,
+  })) };
+});
+
+app.delete<{ Params: { id: string } }>("/api/auth/sessions/:id", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const token = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
+  const user = await currentUser(token);
+  if (!user || !token) return reply.code(401).send({ error: "Sign in to continue." });
+  const revoked = await pool.query(
+    "DELETE FROM auth_sessions WHERE id = $1 AND user_id = $2 RETURNING token_hash",
+    [request.params.id, user.id],
+  );
+  if (!revoked.rowCount) return reply.code(404).send({ error: "This sign-in session could not be found." });
+  const current = revoked.rows[0].token_hash === hashToken(token);
+  if (current) clearSessionCookie(reply, request.protocol === "https", sessionCookieNameFor(request));
+  return { revoked: true, current };
 });
 
 const modulePermissionsSchema = { type: "object", maxProperties: 100, propertyNames: { pattern: "^[a-z0-9][a-z0-9-]{0,63}$" }, additionalProperties: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 80 } } };
@@ -848,10 +1379,10 @@ app.delete<{ Params: { userId: string } }>("/api/location-access/:userId", {
 
 app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const result = await pool.query(
     `SELECT u.id, u.email, u.username, u.display_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
-            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role,
+            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role, u.server_permissions,
             memberships.memberships,
             phones.phone_numbers, relations.relationships
        FROM app_users u
@@ -870,12 +1401,12 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
        ) relations ON true
       ORDER BY u.display_name, u.email`,
   );
-  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], memberships: row.memberships }));
 });
 
 app.get("/api/people-options", async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const result = await pool.query(
     `SELECT id, department_id, first_name, last_name, email, source_system
        FROM contacts ORDER BY department_id, lower(last_name), lower(first_name)`,
@@ -985,6 +1516,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         relationships: relationshipsSchema,
         password: { type: "string", minLength: 12, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
+        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage"] } },
         memberships: {
           type: "array", maxItems: 100,
           items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
@@ -994,7 +1526,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   },
 }, async (request, reply): Promise<SiteUser | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
@@ -1006,11 +1538,15 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const phoneNumbers = cleanPhoneNumbers(request.body.phoneNumbers);
   const relationships = request.body.relationships ?? [];
   const accountRole = request.body.accountRole;
+  const serverPermissions = accountRole === "user" ? request.body.serverPermissions ?? [] : [];
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
   if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
   if (accountRole === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can grant Server Administrator access." });
+  }
+  if (serverPermissions.length && request.authenticatedUser?.role !== "server_admin") {
+    return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
   }
   if (accountRole === "user" && memberships.length === 0) {
     return reply.code(400).send({ error: "Assign a local user to at least one site." });
@@ -1024,10 +1560,10 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     await client.query("BEGIN");
     if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
     const user = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11)
-       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city`,
-      [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city],
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password, server_permissions)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, true, $12)
+       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city, server_permissions`,
+      [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city, serverPermissions],
     );
     for (const membership of memberships) {
       if (membership.contactId) {
@@ -1052,7 +1588,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     }
     await client.query("COMMIT");
     const row = user.rows[0];
-    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, memberships });
+    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1063,7 +1599,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"] } }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"]; serverPermissions?: CreateSiteUser["serverPermissions"] } }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -1078,6 +1614,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
+        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage"] } },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
         memberships: {
@@ -1100,7 +1637,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   },
 }, async (request, reply): Promise<SiteUser | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const email = request.body.email?.trim().toLocaleLowerCase("en-US") || null;
   const username = request.body.username.trim().toLocaleLowerCase("en-US");
   const displayName = request.body.displayName.trim();
@@ -1130,6 +1667,14 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       return reply.code(404).send({ error: "This local user could not be found." });
     }
     const accountRole = request.body.accountRole ?? current.rows[0].role;
+    if (accountRole !== current.rows[0].role && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can change an account's installation role." });
+    }
+    if (request.body.serverPermissions?.length && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
+    }
     if (current.rows[0].role === "server_admin" && accountRole !== "server_admin") {
       const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
       if (admins.rows[0].total <= 1) {
@@ -1139,11 +1684,12 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     }
     const updated = await client.query(
       `UPDATE app_users SET email = $2, username = $3, display_name = $4, birthday = $5::date,
-              street = $6, street_number = $7, postal_code = $8, city = $9, role = $10
+              street = $6, street_number = $7, postal_code = $8, city = $9, role = $10,
+              server_permissions = CASE WHEN $11 THEN $12::TEXT[] ELSE server_permissions END
         WHERE id = $1
         RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
-                  street, street_number, postal_code, city, role`,
-      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole],
+                  street, street_number, postal_code, city, role, server_permissions`,
+      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : []],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -1177,7 +1723,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     }
     await client.query("COMMIT");
     const row = updated.rows[0];
-    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, memberships };
+    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1194,7 +1740,7 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   },
 }, async (request, reply): Promise<{ id: string } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   if (request.params.id === request.authenticatedUser?.id) {
     return reply.code(400).send({ error: "You cannot delete your own account." });
   }
@@ -1207,6 +1753,10 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    if (target.rows[0].role === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can delete an installation administrator." });
     }
     if (target.rows[0].role === "server_admin") {
       const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
@@ -1226,27 +1776,31 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   }
 });
 
-app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword: boolean } }>("/api/users/:id/reset-password", {
+app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?: boolean } }>("/api/users/:id/reset-password", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["password", "mustChangePassword"], properties: { password: { type: "string", minLength: 12, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
+    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 12, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
   },
 }, async (request, reply): Promise<{ id: string; mustChangePassword: boolean } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
   if (request.params.id === request.authenticatedUser?.id) return reply.code(400).send({ error: "Choose another user to reset their password." });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const target = await client.query("SELECT id FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const target = await client.query("SELECT id,role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
-    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = $3 WHERE id = $1", [request.params.id, hashPassword(request.body.password), request.body.mustChangePassword]);
+    if (target.rows[0].role === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can reset an installation administrator password." });
+    }
+    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = true WHERE id = $1", [request.params.id, hashPassword(request.body.password)]);
     await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [request.params.id]);
     await client.query("COMMIT");
-    return { id: request.params.id, mustChangePassword: request.body.mustChangePassword };
+    return { id: request.params.id, mustChangePassword: true };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -1257,14 +1811,14 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword:
 
 app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
-  if (request.authenticatedUser?.role === "server_admin") {
+  if (hasServerPermission(request, "server_manage")) {
     const result = await pool.query(
       `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, COALESCE(m.permissions, '{}'::TEXT[]) AS permissions, COALESCE(m.video_permissions, '{}'::TEXT[]) AS video_permissions, COALESCE(m.presenter_permissions, '{}'::TEXT[]) AS presenter_permissions, COALESCE(m.module_permissions, '{}'::JSONB) AS module_permissions
          FROM departments d
          LEFT JOIN department_memberships m
            ON m.department_id = d.id AND m.user_id = $1
         ORDER BY d.name`,
-      [request.authenticatedUser.id],
+      [request.authenticatedUser?.id],
     );
     return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions }));
   }
@@ -1279,24 +1833,84 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
-app.put<{ Params: { id: string }; Body: { moduleIds: string[] } }>("/api/departments/:id/modules", {
+app.put<{ Body: { moduleIds: string[] } }>("/api/installation/modules", {
   schema: {
-    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
       type: "object", additionalProperties: false, required: ["moduleIds"],
       properties: { moduleIds: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", pattern: "^[a-z0-9][a-z0-9-]*$", maxLength: 80 } } },
     },
   },
-}, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
+}, async (request, reply): Promise<{ enabledModules: string[] } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
-  if (!requireServerAdmin(request, reply)) return reply;
-  const result = await pool.query(
-    "UPDATE departments SET enabled_modules = $2, updated_at = now() WHERE id = $1 RETURNING id, name, time_zone, enabled_modules",
-    [request.params.id, request.body.moduleIds],
-  );
-  const row = result.rows[0];
-  if (!row) return reply.code(404).send({ error: "This site could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "unassigned", enabledModules: row.enabled_modules };
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
+  if (!installationId) return reply.code(503).send({ error: "The installation identity is unavailable." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT id FROM installations WHERE id=$1 FOR UPDATE", [installationId]);
+    const catalogResult = await client.query<{ module_id: string; required: boolean; client_managed: boolean; enabled: boolean }>(
+      "SELECT module_id,required,client_managed,enabled FROM installation_modules WHERE installation_id=$1",
+      [installationId],
+    );
+    const clientCatalog = new Map(catalogResult.rows.filter((module) => module.client_managed).map((module) => [module.module_id, module]));
+    const unknown = request.body.moduleIds.filter((id) => !clientCatalog.has(id));
+    if (unknown.length) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: `These modules are not installed for the client: ${unknown.join(", ")}.` });
+    }
+    const requiredIds = new Set([
+      ...getRequiredServerModuleIds().filter((id) => clientCatalog.has(id)),
+      ...catalogResult.rows.filter((module) => module.required && module.client_managed).map((module) => module.module_id),
+    ]);
+    const disabledRequired = [...requiredIds].filter((id) => !request.body.moduleIds.includes(id));
+    if (disabledRequired.length) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: `Required modules cannot be disabled: ${disabledRequired.join(", ")}.` });
+    }
+    const requiredDependencies = getRequiredModuleDependencies();
+    const missingDependencies = request.body.moduleIds.flatMap((id) => (requiredDependencies[id] ?? [])
+      .filter((dependencyId) => {
+        const dependency = catalogResult.rows.find((module) => module.module_id === dependencyId);
+        return dependency?.client_managed ? !request.body.moduleIds.includes(dependencyId) : !dependency?.enabled;
+      })
+      .map((dependencyId) => `${id} requires ${dependencyId}`));
+    if (missingDependencies.length) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: `Enable required module dependencies first: ${missingDependencies.join("; ")}.` });
+    }
+    await client.query(
+      `UPDATE installation_modules
+          SET enabled=(module_id=ANY($2::TEXT[])),updated_at=now()
+        WHERE installation_id=$1 AND client_managed=TRUE AND required=FALSE`,
+      [installationId, request.body.moduleIds],
+    );
+    await client.query(
+      `UPDATE departments AS department
+          SET enabled_modules=COALESCE((
+                SELECT array_agg(module.module_id ORDER BY module.module_id)
+                  FROM installation_modules AS module
+                 WHERE module.installation_id=department.installation_id
+                   AND module.client_managed=TRUE AND module.enabled=TRUE
+              ), ARRAY['file-storage','notifications']::TEXT[]),
+              updated_at=now()
+        WHERE department.installation_id=$1`,
+      [installationId],
+    );
+    const result = await client.query<{ module_id: string }>(
+      "SELECT module_id FROM installation_modules WHERE installation_id=$1 AND client_managed=TRUE AND enabled=TRUE ORDER BY module_id",
+      [installationId],
+    );
+    await client.query("COMMIT");
+    for (const module of catalogResult.rows.filter((item) => item.client_managed)) {
+      setServerModuleEnabled(module.module_id, module.required || request.body.moduleIds.includes(module.module_id));
+    }
+    return { enabledModules: result.rows.map((row) => row.module_id) };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 });
 
 app.post<{ Body: CreateDepartment }>("/api/departments", {
@@ -1313,7 +1927,8 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   },
 }, async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to create locations." });
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
+  if (!installationId) return reply.code(503).send({ error: "The installation identity is unavailable." });
   const location = request.body.location.trim();
   const timeZone = request.body.timeZone.trim();
   if (!location || !timeZone) return reply.code(400).send({ error: "Location and time zone are required." });
@@ -1327,9 +1942,26 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
   try {
     await client.query("BEGIN");
     const result = await client.query(
-      "INSERT INTO departments (id, name, time_zone) VALUES ($1, $2, $3) RETURNING id, name, time_zone, enabled_modules",
-      [id, location, timeZone],
+      `INSERT INTO departments (id, installation_id, name, time_zone, enabled_modules)
+       SELECT $1,installation.id,$3,$4,COALESCE(array_agg(module.module_id ORDER BY module.module_id) FILTER (WHERE module.module_id IS NOT NULL), ARRAY['file-storage','notifications']::TEXT[])
+         FROM installations AS installation
+         LEFT JOIN installation_modules AS module
+           ON module.installation_id=installation.id AND module.client_managed=TRUE AND module.enabled=TRUE
+        WHERE installation.id=$2
+        GROUP BY installation.id
+       RETURNING id,name,time_zone,enabled_modules`,
+      [id, installationId, location, timeZone],
     );
+    await client.query("INSERT INTO department_self_signup_settings(department_id) VALUES($1) ON CONFLICT(department_id) DO NOTHING", [id]);
+    const redundancyTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (redundancyTable.rows[0]?.table_name) {
+      await client.query(
+        `INSERT INTO sync_site_redundancy(department_id,role,primary_installation_id)
+         SELECT id,'primary',installation_id FROM departments WHERE id=$1
+         ON CONFLICT(department_id) DO NOTHING`,
+        [id],
+      );
+    }
     await client.query(
       "INSERT INTO department_memberships (user_id, department_id, role) VALUES ($1, $2, 'site_admin')",
       [request.authenticatedUser!.id, id],
@@ -1348,7 +1980,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
 app.get("/api/department", async (request, reply): Promise<DepartmentProfile | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load department settings." });
   let selectedDepartmentId: string | null;
-  if (request.authenticatedUser?.role === "server_admin") {
+  if (hasServerPermission(request, "server_manage")) {
     const header = request.headers["x-department-id"];
     selectedDepartmentId = typeof header === "string" ? header : departmentId;
     if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(selectedDepartmentId)) {
@@ -1364,7 +1996,7 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
        FROM departments d
        LEFT JOIN department_memberships m ON m.department_id = d.id AND m.user_id = $2
       WHERE d.id = $1 AND ($3::boolean OR m.user_id IS NOT NULL)`,
-    [selectedDepartmentId, request.authenticatedUser?.id, request.authenticatedUser?.role === "server_admin"],
+    [selectedDepartmentId, request.authenticatedUser?.id, hasServerPermission(request, "server_manage")],
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
@@ -1432,7 +2064,7 @@ app.put<{ Body: { logoDataUrl: string | null } }>("/api/branding", {
   if (!databaseReady || !pool) {
     return reply.code(503).send({ error: "Configure DATABASE_URL to save site branding." });
   }
-  if (!requireServerAdmin(request, reply)) return reply;
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
 
   let mimeType: "image/png" | "image/jpeg" | "image/webp" | null = null;
   let imageData: Buffer | null = null;
@@ -1472,20 +2104,23 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
   if (!selectedDepartmentId) return reply;
 
   const result = await pool.query(
-    `SELECT id, first_name, last_name, email, phone, status, source_system
+    `SELECT id, first_name, last_name, email, phone, status, source_system, elvanto_profile, churchtools_profile
        FROM contacts
       WHERE department_id = $1
       ORDER BY created_at DESC, last_name, first_name`,
     [selectedDepartmentId],
   );
+  const canViewPrivatePeople = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage");
   return result.rows.map((row) => ({
     id: row.id,
     firstName: row.first_name,
     lastName: row.last_name,
-    ...((request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage")) && row.email ? { email: row.email } : {}),
-    ...((request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage")) && row.phone ? { phone: row.phone } : {}),
+    ...(canViewPrivatePeople && row.email ? { email: row.email } : {}),
+    ...(canViewPrivatePeople && row.phone ? { phone: row.phone } : {}),
     status: row.status,
-    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}),
+    ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
+    ...(canViewPrivatePeople && row.source_system === "elvanto" && row.elvanto_profile && Object.keys(row.elvanto_profile).length ? { elvantoProfile: row.elvanto_profile as Record<string, unknown> } : {}),
+    ...(canViewPrivatePeople && row.churchtools_profile && Object.keys(row.churchtools_profile).length ? { churchtoolsProfile: row.churchtools_profile as Record<string, unknown> } : {}),
   }));
 });
 
@@ -1601,7 +2236,7 @@ app.put<{ Params: { id: string }; Body: CreateContact }>("/api/contacts/:id", {
 
   const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "Person not found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This person is managed by ChurchTools. Edit them there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This person is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Edit them there and sync again.` });
   const firstName = request.body.firstName.trim();
   const lastName = request.body.lastName.trim();
   if (!firstName || !lastName) return reply.code(400).send({ error: "First and last name are required." });
@@ -1624,7 +2259,7 @@ app.delete<{ Params: { id: string } }>("/api/contacts/:id", {
 
   const existing = await pool.query("SELECT source_system FROM contacts WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "Person not found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This person is managed by ChurchTools. Remove them there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This person is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Remove them there and sync again.` });
   const result = await pool.query("DELETE FROM contacts WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This person could not be found." });
   return { deleted: true };
@@ -1637,7 +2272,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const selectedDepartmentId = await activeDepartmentId(request, reply);
   if (!selectedDepartmentId) return reply;
   const result = await pool.query<ServiceEventRow>(
-    `SELECT id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+    `SELECT id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
             location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
             registration_enabled, registration_capacity, registration_token,
@@ -1696,13 +2331,13 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
     const rows: ServiceEventRow[] = [];
     for (const date of dates) {
       const result = await client.query<ServiceEventRow>(
-        `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description, room, asset_ids, positions, time_plan, recurrence_id, registration_enabled, registration_capacity, registration_token)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17)
-         RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+        `INSERT INTO service_events (id, department_id, title, kind, event_date, is_all_day, start_time, end_time, location, description, room, asset_ids, positions, time_plan, recurrence_id, registration_enabled, registration_capacity, registration_token)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18)
+         RETURNING id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
                    CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                    location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id,
                    registration_enabled, registration_capacity, registration_token, 0::int AS registration_count`,
-        [randomUUID(), selectedDepartmentId, event.title, event.kind, date, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), seriesId, event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
+        [randomUUID(), selectedDepartmentId, event.title, event.kind, date, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), seriesId, event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
       );
       rows.push(result.rows[0]);
       await syncEventPositionResponses(client, result.rows[0].id, event.positions);
@@ -1727,7 +2362,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Edit it there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Edit it there and sync again.` });
   const event = {
     ...request.body,
     title: request.body.title.trim(),
@@ -1743,22 +2378,27 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const previousPositionsResult = await client.query<{ positions: ServiceEvent["positions"] }>(
+      "SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE",
+      [request.params.id, selectedDepartmentId],
+    );
+    if (!previousPositionsResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
-        SET title = $3, kind = $4, event_date = $5, start_time = $6, end_time = $7,
-            location = $8, description = $9, room = $10, asset_ids = $11, positions = $12::jsonb, time_plan = $13::jsonb,
-            registration_enabled = $14, registration_capacity = $15,
-            registration_token = CASE WHEN $14 THEN COALESCE(registration_token, $16::uuid) ELSE NULL END, updated_at = now()
+        SET title = $3, kind = $4, event_date = $5, is_all_day = $6, start_time = $7, end_time = $8,
+            location = $9, description = $10, room = $11, asset_ids = $12, positions = $13::jsonb, time_plan = $14::jsonb,
+            registration_enabled = $15, registration_capacity = $16,
+            registration_token = CASE WHEN $15 THEN COALESCE(registration_token, $17::uuid) ELSE NULL END, updated_at = now()
       WHERE id = $1 AND department_id = $2
-      RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+      RETURNING id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                 location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
                 registration_enabled, registration_capacity, registration_token,
                 (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
-    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
+    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
   );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
-    await syncEventPositionResponses(client, request.params.id, event.positions);
+    await syncEventPositionResponses(client, request.params.id, event.positions, previousPositionsResult.rows[0].positions);
     await client.query("COMMIT");
     return mapServiceEvent(result.rows[0]);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -1776,7 +2416,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   if (!selectedDepartmentId) return reply;
   const source = await pool.query<{ recurrence_id: string | null; source_system: string | null; event_date: string }>("SELECT recurrence_id,source_system,event_date::text FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!source.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (source.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Edit it there and sync again." });
+  if (source.rows[0].source_system === "churchtools" || source.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${source.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Edit it there and sync again.` });
   if (!source.rows[0].recurrence_id) return reply.code(400).send({ error: "This gathering is not part of a recurring series." });
   const event = { ...request.body, title: request.body.title.trim(), location: request.body.location.trim(), endTime: request.body.endTime?.trim() || undefined, description: request.body.description?.trim() || undefined };
   const validationError = validateServiceEvent({ ...event, recurrence: undefined });
@@ -1787,20 +2427,25 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const previousSeries = await client.query<{ id: string; positions: ServiceEvent["positions"] }>(
+      "SELECT id,positions FROM service_events WHERE department_id=$1 AND recurrence_id=$2 FOR UPDATE",
+      [selectedDepartmentId, source.rows[0].recurrence_id],
+    );
     const result = await client.query<ServiceEventRow>(
-    `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, start_time=$6, end_time=$7,
-       location=$8, description=$9, room=$10, asset_ids=$11, positions=$12::jsonb, time_plan=$13::jsonb,
-       registration_enabled=$14, registration_capacity=$15,
-       registration_token=CASE WHEN $14 THEN COALESCE(registration_token, gen_random_uuid()) ELSE NULL END, updated_at=now()
+    `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, is_all_day=$6, start_time=$7, end_time=$8,
+       location=$9, description=$10, room=$11, asset_ids=$12, positions=$13::jsonb, time_plan=$14::jsonb,
+       registration_enabled=$15, registration_capacity=$16,
+       registration_token=CASE WHEN $15 THEN COALESCE(registration_token, gen_random_uuid()) ELSE NULL END, updated_at=now()
      WHERE department_id=$1 AND recurrence_id=$2
-     RETURNING id,title,kind,event_date::text,to_char(start_time,'HH24:MI') AS start_time,
+     RETURNING id,title,kind,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
        CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
        location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,attendance_recorded_at,recurrence_id,source_system,
        registration_enabled,registration_capacity,registration_token,
        (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
-    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
+    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
   );
-    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions);
+    const previousPositionsByEvent = new Map(previousSeries.rows.map((row) => [row.id, row.positions]));
+    for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions, previousPositionsByEvent.get(row.id));
     await client.query("COMMIT");
     return result.rows.map(mapServiceEvent);
   } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -1815,7 +2460,7 @@ app.delete<{ Params: { id: string } }>("/api/events/:id/series", {
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query<{ recurrence_id: string | null; source_system: string | null }>("SELECT recurrence_id,source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Remove it there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Remove it there and sync again.` });
   if (!existing.rows[0].recurrence_id) return reply.code(400).send({ error: "This gathering is not part of a recurring series." });
   const result = await pool.query("DELETE FROM service_events WHERE department_id=$1 AND recurrence_id=$2 RETURNING id", [selectedDepartmentId, existing.rows[0].recurrence_id]);
   return { deleted: result.rowCount ?? 0 };
@@ -1837,8 +2482,9 @@ app.put<{ Params: { id: string; positionIndex: string }; Body: { status: "pendin
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const eventResult = await client.query<{ positions: ServiceEvent["positions"] }>("SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    const eventResult = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null }>("SELECT positions,source_system FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
     if (!eventResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    if (eventResult.rows[0].source_system === "churchtools" || eventResult.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
     const position = eventResult.rows[0].positions?.[positionIndex];
     if (!position || position.contactId !== contactId) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You are not assigned to this service position." }); }
     const result = await client.query<{ status: string }>(
@@ -1867,11 +2513,11 @@ app.put<{ Params: { id: string }; Body: { adults: number; children: number } }>(
   if (!selectedDepartmentId) return reply;
   const result = await pool.query<{ attendance_adults: number; attendance_children: number; attendance_recorded_at: string }>(
     `UPDATE service_events SET attendance_adults=$3, attendance_children=$4, attendance_recorded_at=now(), updated_at=now()
-      WHERE id=$1 AND department_id=$2 AND source_system IS DISTINCT FROM 'churchtools'
+      WHERE id=$1 AND department_id=$2 AND (source_system IS NULL OR source_system NOT IN ('churchtools','elvanto'))
       RETURNING attendance_adults, attendance_children, attendance_recorded_at`,
     [request.params.id, selectedDepartmentId, request.body.adults, request.body.children],
   );
-  if (!result.rowCount) return reply.code(404).send({ error: "This gathering could not be found or is managed by ChurchTools." });
+  if (!result.rowCount) return reply.code(404).send({ error: "This gathering could not be found or is managed by an external service." });
   return { attendanceAdults: result.rows[0].attendance_adults, attendanceChildren: result.rows[0].attendance_children, attendanceRecordedAt: result.rows[0].attendance_recorded_at };
 });
 
@@ -1881,7 +2527,7 @@ app.get<{ Params: { id: string } }>("/api/events/:id/check-ins", {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
-  const event = await pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2 AND source_system IS DISTINCT FROM 'churchtools'", [request.params.id, selectedDepartmentId]);
+  const event = await pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2 AND (source_system IS NULL OR source_system NOT IN ('churchtools','elvanto'))", [request.params.id, selectedDepartmentId]);
   if (!event.rowCount) return reply.code(404).send({ error: "This locally managed gathering could not be found." });
   const result = await pool.query<ServiceEventCheckIn>(
     `SELECT checkin.contact_id AS "contactId", checkin.first_time_visitor AS "firstTimeVisitor", checkin.follow_up_status AS "followUpStatus", checkin.checked_in_at AS "checkedInAt"
@@ -1908,7 +2554,7 @@ app.put<{ Params: { id: string }; Body: { contactId: string; firstTimeVisitor?: 
     `INSERT INTO event_attendance_checkins (event_id,contact_id,first_time_visitor,follow_up_status)
      SELECT gathering.id,person.id,$4,COALESCE($5,CASE WHEN $4 THEN 'needed' ELSE 'not_needed' END)
        FROM service_events gathering JOIN contacts person ON person.id=$2 AND person.department_id=gathering.department_id
-      WHERE gathering.id=$1 AND gathering.department_id=$3 AND gathering.source_system IS DISTINCT FROM 'churchtools'
+      WHERE gathering.id=$1 AND gathering.department_id=$3 AND (gathering.source_system IS NULL OR gathering.source_system NOT IN ('churchtools','elvanto'))
      ON CONFLICT (event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,follow_up_status=EXCLUDED.follow_up_status,updated_at=now()
      RETURNING contact_id AS "contactId",first_time_visitor AS "firstTimeVisitor",follow_up_status AS "followUpStatus",checked_in_at AS "checkedInAt"`,
     [request.params.id, request.body.contactId, selectedDepartmentId, request.body.firstTimeVisitor ?? false, request.body.followUpStatus ?? null],
@@ -1926,7 +2572,7 @@ app.delete<{ Params: { id: string; contactId: string } }>("/api/events/:id/check
   const result = await pool.query(
     `DELETE FROM event_attendance_checkins checkin USING service_events gathering, contacts person
       WHERE checkin.event_id=gathering.id AND checkin.contact_id=person.id AND gathering.id=$1 AND person.id=$2
-        AND gathering.department_id=$3 AND person.department_id=$3 AND gathering.source_system IS DISTINCT FROM 'churchtools'`,
+        AND gathering.department_id=$3 AND person.department_id=$3 AND (gathering.source_system IS NULL OR gathering.source_system NOT IN ('churchtools','elvanto'))`,
     [request.params.id, request.params.contactId, selectedDepartmentId],
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This check-in could not be found in the selected location." });
@@ -1938,10 +2584,10 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
 }, async (request, reply): Promise<PublicRegistrationEvent | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
   const result = await pool.query<{
-    title: string; event_date: string; start_time: string; end_time: string | null; location: string;
+    title: string; event_date: string; is_all_day: boolean; start_time: string; end_time: string | null; location: string;
     description: string | null; registration_capacity: number | null; registered_count: number; waitlist_count: number; registration_open: boolean;
   }>(
-    `SELECT title,event_date::text,to_char(start_time,'HH24:MI') AS start_time,
+    `SELECT title,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
             location,description,registration_capacity,event_date>=CURRENT_DATE AS registration_open,
             (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='registered') AS registered_count,
@@ -1952,7 +2598,7 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
   if (!result.rowCount) return reply.code(404).send({ error: "This registration link is unavailable." });
   const row = result.rows[0];
   return {
-    title: row.title, eventDate: row.event_date, startTime: row.start_time,
+    title: row.title, eventDate: row.event_date, isAllDay: row.is_all_day, startTime: row.start_time,
     ...(row.end_time ? { endTime: row.end_time } : {}), location: row.location,
     ...(row.description ? { description: row.description } : {}),
     ...(row.registration_capacity ? { capacity: row.registration_capacity } : {}),
@@ -1977,10 +2623,11 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const event = await client.query<{ id: string; registration_capacity: number | null }>(
-      "SELECT id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
+    const event = await client.query<{ id: string; department_id: string; registration_capacity: number | null }>(
+      "SELECT id,department_id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
     );
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
+    if (!await lockDepartmentForWrite(client, event.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
     const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2)", [event.rows[0].id, email]);
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
     const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [event.rows[0].id]);
@@ -2094,13 +2741,15 @@ app.delete<{ Params: { id: string } }>("/api/events/:id", {
   if (!selectedDepartmentId) return reply;
   const existing = await pool.query("SELECT source_system FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
   if (!existing.rowCount) return reply.code(404).send({ error: "This event could not be found." });
-  if (existing.rows[0].source_system === "churchtools") return reply.code(403).send({ error: "This service is managed by ChurchTools. Remove it there and sync again." });
+  if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: `This service is managed by ${existing.rows[0].source_system === "churchtools" ? "ChurchTools" : "Elvanto"}. Remove it there and sync again.` });
   const result = await pool.query("DELETE FROM service_events WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, selectedDepartmentId]);
   if (!result.rowCount) return reply.code(404).send({ error: "This event could not be found." });
   return { id: result.rows[0].id };
 });
 
 app.addHook("onClose", async () => {
+  removeVideoActivationListener?.();
+  removeVideoActivationListener = null;
   await videoWorker?.close();
   await closeDatabase();
 });
@@ -2132,6 +2781,13 @@ try {
   try {
     databaseReady = await initializeDatabase();
     if (databaseReady && pool) {
+      const accessSettings = await pool.query<{ access_mode: HttpAccessMode }>(
+        `SELECT settings.access_mode
+           FROM installation_http_settings settings
+           JOIN installations installation ON installation.id = settings.installation_id
+          WHERE installation.is_current = TRUE`,
+      );
+      httpAccessMode = accessSettings.rows[0]?.access_mode ?? "none";
       await pool.query("DELETE FROM auth_sessions WHERE expires_at <= now()");
       const accounts = await pool.query("SELECT count(*)::int AS total FROM app_users");
       if (accounts.rows[0].total === 0) {
@@ -2144,6 +2800,7 @@ try {
     app.log.error({ err: error }, "Database unavailable; department data will not be saved.");
   }
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
+  if (pool && databaseReady) registerCoreReplicationAdapter(pool);
   await registerServerModules(app, {
     realtime: {
       publish: (topic, selectedDepartmentId, payload) => realtime.publish(topic, selectedDepartmentId, payload),
@@ -2152,10 +2809,13 @@ try {
     workers: { register: (id, name, getDiagnostics) => registerRuntimeWorker(id, name, getDiagnostics) },
     pool: pool ?? null,
     isDatabaseReady: () => databaseReady,
+    isDepartmentWritable,
+    lockDepartmentForWrite,
     getDefaultDepartmentId: () => departmentId,
     resolveDepartmentId: activeDepartmentId,
     validateMutation: validModuleMutation,
     getVideoWorker: () => videoWorker,
+    email: emailConnector,
   });
   app.setNotFoundHandler(async (request, reply) => {
     if ((request.method !== "GET" && request.method !== "HEAD") || request.url === "/api" || request.url.startsWith("/api/")) {
@@ -2180,13 +2840,22 @@ try {
     if (request.method === "HEAD") return reply.code(200).send();
     return reply.send(createReadStream(target));
   });
+  // Let module onReady hooks create their tables, then install the database
+  // fence before binding the HTTP listener so no request can race startup.
+  await app.ready();
+  if (pool && databaseReady) await installSiteWriteFenceTriggers(pool);
   await app.listen({ host, port });
   const shutdown = () => { void app.close().catch((error) => { app.log.error({ err: error }, "Server shutdown failed."); process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown);
   process.once("SIGINT", shutdown);
   videoWorker = new VideoWorkerSupervisor(app.server, port, Boolean(process.env.STREAMING_CONFIG_FILE), (message) => recordRuntimeLog("api/video-steffisburg", "error", message));
-  registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null });
-  videoWorker.start();
+  registerRuntimeWorker("video-steffisburg:worker", "Video Steffisburg", () => videoWorker?.diagnostics ?? { status: "starting", error: null, uptimeSeconds: null, memory: null }, () => videoWorker?.restart());
+  removeVideoActivationListener = onServerModuleActivationChange("video-steffisburg", (enabled) => {
+    if (enabled) videoWorker?.start();
+    else videoWorker?.stop();
+  });
+  if (isServerModuleEnabled("video-steffisburg")) videoWorker.start();
+  else videoWorker.stop();
 } catch (error) {
   app.log.error(error);
   await closeDatabase();

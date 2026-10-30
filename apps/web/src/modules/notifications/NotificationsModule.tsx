@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Bell, CalendarClock, Check, CheckCheck, CircleAlert, ClipboardCheck, Megaphone, Send, Settings2, UserCheck } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import type { ChurchGroup } from "@smart-church/contracts";
+import { formatUserDate } from "../../date-format";
 import "./notifications.css";
 
 type Notification = {
@@ -25,7 +26,6 @@ type NotificationResponse = {
   emailEnabled: boolean;
   emailAddress: string | null;
   emailDeliveryConfigured: boolean;
-  emailWebhookConfigured: boolean;
   emailSuppressed: boolean;
   canSend: boolean;
 };
@@ -38,7 +38,6 @@ export function NotificationsModule({ departmentId, csrfToken }: ModuleContext) 
   const [emailEnabled, setEmailEnabled] = useState(false);
   const [emailAddress, setEmailAddress] = useState<string | null>(null);
   const [emailDeliveryConfigured, setEmailDeliveryConfigured] = useState(false);
-  const [emailWebhookConfigured, setEmailWebhookConfigured] = useState(false);
   const [emailSuppressed, setEmailSuppressed] = useState(false);
   const [canSend, setCanSend] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -64,7 +63,6 @@ export function NotificationsModule({ departmentId, csrfToken }: ModuleContext) 
       setEmailEnabled(result.emailEnabled);
       setEmailAddress(result.emailAddress);
       setEmailDeliveryConfigured(result.emailDeliveryConfigured);
-      setEmailWebhookConfigured(result.emailWebhookConfigured);
       setEmailSuppressed(result.emailSuppressed);
       setCanSend(result.canSend);
     } catch (reason) {
@@ -191,7 +189,7 @@ export function NotificationsModule({ departmentId, csrfToken }: ModuleContext) 
     </section>
     <section className="notification-preference-card" aria-label="Email notification preferences">
       <div className="notification-preference-icon"><Send size={17} /></div>
-      <div className="notification-preference-copy"><strong>Email notifications</strong><span>{emailSuppressed ? "This address was suppressed after a bounce or complaint. Update your account email before expecting further delivery." : emailAddress ? `Send inbox notifications to ${emailAddress}.` : "Add an email address to your account to enable email notifications."}{!emailDeliveryConfigured && " Email delivery also needs to be configured by your administrator."}{emailDeliveryConfigured && !emailWebhookConfigured && " Delivery receipts are not available until the Resend webhook is configured."}</span></div>
+      <div className="notification-preference-copy"><strong>Email notifications</strong><span>{emailSuppressed ? "This address was suppressed after a bounce or complaint. Update your account email before expecting further delivery." : emailAddress ? `Send inbox notifications to ${emailAddress}.` : "Add an email address to your account to enable email notifications."}{!emailDeliveryConfigured && " Email delivery also needs to be configured by your administrator."}</span></div>
       <label className="notification-toggle"><input type="checkbox" checked={emailEnabled} disabled={busy || (!emailEnabled && (!emailDeliveryConfigured || !emailAddress || emailSuppressed))} onChange={(event) => void savePreferences(eventRemindersEnabled, serviceRequestsEnabled, followUpsEnabled, event.target.checked)} /><span>{emailEnabled ? "On" : "Off"}</span></label>
     </section>
 
@@ -203,7 +201,7 @@ export function NotificationsModule({ departmentId, csrfToken }: ModuleContext) 
       {loading ? <p className="notification-empty" role="status">Loading notifications…</p> : notifications.length === 0 ? <div className="notification-empty-state"><span><Bell size={20} /></span><strong>You’re all caught up</strong><p>New announcements and event reminders will appear here.</p></div> : <div className="notification-list">
         {notifications.map((notification) => <article className={`notification-item${notification.readAt ? " notification-item-read" : " notification-item-unread"}`} key={notification.id}>
           <div className={`notification-item-icon ${notification.kind === "event_reminder" || notification.kind === "follow_up_reminder" ? "notification-item-icon-event" : notification.kind === "service_request" || notification.kind === "follow_up_assignment" ? "notification-item-icon-request" : "notification-item-icon-announcement"}`}>{notification.kind === "event_reminder" || notification.kind === "follow_up_reminder" ? <CalendarClock size={17} /> : notification.kind === "service_request" ? <ClipboardCheck size={17} /> : notification.kind === "follow_up_assignment" ? <UserCheck size={17} /> : <Megaphone size={17} />}</div>
-          <div className="notification-item-content"><div className="notification-item-heading"><strong>{notification.title}</strong><time dateTime={notification.createdAt}>{new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(notification.createdAt))}</time></div><p>{notification.body}</p><small>{notification.kind === "event_reminder" ? "Event reminder" : notification.kind === "service_request" ? "Volunteer request" : notification.kind === "follow_up_assignment" ? "Visitor follow-up assignment" : notification.kind === "follow_up_reminder" ? "Visitor follow-up reminder" : "Location announcement"}</small>{notification.emailDeliveryStatus && <small className={`notification-email-status notification-email-status-${notification.emailDeliveryStatus}`}>Email {notification.emailDeliveryStatus === "pending" ? "queued" : notification.emailDeliveryStatus === "sent" ? "accepted by provider" : notification.emailDeliveryStatus}</small>}</div>
+          <div className="notification-item-content"><div className="notification-item-heading"><strong>{notification.title}</strong><time dateTime={notification.createdAt}>{formatUserDate(notification.createdAt, true)}</time></div><p>{notification.body}</p><small>{notification.kind === "event_reminder" ? "Event reminder" : notification.kind === "service_request" ? "Volunteer request" : notification.kind === "follow_up_assignment" ? "Visitor follow-up assignment" : notification.kind === "follow_up_reminder" ? "Visitor follow-up reminder" : "Location announcement"}</small>{notification.emailDeliveryStatus && <small className={`notification-email-status notification-email-status-${notification.emailDeliveryStatus}`}>Email {notification.emailDeliveryStatus === "pending" ? "queued" : notification.emailDeliveryStatus === "sent" ? "accepted by provider" : notification.emailDeliveryStatus}</small>}</div>
           {!notification.readAt && <button className="button button-secondary notification-read-button" type="button" onClick={() => void markRead(notification)} aria-label={`Mark “${notification.title}” as read`}><Check size={14} />Read</button>}
         </article>)}
       </div>}

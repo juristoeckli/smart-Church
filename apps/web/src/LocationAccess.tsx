@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
-import { registeredModules } from "./module-registry";
+import { ModuleTranslationHost, registeredModules } from "./module-registry";
+import { translateModuleMessage, translationsForModule } from "./modules/translations";
+import { getActiveLanguage } from "./i18n";
 import "./LocationAccess.css";
 
 type LocationMember = {
@@ -125,7 +127,7 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
     update(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   }
 
-  return <div className={embedded ? "location-access-embedded" : "modal-backdrop location-access-backdrop"} role={embedded ? undefined : "presentation"} onMouseDown={!embedded ? (event) => event.target === event.currentTarget && onClose() : undefined}>
+  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><div className={embedded ? "location-access-embedded" : "modal-backdrop location-access-backdrop"} role={embedded ? undefined : "presentation"} onMouseDown={!embedded ? (event) => event.target === event.currentTarget && onClose() : undefined}>
     <section className={`modal location-access-modal ${embedded ? "location-access-embedded-panel" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="location-access-title">
       <div className="modal-heading"><div><span className="eyebrow">LOCATION MANAGEMENT</span><h2 id="location-access-title">People &amp; access</h2><p>Manage who can use {department.location} and what each person can do.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><X size={19} /></button></div>
       <div className="location-access-layout">
@@ -142,13 +144,13 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
               <fieldset className="module-rights-fieldset"><legend>Location rights</legend>{locationRights.map((right) => <label className="module-right-option" key={right.value}><input type="checkbox" checked={permissions.includes(right.value)} onChange={() => toggle(right.value, permissions, setPermissions)} /><span><strong>{right.label}</strong><small>{right.description}</small></span></label>)}</fieldset>
               {enabledAccessModules.map((module) => <fieldset className="module-rights-fieldset" key={module.id}><legend>{module.accessLabel ?? module.name}</legend>{module.accessLevels!.map((level) => <label className="module-right-option" key={level.value}><input type="checkbox" checked={(modulePermissions[module.id] ?? []).includes(level.value)} onChange={() => setModulePermissions((current) => ({ ...current, [module.id]: (current[module.id] ?? []).includes(level.value) ? current[module.id].filter((value) => value !== level.value) : [...(current[module.id] ?? []), level.value] }))} /><span><strong>{level.label}</strong>{level.description && <small>{level.description}</small>}</span></label>)}</fieldset>)}
             </>}
-            {error && <p className="user-access-feedback user-access-feedback-error" role="alert">{error}</p>}{notice && <p className="user-access-feedback" role="status">{notice}</p>}
+            {error && <p className="user-access-feedback user-access-feedback-error" role="alert">{translateModuleMessage("core-admin", getActiveLanguage(), error)}</p>}{notice && <p className="user-access-feedback" role="status">{notice}</p>}
             <div className="form-actions"><button className="button button-danger" type="button" disabled={saving || selected.id === currentUserId} title={selected.id === currentUserId ? "Ask another site administrator to remove your access." : undefined} onClick={() => void removeAccess()}><Trash2 size={15} />Remove location access</button><button className="button button-primary" type="submit" disabled={saving}>{saving ? "Saving…" : <><Check size={15} />Save access</>}</button></div>
             <p className="modal-demo-footnote">Removing access preserves the account and all access to other locations. At least one site administrator must remain.</p>
           </> : <div className="location-access-empty"><UsersRound size={22} /><strong>Select a person</strong><p>Choose someone with access to manage their role, or add an existing account.</p></div>}
-          {error && !selected && <p className="user-access-feedback user-access-feedback-error" role="alert">{error}</p>}
+          {error && !selected && <p className="user-access-feedback user-access-feedback-error" role="alert">{translateModuleMessage("core-admin", getActiveLanguage(), error)}</p>}
         </form>
       </div>
     </section>
-  </div>;
+  </div></ModuleTranslationHost>;
 }

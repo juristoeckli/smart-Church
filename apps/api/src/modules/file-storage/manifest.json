@@ -2,5 +2,11 @@
   "id": "file-storage",
   "name": "File storage",
   "version": "0.1.0",
-  "serverEntry": "./routes.ts"
+  "serverEntry": "./routes.ts",
+  "required": true,
+  "enabledByDefault": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
 }
