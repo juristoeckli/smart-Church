@@ -657,6 +657,14 @@ function mapEvents(events: JsonObject[]) {
     const end = dateTime(row.endDate ?? row.end ?? row.endDateTime, start.date, row.endTime);
     const assignments: JsonObject[] = Array.isArray(row.services) ? row.services : Array.isArray(row.eventServices) ? row.eventServices : [];
     const agenda: JsonObject[] = Array.isArray(row.agenda?.items) ? row.agenda.items : Array.isArray(row.agendaItems) ? row.agendaItems : [];
+    const supportedPlanFields = new Set(["name", "title", "label", "startDateTime", "start", "time", "startTime", "durationMinutes", "duration", "description", "note", "notes", "song"]);
+    const unmappedFields = [...new Set(agenda.flatMap((item) => {
+      const song = item.song && typeof item.song === "object" ? item.song as JsonObject : {};
+      const itemFields = Object.keys(item).filter((key) => !supportedPlanFields.has(key)).map((key) => `agenda.items[].${key}`);
+      const songFields = Object.keys(song).filter((key) => !["title", "name"].includes(key)).map((key) => `agenda.items[].song.${key}`);
+      if (song.id) songFields.push("agenda.items[].song.id (catalog link not imported)");
+      return [...itemFields, ...songFields];
+    }))];
     return [{
       sourceId, title: firstText(row.name, row.title, row.subject) || "ChurchTools service",
       date: start.date, isAllDay: row.isAllDay === true || row.allDay === true || row.is_all_day === true, start: row.isAllDay === true || row.allDay === true || row.is_all_day === true ? "00:00" : start.time, end: row.isAllDay === true || row.allDay === true || row.is_all_day === true ? null : end?.date === start.date && end.time > start.time ? end.time : null,
@@ -668,12 +676,15 @@ function mapEvents(events: JsonObject[]) {
         return name ? [{ name, ...(personId ? { personId: String(personId) } : {}) }] : [];
       }),
       timePlan: agenda.flatMap((item) => {
-        const title = firstText(item.name, item.title, item.label);
+        const song = item.song && typeof item.song === "object" ? item.song as JsonObject : {};
+        const title = firstText(item.name, item.title, item.label, song.title, song.name);
         if (!title) return [];
         const when = dateTime(item.startDateTime ?? item.start ?? item.time, start.date, item.startTime);
         const duration = Number(item.durationMinutes ?? item.duration);
-        return [{ title, ...(when ? { startTime: when.time } : {}), ...(duration > 0 ? { durationMinutes: duration } : {}), ...(firstText(item.description, item.note) ? { notes: firstText(item.description, item.note).slice(0, 500) } : {}) }];
+        const notes = firstText(item.description, item.note, item.notes);
+        return [{ title, ...(when ? { startTime: when.time } : {}), ...(duration > 0 ? { durationMinutes: duration } : {}), ...(notes ? { notes: notes.slice(0, 500) } : {}) }];
       }),
+      ...(unmappedFields.length ? { unmappedFields } : {}),
     }];
   });
 }
@@ -906,7 +917,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const encryptedSnapshot = encrypt(JSON.stringify(records));
         await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
           VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now()`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
-        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action })) };
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
     });
