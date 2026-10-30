@@ -241,26 +241,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     fr: { Primary: "Principal", "Service 1": "Culte 1", Set: "Définir", "Streaming High": "Streaming haute qualité", "Nur für Übertragungen zwischen den Pflegeheimen": "Uniquement pour les retransmissions entre les maisons de retraite" },
     it: { Primary: "Primario", "Service 1": "Culto 1", Set: "Imposta", "Streaming High": "Streaming alta qualità", "Nur für Übertragungen zwischen den Pflegeheimen": "Solo per le trasmissioni tra le case di riposo" },
   },
-  sync: {
-    de: {
-      "Matching uses stable ChurchTools IDs. Email, name, and event matches are flagged for review instead of merged. Group import only adds linked members; local-only memberships are kept. Resource bookings and unsupported profile fields are not imported.": "Der Abgleich nutzt stabile ChurchTools-IDs. Treffer bei E-Mail, Namen und Ereignissen werden zur Prüfung markiert und nicht zusammengeführt. Der Gruppenimport fügt nur verknüpfte Mitglieder hinzu; lokale Mitgliedschaften bleiben erhalten. Ressourcenbuchungen und nicht unterstützte Profilfelder werden nicht importiert.",
-      "Only the first 40 records are shown. The saved snapshot is encrypted; each import request processes at most 50 records and can resume after a reload.": "Es werden nur die ersten 40 Datensätze angezeigt. Die gespeicherte Momentaufnahme ist verschlüsselt. Jeder Importaufruf verarbeitet höchstens 50 Datensätze und kann nach dem Neuladen fortgesetzt werden.",
-      "Preview and import people, groups, services/events, and resources into this location. Imported records stay editable and are not tied to scheduled sync.": "Personen, Gruppen, Gottesdienste/Ereignisse und Ressourcen für diesen Standort vorab prüfen und importieren. Importierte Einträge bleiben bearbeitbar und sind nicht an die geplante Synchronisierung gebunden.",
-      "Migration preview": "Migrationsvorschau", "Migration progress": "Migrationsfortschritt",
-    },
-    fr: {
-      "Matching uses stable ChurchTools IDs. Email, name, and event matches are flagged for review instead of merged. Group import only adds linked members; local-only memberships are kept. Resource bookings and unsupported profile fields are not imported.": "La correspondance utilise les identifiants ChurchTools stables. Les correspondances d’e-mail, de nom et d’événement sont signalées pour vérification, sans fusion. L’importation des groupes ajoute uniquement les membres liés et conserve les adhésions locales. Les réservations de ressources et les champs de profil non pris en charge ne sont pas importés.",
-      "Only the first 40 records are shown. The saved snapshot is encrypted; each import request processes at most 50 records and can resume after a reload.": "Seuls les 40 premiers enregistrements sont affichés. L’instantané enregistré est chiffré. Chaque demande d’importation traite au maximum 50 enregistrements et peut reprendre après un rechargement.",
-      "Preview and import people, groups, services/events, and resources into this location. Imported records stay editable and are not tied to scheduled sync.": "Prévisualisez et importez les personnes, groupes, cultes/événements et ressources dans ce lieu. Les éléments importés restent modifiables et ne dépendent pas de la synchronisation planifiée.",
-      "Migration preview": "Aperçu de la migration", "Migration progress": "Progression de la migration",
-    },
-    it: {
-      "Matching uses stable ChurchTools IDs. Email, name, and event matches are flagged for review instead of merged. Group import only adds linked members; local-only memberships are kept. Resource bookings and unsupported profile fields are not imported.": "La corrispondenza usa gli ID stabili di ChurchTools. Le corrispondenze per e-mail, nome ed evento vengono segnalate per la verifica senza essere unite. L’importazione dei gruppi aggiunge solo i membri collegati e conserva le iscrizioni locali. Le prenotazioni delle risorse e i campi profilo non supportati non vengono importati.",
-      "Only the first 40 records are shown. The saved snapshot is encrypted; each import request processes at most 50 records and can resume after a reload.": "Sono mostrati solo i primi 40 record. L’istantanea salvata è cifrata. Ogni richiesta elabora al massimo 50 record e può riprendere dopo aver ricaricato la pagina.",
-      "Preview and import people, groups, services/events, and resources into this location. Imported records stay editable and are not tied to scheduled sync.": "Visualizza in anteprima e importa persone, gruppi, funzioni/eventi e risorse in questa sede. I record importati restano modificabili e separati dalla sincronizzazione pianificata.",
-      "Migration preview": "Anteprima migrazione", "Migration progress": "Avanzamento migrazione",
-    },
-  },
+
 };
 
 export function mergeModuleTranslationOverrides(id: string, base?: ModuleDictionaries): ModuleDictionaries {
