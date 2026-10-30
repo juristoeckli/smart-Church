@@ -398,40 +398,57 @@ async function fetchElvantoPagedRows(apiKey: string, endpoint: string, container
   }
   return { rows, reportedTotal, complete };
 }
-const elvantoPeopleFields = ["gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "demographics", "service_types", "locations"];
+type ElvantoCustomField = { id: string; name: string; type: string; values?: unknown };
+const elvantoPeopleFields = ["gender", "birthday", "anniversary", "school_grade", "marital_status", "development_child", "special_needs_child", "mailing_address", "mailing_address2", "mailing_city", "mailing_state", "mailing_postcode", "mailing_country", "home_address", "home_address2", "home_city", "home_state", "home_postcode", "home_country", "access_permissions", "departments", "demographics", "service_types", "locations", "family", "reports_to"];
+function sanitizeElvantoPeopleValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => sanitizeElvantoPeopleValue(item));
+  if (!value || typeof value !== "object") return value;
+  const excludedKey = /(security.?code|check.?in.?code|receipt.?name|giving.?number|password|passphrase|api.?key|access.?key|private.?key|authorization|token|secret)/i;
+  return Object.fromEntries(Object.entries(value as JsonObject)
+    .filter(([key]) => !excludedKey.test(key))
+    .map(([key, item]) => [key, sanitizeElvantoPeopleValue(item)]));
+}
 async function fetchElvantoPeopleCustomFields(apiKey: string) {
   const result = await fetchElvantoPagedRows(apiKey, "people/customFields/getAll", "custom_fields", "custom_field");
-  const fields = result.rows.map((field) => ({ id: idOf(field), name: firstText(field.name), type: firstText(field.type) })).filter((field) => field.id && field.name).sort((left, right) => left.id.localeCompare(right.id));
+  const excludedName = /(security[\\s_-]*code|check[\\s_-]*in[\\s_-]*code|receipt|giving|donation|financial|bank|\\biban\\b)/i;
+  const fields: ElvantoCustomField[] = result.rows.map((field) => ({
+    id: idOf(field),
+    name: firstText(field.name),
+    type: firstText(field.type),
+    ...(field.values !== undefined ? { values: sanitizeElvantoPeopleValue(field.values) } : {}),
+  })).filter((field) => field.id && field.name && !excludedName.test(field.name)).sort((left, right) => left.id.localeCompare(right.id));
   return { fields, complete: result.complete };
 }
-function mapElvantoPeopleProfile(person: JsonObject, customFields: Array<{ id: string; name: string; type: string }>): JsonObject {
+function mapElvantoPeopleProfile(person: JsonObject, customFields: ElvantoCustomField[]): JsonObject {
   const profile: JsonObject = {};
   const textFields: Record<string, string[]> = {
     preferredName: ["preferred_name", "preferredName"], middleName: ["middle_name", "middleName"],
-    categoryId: ["category_id", "categoryId"], accountStatus: ["status"], country: ["country"], timezone: ["timezone"],
-    familyId: ["family_id", "familyId"], familyRelationship: ["family_relationship", "familyRelationship"],
+    categoryId: ["category_id", "categoryId"], accountStatus: ["status"], username: ["username"], lastLogin: ["last_login"],
+    country: ["country"], timezone: ["timezone"], familyId: ["family_id", "familyId"],
+    familyRelationship: ["family_relationship", "familyRelationship"],
     birthday: ["birthday"], anniversary: ["anniversary"], gender: ["gender"], schoolGrade: ["school_grade"],
-    maritalStatus: ["marital_status"], mailingAddress: ["mailing_address"],
+    maritalStatus: ["marital_status"],
   };
   for (const [key, sources] of Object.entries(textFields)) {
     const value = firstText(...sources.map((source) => person[source]));
     if (value) profile[key] = value;
   }
-  for (const [key, source] of [["archived", "archived"], ["contact", "contact"], ["volunteer", "volunteer"]] as const) {
+  for (const [key, source] of [["archived", "archived"], ["contact", "contact"], ["volunteer", "volunteer"], ["admin", "admin"]] as const) {
     if (person[source] !== undefined && person[source] !== null) profile[key] = person[source] === true || person[source] === 1 || person[source] === "1";
   }
   for (const [key, source] of [["developmentChild", "development_child"], ["specialNeedsChild", "special_needs_child"]] as const) {
     const value = firstText(person[source]);
     if (value) profile[key] = value;
   }
-  for (const key of ["demographics", "service_types", "locations"] as const) {
-    if (person[key] !== undefined && person[key] !== null) profile[key === "service_types" ? "serviceTypes" : key] = person[key];
+  for (const key of ["demographics", "service_types", "locations", "mailing_address", "mailing_address2", "mailing_city", "mailing_state", "mailing_postcode", "mailing_country", "home_address", "home_address2", "home_city", "home_state", "home_postcode", "home_country", "access_permissions", "departments", "family", "reports_to"] as const) {
+    if (person[key] !== undefined && person[key] !== null) profile[key === "service_types" ? "serviceTypes" : key] = sanitizeElvantoPeopleValue(person[key]);
   }
   const custom = customFields.flatMap((field) => {
     const value = person[`custom_${field.id}`];
-    return value === undefined || value === null || value === "" ? [] : [{ id: field.id, name: field.name, type: field.type, value }];
+    return value === undefined || value === null || value === "" ? [] : [{ id: field.id, name: field.name, type: field.type, ...(field.values !== undefined ? { values: field.values } : {}), value: sanitizeElvantoPeopleValue(value) }];
   });
   if (custom.length) profile.customFields = custom;
+  profile.sourceFields = sanitizeElvantoPeopleValue(person);
   return profile;
 }
 async function fetchElvantoFinancialTransactions(apiKey: string, startDate: string, endDate: string, firstPage = 1, pageLimit = 200) {
@@ -1429,7 +1446,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (row.directions.people === "off" || row.directions.people === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set People direction to Elvanto → Smart Church or bidirectional before importing." });
       const previewTime = row.people_preview_at ? new Date(row.people_preview_at).getTime() : 0;
       if (!row.people_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete People import preview first. Previews expire after one hour and after connection settings change." });
-      const savedFieldState = await pool!.query<{ fields: Array<{ id: string; name: string; type: string }> }>("SELECT people_preview_custom_fields AS fields FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      const savedFieldState = await pool!.query<{ fields: ElvantoCustomField[] }>("SELECT people_preview_custom_fields AS fields FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const previewCustomFields = Array.isArray(savedFieldState.rows[0]?.fields) ? savedFieldState.rows[0].fields : [];
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); }
