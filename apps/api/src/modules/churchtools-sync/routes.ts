@@ -551,13 +551,13 @@ function rows(payload: JsonObject): JsonObject[] {
   const options = [payload.data, payload.data?.data, payload.persons, payload.groups, payload.events, payload.appointments, payload.resources, payload.members, payload.data?.persons, payload.data?.groups, payload.data?.events, payload.data?.resources, payload.data?.appointments, payload.data?.members, payload.items];
   return (options.find(Array.isArray) ?? []).filter((value: unknown) => value && typeof value === "object");
 }
-function sanitizeChurchToolsProfile(value: unknown, depth = 0): JsonObject | unknown {
-  if (depth > 12 || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => sanitizeChurchToolsProfile(item, depth + 1));
+function sanitizeChurchToolsProfile(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeChurchToolsProfile(item));
   const secretKey = /(password|passphrase|token|secret|credential|api.?key|access.?key|private.?key|authorization)/i;
   return Object.fromEntries(Object.entries(value as JsonObject)
     .filter(([key]) => !secretKey.test(key))
-    .map(([key, item]) => [key, sanitizeChurchToolsProfile(item, depth + 1)]));
+    .map(([key, item]) => [key, sanitizeChurchToolsProfile(item)]));
 }
 function idOf(row: JsonObject) {
   const value = row.id ?? row.personId ?? row.groupId ?? row.eventId ?? row.appointmentId ?? row.resourceId;
