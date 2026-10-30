@@ -438,6 +438,7 @@ type ServiceEventRow = {
   title: string;
   kind: ServiceEvent["kind"];
   event_date: string;
+  is_all_day: boolean;
   start_time: string;
   end_time: string | null;
   location: string;
@@ -461,6 +462,7 @@ const serviceEventProperties = {
   title: { type: "string", minLength: 1, maxLength: 160 },
   kind: { type: "string", enum: ["service", "meeting", "community", "other"] },
   eventDate: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$" },
+  isAllDay: { type: "boolean" },
   startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
   endTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" },
   location: { type: "string", minLength: 1, maxLength: 160 },
@@ -486,6 +488,7 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     title: row.title,
     kind: row.kind,
     eventDate: row.event_date,
+    isAllDay: row.is_all_day ?? false,
     startTime: row.start_time.slice(0, 5),
     ...(row.end_time ? { endTime: row.end_time.slice(0, 5) } : {}),
     location: row.location,
@@ -512,7 +515,7 @@ function validateServiceEvent(event: CreateServiceEvent) {
   if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
     return "Choose a valid event date.";
   }
-  if (event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
+  if (!event.isAllDay && event.endTime && event.endTime <= event.startTime) return "The end time must be later than the start time.";
   if (!event.title.trim()) return "Enter an event title.";
   if (!event.location.trim()) return "Enter a location.";
   if (event.registrationCapacity !== undefined && event.registrationCapacity !== null && (!Number.isInteger(event.registrationCapacity) || event.registrationCapacity < 1 || event.registrationCapacity > 100000)) return "Registration capacity must be a positive whole number.";
@@ -1966,7 +1969,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const selectedDepartmentId = await activeDepartmentId(request, reply);
   if (!selectedDepartmentId) return reply;
   const result = await pool.query<ServiceEventRow>(
-    `SELECT id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+    `SELECT id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
             location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
             registration_enabled, registration_capacity, registration_token,
@@ -2025,13 +2028,13 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
     const rows: ServiceEventRow[] = [];
     for (const date of dates) {
       const result = await client.query<ServiceEventRow>(
-        `INSERT INTO service_events (id, department_id, title, kind, event_date, start_time, end_time, location, description, room, asset_ids, positions, time_plan, recurrence_id, registration_enabled, registration_capacity, registration_token)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14, $15, $16, $17)
-         RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+        `INSERT INTO service_events (id, department_id, title, kind, event_date, is_all_day, start_time, end_time, location, description, room, asset_ids, positions, time_plan, recurrence_id, registration_enabled, registration_capacity, registration_token)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15, $16, $17, $18)
+         RETURNING id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
                    CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                    location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id,
                    registration_enabled, registration_capacity, registration_token, 0::int AS registration_count`,
-        [randomUUID(), selectedDepartmentId, event.title, event.kind, date, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), seriesId, event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
+        [randomUUID(), selectedDepartmentId, event.title, event.kind, date, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), seriesId, event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
       );
       rows.push(result.rows[0]);
       await syncEventPositionResponses(client, result.rows[0].id, event.positions);
@@ -2074,17 +2077,17 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
     await client.query("BEGIN");
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
-        SET title = $3, kind = $4, event_date = $5, start_time = $6, end_time = $7,
-            location = $8, description = $9, room = $10, asset_ids = $11, positions = $12::jsonb, time_plan = $13::jsonb,
-            registration_enabled = $14, registration_capacity = $15,
-            registration_token = CASE WHEN $14 THEN COALESCE(registration_token, $16::uuid) ELSE NULL END, updated_at = now()
+        SET title = $3, kind = $4, event_date = $5, is_all_day = $6, start_time = $7, end_time = $8,
+            location = $9, description = $10, room = $11, asset_ids = $12, positions = $13::jsonb, time_plan = $14::jsonb,
+            registration_enabled = $15, registration_capacity = $16,
+            registration_token = CASE WHEN $15 THEN COALESCE(registration_token, $17::uuid) ELSE NULL END, updated_at = now()
       WHERE id = $1 AND department_id = $2
-      RETURNING id, title, kind, event_date::text, to_char(start_time, 'HH24:MI') AS start_time,
+      RETURNING id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                 location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
                 registration_enabled, registration_capacity, registration_token,
                 (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
-    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
+    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
   );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     await syncEventPositionResponses(client, request.params.id, event.positions);
@@ -2117,17 +2120,17 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   try {
     await client.query("BEGIN");
     const result = await client.query<ServiceEventRow>(
-    `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, start_time=$6, end_time=$7,
-       location=$8, description=$9, room=$10, asset_ids=$11, positions=$12::jsonb, time_plan=$13::jsonb,
-       registration_enabled=$14, registration_capacity=$15,
-       registration_token=CASE WHEN $14 THEN COALESCE(registration_token, gen_random_uuid()) ELSE NULL END, updated_at=now()
+    `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, is_all_day=$6, start_time=$7, end_time=$8,
+       location=$9, description=$10, room=$11, asset_ids=$12, positions=$13::jsonb, time_plan=$14::jsonb,
+       registration_enabled=$15, registration_capacity=$16,
+       registration_token=CASE WHEN $15 THEN COALESCE(registration_token, gen_random_uuid()) ELSE NULL END, updated_at=now()
      WHERE department_id=$1 AND recurrence_id=$2
-     RETURNING id,title,kind,event_date::text,to_char(start_time,'HH24:MI') AS start_time,
+     RETURNING id,title,kind,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
        CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
        location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,attendance_recorded_at,recurrence_id,source_system,
        registration_enabled,registration_capacity,registration_token,
        (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
-    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.startTime, event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
+    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
   );
     for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions);
     await client.query("COMMIT");
@@ -2268,10 +2271,10 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
 }, async (request, reply): Promise<PublicRegistrationEvent | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
   const result = await pool.query<{
-    title: string; event_date: string; start_time: string; end_time: string | null; location: string;
+    title: string; event_date: string; is_all_day: boolean; start_time: string; end_time: string | null; location: string;
     description: string | null; registration_capacity: number | null; registered_count: number; waitlist_count: number; registration_open: boolean;
   }>(
-    `SELECT title,event_date::text,to_char(start_time,'HH24:MI') AS start_time,
+    `SELECT title,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
             location,description,registration_capacity,event_date>=CURRENT_DATE AS registration_open,
             (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='registered') AS registered_count,
@@ -2282,7 +2285,7 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
   if (!result.rowCount) return reply.code(404).send({ error: "This registration link is unavailable." });
   const row = result.rows[0];
   return {
-    title: row.title, eventDate: row.event_date, startTime: row.start_time,
+    title: row.title, eventDate: row.event_date, isAllDay: row.is_all_day, startTime: row.start_time,
     ...(row.end_time ? { endTime: row.end_time } : {}), location: row.location,
     ...(row.description ? { description: row.description } : {}),
     ...(row.registration_capacity ? { capacity: row.registration_capacity } : {}),
