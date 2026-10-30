@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { decryptYoutubeToken } from "./youtube.js";
+import { decryptYoutubeToken, encryptYoutubeToken } from "./youtube.js";
 
 type Snapshot = {
   version: 1;
@@ -60,8 +60,8 @@ async function collect(client: Pick<PoolClient, "query">, departmentId: string):
 export function registerVideoSteffisburgReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "2",
-    getSchemaVersion: async () => `2:${encryptionKeyFingerprint()}:${await workerConfiguration().catch(() => "missing-or-invalid-worker-config")}`,
+    schemaVersion: "3",
+    getSchemaVersion: async () => `3:${await workerConfiguration().catch(() => "missing-or-invalid-worker-config")}`,
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Video Steffisburg database is unavailable."], recordCount: 0 };
       try {
@@ -85,6 +85,38 @@ export function registerVideoSteffisburgReplication(context: ModuleServerContext
       } catch (error) { return { ready: false, blockers: [error instanceof Error ? error.message.slice(0, 240) : "Video module readiness could not be checked."], recordCount: 0 }; }
     },
     exportSnapshot: (client, departmentId) => collect(client, departmentId),
+    prepareSnapshotForPeer: async (input, sealForPeer) => {
+      const snapshot = input as Snapshot;
+      const protectedSnapshot: Snapshot & { credentialTransferVersion?: number } = structuredClone(snapshot);
+      for (const row of protectedSnapshot.youtubeConnections) {
+        if (typeof row.encrypted_refresh_token === "string" && row.encrypted_refresh_token.length) {
+          row.encrypted_refresh_token = { sealedCredential: sealForPeer(decryptYoutubeToken(row.encrypted_refresh_token)) };
+        }
+      }
+      for (const row of protectedSnapshot.moduleSettings) {
+        if (typeof row.youtube_client_secret_encrypted === "string" && row.youtube_client_secret_encrypted.length) {
+          row.youtube_client_secret_encrypted = { sealedCredential: sealForPeer(decryptYoutubeToken(row.youtube_client_secret_encrypted)) };
+        }
+      }
+      protectedSnapshot.credentialTransferVersion = 1;
+      return protectedSnapshot;
+    },
+    restoreSnapshotFromPeer: async (input, openForLocal) => {
+      const snapshot = input as Snapshot & { credentialTransferVersion?: number };
+      if (snapshot.credentialTransferVersion !== 1) return input;
+      const restored: Snapshot = structuredClone(snapshot);
+      for (const row of restored.youtubeConnections) {
+        const value = row.encrypted_refresh_token;
+        if (value && typeof value === "object" && "sealedCredential" in value && typeof value.sealedCredential === "string") row.encrypted_refresh_token = encryptYoutubeToken(openForLocal(value.sealedCredential));
+        else if (typeof value === "string" && value.length) throw new Error("A YouTube refresh token was not protected for this standby server.");
+      }
+      for (const row of restored.moduleSettings) {
+        const value = row.youtube_client_secret_encrypted;
+        if (value && typeof value === "object" && "sealedCredential" in value && typeof value.sealedCredential === "string") row.youtube_client_secret_encrypted = encryptYoutubeToken(openForLocal(value.sealedCredential));
+        else if (typeof value === "string" && value.length) throw new Error("The YouTube client secret was not protected for this standby server.");
+      }
+      return restored;
+    },
     restoreSnapshot: async (client, departmentId, input) => {
       const snapshot = input as Snapshot;
       if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.deviceAddresses) || snapshot.deviceAddresses.length > 1 || !Array.isArray(snapshot.plannedStreams) || snapshot.plannedStreams.length > 5000 || !Array.isArray(snapshot.youtubeConnections) || snapshot.youtubeConnections.length > 1 || !Array.isArray(snapshot.moduleSettings) || snapshot.moduleSettings.length > 1) throw new Error("The Video Steffisburg snapshot is invalid or exceeds the supported limits.");

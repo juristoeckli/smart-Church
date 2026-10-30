@@ -1,7 +1,7 @@
 {
   "id": "churchtools-sync",
   "name": "ChurchTools sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "serverEntry": "./routes.ts",
   "required": false,
   "enabledByDefault": false,

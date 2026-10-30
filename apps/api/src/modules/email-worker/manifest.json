@@ -1,7 +1,7 @@
 {
   "id": "email-worker",
   "name": "Email delivery",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "serverEntry": "./routes.ts",
   "required": true,
   "enabledByDefault": true,

@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
@@ -20,11 +20,17 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function decryptable(destination: StoredDestination, key: Buffer) {
+function decryptPassword(destination: StoredDestination, key: Buffer) {
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(destination.password_iv, "base64"));
   decipher.setAuthTag(Buffer.from(destination.password_tag, "base64"));
-  decipher.update(Buffer.from(destination.password_ciphertext, "base64"));
-  decipher.final();
+  return Buffer.concat([decipher.update(Buffer.from(destination.password_ciphertext, "base64")), decipher.final()]).toString("utf8");
+}
+
+function encryptPassword(password: string, key: Buffer) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(password, "utf8"), cipher.final()]);
+  return { password_ciphertext: ciphertext.toString("base64"), password_iv: iv.toString("base64"), password_tag: cipher.getAuthTag().toString("base64") };
 }
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
@@ -36,11 +42,8 @@ async function collect(client: Pick<PoolClient, "query">, departmentId: string):
 export function registerRemoteDesktopReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "1",
-    getSchemaVersion: async () => {
-      const key = encryptionKey();
-      return `1:${key ? createHash("sha256").update(key).digest("hex") : "missing-key"}`;
-    },
+    schemaVersion: "2",
+    getSchemaVersion: async () => "2",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Remote Desktop database is unavailable."], recordCount: 0 };
       try {
@@ -48,34 +51,61 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
         const bytes = Buffer.byteLength(JSON.stringify(snapshot));
         const blockers: string[] = [];
         if (bytes > maxBytes) blockers.push("Remote Desktop settings and destinations exceed the 50 MiB snapshot limit.");
-        if (snapshot.destinations.length) {
-          const apiUrl = process.env.SYSTEM_LAPTOP_GUACAMOLE_API_URL?.trim() ?? "";
+        const apiUrl = process.env.SYSTEM_LAPTOP_GUACAMOLE_API_URL?.trim() ?? "";
+        try {
+          const url = new URL(apiUrl);
+          if (!new Set(["http:", "https:"]).has(url.protocol) || url.username || url.password) throw new Error("invalid gateway URL");
+        } catch { blockers.push("Configure the local Guacamole API URL on this server before enabling Remote Desktop failover."); }
+        if (apiUrl) {
           try {
-            const url = new URL(apiUrl);
-            if (!new Set(["http:", "https:"]).has(url.protocol) || url.username || url.password) throw new Error("invalid gateway URL");
-          } catch { blockers.push("Configure the local Guacamole API URL on this server before enabling Remote Desktop failover."); }
-          if (apiUrl) {
-            try {
-              const probe = await fetch(`${apiUrl.replace(/\/$/, "")}/guacamole-common-js/all.min.js`, { signal: AbortSignal.timeout(2_500) });
-              await probe.body?.cancel();
-              if (!probe.ok) blockers.push(`The local Guacamole gateway returned HTTP ${probe.status}; Remote Desktop will not be available after failover.`);
-            } catch { blockers.push("The local Guacamole gateway cannot be reached; Remote Desktop will not be available after failover."); }
-          }
-          const key = encryptionKey();
-          if (!key) blockers.push("Set SYSTEM_LAPTOP_JSON_SECRET_KEY to the same 32-character hex key on the primary and every standby before replicating Remote Desktop credentials.");
-          else for (const destination of snapshot.destinations) {
-            try { decryptable(destination, key); }
-            catch { blockers.push(`The saved password for ${String(destination.name ?? destination.id)} cannot be decrypted with SYSTEM_LAPTOP_JSON_SECRET_KEY.`); break; }
-          }
+            const probe = await fetch(`${apiUrl.replace(/\/$/, "")}/guacamole-common-js/all.min.js`, { signal: AbortSignal.timeout(2_500) });
+            await probe.body?.cancel();
+            if (!probe.ok) blockers.push(`The local Guacamole gateway returned HTTP ${probe.status}; Remote Desktop will not be available after failover.`);
+          } catch { blockers.push("The local Guacamole gateway cannot be reached; Remote Desktop will not be available after failover."); }
+        }
+        const key = encryptionKey();
+        if (!key) blockers.push("Set SYSTEM_LAPTOP_JSON_SECRET_KEY on this server before using or replicating Remote Desktop credentials.");
+        else for (const destination of snapshot.destinations) {
+          try { decryptPassword(destination, key); }
+          catch { blockers.push(`The saved password for ${String(destination.name ?? destination.id)} cannot be decrypted with SYSTEM_LAPTOP_JSON_SECRET_KEY.`); break; }
         }
         return { ready: !blockers.length, blockers, recordCount: snapshot.destinations.length + snapshot.settings.length };
       } catch (error) { return { ready: false, blockers: [error instanceof Error ? error.message.slice(0, 240) : "Remote Desktop readiness could not be checked."], recordCount: 0 }; }
     },
     exportSnapshot: (client, departmentId) => collect(client, departmentId),
+    prepareSnapshotForPeer: async (input, sealForPeer) => {
+      const snapshot = structuredClone(input) as Snapshot & { credentialTransferVersion?: number };
+      const key = encryptionKey();
+      for (const destination of snapshot.destinations) {
+        if (!key) throw new Error("Configure SYSTEM_LAPTOP_JSON_SECRET_KEY locally before sending Remote Desktop credentials.");
+        const plaintext = decryptPassword(destination, key);
+        const record = destination as Record<string, unknown>;
+        record.password_ciphertext = { sealedCredential: sealForPeer(plaintext) };
+        record.password_iv = null;
+        record.password_tag = null;
+      }
+      snapshot.credentialTransferVersion = 1;
+      return snapshot;
+    },
+    restoreSnapshotFromPeer: async (input, openForLocal) => {
+      const snapshot = input as Snapshot & { credentialTransferVersion?: number };
+      if (snapshot.credentialTransferVersion !== 1) return input;
+      const restored = structuredClone(snapshot) as Snapshot & { credentialTransferVersion?: number };
+      const key = encryptionKey();
+      for (const destination of restored.destinations) {
+        const record = destination as Record<string, unknown>;
+        const value = record.password_ciphertext;
+        if (value && typeof value === "object" && "sealedCredential" in value && typeof value.sealedCredential === "string") {
+          if (!key) throw new Error("Set SYSTEM_LAPTOP_JSON_SECRET_KEY on the standby before restoring Remote Desktop credentials.");
+          Object.assign(record, encryptPassword(openForLocal(value.sealedCredential), key));
+        } else throw new Error("A Remote Desktop password was not protected for this standby server.");
+      }
+      return restored;
+    },
     restoreSnapshot: async (client, departmentId, input) => {
       const snapshot = input as Snapshot;
       if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.settings) || snapshot.settings.length > 1 || !Array.isArray(snapshot.destinations) || snapshot.destinations.length > 2000) throw new Error("The Remote Desktop snapshot is invalid or exceeds the supported limits.");
-      if (snapshot.destinations.length && !encryptionKey()) throw new Error("Set SYSTEM_LAPTOP_JSON_SECRET_KEY to the same value as the primary before restoring Remote Desktop credentials.");
+      if (snapshot.destinations.length && !encryptionKey()) throw new Error("Set SYSTEM_LAPTOP_JSON_SECRET_KEY locally before restoring Remote Desktop credentials.");
       await client.query("DELETE FROM remote_desktop_destinations WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM remote_desktop_site_settings WHERE department_id=$1", [departmentId]);
       for (const row of snapshot.settings) await client.query("INSERT INTO remote_desktop_site_settings(department_id,managed,updated_at) VALUES($1,$2,$3)", [departmentId, row.managed, row.updated_at]);

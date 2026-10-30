@@ -37,6 +37,9 @@ function decrypt(value: string) {
   return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
 }
 
+export function encryptEmailSecret(value: string) { return encrypt(value); }
+export function decryptEmailSecret(value: string) { return decrypt(value); }
+
 function validEmail(value: string) {
   return value.length <= 254 && /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value);
 }

@@ -72,6 +72,16 @@ because the servers are paired.
    only the database or only the key is not a supported server identity
    recovery procedure.
 
+Each installation also creates a separate X25519 key pair beside the Ed25519
+identity file, using the `.x25519.pem` suffix and the same directory/file
+permissions. Its public key is included in the Ed25519-signed identity
+response; its private key never leaves that server. Modules decrypt their own
+stored credentials, seal each credential to the signed standby public key for
+the HTTPS transfer, then encrypt it under the standby's local module key after
+receipt. The peer encryption key is fetched again for each snapshot, so key
+rotation does not require sharing private keys or re-pairing the Ed25519
+identity.
+
 ## Trust establishment and key exchange
 
 Pairing uses a one-time invitation created by the receiving installation:
@@ -280,9 +290,9 @@ data, and Module Demo. Each enabled module must still pass its own readiness
 checks. The core adapter copies password hashes and user profile fields so site
 members can sign in after failover; active sessions, server-wide roles, and
 server permissions stay local. Snapshot transfer is signed and uses HTTPS, and
-staged chunks are deleted after restore. Email connector credentials and other
-host-level service settings remain local and must be configured on each server
-when required. The readiness check also
+staged chunks are deleted after restore. Per-site SMTP credentials are sealed
+for the standby and re-encrypted with its local key. Other host-level service
+settings remain local and must be configured on each server when required. The readiness check also
 blocks promotion while self-sign-up is enabled or has unresolved requests,
 because the self-sign-up workflow is installation-wide and is not part of the
 location snapshot.
@@ -290,15 +300,19 @@ location snapshot.
 The Video adapter compares a fingerprint of its parsed worker configuration
 and converter runtime settings between servers, and requires the standby's
 local worker process to report ready; the devices themselves still need to be
-reachable during recovery. Remote Desktop credential ciphertext is copied
-only when both installations share the module encryption key, the standby
-gateway is configured, and its client endpoint responds locally. Presenter
-snapshots copy datasets and site media as well as database records. Since the
-current Presenter dataset library and Video OAuth settings are installation-
-wide, redundancy is blocked if another location on either installation uses
-those modules; that prevents replacing configuration shared by another site.
-Other external APIs, OAuth credentials, email delivery configuration, device
-networks, local
+reachable during recovery. Remote Desktop credentials are decrypted locally,
+sealed to the standby's authenticated X25519 public key for transfer, then
+encrypted under the standby's own module key. The standby gateway must be
+configured and its client endpoint must respond locally. ChurchTools and
+Elvanto integration credentials use the same per-peer envelope approach.
+Presenter snapshots copy datasets and site media as well as database records.
+Video OAuth settings and Presenter data are location-scoped in the current
+adapters, so each site's snapshot stays separate from other locations on the
+same installation.
+EventDesk uses a keyed fingerprint of its Resend API key and sender address in
+the adapter version, so the two servers must have matching mail delivery
+settings; the secret itself is never included in a snapshot. Other external APIs, OAuth
+credentials, device networks, local
 worker processes, and operational state cannot be made available merely by copying
 database rows. A Server Administrator must provision and verify these local
 dependencies before promotion. Transient Chat presence is deliberately rebuilt.

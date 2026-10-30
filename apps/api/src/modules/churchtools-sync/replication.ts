@@ -1,4 +1,4 @@
-import { createDecipheriv, createHash, scryptSync } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
@@ -13,21 +13,34 @@ function q(identifier: string) {
   return `"${identifier}"`;
 }
 
-function cryptoKey() {
-  const source = process.env.SMART_CHURCH_SYNC_ENCRYPTION_KEY?.trim() ?? "";
-  return source ? scryptSync(source, "smart-church/churchtools-sync/v1", 32) : null;
+function cryptoKey(purpose: "churchtools" | "elvanto") {
+  const source = process.env.SMART_CHURCH_SYNC_ENCRYPTION_KEY?.trim() || process.env.DATABASE_URL?.trim() || "";
+  return source ? scryptSync(source, `smart-church/${purpose === "churchtools" ? "churchtools-sync" : "elvanto-sync"}/v1`, 32) : null;
 }
 
-function decrypt(value: string, purpose: "churchtools" | "elvanto") {
-  const keySource = process.env.SMART_CHURCH_SYNC_ENCRYPTION_KEY?.trim() ?? "";
-  if (!keySource) throw new Error("SMART_CHURCH_SYNC_ENCRYPTION_KEY must be set on both servers to replicate saved integration credentials.");
+function decrypt(value: string, purpose: "churchtools" | "elvanto"): string {
+  const key = cryptoKey(purpose);
+  if (!key) throw new Error("The local integration credential encryption key is unavailable.");
   const [version, iv, tag, data] = value.split(".");
   if (version !== "v1" || !iv || !tag || !data) throw new Error("A saved integration credential has an unsupported encryption format.");
-  const key = scryptSync(keySource, `smart-church/${purpose === "churchtools" ? "churchtools-sync" : "elvanto-sync"}/v1`, 32);
   const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(iv, "base64url"));
   decipher.setAuthTag(Buffer.from(tag, "base64url"));
-  decipher.update(Buffer.from(data, "base64url"));
-  decipher.final();
+  return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8");
+}
+
+function encrypt(value: string, purpose: "churchtools" | "elvanto") {
+  const key = cryptoKey(purpose);
+  if (!key) throw new Error("Configure the local integration credential encryption key before restoring credentials.");
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const data = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), data.toString("base64url")].join(".");
+}
+
+function credentialPurpose(column: string): "churchtools" | "elvanto" | null {
+  if (column === "encrypted_login_token" || column === "encrypted_snapshot") return "churchtools";
+  if (column === "encrypted_api_key" || column === "encrypted_payload") return "elvanto";
+  return null;
 }
 
 function canonical(value: unknown): string {
@@ -95,14 +108,15 @@ async function inspect(client: PoolClient, departmentId: string) {
   }
   if (bytes > maxSnapshotBytes) blockers.push("Integration settings and imported records exceed the 200 MiB snapshot limit.");
   for (const table of tables) {
-    for (const column of table.columns.filter((item) => ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"].includes(item.column_name))) {
+    for (const column of table.columns.filter((item) => credentialPurpose(item.column_name))) {
       const rows = await client.query<{ value: string }>(`SELECT ${q(column.column_name)} AS value FROM ${q(table.name)} WHERE department_id=$1 AND ${q(column.column_name)} IS NOT NULL AND ${q(column.column_name)}<>''`, [departmentId]);
-      if (rows.rowCount && !cryptoKey()) {
-        blockers.push("Set SMART_CHURCH_SYNC_ENCRYPTION_KEY to the same secret on both servers, then re-enter saved ChurchTools or Elvanto credentials and migration previews.");
+      const purpose = credentialPurpose(column.column_name)!;
+      if (rows.rowCount && !cryptoKey(purpose)) {
+        blockers.push("The local integration credential encryption key is unavailable; configure it before replicating saved credentials.");
         continue;
       }
       for (const row of rows.rows) {
-        try { decrypt(row.value, column.column_name === "encrypted_login_token" || column.column_name === "encrypted_snapshot" ? "churchtools" : "elvanto"); }
+        try { decrypt(row.value, purpose); }
         catch (error) { blockers.push(error instanceof Error ? error.message : "A saved integration credential cannot be decrypted."); break; }
       }
     }
@@ -113,18 +127,12 @@ async function inspect(client: PoolClient, departmentId: string) {
 export function registerChurchToolsSyncReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "1",
-    getSchemaVersion: async (departmentId) => {
-      if (!pool || !isDatabaseReady()) return "1:unavailable";
+    schemaVersion: "2",
+    getSchemaVersion: async () => {
+      if (!pool || !isDatabaseReady()) return "2:unavailable";
       const tables = await discoverTables(pool);
       const shape = tables.map((table) => [table.name, table.columns.map((column) => [column.column_name, column.data_type])]);
-      let hasSecrets = false;
-      for (const table of tables) for (const column of table.columns.filter((item) => ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"].includes(item.column_name))) {
-        const result = await pool.query<{ present: boolean }>(`SELECT EXISTS(SELECT 1 FROM ${q(table.name)} WHERE department_id=$1 AND ${q(column.column_name)} IS NOT NULL AND ${q(column.column_name)}<>'') AS present`, [departmentId]);
-        hasSecrets ||= result.rows[0]?.present === true;
-      }
-      const key = hasSecrets ? process.env.SMART_CHURCH_SYNC_ENCRYPTION_KEY?.trim() ?? "missing-key" : "no-secret-data";
-      return `1:${createHash("sha256").update(JSON.stringify([shape, createHash("sha256").update(key).digest("hex")])).digest("hex")}`;
+      return `2:${createHash("sha256").update(JSON.stringify(shape)).digest("hex")}`;
     },
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Sync integration database is unavailable."], recordCount: 0 };
@@ -140,6 +148,30 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
       } catch (error) { return { ready: false, blockers: [error instanceof Error ? error.message.slice(0, 240) : "Integration readiness could not be checked."], recordCount: 0 }; }
     },
     exportSnapshot: (client, departmentId) => collect(client, departmentId),
+    prepareSnapshotForPeer: async (input, sealForPeer) => {
+      const snapshot = structuredClone(input) as Snapshot & { credentialTransferVersion?: number };
+      for (const table of snapshot.tables) for (const row of table.rows) for (const column of Object.keys(row)) {
+        const purpose = credentialPurpose(column);
+        const value = row[column];
+        if (!purpose || typeof value !== "string" || !value) continue;
+        row[column] = { sealedCredential: sealForPeer(decrypt(value, purpose)) };
+      }
+      snapshot.credentialTransferVersion = 1;
+      return snapshot;
+    },
+    restoreSnapshotFromPeer: async (input, openForLocal) => {
+      const snapshot = input as Snapshot & { credentialTransferVersion?: number };
+      if (snapshot.credentialTransferVersion !== 1) return input;
+      const restored = structuredClone(snapshot) as Snapshot & { credentialTransferVersion?: number };
+      for (const table of restored.tables) for (const row of table.rows) for (const column of Object.keys(row)) {
+        const purpose = credentialPurpose(column);
+        const value = row[column];
+        if (!purpose) continue;
+        if (value && typeof value === "object" && "sealedCredential" in value && typeof value.sealedCredential === "string") row[column] = encrypt(openForLocal(value.sealedCredential), purpose);
+        else if (typeof value === "string" && value) throw new Error("A ChurchTools or Elvanto credential was not protected for this standby server.");
+      }
+      return restored;
+    },
     restoreSnapshot: async (client, departmentId, input) => {
       const snapshot = input as Snapshot;
       if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.tables) || snapshot.tables.length > 300) throw new Error("The integration snapshot is invalid or exceeds the supported limits.");
@@ -152,7 +184,6 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
       }
       const order = await orderedTables(client, localTables);
       for (const name of [...order].reverse()) await client.query(`DELETE FROM ${q(name)} WHERE department_id=$1`, [departmentId]);
-      const key = cryptoKey();
       let records = 0;
       for (const name of order) {
         const table = snapshot.tables.find((item) => item.name === name)!;
@@ -160,8 +191,8 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
           for (const column of ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"]) {
             const value = row[column];
             if (typeof value === "string" && value) {
-              if (!key) throw new Error("SMART_CHURCH_SYNC_ENCRYPTION_KEY is required to restore saved integration credentials.");
-              decrypt(value, column === "encrypted_login_token" || column === "encrypted_snapshot" ? "churchtools" : "elvanto");
+              const purpose = credentialPurpose(column)!;
+              decrypt(value, purpose);
             }
           }
           const values: Record<string, unknown> = { ...row, department_id: departmentId };

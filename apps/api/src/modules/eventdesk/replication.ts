@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext, ReplicationRestoreContext } from "../module-sdk.js";
 
@@ -89,7 +90,15 @@ function canonical(value: unknown): string {
 export function registerEventDeskReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "1",
+    schemaVersion: "2",
+    getSchemaVersion: async () => {
+      const apiKey = process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
+      const emailFrom = process.env.SMART_CHURCH_EMAIL_FROM?.trim() || process.env.EVENTDESK_EMAIL_FROM?.trim() || "";
+      const externalMailConfig = apiKey && emailFrom
+        ? createHmac("sha256", apiKey).update(`smart-church/eventdesk/resend/v1:${emailFrom}`).digest("hex")
+        : !apiKey && !emailFrom ? "unconfigured" : "incomplete";
+      return `2:${externalMailConfig}`;
+    },
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["EventDesk database is unavailable."], recordCount: 0 };
       try {

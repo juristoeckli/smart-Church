@@ -43,8 +43,12 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
   const load = useCallback(async () => {
     try {
       const response = await fetch("/api/modules/sync/federation", { cache: "no-store" });
-      const data = await response.json() as PeerSettings | { error?: string };
-      if (!response.ok || !("identity" in data)) throw new Error("error" in data ? data.error ?? "Could not load server Sync settings." : "Could not load server Sync settings.");
+      const data = await response.json() as PeerSettings | { error?: string; details?: string };
+      if (!response.ok || !("identity" in data)) {
+        const message = "error" in data ? data.error ?? "Could not load server Sync settings." : "Could not load server Sync settings.";
+        const details = "details" in data ? data.details?.trim() : "";
+        throw new Error(details ? `${message} ${details}` : message);
+      }
       setSettings(data);
       const [shareResponse, subscriptionResponse] = await Promise.all([
         fetch("/api/modules/sync/federation/shares", { headers: { "x-department-id": departmentId }, cache: "no-store" }),
@@ -69,7 +73,7 @@ export function FederationSettings({ csrfToken, departmentId }: { csrfToken: str
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load server Sync settings."); }
   }, [departmentId]);
 
-  useEffect(() => { void load(); const interval = window.setInterval(() => void load(), 30_000); return () => window.clearInterval(interval); }, [load]);
+  useEffect(() => { void load(); }, [load]);
 
   async function request<T>(path: string, method: string, body?: object): Promise<T> {
     const response = await fetch(path, { method, headers: { "x-csrf-token": csrfToken, "x-department-id": departmentId, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });

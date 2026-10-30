@@ -429,6 +429,12 @@ function realtimeTopicForPath(pathname: string) {
 }
 
 app.addHook("onResponse", async (request, reply) => {
+  const route = request.routeOptions.url;
+  if (route !== "/api/admin/diagnostics" && route !== "/api/health" && (route?.startsWith("/api/") || request.url.startsWith("/api/"))) {
+    const level: RuntimeLogLevel = reply.statusCode >= 500 ? "error" : reply.statusCode >= 400 ? "warn" : "info";
+    const safeRoute = route?.startsWith("/api/") ? route : "<unmatched API route>";
+    recordRuntimeLog("api/http", level, `${request.method} ${safeRoute} ${reply.statusCode} (${Math.round(reply.elapsedTime)} ms)`);
+  }
   if (!request.authenticatedUser || reply.statusCode >= 400 || !new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase())) return;
   let pathname: string;
   try { pathname = new URL(request.url, "http://localhost").pathname; }
@@ -612,15 +618,59 @@ async function readContainerMemory() {
       readFile("/sys/fs/cgroup/memory.current", "utf8"),
       readFile("/sys/fs/cgroup/memory.max", "utf8"),
     ]);
-    return { usageBytes: Number(usage.trim()), limitBytes: limit.trim() === "max" ? null : Number(limit.trim()) };
+    const [peak, stats] = await Promise.all([
+      readFile("/sys/fs/cgroup/memory.peak", "utf8").catch(() => ""),
+      readFile("/sys/fs/cgroup/memory.stat", "utf8").catch(() => ""),
+    ]);
+    const inactiveFile = Number(stats.match(/^inactive_file\s+(\d+)/m)?.[1] ?? 0);
+    const usageBytes = Number(usage.trim());
+    return {
+      usageBytes,
+      limitBytes: limit.trim() === "max" ? null : Number(limit.trim()),
+      peakBytes: Number(peak.trim()) || null,
+      workingSetBytes: Math.max(0, usageBytes - inactiveFile),
+    };
   } catch {
     try {
       const [usage, limit] = await Promise.all([
         readFile("/sys/fs/cgroup/memory/memory.usage_in_bytes", "utf8"),
         readFile("/sys/fs/cgroup/memory/memory.limit_in_bytes", "utf8"),
       ]);
-      return { usageBytes: Number(usage.trim()), limitBytes: Number(limit.trim()) };
+      const [peak, stats] = await Promise.all([
+        readFile("/sys/fs/cgroup/memory/memory.max_usage_in_bytes", "utf8").catch(() => ""),
+        readFile("/sys/fs/cgroup/memory/memory.stat", "utf8").catch(() => ""),
+      ]);
+      const inactiveFile = Number(stats.match(/^(?:total_)?inactive_file\s+(\d+)/m)?.[1] ?? 0);
+      const usageBytes = Number(usage.trim());
+      return {
+        usageBytes,
+        limitBytes: Number(limit.trim()) >= Number.MAX_SAFE_INTEGER ? null : Number(limit.trim()),
+        peakBytes: Number(peak.trim()) || null,
+        workingSetBytes: Math.max(0, usageBytes - inactiveFile),
+      };
     } catch { return null; }
+  }
+}
+
+async function readSystemMemory() {
+  const fallbackTotalBytes = totalmem();
+  const fallbackAvailableBytes = freemem();
+  try {
+    const info = await readFile("/proc/meminfo", "utf8");
+    const kibibytes = (key: string) => Number(info.match(new RegExp(`^${key}:\\s+(\\d+)\\s+kB$`, "m"))?.[1] ?? 0);
+    const totalBytes = (kibibytes("MemTotal") || fallbackTotalBytes / 1024) * 1024;
+    const availableBytes = (kibibytes("MemAvailable") || kibibytes("MemFree") || fallbackAvailableBytes / 1024) * 1024;
+    const freeBytes = kibibytes("MemFree") * 1024 || fallbackAvailableBytes;
+    const cacheBytes = Math.max(0, kibibytes("Buffers") + kibibytes("Cached") + kibibytes("SReclaimable") - kibibytes("Shmem")) * 1024;
+    return { totalBytes, availableBytes, usedBytes: Math.max(0, totalBytes - availableBytes), freeBytes, cacheBytes };
+  } catch {
+    return {
+      totalBytes: fallbackTotalBytes,
+      availableBytes: fallbackAvailableBytes,
+      usedBytes: Math.max(0, fallbackTotalBytes - fallbackAvailableBytes),
+      freeBytes: fallbackAvailableBytes,
+      cacheBytes: 0,
+    };
   }
 }
 
@@ -664,20 +714,19 @@ app.get("/api/admin/diagnostics", async (request, reply) => {
   const memory = process.memoryUsage();
   const containerMemory = await readContainerMemory();
   const applicationDisk = await readApplicationDisk();
-  const systemMemoryTotalBytes = totalmem();
-  const systemMemoryAvailableBytes = freemem();
+  const systemMemory = await readSystemMemory();
   return {
     capturedAt: new Date().toISOString(),
     runtime: {
       uptimeSeconds: Math.floor(process.uptime()),
-      memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external },
+      memory: { rssBytes: memory.rss, heapUsedBytes: memory.heapUsed, heapTotalBytes: memory.heapTotal, externalBytes: memory.external, arrayBuffersBytes: memory.arrayBuffers },
       containerMemory,
-      systemMemory: { totalBytes: systemMemoryTotalBytes, availableBytes: systemMemoryAvailableBytes, usedBytes: Math.max(0, systemMemoryTotalBytes - systemMemoryAvailableBytes) },
+      systemMemory,
       cpuPercent: readSystemCpuPercent(),
       applicationDisk,
     },
     workers: runtimeWorkerDiagnostics(),
-    logs: recentRuntimeLogs(),
+    logs: recentRuntimeLogs(500),
   };
 });
 

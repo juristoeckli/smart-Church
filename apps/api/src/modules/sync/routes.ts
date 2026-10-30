@@ -1,9 +1,9 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleReplicationAdapter, ModuleServerContext } from "../module-sdk.js";
-import { canonicalRequest, canonicalResponse, fingerprintPublicKey, getIdentity, protocolVersion, signBytes, verifyBytes, type FederationIdentity } from "./federation-crypto.js";
+import { canonicalRequest, canonicalResponse, fingerprintPublicKey, getIdentity, openFromPeer, protocolVersion, sealForPeer, signBytes, verifyBytes, type FederationIdentity } from "./federation-crypto.js";
 
 const adminPrefix = "/api/modules/sync/federation";
 const prefix = `${adminPrefix}/v1`;
@@ -103,7 +103,14 @@ function peerIdentity(value: unknown): FederationIdentity {
     || typeof row.fingerprint !== "string" || row.protocolVersion !== protocolVersion) throw new Error("The remote server returned an unsupported or malformed identity.");
   const fingerprint = fingerprintPublicKey(row.publicKeyPem);
   if (fingerprint !== row.fingerprint) throw new Error("The remote server's public key does not match its fingerprint.");
-  return { installationId: row.installationId, displayName: row.displayName, publicKeyPem: row.publicKeyPem, fingerprint, protocolVersion };
+  let encryptionPublicKeyPem: string | undefined;
+  if (row.encryptionPublicKeyPem !== undefined) {
+    if (typeof row.encryptionPublicKeyPem !== "string" || row.encryptionPublicKeyPem.length > 4096) throw new Error("The remote server returned a malformed snapshot-encryption key.");
+    const encryptionKey = createPublicKey(row.encryptionPublicKeyPem);
+    if (encryptionKey.asymmetricKeyType !== "x25519") throw new Error("The remote server returned an unsupported snapshot-encryption key.");
+    encryptionPublicKeyPem = row.encryptionPublicKeyPem;
+  }
+  return { installationId: row.installationId, displayName: row.displayName, publicKeyPem: row.publicKeyPem, fingerprint, protocolVersion, ...(encryptionPublicKeyPem ? { encryptionPublicKeyPem } : {}) };
 }
 
 async function readRemoteJson<T>(response: Response, publicKeyPem: string, nonce = "") {
@@ -165,6 +172,8 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
     const identity = await getIdentity(pool, siteName);
     const local = await redundancyManifest(pool, context.replication.list(), departmentId);
     if (local.blockers.length) throw new Error(`The primary is not ready to create a complete site snapshot: ${local.blockers.join(" ")}`);
+    const remoteIdentityRecord = await remoteIdentity(peer.base_url);
+    if (remoteIdentityRecord.installationId !== peer.installation_id || remoteIdentityRecord.fingerprint !== peer.fingerprint) throw new Error("The standby server identity changed. Verify it out of band and pair it again before sending site data.");
     const remote = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; upstreamInstallationId: string | null; upstreamDepartmentId: string | null; siteEpoch: string; lastSnapshotId: string | null; lastSnapshotAt: string | null; lastVerifiedAt: string | null; lastSourceDigest: string | null; modules: RedundancyModuleManifestEntry[]; ready: boolean; blockers: string[] }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(targetDepartmentId)}`);
     if (remote.role !== "standby" || remote.upstreamInstallationId !== identity.installationId || remote.upstreamDepartmentId !== departmentId || remote.installationId !== peer.installation_id || remote.departmentId !== targetDepartmentId) throw new Error("The destination has not been configured as this site's standby.");
     if (remote.blockers.length) throw new Error(`The standby is not ready to receive a complete site snapshot: ${remote.blockers.join(" ")}`);
@@ -182,7 +191,6 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
-    const payloadText = JSON.stringify({ sourceDepartmentId: departmentId, targetDepartmentId, siteEpoch: Number(localState.rows[0].site_epoch), modules: snapshot });
     const sourceDigest = sourceSnapshotDigest(snapshot);
     if (remote.siteEpoch === localState.rows[0].site_epoch && remote.lastSourceDigest === sourceDigest && remote.lastSnapshotId) {
       const verification = await signedRemoteRequest<{ verified: boolean; verifiedAt?: string }>(peer, identity, "POST", `${prefix}/redundancy/verify`, JSON.stringify({ departmentId: targetDepartmentId, sourceEpoch: Number(localState.rows[0].site_epoch), sourceDigest }), 120_000);
@@ -193,6 +201,18 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
         return { skipped: false as const, unchanged: true as const, snapshotId: remote.lastSnapshotId, moduleCount: local.modules.length, byteCount: 0, verifiedAt: verification.verifiedAt };
       }
     }
+    const transferSnapshot: Record<string, unknown> = {};
+    for (const module of local.modules) {
+      const adapter = local.adapters.get(module.moduleId)!;
+      const moduleSnapshot = snapshot[module.moduleId];
+      transferSnapshot[module.moduleId] = adapter.prepareSnapshotForPeer
+        ? await adapter.prepareSnapshotForPeer(moduleSnapshot, (plaintext) => {
+          if (!remoteIdentityRecord.encryptionPublicKeyPem) throw new Error(`${adapter.moduleName} contains credentials, but the standby does not support encrypted credential transfer. Update both servers before syncing.`);
+          return sealForPeer(remoteIdentityRecord.encryptionPublicKeyPem, plaintext);
+        })
+        : moduleSnapshot;
+    }
+    const payloadText = JSON.stringify({ sourceDepartmentId: departmentId, targetDepartmentId, siteEpoch: Number(localState.rows[0].site_epoch), sourceDigest, modules: transferSnapshot });
     const plain = Buffer.from(payloadText, "utf8");
     if (plain.length > 1024 * 1024 * 1024) throw new Error("The uncompressed site snapshot exceeds the 1 GiB safety limit.");
     const compressed = gzipSync(plain, { level: 6 });
@@ -333,7 +353,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   let automaticPushRunning = false;
   let automaticPushTimer: NodeJS.Timeout | null = null;
   let automaticPushError: string | null = null;
-  context.workers.register("redundancy-push", "Automatic site redundancy", () => ({
+  context.workers.register("redundancy-push", () => ({
     status: automaticPushRunning ? "syncing" : automaticPushError ? "degraded" : "ready",
     error: automaticPushError,
     uptimeSeconds: null,
@@ -409,7 +429,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get(`${prefix}/identity`, async (_request, reply) => {
     try {
       const identity = await getIdentity(pool, siteName);
-      const { privateKeyPem: _private, ...publicIdentity } = identity;
+      const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
       return json(reply, 200, publicIdentity, identity);
     } catch (error) { app.log.error({ err: error, module: "sync" }, "Could not load the local Sync identity."); return reply.code(503).send({ error: "The Sync identity is unavailable." }); }
   });
@@ -624,11 +644,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (imported.received_chunks !== imported.chunk_count || chunkResult.rowCount !== imported.chunk_count) return json(reply, 409, { error: "The site snapshot is incomplete; no records were changed." }, identity, request.headers["x-sc-nonce"] as string);
     const compressed = Buffer.concat(chunkResult.rows.map((chunk) => chunk.chunk_data));
     if (compressed.length !== Number(imported.byte_count) || createHash("sha256").update(compressed).digest("hex") !== imported.sha256) return json(reply, 400, { error: "The snapshot bytes do not match the signed manifest." }, identity, request.headers["x-sc-nonce"] as string);
-    let payload: { sourceDepartmentId: string; targetDepartmentId: string; siteEpoch: number; modules: Record<string, unknown> };
+    let payload: { sourceDepartmentId: string; targetDepartmentId: string; siteEpoch: number; sourceDigest?: string; modules: Record<string, unknown> };
     try {
       const plain = gunzipSync(compressed, { maxOutputLength: 1024 * 1024 * 1024 });
       payload = JSON.parse(plain.toString("utf8")) as typeof payload;
-      if (!payload || payload.sourceDepartmentId !== imported.source_department_id || payload.targetDepartmentId !== imported.target_department_id || payload.siteEpoch !== Number(imported.source_epoch) || !payload.modules || typeof payload.modules !== "object" || Array.isArray(payload.modules)) throw new Error("Snapshot payload metadata does not match the signed import record.");
+      if (!payload || payload.sourceDepartmentId !== imported.source_department_id || payload.targetDepartmentId !== imported.target_department_id || payload.siteEpoch !== Number(imported.source_epoch) || (payload.sourceDigest !== undefined && (typeof payload.sourceDigest !== "string" || !/^[0-9a-f]{64}$/.test(payload.sourceDigest))) || !payload.modules || typeof payload.modules !== "object" || Array.isArray(payload.modules)) throw new Error("Snapshot payload metadata does not match the signed import record.");
     } catch (error) {
       await pool.query("UPDATE sync_redundancy_imports SET state='rejected' WHERE snapshot_id=$1", [request.params.snapshotId]);
       await pool.query("DELETE FROM sync_redundancy_chunks WHERE snapshot_id=$1", [request.params.snapshotId]);
@@ -656,13 +676,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const entry of entries) {
         const adapter = readiness.adapters.get(entry.moduleId);
         if (!adapter || await adapterSchemaVersion(adapter, imported.target_department_id) !== entry.schemaVersion || !(entry.moduleId in payload.modules)) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
-        await adapter.restoreSnapshot(client, imported.target_department_id, payload.modules[entry.moduleId], restoreContext);
-        const verified = await adapter.verifySnapshot(client, imported.target_department_id, payload.modules[entry.moduleId], restoreContext);
+        const moduleSnapshot = adapter.restoreSnapshotFromPeer
+          ? await adapter.restoreSnapshotFromPeer(payload.modules[entry.moduleId], (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, envelope))
+          : payload.modules[entry.moduleId];
+        await adapter.restoreSnapshot(client, imported.target_department_id, moduleSnapshot, restoreContext);
+        const verified = await adapter.verifySnapshot(client, imported.target_department_id, moduleSnapshot, restoreContext);
         if (!verified.ready) throw new Error(`${adapter.moduleName} restore verification failed: ${verified.blockers.join(" ")}`);
         restoredSnapshots[entry.moduleId] = await adapter.exportSnapshot(client, imported.target_department_id);
       }
       const digest = replicationDigest(restoredSnapshots);
-      const sourceDigest = sourceSnapshotDigest(payload.modules);
+      const sourceDigest = payload.sourceDigest ?? sourceSnapshotDigest(payload.modules);
       await client.query("UPDATE sync_site_redundancy SET primary_installation_id=$2,site_epoch=$3,last_snapshot_id=$4,last_replica_digest=$5,last_source_digest=$6,last_replica_manifest=$7::jsonb,last_snapshot_at=now(),last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1", [imported.target_department_id, sender.installationId, imported.source_epoch, request.params.snapshotId, digest, sourceDigest, JSON.stringify(imported.module_manifest)]);
       await client.query("UPDATE sync_redundancy_imports SET state='applied' WHERE snapshot_id=$1", [request.params.snapshotId]);
       await client.query("DELETE FROM sync_redundancy_chunks WHERE snapshot_id=$1", [request.params.snapshotId]);
@@ -822,11 +845,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!requireManager(request, reply)) return;
     try {
       const identity = await getIdentity(pool, siteName);
-      const { privateKeyPem: _private, ...publicIdentity } = identity;
+      const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
       const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers ORDER BY CASE trust_state WHEN 'pending' THEN 0 WHEN 'trusted' THEN 1 ELSE 2 END,display_name");
       const invitations = await pool.query<{ id: string; expires_at: Date | string; created_at: Date | string }>("SELECT id,expires_at,created_at FROM sync_pairing_invitations WHERE used_at IS NULL AND expires_at>now() ORDER BY created_at DESC");
       return { identity: publicIdentity, peers: peers.rows, invitations: invitations.rows };
-    } catch (error) { app.log.error({ err: error }, "Could not load Sync peer settings."); return reply.code(503).send({ error: "Sync settings are unavailable." }); }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message.slice(0, 240) : "Unknown error.";
+      app.log.error({ err: error }, `Could not load Sync peer settings: ${reason}`);
+      return reply.code(503).send({ error: "Sync settings are unavailable.", details: reason });
+    }
   });
 
   app.get(`${adminPrefix}/redundancy/readiness`, async (request, reply) => {

@@ -1,12 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { emailEncryptionKeyFingerprint, readDepartmentEmailSettings, saveDepartmentEmailSettings, type EmailSettingsDraft } from "./service.js";
+import { decryptEmailSecret, encryptEmailSecret, readDepartmentEmailSettings, saveDepartmentEmailSettings, type EmailSettingsDraft } from "./service.js";
 import { registerSelfSignupRoutes } from "./self-signup.js";
 
 type EmailSnapshot = {
-  version: 3;
-  encryptionKeyFingerprint: string | null;
+  version: 4;
   emailSettings: Array<Record<string, unknown>>;
 };
 
@@ -21,13 +20,7 @@ async function collectEmailSnapshot(client: Pick<PoolClient, "query">, departmen
     SELECT 'direct'::text,false,'Smart Church'::text,''::text,''::text,587,'starttls'::text,''::text,NULL::text,'1970-01-01T00:00:00Z'::timestamptz
      WHERE NOT EXISTS(SELECT 1 FROM email_worker_department_settings WHERE department_id=$1)
        AND NOT EXISTS(SELECT 1 FROM departments department JOIN installation_email_settings settings ON settings.installation_id=department.installation_id WHERE department.id=$1)`, [departmentId]);
-  const hasEncryptedPassword = emailSettings.rows.some((row) => typeof row.encrypted_smtp_password === "string" && row.encrypted_smtp_password.length > 0);
-  let keyFingerprint: string | null = null;
-  if (hasEncryptedPassword) {
-    try { keyFingerprint = emailEncryptionKeyFingerprint(); }
-    catch { keyFingerprint = "missing"; }
-  }
-  return { version: 3, encryptionKeyFingerprint: keyFingerprint, emailSettings: emailSettings.rows };
+  return { version: 4, emailSettings: emailSettings.rows };
 }
 
 function canonical(value: unknown): string {
@@ -72,16 +65,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return departmentId;
   }
   context.replication.register({
-    schemaVersion: "3",
-    getSchemaVersion: async () => "3",
+    schemaVersion: "4",
+    getSchemaVersion: async () => "4",
     inspect: async (departmentId) => {
       if (!context.pool || !context.isDatabaseReady()) return { ready: false, blockers: ["Email settings database is unavailable."], recordCount: 0 };
       try {
         const snapshot = await collectEmailSnapshot(context.pool, departmentId);
         const blockers: string[] = [];
+        const signupState = await context.pool.query<{ enabled: boolean; request_count: string }>(
+          `SELECT COALESCE((SELECT settings.enabled FROM installation_self_signup_settings settings
+                              JOIN installations installation ON installation.id=settings.installation_id
+                             WHERE installation.is_current=TRUE),FALSE) AS enabled,
+                  (SELECT count(*)::text FROM self_signup_requests) AS request_count`,
+        );
+        if (signupState.rows[0]?.enabled || Number(signupState.rows[0]?.request_count ?? 0) > 0) {
+          blockers.push("Self-sign-up settings or requests are installation-wide and are not included in per-site recovery. Disable self sign-up and clear its request queue before enabling redundancy for this location.");
+        }
         if (snapshot.emailSettings[0]?.enabled && !await context.email.isConfigured(departmentId)) blockers.push("Email delivery is enabled but credentials are unavailable on this server; reconfigure them locally before promotion.");
-        const encryptedPassword = snapshot.emailSettings[0]?.encrypted_smtp_password;
-        if (typeof encryptedPassword === "string" && encryptedPassword.length > 0 && snapshot.encryptionKeyFingerprint === "missing") blockers.push("Set SMART_CHURCH_EMAIL_ENCRYPTION_KEY before replicating SMTP credentials; the current encryption key is unavailable.");
+        for (const row of snapshot.emailSettings) {
+          if (typeof row.encrypted_smtp_password === "string" && row.encrypted_smtp_password.length > 0) {
+            try { decryptEmailSecret(row.encrypted_smtp_password); }
+            catch { blockers.push("SMTP credentials cannot be decrypted with this server's email encryption key."); break; }
+          }
+        }
         if (Buffer.byteLength(JSON.stringify(snapshot)) > 50 * 1024 * 1024) blockers.push("Email settings exceed the 50 MiB snapshot limit.");
         return { ready: blockers.length === 0, blockers, recordCount: snapshot.emailSettings.length };
       } catch (error) {
@@ -89,16 +95,31 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
     },
     exportSnapshot: (client: PoolClient, departmentId) => collectEmailSnapshot(client, departmentId),
+    prepareSnapshotForPeer: async (input, sealForPeer) => {
+      const snapshot = input as EmailSnapshot;
+      const protectedSnapshot: EmailSnapshot & { credentialTransferVersion?: number } = structuredClone(snapshot);
+      for (const row of protectedSnapshot.emailSettings) {
+        if (typeof row.encrypted_smtp_password === "string" && row.encrypted_smtp_password.length) {
+          row.encrypted_smtp_password = { sealedCredential: sealForPeer(decryptEmailSecret(row.encrypted_smtp_password)) };
+        }
+      }
+      protectedSnapshot.credentialTransferVersion = 1;
+      return protectedSnapshot;
+    },
+    restoreSnapshotFromPeer: async (input, openForLocal) => {
+      const snapshot = input as EmailSnapshot & { credentialTransferVersion?: number };
+      if (snapshot.credentialTransferVersion !== 1) return input;
+      const restored: EmailSnapshot = structuredClone(snapshot);
+      for (const row of restored.emailSettings) {
+        const value = row.encrypted_smtp_password;
+        if (value && typeof value === "object" && "sealedCredential" in value && typeof value.sealedCredential === "string") row.encrypted_smtp_password = encryptEmailSecret(openForLocal(value.sealedCredential));
+        else if (typeof value === "string" && value.length) throw new Error("The SMTP password was not protected for this standby server.");
+      }
+      return restored;
+    },
     restoreSnapshot: async (client, departmentId, input) => {
       const snapshot = input as Partial<EmailSnapshot>;
-      if (!snapshot || snapshot.version !== 3 || !Array.isArray(snapshot.emailSettings) || snapshot.emailSettings.length > 1) throw new Error("The Email Delivery snapshot is invalid or exceeds supported limits.");
-      const hasEncryptedPassword = snapshot.emailSettings.some((row) => typeof row.encrypted_smtp_password === "string" && row.encrypted_smtp_password.length > 0);
-      if (hasEncryptedPassword) {
-        let localFingerprint: string;
-        try { localFingerprint = emailEncryptionKeyFingerprint(); }
-        catch { throw new Error("Set SMART_CHURCH_EMAIL_ENCRYPTION_KEY on the standby before restoring SMTP credentials."); }
-        if (!snapshot.encryptionKeyFingerprint || snapshot.encryptionKeyFingerprint === "missing" || localFingerprint !== snapshot.encryptionKeyFingerprint) throw new Error("SMART_CHURCH_EMAIL_ENCRYPTION_KEY does not match the primary; SMTP credentials cannot be restored safely.");
-      }
+      if (!snapshot || snapshot.version !== 4 || !Array.isArray(snapshot.emailSettings) || snapshot.emailSettings.length > 1) throw new Error("The Email Delivery snapshot is invalid or exceeds supported limits.");
       if (snapshot.emailSettings[0]) {
         const row = snapshot.emailSettings[0];
         await client.query(`INSERT INTO email_worker_department_settings(department_id,mode,enabled,from_name,from_email,smtp_host,smtp_port,smtp_security,smtp_username,encrypted_smtp_password,updated_at)
@@ -109,9 +130,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { recordCount: snapshot.emailSettings.length };
     },
     verifySnapshot: async (client, departmentId, input) => {
-      if (!input || typeof input !== "object" || (input as Partial<EmailSnapshot>).version !== 3 || !Array.isArray((input as Partial<EmailSnapshot>).emailSettings)) return { ready: false, blockers: ["No supported Email Delivery snapshot is available."] };
-      const expected = (input as EmailSnapshot).emailSettings.map(canonical).sort();
-      const actual = (await collectEmailSnapshot(client, departmentId)).emailSettings.map(canonical).sort();
+      if (!input || typeof input !== "object" || (input as Partial<EmailSnapshot>).version !== 4 || !Array.isArray((input as Partial<EmailSnapshot>).emailSettings)) return { ready: false, blockers: ["No supported Email Delivery snapshot is available."] };
+      const comparable = (rows: Array<Record<string, unknown>>) => rows.map((row) => ({ ...row, encrypted_smtp_password: typeof row.encrypted_smtp_password === "string" && row.encrypted_smtp_password.length ? decryptEmailSecret(row.encrypted_smtp_password) : null })).map(canonical).sort();
+      const expected = comparable((input as EmailSnapshot).emailSettings);
+      const actual = comparable((await collectEmailSnapshot(client, departmentId)).emailSettings);
       return expected.length === actual.length && expected.every((row, index) => row === actual[index])
         ? { ready: true, blockers: [] }
         : { ready: false, blockers: ["Location email settings differ from the verified snapshot."] };

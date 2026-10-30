@@ -9,7 +9,7 @@ export type ManagedWorkerDiagnostics = {
 };
 export type RuntimeWorkerEntry = ManagedWorkerDiagnostics & { id: string; name: string; restartable: boolean };
 
-const maxEntries = 150;
+const maxEntries = 1_000;
 const entries: RuntimeLogEntry[] = [];
 const workers = new Map<string, { name: string; getDiagnostics: () => ManagedWorkerDiagnostics; restart?: () => void | Promise<void> }>();
 
@@ -55,6 +55,6 @@ export function recordRuntimeLog(source: string, level: RuntimeLogLevel, message
   if (entries.length > maxEntries) entries.splice(0, entries.length - maxEntries);
 }
 
-export function recentRuntimeLogs(limit = 100) {
+export function recentRuntimeLogs(limit = 500) {
   return entries.slice(-Math.max(1, Math.min(maxEntries, limit))).reverse();
 }
