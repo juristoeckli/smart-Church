@@ -1,7 +1,7 @@
 {
   "id": "sync",
   "name": "Sync",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "serverEntry": "./routes.ts",
   "required": false,
   "enabledByDefault": true,

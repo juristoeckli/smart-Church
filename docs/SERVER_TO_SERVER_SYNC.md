@@ -172,6 +172,20 @@ source. There is no extra listener, service, or port. Neither server may widen
 the other's field scope. A person, group,
 event, or resource remains owned by the source installation and location.
 
+Peer pairing can also be outbound-only. Set
+`SMART_CHURCH_SYNC_PEER_BASE_URL=outbound-only` on a server with no inbound
+HTTPS URL; it can still initiate signed requests to its reachable peer. The
+receiving server stores the peer without a callback address, so operations
+that require reaching that server must be initiated there. The default `auto`
+uses `SMART_CHURCH_WEB_ORIGIN` (or the request origin in production); set the
+variable to the server's externally reachable HTTPS origin when callback
+access is available.
+
+For full-site redundancy, the primary sends a standby request to the remote
+site. Its Server Administrator approves the request locally; after approval,
+the primary discovers that standby and pushes snapshots outbound. The standby
+does not need a callback to the primary.
+
 Every adapter must define a stable globally unique source ID, owner ID,
 monotonic record revision, canonical serialization/version, allowed fields,
 relationship/reference mapping, and deletion tombstone. Each grant has an
