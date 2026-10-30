@@ -4,11 +4,12 @@ import { registerPlatformReplicationAdapter, type ReplicationRestoreContext } fr
 const snapshotTableNames = [
   "contacts", "service_events", "church_groups", "group_members", "church_teams", "team_members",
   "church_team_leaders", "bookable_resources", "resource_bookings", "group_meetings",
-  "group_meeting_attendance", "event_position_responses", "event_attendance_checkins",
+  "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "worship_songs",
+  "worship_song_arrangements", "service_plan_templates",
   "event_registrations", "department_memberships", "user_phone_numbers", "user_relationships", "app_users",
 ] as const;
 type SnapshotTable = typeof snapshotTableNames[number];
-type CoreSnapshot = { version: 4; sourceDepartmentId: string; department: { name: string; time_zone: string; enabled_modules: string[] }; tables: Partial<Record<SnapshotTable, Array<Record<string, unknown>>>> };
+type CoreSnapshot = { version: 5; sourceDepartmentId: string; department: { name: string; time_zone: string }; tables: Partial<Record<SnapshotTable, Array<Record<string, unknown>>>> };
 
 async function standbyReplicatedUserIds(client: Pick<PoolClient, "query">, departmentId: string) {
   const result = await client.query<{ role: string; replicated_user_ids: string[] }>("SELECT role,replicated_user_ids FROM sync_site_redundancy WHERE department_id=$1", [departmentId]);
@@ -36,6 +37,9 @@ const exportQueries: Record<SnapshotTable, string> = {
   event_position_responses: "SELECT response.* FROM event_position_responses response JOIN service_events parent ON parent.id=response.event_id WHERE parent.department_id=$1 ORDER BY response.event_id,response.position_index",
   event_attendance_checkins: "SELECT checkin.* FROM event_attendance_checkins checkin JOIN service_events parent ON parent.id=checkin.event_id WHERE parent.department_id=$1 ORDER BY checkin.event_id,checkin.contact_id",
   event_registrations: "SELECT registration.* FROM event_registrations registration JOIN service_events parent ON parent.id=registration.event_id WHERE parent.department_id=$1 ORDER BY registration.id",
+  worship_songs: "SELECT * FROM worship_songs WHERE department_id=$1 ORDER BY id",
+  worship_song_arrangements: "SELECT arrangement.* FROM worship_song_arrangements arrangement JOIN worship_songs song ON song.id=arrangement.song_id WHERE song.department_id=$1 ORDER BY arrangement.id",
+  service_plan_templates: "SELECT * FROM service_plan_templates WHERE department_id=$1 ORDER BY id",
   department_memberships: "SELECT * FROM department_memberships WHERE department_id=$1 ORDER BY user_id",
   user_phone_numbers: "SELECT phone.* FROM user_phone_numbers phone JOIN department_memberships member ON member.user_id=phone.user_id WHERE member.department_id=$1 ORDER BY phone.user_id,phone.position",
   user_relationships: "SELECT relation.* FROM user_relationships relation WHERE relation.user_id IN (SELECT user_id FROM department_memberships WHERE department_id=$1) AND relation.related_user_id IN (SELECT user_id FROM department_memberships WHERE department_id=$1) ORDER BY relation.user_id,relation.related_user_id",
@@ -45,6 +49,7 @@ const exportQueries: Record<SnapshotTable, string> = {
 };
 
 const deleteQueries = [
+  "DELETE FROM service_plan_templates WHERE department_id=$1",
   "DELETE FROM event_registrations WHERE event_id IN (SELECT id FROM service_events WHERE department_id=$1)",
   "DELETE FROM event_attendance_checkins WHERE event_id IN (SELECT id FROM service_events WHERE department_id=$1)",
   "DELETE FROM event_position_responses WHERE event_id IN (SELECT id FROM service_events WHERE department_id=$1)",
@@ -83,7 +88,7 @@ function mapUserFields(row: Record<string, unknown>, userIdMap: Map<string, stri
 }
 
 async function collect(client: PoolClient, departmentId: string): Promise<CoreSnapshot> {
-  const department = await client.query<{ name: string; time_zone: string; enabled_modules: string[] }>("SELECT name,time_zone,enabled_modules FROM departments WHERE id=$1", [departmentId]);
+  const department = await client.query<{ name: string; time_zone: string }>("SELECT name,time_zone FROM departments WHERE id=$1", [departmentId]);
   if (!department.rowCount) throw new Error("The replicated site no longer exists.");
   const replicatedUserIds = await standbyReplicatedUserIds(client, departmentId);
   const tables: CoreSnapshot["tables"] = {};
@@ -97,7 +102,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 4, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 5, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -114,14 +119,14 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "4",
+    schemaVersion: "5",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
     },
     exportSnapshot: (client, departmentId) => collect(client, departmentId),
     restoreSnapshot: async (client, targetDepartmentId, input, restoreContext: ReplicationRestoreContext) => {
-      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 4 || !Array.isArray((input as CoreSnapshot).tables?.contacts) || !(input as CoreSnapshot).department) throw new Error("The core site snapshot is incomplete or unsupported.");
+      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 5 || !snapshotTableNames.every((table) => Array.isArray((input as CoreSnapshot).tables?.[table])) || !(input as CoreSnapshot).department) throw new Error("The core site snapshot is incomplete or unsupported.");
       const snapshot = input as CoreSnapshot;
       const tables = snapshot.tables;
       let recordCount = 0;
@@ -184,7 +189,16 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       await client.query("DELETE FROM user_relationships WHERE user_id=ANY($1::uuid[]) OR related_user_id=ANY($1::uuid[])", [usersBeingReplaced]);
       await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersBeingReplaced]);
 
-      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "event_registrations"];
+      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "worship_songs", "worship_song_arrangements", "service_plan_templates", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "event_registrations"];
+      const upsertQueries: Partial<Record<SnapshotTable, string>> = {
+        // Worship library rows are soft-deleted and referenced by the
+        // ChurchTools/Elvanto integration module. Updating them in place keeps
+        // those module-owned foreign keys valid across repeated snapshots.
+        worship_songs: `INSERT INTO worship_songs(id,department_id,title,authors,default_key,notes,active,created_at,updated_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET department_id=EXCLUDED.department_id,title=EXCLUDED.title,authors=EXCLUDED.authors,default_key=EXCLUDED.default_key,notes=EXCLUDED.notes,active=EXCLUDED.active,created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at`,
+        worship_song_arrangements: `INSERT INTO worship_song_arrangements(id,song_id,name,musical_key,chart_url,audio_url,active,created_at,updated_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET song_id=EXCLUDED.song_id,name=EXCLUDED.name,musical_key=EXCLUDED.musical_key,chart_url=EXCLUDED.chart_url,audio_url=EXCLUDED.audio_url,active=EXCLUDED.active,created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at`,
+      };
       const jsonColumns = await client.query<{ table_name: string; column_name: string; data_type: string }>(
         "SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=ANY($1::text[]) AND data_type IN ('json','jsonb')",
         [insertOrder],
@@ -205,8 +219,8 @@ export function registerCoreReplicationAdapter(pool: Pool) {
           const columns = Object.keys(row);
           const values = columns.map((column) => replicationValue(row[column], jsonTypes.get(`${table}.${column}`)));
           const placeholders = columns.map((_, index) => `$${index + 1}`);
-          const inserted = await client.query(`INSERT INTO public."${table}" (${columns.map((column) => `"${column}"`).join(",")}) VALUES (${placeholders.join(",")}) ON CONFLICT DO NOTHING`, values);
-          if (inserted.rowCount !== 1) throw new Error(`The core site snapshot conflicts with existing ${table} data. Restore was rolled back.`);
+          const inserted = await client.query(upsertQueries[table] ?? `INSERT INTO public."${table}" (${columns.map((column) => `"${column}"`).join(",")}) VALUES (${placeholders.join(",")}) ON CONFLICT DO NOTHING`, values);
+          if (!upsertQueries[table] && inserted.rowCount !== 1) throw new Error(`The core site snapshot conflicts with existing ${table} data. Restore was rolled back.`);
           recordCount += 1;
         }
       }
@@ -225,7 +239,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       return { recordCount };
     },
     verifySnapshot: async (client, departmentId, input, context) => {
-      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 4) return { ready: false, blockers: ["No verified core-site snapshot is available."] };
+      if (!input || typeof input !== "object" || (input as CoreSnapshot).version !== 5) return { ready: false, blockers: ["No verified core-site snapshot is available."] };
       const snapshot = input as CoreSnapshot;
       const userIdMap = context?.userIdMap ?? new Map<string, string>();
       for (const table of snapshotTableNames) {
