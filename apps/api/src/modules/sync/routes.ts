@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleReplicationAdapter, ModuleServerContext } from "../module-sdk.js";
 import { canonicalRequest, canonicalResponse, fingerprintPublicKey, getIdentity, openFromPeer, protocolVersion, sealForPeer, signBytes, verifyBytes, type FederationIdentity } from "./federation-crypto.js";
+import { FederationChannels } from "./federation-channel.js";
 
 const adminPrefix = "/api/modules/sync/federation";
 const prefix = `${adminPrefix}/v1`;
@@ -13,6 +14,8 @@ const maxPeerBodyBytes = 1024 * 1024;
 const redundancyChunkBytes = 512 * 1024;
 const maxRedundancyBytes = 256 * 1024 * 1024;
 const pairAttempts = new Map<string, { count: number; expiresAt: number }>();
+let activeFederationChannels: FederationChannels | null = null;
+let federationInternalRequestToken = "";
 
 type IdentityPayload = FederationIdentity & { signature?: string };
 type PeerRow = { installation_id: string; display_name: string; base_url: string | null; public_key_pem: string; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; created_at: Date | string; approved_at: Date | string | null; last_seen_at: Date | string | null; last_error: string | null };
@@ -70,6 +73,29 @@ async function allAdapterManifest(adapters: ModuleReplicationAdapter[], departme
     schemaVersion: await adapterSchemaVersion(adapter, departmentId),
     installedVersion: adapter.schemaVersion,
   })));
+}
+
+async function installSiteChangeTriggers(pool: import("pg").Pool) {
+  const tables = await pool.query<{ table_name: string }>(`SELECT table_name FROM information_schema.tables
+    WHERE table_schema='public' AND table_type='BASE TABLE' AND left(table_name,5)<>'sync_'
+      AND (table_name='departments' OR EXISTS (
+        SELECT 1 FROM information_schema.columns column_row
+         WHERE column_row.table_schema='public' AND column_row.table_name=information_schema.tables.table_name AND column_row.column_name='department_id'
+      ))
+    ORDER BY table_name`);
+  for (const { table_name: name } of tables.rows) {
+    if (!/^[a-z][a-z0-9_]*$/.test(name)) continue;
+    const relation = `"public"."${name}"`;
+    await pool.query(`DROP TRIGGER IF EXISTS smart_church_sync_site_change ON ${relation}`);
+    await pool.query(`CREATE TRIGGER smart_church_sync_site_change AFTER INSERT OR UPDATE OR DELETE ON ${relation} FOR EACH ROW EXECUTE FUNCTION smart_church_sync_notify_site_change()`);
+  }
+  for (const name of ["app_users", "user_phone_numbers", "user_relationships"]) {
+    const present = await pool.query("SELECT to_regclass($1) IS NOT NULL AS present", [`public.${name}`]);
+    if (!present.rows[0]?.present) continue;
+    const relation = `"public"."${name}"`;
+    await pool.query(`DROP TRIGGER IF EXISTS smart_church_sync_account_change ON ${relation}`);
+    await pool.query(`CREATE TRIGGER smart_church_sync_account_change AFTER INSERT OR UPDATE OR DELETE ON ${relation} FOR EACH ROW EXECUTE FUNCTION smart_church_sync_notify_account_change()`);
+  }
 }
 
 async function redundancyManifest(pool: import("pg").Pool, adapters: ModuleReplicationAdapter[], departmentId: string) {
@@ -174,7 +200,25 @@ async function readRemoteJson<T>(response: Response, publicKeyPem: string, nonce
   return data;
 }
 
-async function remoteIdentity(baseUrl: string) {
+async function remoteIdentity(baseUrl: string, trustedPeer?: RemotePeerAddress, localIdentity?: Awaited<ReturnType<typeof getIdentity>>) {
+  if (trustedPeer && localIdentity && activeFederationChannels) {
+    const timestamp = String(Date.now());
+    const nonce = randomBytes(24).toString("base64url");
+    const headers: Record<string, string> = {
+      accept: "application/json",
+      "x-sc-protocol": protocolVersion,
+      "x-sc-installation": localIdentity.installationId,
+      "x-sc-timestamp": timestamp,
+      "x-sc-nonce": nonce,
+      "x-sc-signature": signBytes(localIdentity.privateKeyPem, canonicalRequest("GET", `${prefix}/identity`, timestamp, nonce, "")),
+    };
+    const tunneled = await activeFederationChannels.request(trustedPeer, "GET", `${prefix}/identity`, headers, "", 12_000);
+    const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
+    const raw = await readRemoteJson<IdentityPayload>(response, trustedPeer.public_key_pem, nonce);
+    const remote = peerIdentity(raw);
+    if (remote.installationId !== trustedPeer.installation_id) throw new Error("The identity returned over the federation channel does not match this trusted peer.");
+    return remote;
+  }
   const response = await fetch(`${baseUrl}${prefix}/identity`, { method: "GET", headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000), redirect: "error" });
   const text = await response.text();
   if (Buffer.byteLength(text, "utf8") > maxPeerBodyBytes) throw new Error("The remote identity response exceeds the size limit.");
@@ -189,8 +233,7 @@ async function remoteIdentity(baseUrl: string) {
   return remote;
 }
 
-async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, method: string, path: string, body = "", timeoutMs = 12_000) {
-  if (!peer.base_url) throw new Error("This peer is outbound-only and cannot be called from this server.");
+async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, method: string, path: string, body = "", timeoutMs = 12_000, allowBootstrapHttp = false) {
   const timestamp = String(Date.now());
   const nonce = randomBytes(24).toString("base64url");
   const headers: Record<string, string> = {
@@ -202,18 +245,23 @@ async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited
     "x-sc-signature": signBytes(identity.privateKeyPem, canonicalRequest(method, path, timestamp, nonce, body)),
   };
   if (body) headers["content-type"] = "application/json";
-  const response = await fetch(`${peer.base_url}${path}`, { method, headers, ...(body ? { body } : {}), signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
+  if (allowBootstrapHttp) {
+    if (path !== `${prefix}/status`) throw new Error("HTTPS is reserved for Sync peer trust bootstrap; operational Sync requests must use the federation WebSocket.");
+    if (!peer.base_url) throw new Error("This peer has no reachable HTTPS address for trust bootstrap.");
+    const response = await fetch(`${peer.base_url}${path}`, { method, headers, ...(body ? { body } : {}), signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
+    return readRemoteJson<T>(response, peer.public_key_pem, nonce);
+  }
+  if (!activeFederationChannels) throw new Error("The authenticated federation WebSocket service is not ready.");
+  const tunneled = await activeFederationChannels.request(peer, method, path, headers, body, timeoutMs);
+  const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
   return readRemoteJson<T>(response, peer.public_key_pem, nonce);
 }
 
 async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, path: string, body: string, timeoutMs = 300_000) {
-  if (!peer.base_url) throw new Error("This peer is outbound-only and cannot be called from this server.");
   const method = "POST";
   const timestamp = String(Date.now());
   const nonce = randomBytes(24).toString("base64url");
-  const response = await fetch(`${peer.base_url}${path}`, {
-    method,
-    headers: {
+  const requestHeaders = {
       accept: "application/vnd.smart-church.redundancy-snapshot, application/json",
       "content-type": "application/json",
       "x-sc-protocol": protocolVersion,
@@ -221,16 +269,14 @@ async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Aw
       "x-sc-timestamp": timestamp,
       "x-sc-nonce": nonce,
       "x-sc-signature": signBytes(identity.privateKeyPem, canonicalRequest(method, path, timestamp, nonce, body)),
-    },
-    body,
-    signal: AbortSignal.timeout(timeoutMs),
-    redirect: "error",
-  });
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > maxRedundancyBytes || response.headers.get("x-sc-protocol") !== protocolVersion) throw new Error("The remote redundancy snapshot response is invalid or exceeds the transfer limit.");
-  const signature = response.headers.get("x-sc-response-signature");
+    };
+  if (!activeFederationChannels) throw new Error("The authenticated federation WebSocket service is not ready.");
+  const response = await activeFederationChannels.requestBinary(peer, method, path, requestHeaders, body, timeoutMs);
+  const bytes = response.bytes;
+  if (bytes.length > maxRedundancyBytes || response.headers["x-sc-protocol"] !== protocolVersion) throw new Error("The remote redundancy snapshot response is invalid or exceeds the transfer limit.");
+  const signature = response.headers["x-sc-response-signature"];
   if (!signature || !verifyBytes(peer.public_key_pem, canonicalResponse(response.status, nonce, bytes), signature)) throw new Error("The remote snapshot response signature could not be verified.");
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     try {
       const parsed = JSON.parse(bytes.toString("utf8")) as { error?: unknown };
       if (typeof parsed.error === "string") throw new Error(parsed.error);
@@ -239,7 +285,7 @@ async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Aw
     }
     throw new Error("The remote server rejected the redundancy snapshot request.");
   }
-  return { contentType: response.headers.get("content-type")?.split(";", 1)[0] ?? "", bytes };
+  return { contentType: response.headers["content-type"]?.split(";", 1)[0] ?? "", bytes };
 }
 
 async function applyRedundancySnapshot(
@@ -305,7 +351,6 @@ async function applyRedundancySnapshot(
 }
 
 async function pullRedundancySnapshot(app: FastifyInstance, pool: import("pg").Pool, context: ModuleServerContext, siteName: string, departmentId: string, peer: PeerRow, sourceDepartmentId: string) {
-  if (!peer.base_url) throw new Error("The current primary has no reachable callback address; this standby cannot pull a snapshot.");
   const stateResult = await pool.query<{ role: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string; last_source_digest: string | null; last_replica_digest: string | null; last_replica_manifest: RedundancyModuleManifestEntry[] | null }>(
     "SELECT role,upstream_installation_id,upstream_department_id,site_epoch::text,last_source_digest,last_replica_digest,last_replica_manifest FROM sync_site_redundancy WHERE department_id=$1", [departmentId],
   );
@@ -365,8 +410,6 @@ async function pullRedundancySnapshot(app: FastifyInstance, pool: import("pg").P
 }
 
 async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleServerContext, siteName: string, departmentId: string, peer: RemotePeerAddress & { fingerprint: string }, targetDepartmentId: string) {
-  const remoteBaseUrl = peer.base_url;
-  if (!remoteBaseUrl) throw new Error("This standby server is outbound-only and cannot receive snapshots from this primary.");
   const lockClient = await pool.connect();
   const lockName = `smart-church-redundancy-push:${departmentId}:${peer.installation_id}:${targetDepartmentId}`;
   let locked = false;
@@ -379,7 +422,7 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
     const identity = await getIdentity(pool, siteName);
     const local = await redundancyManifest(pool, context.replication.list(), departmentId);
     if (local.blockers.length) throw new Error(`The primary is not ready to create a complete site snapshot: ${local.blockers.join(" ")}`);
-    const remoteIdentityRecord = await remoteIdentity(remoteBaseUrl);
+    const remoteIdentityRecord = await remoteIdentity(peer.base_url ?? "", peer, identity);
     if (remoteIdentityRecord.installationId !== peer.installation_id || remoteIdentityRecord.fingerprint !== peer.fingerprint) throw new Error("The standby server identity changed. Verify it out of band and pair it again before sending site data.");
     const remote = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; upstreamInstallationId: string | null; upstreamDepartmentId: string | null; siteEpoch: string; lastSnapshotId: string | null; lastSnapshotAt: string | null; lastVerifiedAt: string | null; lastSourceDigest: string | null; modules: RedundancyModuleManifestEntry[]; ready: boolean; blockers: string[] }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(targetDepartmentId)}`);
     if (remote.role !== "standby" || remote.upstreamInstallationId !== identity.installationId || remote.upstreamDepartmentId !== departmentId || remote.installationId !== peer.installation_id || remote.departmentId !== targetDepartmentId) throw new Error("The destination has not been configured as this site's standby.");
@@ -452,6 +495,9 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
 }
 
 async function verifySignedPeer(request: FastifyRequest, client: PoolClient | import("pg").Pool, allowPending = false) {
+  const channelAuthorized = typeof request.headers["x-sc-internal-federation-channel"] === "string"
+    && request.headers["x-sc-internal-federation-channel"] === federationInternalRequestToken;
+  if (!channelAuthorized && request.url !== `${prefix}/status`) return null;
   const installation = request.headers["x-sc-installation"];
   const timestamp = request.headers["x-sc-timestamp"];
   const nonce = request.headers["x-sc-nonce"];
@@ -557,25 +603,44 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   if (!context.pool) return;
   const pool = context.pool;
   const siteName = process.env.SMART_CHURCH_DEPARTMENT_NAME?.trim() || "Smart-Church";
+  federationInternalRequestToken = randomBytes(32).toString("base64url");
+  const federationChannels = new FederationChannels(app, app.server, pool, () => getIdentity(pool, siteName), federationInternalRequestToken);
+  activeFederationChannels = federationChannels;
+  const unregisterFederationWorker = context.workers.register("federation-channel", () => ({
+    status: federationChannels.connectedPeerCount() > 0 ? "ready" : "degraded",
+    error: federationChannels.connectedPeerCount() > 0 ? null : "Waiting for an authenticated peer WebSocket channel.",
+    uptimeSeconds: null,
+    memory: null,
+  }));
+  app.addHook("onReady", async () => { await federationChannels.start(); });
+  app.addHook("onClose", async () => {
+    federationChannels.close();
+    unregisterFederationWorker();
+    if (activeFederationChannels === federationChannels) activeFederationChannels = null;
+    if (federationInternalRequestToken) federationInternalRequestToken = "";
+  });
   let automaticPushRunning = false;
   let automaticPushTimer: NodeJS.Timeout | null = null;
+  let siteChangeListener: PoolClient | null = null;
+  let siteChangeReconnectTimer: NodeJS.Timeout | null = null;
+  let targetedPushTimer: NodeJS.Timeout | null = null;
   let automaticPushError: string | null = null;
+  const queuedSitePushes = new Set<string>();
   context.workers.register("redundancy-push", () => ({
     status: automaticPushRunning ? "syncing" : automaticPushError ? "degraded" : "ready",
     error: automaticPushError,
     uptimeSeconds: null,
     memory: null,
   }));
-  const runAutomaticPushes = async () => {
+  const runAutomaticPushes = async (onlyDepartmentId?: string) => {
     if (automaticPushRunning || !context.isDatabaseReady()) return;
     automaticPushRunning = true;
     automaticPushError = null;
     try {
-      const primaries = await pool.query<{ department_id: string; site_epoch: string; primary_installation_id: string }>("SELECT department_id,site_epoch::text,primary_installation_id FROM sync_site_redundancy WHERE role='primary' ORDER BY department_id");
+      const primaries = await pool.query<{ department_id: string; site_epoch: string; primary_installation_id: string }>("SELECT department_id,site_epoch::text,primary_installation_id FROM sync_site_redundancy WHERE role='primary' AND ($1::uuid IS NULL OR department_id=$1) ORDER BY department_id", [onlyDepartmentId ?? null]);
       const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE trust_state='trusted' ORDER BY installation_id");
       const identity = peers.rowCount ? await getIdentity(pool, siteName) : null;
-      if (identity) for (const peer of peers.rows) {
-        if (!peer.base_url) continue;
+      if (identity && primaries.rowCount) for (const peer of peers.rows) {
         let remoteSites: { installationId: string; sites: Array<{ id: string; role: string; primary_installation_id: string | null; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string }> };
         try { remoteSites = await signedRemoteRequest(peer, identity, "GET", `${prefix}/redundancy/sites`); }
         catch (error) {
@@ -618,6 +683,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           }
         }
       }
+      if (!onlyDepartmentId) {
       const standbyResult = await pool.query<{ department_id: string; upstream_installation_id: string; upstream_department_id: string; peer: PeerRow }>(
         `SELECT redundancy.department_id,redundancy.upstream_installation_id,redundancy.upstream_department_id,
                 to_jsonb(peer) AS peer
@@ -628,7 +694,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       );
       for (const standby of standbyResult.rows) {
         const peer = standby.peer;
-        if (!peer.base_url) continue;
         const lockClient = await pool.connect();
         const lockName = `smart-church-redundancy-pull:${standby.department_id}:${peer.installation_id}:${standby.upstream_department_id}`;
         let locked = false;
@@ -647,24 +712,75 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           lockClient.release();
         }
       }
+      }
     } catch (error) {
       automaticPushError = error instanceof Error ? error.message.slice(0, 500) : "Automatic redundancy replication failed.";
       app.log.error({ err: error, module: "sync" }, "Automatic site redundancy cycle failed.");
-    } finally { automaticPushRunning = false; }
+    } finally {
+      automaticPushRunning = false;
+      if (queuedSitePushes.size && !targetedPushTimer) targetedPushTimer = setTimeout(drainSitePushQueue, 100);
+    }
   };
+
+  function drainSitePushQueue() {
+    targetedPushTimer = null;
+    if (automaticPushRunning || !queuedSitePushes.size) return;
+    const next = queuedSitePushes.values().next().value as string | undefined;
+    if (!next) return;
+    queuedSitePushes.delete(next);
+    void runAutomaticPushes(next);
+  }
+
+  function enqueueSitePush(departmentId: string) {
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) return;
+    queuedSitePushes.add(departmentId);
+    if (!automaticPushRunning && !targetedPushTimer) targetedPushTimer = setTimeout(drainSitePushQueue, 250);
+  }
+
+  async function ensureSiteChangeListener() {
+    if (siteChangeListener) return;
+    const client = await pool.connect();
+    try {
+      await client.query("LISTEN smart_church_site_changed");
+      client.on("notification", (notification) => {
+        if (notification.channel === "smart_church_site_changed" && notification.payload) enqueueSitePush(notification.payload);
+      });
+      client.on("error", (error) => {
+        if (siteChangeListener === client) siteChangeListener = null;
+        client.release(error);
+        app.log.warn({ err: error, module: "sync" }, "Site change notifications disconnected; periodic redundancy sync remains active.");
+      });
+      siteChangeListener = client;
+    } catch (error) { client.release(); throw error; }
+  }
+
   app.addHook("onReady", async () => {
+    await installSiteChangeTriggers(pool);
+    await ensureSiteChangeListener().catch((error) => app.log.warn({ err: error, module: "sync" }, "Site change notifications are unavailable; periodic redundancy sync remains active."));
     const configuredInterval = Number(process.env.SMART_CHURCH_REDUNDANCY_SYNC_INTERVAL_SECONDS ?? 60);
     const intervalMs = Number.isFinite(configuredInterval) ? Math.max(30, Math.min(240, configuredInterval)) * 1000 : 60_000;
     automaticPushTimer = setInterval(() => { void runAutomaticPushes(); }, intervalMs);
     automaticPushTimer.unref();
+    siteChangeReconnectTimer = setInterval(() => { void ensureSiteChangeListener().catch(() => undefined); }, 10_000);
+    siteChangeReconnectTimer.unref();
     void runAutomaticPushes();
   });
-  app.addHook("onClose", async () => { if (automaticPushTimer) clearInterval(automaticPushTimer); });
+  app.addHook("onClose", async () => {
+    if (automaticPushTimer) clearInterval(automaticPushTimer);
+    if (siteChangeReconnectTimer) clearInterval(siteChangeReconnectTimer);
+    if (targetedPushTimer) clearTimeout(targetedPushTimer);
+    if (siteChangeListener) { await siteChangeListener.query("UNLISTEN smart_church_site_changed").catch(() => undefined); siteChangeListener.release(); siteChangeListener = null; }
+  });
 
-  app.get(`${prefix}/identity`, async (_request, reply) => {
+  app.get(`${prefix}/identity`, async (request, reply) => {
     try {
       const identity = await getIdentity(pool, siteName);
       const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
+      if (request.headers["x-sc-installation"] !== undefined) {
+        const sender = await verifySignedPeer(request, pool);
+        if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+        return json(reply, 200, publicIdentity, identity, String(request.headers["x-sc-nonce"] ?? ""));
+      }
       return json(reply, 200, publicIdentity, identity);
     } catch (error) { app.log.error({ err: error, module: "sync" }, "Could not load the local Sync identity."); return reply.code(503).send({ error: "The Sync identity is unavailable." }); }
   });
@@ -1244,7 +1360,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
       const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers ORDER BY CASE trust_state WHEN 'pending' THEN 0 WHEN 'trusted' THEN 1 ELSE 2 END,display_name");
       const invitations = await pool.query<{ id: string; expires_at: Date | string; created_at: Date | string }>("SELECT id,expires_at,created_at FROM sync_pairing_invitations WHERE used_at IS NULL AND expires_at>now() ORDER BY created_at DESC");
-      return { identity: publicIdentity, peers: peers.rows, invitations: invitations.rows, canReceiveCallbacks: advertisedPeerBaseUrl(request) !== null };
+      return { identity: publicIdentity, peers: peers.rows.map((peer) => ({ ...peer, channels: activeFederationChannels?.status(peer.installation_id) ?? { outbound: false, inbound: false } })), invitations: invitations.rows };
     } catch (error) {
       const reason = error instanceof Error ? error.message.slice(0, 240) : "Unknown error.";
       app.log.error({ err: error }, `Could not load Sync peer settings: ${reason}`);
@@ -1350,7 +1466,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!body || typeof body.peerInstallationId !== "string" || typeof body.targetDepartmentId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(body.peerInstallationId) || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(body.targetDepartmentId)) return reply.code(400).send({ error: "Choose a trusted server and destination site." });
     const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [body.peerInstallationId]);
     const peer = peerResult.rows[0];
-    if (!peer?.base_url) return reply.code(409).send({ error: "Choose a reachable HTTPS standby server. The primary must be able to open the outbound request." });
+    if (!peer) return reply.code(409).send({ error: "Choose a trusted standby server." });
     const state = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [department]);
     if (state.rows[0]?.role !== "primary") return reply.code(409).send({ error: "Only the writable primary can request standby configuration." });
     const sourceSite = await pool.query<{ name: string }>("SELECT name FROM departments WHERE id=$1", [department]);
@@ -1373,7 +1489,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(body.peerInstallationId) || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(body.sourceDepartmentId)) return reply.code(400).send({ error: "Choose a trusted primary and confirm that its snapshot will replace this site's data." });
     const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [body.peerInstallationId]);
     const peer = peerResult.rows[0];
-    if (!peer?.base_url) return reply.code(409).send({ error: "Choose a trusted primary reachable over the existing HTTPS/API connection." });
+    if (!peer) return reply.code(409).send({ error: "Choose a trusted primary server." });
     const current = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [department]);
     if (!current.rowCount || !["primary", "standby", "fenced"].includes(current.rows[0].role)) return reply.code(409).send({ error: "This site cannot be configured as a standby from its current state." });
     try {
@@ -1390,7 +1506,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const locked = await client.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [department]);
         if (!locked.rowCount || !["primary", "standby", "fenced"].includes(locked.rows[0].role) || BigInt(remote.siteEpoch) < BigInt(locked.rows[0].site_epoch)) throw new Error("This site's redundancy state changed while requesting the primary.");
         await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, peer.installation_id, body.sourceDepartmentId, remote.siteEpoch]);
-        await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'standby_configured',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, locked.rows[0].site_epoch, remote.siteEpoch, peer.installation_id, "Administrator requested that this outbound-only site become a standby; the source site must approve before its snapshot can be pulled."]);
+        await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'standby_configured',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, locked.rows[0].site_epoch, remote.siteEpoch, peer.installation_id, "Administrator requested that this site become a standby; the source site must approve before its snapshot can be pulled over the WebSocket channel."]);
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
@@ -1462,7 +1578,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [peerId]);
     const peer = peerResult.rows[0];
     if (!peer) return reply.code(404).send({ error: "This trusted server was not found." });
-    if (!peer.base_url) return reply.code(409).send({ error: "This server cannot call back to the selected peer. Run this action from the peer that can reach it, or configure a public HTTPS peer URL." });
     try {
       const identity = await getIdentity(pool, siteName);
       return await signedRemoteRequest<{ installationId: string; sites: Array<{ id: string; name: string; time_zone: string; role: string }> }>(peer, identity, "GET", `${prefix}/redundancy/sites`);
@@ -1498,7 +1613,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [body.sourceInstallationId]);
     const peer = peerResult.rows[0];
     if (!peer) return reply.code(400).send({ error: "The primary must be paired and trusted first." });
-    if (!peer.base_url) return reply.code(409).send({ error: "This primary is outbound-only. Configure the standby from the primary server instead, or set a public HTTPS peer URL." });
     try {
       const identity = await getIdentity(pool, siteName);
       const remote = await signedRemoteRequest<{ role: string; siteEpoch: string; departmentId: string }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(body.sourceDepartmentId)}`);
@@ -1622,10 +1736,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state<>'revoked'", [request.params.installationId]);
     const peer = result.rows[0];
     if (!peer) return reply.code(404).send({ error: "This peer is not available." });
-    if (!peer.base_url) return reply.code(409).send({ error: "This peer is outbound-only. Run Check from that server, or configure a public HTTPS peer URL." });
+    if (peer.trust_state !== "trusted" && !peer.base_url) return reply.code(409).send({ error: "This pending peer has no reachable HTTPS address for trust bootstrap." });
     try {
       const identity = await getIdentity(pool, siteName);
-      const status = await signedRemoteRequest<{ installationId: string; peerInstallationId: string; peerTrustState: string; peerFingerprint: string; protocolVersion: string }>(peer, identity, "GET", `${prefix}/status`);
+      const status = await signedRemoteRequest<{ installationId: string; peerInstallationId: string; peerTrustState: string; peerFingerprint: string; protocolVersion: string }>(peer, identity, "GET", `${prefix}/status`, "", 12_000, peer.trust_state !== "trusted");
       if (status.installationId !== peer.installation_id || status.peerInstallationId !== identity.installationId || status.peerFingerprint !== identity.fingerprint || status.protocolVersion !== protocolVersion) throw new Error("The remote server returned a status for a different peer identity.");
       return { reachable: true, remoteTrustState: status.peerTrustState };
     } catch (error) {
@@ -1644,7 +1758,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!peer.base_url) return reply.code(409).send({ error: "This outgoing peer has no reachable address. Re-pair it with a valid HTTPS server URL." });
       try {
         const identity = await getIdentity(pool, siteName);
-        const status = await signedRemoteRequest<{ peerTrustState: string }>(peer, identity, "GET", `${prefix}/status`);
+        const status = await signedRemoteRequest<{ peerTrustState: string }>(peer, identity, "GET", `${prefix}/status`, "", 12_000, true);
         if (status.peerTrustState !== "trusted") return reply.code(409).send({ error: "The remote Server Administrator has not approved this installation yet." });
       } catch { return reply.code(502).send({ error: "Could not verify that the remote administrator approved this installation. Try again later." }); }
     }
@@ -1690,8 +1804,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(peerInstallationId) || !Array.isArray(scopes) || !scopes.length || scopes.some((scope) => !["people_names", "services"].includes(scope)) || new Set(scopes).size !== scopes.length || !["pull", "push"].includes(deliveryMode)) return reply.code(400).send({ error: "Choose a trusted peer, at least one valid data scope, and a sync direction." });
     const peer = await pool.query<{ base_url: string | null }>("SELECT base_url FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [peerInstallationId]);
     if (!peer.rowCount) return reply.code(400).send({ error: "Share data only with a mutually trusted server." });
-    if (deliveryMode === "push" && !peer.rows[0].base_url) return reply.code(409).send({ error: "This peer is outbound-only and cannot be reached from this server. Create the share on the peer that can reach this server." });
-    if (deliveryMode === "pull" && !advertisedPeerBaseUrl(request)) return reply.code(409).send({ error: "This server has no reachable HTTPS callback URL, so shares must use outbound push." });
     const id = randomUUID();
     await pool.query("INSERT INTO sync_share_grants(id,owner_department_id,recipient_installation_id,scopes,delivery_mode,state,created_by) VALUES($1,$2,$3,$4,$5,'active',$6)", [id, department, peerInstallationId, scopes, deliveryMode, request.authenticatedUser!.id]);
     return reply.code(201).send({ id, scopes, deliveryMode, state: "active" });
@@ -1712,7 +1824,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE trust_state='trusted' ORDER BY display_name LIMIT 50");
     const available: Array<Record<string, unknown>> = [];
     for (const peer of peers.rows) {
-      if (!peer.base_url) continue;
       try {
         const result = await signedRemoteRequest<{ grants: Array<{ id: string; sourceDepartmentName: string; scopes: string[]; deliveryMode: string; revision: number; createdAt: string }> }>(peer, identity, "GET", `${prefix}/grants`);
         for (const grant of result.grants) available.push({ ...grant, sourceInstallationId: peer.installation_id, sourceServerName: peer.display_name, baseUrl: peer.base_url });
@@ -1739,7 +1850,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [body.peerInstallationId]);
     const peer = peerResult.rows[0];
     if (!peer) return reply.code(400).send({ error: "Choose a paired and trusted standby server." });
-    if (!peer.base_url) return reply.code(409).send({ error: "This peer is outbound-only. Start redundancy replication from the server that can reach this standby." });
     try {
       const result = await pushRedundancySnapshot(pool, context, siteName, department, peer, body.targetDepartmentId);
       if (result.skipped) return reply.code(409).send({ error: result.reason });
@@ -1821,10 +1931,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     const subscription = result.rows[0];
     if (!subscription) return reply.code(409).send({ error: "This subscription is unavailable, already syncing, or its source peer is not trusted." });
-    if (!subscription.base_url) {
-      await pool.query("UPDATE sync_subscriptions SET current_run_id=NULL,sync_started_at=NULL,last_error='The source is outbound-only; it must push this share.',updated_at=now() WHERE id=$1 AND current_run_id=$2", [request.params.id, runId]);
-      return reply.code(409).send({ error: "This source is outbound-only. Ask its administrator to push the share instead of pulling it." });
-    }
     const peer = { base_url: subscription.base_url, installation_id: subscription.installation_id, public_key_pem: subscription.public_key_pem };
     try {
       const identity = await getIdentity(pool, siteName);
@@ -1868,7 +1974,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const grant = grantResult.rows[0];
     if (!grant || grant.state !== "active") return reply.code(404).send({ error: "This active share was not found." });
     if (grant.delivery_mode !== "push") return reply.code(400).send({ error: "This share is configured for recipient-initiated pull sync." });
-    if (!grant.base_url) return reply.code(409).send({ error: "This peer is outbound-only. The receiving server must initiate the transfer or be given a public HTTPS peer URL." });
     const peer = { base_url: grant.base_url, installation_id: grant.recipient_installation_id, public_key_pem: grant.public_key_pem };
     try {
       const identity = await getIdentity(pool, siteName);
