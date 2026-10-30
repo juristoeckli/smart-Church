@@ -2273,6 +2273,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const existingMembersByGroup = new Map<string, Map<string, string>>();
       for (const member of localMembershipRows.rows) existingMembersByGroup.set(member.group_id, new Map([...(existingMembersByGroup.get(member.group_id) ?? new Map<string, string>()), [member.person_source_id ?? `local:${member.contact_id}`, member.role]]));
       const groupSourceIds = [...new Set(groups.map(idOf).filter(Boolean))];
+      const remoteGroupIds = new Set(groupSourceIds);
+      const missingRemoteCount = complete ? [...bySourceId.keys()].filter((sourceId) => !remoteGroupIds.has(sourceId)).length : 0;
       const groupSyncStates = groupSourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null }>("SELECT source_id,baseline FROM elvanto_group_sync_state WHERE department_id=$1 AND source_id=ANY($2::text[])", [dept, groupSourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null }> };
       const groupStateBySource = new Map(groupSyncStates.rows.map((state) => [state.source_id, state]));
       const seen = new Set<string>();
@@ -2338,7 +2340,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         [dept, state.sourceId, previewAt, JSON.stringify(state.local), JSON.stringify(state.remote), elvantoGroupSnapshotHash(state.remote), state.requiresReview, state.resolution],
       );
       await recordElvantoAudit(pool!, dept, "groups", "preview", complete ? "complete" : "incomplete", { scanned: groups.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, membersToAdd: memberAddCount, conflicts: conflictCount, localConflicts: localConflictCount, invalid: invalidCount });
-      return { scannedCount: groups.length, reportedTotal: total, complete, previewAt, createCount, updateCount, alreadyLinkedCount, memberAddCount, nameConflictCount: conflictCount, localConflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, localOnlyMemberCount, sample };
+      return { scannedCount: groups.length, reportedTotal: total, complete, previewAt, createCount, updateCount, alreadyLinkedCount, missingRemoteCount, memberAddCount, nameConflictCount: conflictCount, localConflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, localOnlyMemberCount, sample };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/groups-conflicts", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 50 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
