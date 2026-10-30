@@ -5,12 +5,23 @@ import "./people-flows.css";
 
 type Flow = { id: string; name: string; description: string; status: "active" | "archived"; stepCount: number; activeEnrollmentCount: number; createdAt: string; updatedAt: string };
 type Step = { id: string; title: string; instructions: string; position: number; dueAfterDays: number | null; required: boolean; active: boolean };
-type ProgressStep = { stepId: string; title: string; position: number; required: boolean; status: "pending" | "completed" | "skipped"; dueOn: string | null; completedAt: string | null };
+type ProgressStep = { stepId: string; title: string; position: number; required: boolean; active: boolean; status: "pending" | "completed" | "skipped"; active: boolean; dueOn: string | null; completedAt: string | null };
 type Assignment = { id: string; flowId: string; contactId: string; contactName: string; status: "active" | "completed" | "cancelled"; dueOn: string | null; startedAt: string; completedAt: string | null; steps: ProgressStep[] };
 type Contact = { id: string; firstName: string; lastName: string; email?: string; status: "member" | "visitor"; importedFrom?: string };
 type Audit = { id: string; actorUserId: string | null; action: string; flowId: string | null; enrollmentId: string | null; stepId: string | null; metadata: Record<string, unknown>; createdAt: string };
 
-export function PeopleFlowsModule({ departmentId, csrfToken }: ModuleContext) {
+function statusLabel(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
+function auditLabel(action: string) {
+  const labels: Record<string, string> = {
+    flow_created: "flow created", flow_updated: "flow updated", flow_archived: "flow archived", flow_activated: "flow activated",
+    step_created: "step created", step_updated: "step updated", people_assigned: "people assigned",
+    assignment_completed: "assignment completed", assignment_cancelled: "assignment cancelled", assignment_active: "assignment active",
+    step_status_changed: "step status changed",
+  };
+  return labels[action] ?? action.replaceAll("_", " ");
+}
+
+export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleContext) {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [selectedFlowId, setSelectedFlowId] = useState("");
@@ -203,17 +214,17 @@ export function PeopleFlowsModule({ departmentId, csrfToken }: ModuleContext) {
               <button className="button button-primary" type="submit" disabled={busy || selectedContacts.length === 0}><Users size={15} />Assign selected</button>
             </form>}
             {assignments.length === 0 ? <p className="people-flows-empty">No assignments yet.</p> : <div className="people-flows-assignments">{assignments.map((assignment) => <article className="people-flows-assignment" key={assignment.id}>
-              <div className="people-flows-section-heading"><div><h3>{assignment.contactName}</h3><p>{assignment.status} · {assignment.dueOn ? `Due ${assignment.dueOn}` : "No overall due date"}</p></div>
+              <div className="people-flows-section-heading"><div><h3>{assignment.contactName}</h3><p>{statusLabel(assignment.status)} · {assignment.dueOn ? `Due ${assignment.dueOn}` : "No overall due date"}</p></div>
                 {assignment.status === "active" ? <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "completed")} disabled={busy}>Complete workflow</button> : <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "active")} disabled={busy}>Reopen</button>}
                 {assignment.status === "active" && <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "cancelled")} disabled={busy}>Cancel</button>}
               </div>
-              <div className="people-flows-progress">{assignment.steps.map((step) => <div className="people-flows-progress-step" key={step.stepId}><label><input type="checkbox" checked={step.status === "completed"} disabled={busy || assignment.status !== "active"} onChange={(event) => void setStepStatus(assignment, step, event.target.checked ? "completed" : "pending")} /><span><strong>{step.title}</strong><small>{step.required ? "Required" : "Optional"} · {step.dueOn ? `Due ${step.dueOn}` : "No due date"}{step.status === "skipped" ? " · Skipped" : ""}</small></span></label></div>)}</div>
+              <div className="people-flows-progress">{assignment.steps.map((step) => <div className="people-flows-progress-step" key={step.stepId}><label><input type="checkbox" checked={step.status === "completed"} disabled={busy || assignment.status !== "active"} onChange={(event) => void setStepStatus(assignment, step, event.target.checked ? "completed" : "pending")} /><span><strong>{step.title}</strong><small>{!step.active ? "Archived step" : step.required ? "Required" : "Optional"} · {step.dueOn ? `Due ${step.dueOn}` : "No due date"}{step.status === "skipped" ? " · Skipped" : ""}</small></span></label></div>)}</div>
             </article>)}</div>}
           </section>
 
           <section className="people-flows-section">
             <div className="people-flows-section-heading"><div><h2>Recent activity</h2><p>Audit history records workflow actions, not private notes.</p></div></div>
-            {audit.filter((entry) => entry.flowId === selectedFlow.id).slice(0, 20).map((entry) => <div className="people-flows-audit" key={entry.id}><strong>{entry.action.replaceAll("_", " ")}</strong><span>{new Date(entry.createdAt).toLocaleString()}</span></div>)}
+            {audit.filter((entry) => entry.flowId === selectedFlow.id).slice(0, 20).map((entry) => <div className="people-flows-audit" key={entry.id}><strong>{auditLabel(entry.action)}</strong><span>{new Date(entry.createdAt).toLocaleString(language)}</span></div>)}
             {audit.every((entry) => entry.flowId !== selectedFlow.id) && <p className="people-flows-empty">No workflow activity yet.</p>}
           </section>
         </>}
