@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from "react";
 import { AudioLines, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Eye, EyeOff, FileMusic, FileUp, Folder, FolderPlus, GripVertical, ListMusic, Monitor, Music2, Pause, Play, Plus, Search, Settings2, SlidersHorizontal, Trash2, Upload, WandSparkles, X } from "lucide-react";
-import type { ModuleRealtime } from "../../module-registry";
+import type { UserLanguage } from "@smart-church/contracts";
+import { translateModuleText, type ModuleRealtime } from "../../module-registry";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
+import { translationsForModule } from "../translations";
 import "./presenter.css";
 
 type Dataset = { id: string; name: string; description: string; songCount: number; slideCount: number; builtIn: boolean };
@@ -51,8 +54,10 @@ const defaultLibraries = [
   { id: "singt-text", name: "Singt just text", icon: AudioLines },
   { id: "singt-lower-third", name: "Singt lower third", icon: FileMusic },
 ];
+const presenterTranslations = mergeModuleTranslationOverrides("presenter", translationsForModule("presenter"));
 
-export function PresenterWorkspace({ departmentId, csrfToken, realtime, capabilities = { canEdit: true, canPresent: true, canManageLayouts: true } }: { departmentId: string; csrfToken: string; realtime?: ModuleRealtime; capabilities?: { canEdit: boolean; canPresent: boolean; canManageLayouts: boolean } }) {
+export function PresenterWorkspace({ departmentId, csrfToken, realtime, language = "en", capabilities = { canEdit: true, canPresent: true, canManageLayouts: true } }: { departmentId: string; csrfToken: string; realtime?: ModuleRealtime; language?: UserLanguage; capabilities?: { canEdit: boolean; canPresent: boolean; canManageLayouts: boolean } }) {
+  const confirmPresenterAction = (message: string) => window.confirm(translateModuleText(message, presenterTranslations, language));
   const [datasetId, setDatasetId] = useState(defaultLibraries[0].id);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [sessions, setSessions] = useState<PresenterSession[]>([]);
@@ -590,7 +595,7 @@ export function PresenterWorkspace({ departmentId, csrfToken, realtime, capabili
   }
 
   async function deleteMedia(item: PresenterMedia) {
-    if (!capabilities.canManageLayouts || !window.confirm(`Delete media “${item.name}”? This cannot be undone.`)) return;
+    if (!capabilities.canManageLayouts || !confirmPresenterAction(`Delete media “${item.name}”? This cannot be undone.`)) return;
     try {
       const response = await fetch(`/api/presenter/media/${encodeURIComponent(item.id)}`, {
         method: "DELETE",
@@ -656,7 +661,12 @@ export function PresenterWorkspace({ departmentId, csrfToken, realtime, capabili
 
   async function deletePresentationLibrary(library: PresentationLibrary) {
     const items = folderPresentations(library);
-    if (!window.confirm(`Delete library “${library.name}”${items.length ? ` and its ${items.length} presentation${items.length === 1 ? "" : "s"}` : ""}? This cannot be undone.`)) return;
+    const confirmation = items.length === 1
+      ? `Delete library “${library.name}” and its ${items.length} presentation? This cannot be undone.`
+      : items.length > 1
+        ? `Delete library “${library.name}” and its ${items.length} presentations? This cannot be undone.`
+        : `Delete library “${library.name}”? This cannot be undone.`;
+    if (!confirmPresenterAction(confirmation)) return;
     const failed: string[] = [];
     for (const item of items) {
       try { await removeDataset(item.id); }
@@ -672,19 +682,19 @@ export function PresenterWorkspace({ departmentId, csrfToken, realtime, capabili
   }
 
   async function deletePresentation(presentation: Dataset) {
-    if (!window.confirm(`Delete “${presentation.name}”? This cannot be undone.`)) return;
+    if (!confirmPresenterAction(`Delete “${presentation.name}”? This cannot be undone.`)) return;
     try { await removeDataset(presentation.id); setNotice(`Deleted “${presentation.name}”.`); }
     catch (error) { setNotice(error instanceof Error ? error.message : "Could not delete the presentation."); }
   }
 
   async function deleteCustomDataset(dataset: Dataset) {
-    if (!window.confirm(`Delete library “${dataset.name}” and all of its songs? This cannot be undone.`)) return;
+    if (!confirmPresenterAction(`Delete library “${dataset.name}” and all of its songs? This cannot be undone.`)) return;
     try { await removeDataset(dataset.id); setNotice(`Deleted library “${dataset.name}”.`); }
     catch (error) { setNotice(error instanceof Error ? error.message : "Could not delete the library."); }
   }
 
   function deletePlaylist(playlist: PresenterPlaylist) {
-    if (!window.confirm(`Delete playlist “${playlist.name}”?`)) return;
+    if (!confirmPresenterAction(`Delete playlist “${playlist.name}”?`)) return;
     setPlaylists((current) => current.filter((item) => item.id !== playlist.id));
     if (activePlaylistId === playlist.id) setActivePlaylistId(null);
   }

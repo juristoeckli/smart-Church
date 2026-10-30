@@ -61,7 +61,7 @@ export function moduleTranslation(translations: ModuleRegistration["translations
   return translations?.[language]?.[key] ?? translations?.en?.[key] ?? englishFallback;
 }
 
-function translateModuleText(value: string, translations: ModuleRegistration["translations"], language: UserLanguage): string {
+export function translateModuleText(value: string, translations: ModuleRegistration["translations"], language: UserLanguage): string {
   const match = value.match(/^(\s*)([\s\S]*?)(\s*)$/);
   if (!match) return value;
   const [, before, text, after] = match;
