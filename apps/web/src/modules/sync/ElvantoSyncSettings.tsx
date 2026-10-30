@@ -29,9 +29,9 @@ type GroupsPreview = {
 };
 type ServicesPreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
-  createCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
+  createCount: number; updateCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
   assignmentCreateCount: number; assignmentChangeCount: number; missingPeopleLinkCount: number;
-  sample: Array<{ title: string; date: string; action: string }>;
+  sample: Array<{ title: string; date: string; action: string; changedFields: string[] }>;
 };
 type CalendarPreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean; startDate: string; endDate: string;
@@ -353,7 +353,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   }
 
   async function importServices() {
-    if (!servicesPreview?.complete || servicesPreview.createCount + servicesPreview.alreadyLinkedCount <= 0) return;
+    if (!servicesPreview?.complete || servicesPreview.createCount + servicesPreview.updateCount + servicesPreview.alreadyLinkedCount <= 0) return;
     setBusy(true); setFeedback(""); setError("");
     try {
       const response = await fetch("/api/modules/sync/elvanto/services-import", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, ...(status?.servicesImport?.complete ? { body: JSON.stringify({ restart: true }) } : {}) });
@@ -676,11 +676,11 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {groupsExportPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Groups export preview</strong><span>{groupsExportPreview.groups} local groups · {groupsExportPreview.create} new · {groupsExportPreview.update} updates · {groupsExportPreview.addMembers} members to add · {groupsExportPreview.review} needing review</span></div><div className="sync-feedback"><span>{groupsExportPreview.missingPeople} active members need a People export first</span> · <span>{groupsExportPreview.remoteOnlyMembers} Elvanto memberships will be kept for review</span></div>{groupsExportPreview.sample.map((group, index) => <div className="sync-feedback" key={`${group.name}-${index}`}><strong>{group.name}</strong><span>{group.action.replaceAll("_", " ")} · {group.membersToAdd} members to add · {group.missingPeople} people not linked · {group.remoteOnlyMembers} remote-only memberships</span></div>)}<small className="sync-help">Only group names and active member links are exported. Member removals are never automatic; Elvanto-only members stay in place for manual review. Writes are resumable in batches of at most five API calls.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void exportGroups()} disabled={busy || !groupsExportPreview.complete || groupsExportPreview.create + groupsExportPreview.update + groupsExportPreview.addMembers === 0}><Check size={15} />{busy ? "Exporting…" : status?.groupsExport && !status.groupsExport.complete ? "Continue Groups export" : "Export Groups to Elvanto"}</button></div></div>}
     {servicesPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Services import preview</strong><span>{servicesPreview.scannedCount} service times scanned{servicesPreview.reportedTotal !== null && <> across {servicesPreview.reportedTotal} Elvanto services</>}{!servicesPreview.complete && <em> — preview is incomplete</em>}</span></div>
-      <div className="sync-feedback"><span>{servicesPreview.createCount} new</span> · <span>{servicesPreview.alreadyLinkedCount} already linked</span> · <span>{servicesPreview.conflictCount} same-title/date conflicts</span> · <span>{servicesPreview.invalidCount} invalid or duplicate rows</span></div>
+      <div className="sync-feedback"><span>{servicesPreview.createCount} {tr("new")}</span> · <span>{servicesPreview.updateCount} {tr("updates")}</span> · <span>{servicesPreview.alreadyLinkedCount} {tr("unchanged")}</span> · <span>{servicesPreview.conflictCount} same-title/date conflicts</span> · <span>{servicesPreview.invalidCount} invalid or duplicate rows</span></div>
       <div className="sync-feedback"><span>{servicesPreview.assignmentCreateCount} new volunteer assignments</span> · <span>{servicesPreview.assignmentChangeCount} assignment changes</span> · <span>{servicesPreview.missingPeopleLinkCount} assignments need People links</span></div>
-      {servicesPreview.sample.map((service, index) => <div className="sync-feedback" key={`${service.date}-${service.title}-${index}`}><strong>{service.title}</strong><span>{service.date} · {service.action === "already_linked" ? "Already linked" : service.action === "review_event_conflict" ? "Review event conflict" : service.action === "needs_review" ? "Needs review" : service.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New service"}</span></div>)}
+      {servicesPreview.sample.map((service, index) => <div className="sync-feedback" key={`${service.date}-${service.title}-${index}`}><strong>{service.title}</strong><span>{service.date} · {service.action === "update" ? `${tr("Update")}: ${service.changedFields.map((field) => tr(field)).join(", ")}` : service.action === "already_linked" ? tr("Unchanged") : service.action === "review_event_conflict" ? "Review event conflict" : service.action === "needs_review" ? "Needs review" : service.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New service"}</span></div>)}
       <small className="sync-help">Only complete previews can be imported. Each batch advances up to five Elvanto pages. Imported events are read-only and are not deleted when absent from Elvanto.</small>
-      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importServices()} disabled={busy || !servicesPreview.complete || servicesPreview.createCount + servicesPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.servicesImport?.complete ? "Refresh Services from Elvanto" : status?.servicesImport ? "Continue Services import" : "Import eligible services"}</button></div>
+      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importServices()} disabled={busy || !servicesPreview.complete || servicesPreview.createCount + servicesPreview.updateCount + servicesPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.servicesImport?.complete ? "Refresh Services from Elvanto" : status?.servicesImport ? "Continue Services import" : "Import eligible services"}</button></div>
     </div>}
     {calendarPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Calendar import preview</strong><span>{calendarPreview.scannedCount} events scanned, {calendarPreview.startDate} – {calendarPreview.endDate}{!calendarPreview.complete && <em> — preview is incomplete</em>}</span></div>

@@ -281,6 +281,25 @@ function mapElvantoServices(service: JsonObject, contacts: Map<string, string>) 
     }];
   });
 }
+function elvantoServiceChanges(event: JsonObject, linked: {
+  title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null;
+  location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[];
+}) {
+  const changedFields: string[] = [];
+  const time = (value: unknown) => value == null ? null : String(value).slice(0, 5);
+  if (linked.title !== event.title) changedFields.push("title");
+  if (linked.event_date !== event.date) changedFields.push("date");
+  if (linked.is_all_day !== Boolean(event.isAllDay)) changedFields.push("all-day status");
+  if (time(linked.start_time) !== time(event.start)) changedFields.push("start time");
+  if (time(linked.end_time) !== time(event.end)) changedFields.push("end time");
+  if ((linked.location ?? "") !== String(event.location ?? "")) changedFields.push("location");
+  if ((linked.description ?? "") !== String(event.description ?? "")) changedFields.push("description");
+  if ((linked.room ?? "") !== String(event.room ?? "")) changedFields.push("room");
+  const positions = mergeElvantoPositionResponses(objectRows(event.positions), linked.positions);
+  if (JSON.stringify(canonicalJson(positions)) !== JSON.stringify(canonicalJson(objectRows(linked.positions)))) changedFields.push("volunteer assignments");
+  if (JSON.stringify(canonicalJson(objectRows(event.timePlan))) !== JSON.stringify(canonicalJson(objectRows(linked.time_plan)))) changedFields.push("service plan");
+  return changedFields;
+}
 function mapElvantoCalendarEvent(event: JsonObject) {
   const id = idOf(event);
   const start = elvantoTime(event.start_date ?? event.startDate ?? event.starts);
@@ -2302,20 +2321,20 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (batch.length < 1000 || total !== null && page * 1000 >= total) { complete = true; break; }
       }
       const [local, contacts] = await Promise.all([
-        pool!.query<{ source_id: string | null; source_system: string | null; title: string; event_date: string; positions: JsonObject[] }>("SELECT source_id,source_system,title,event_date::text,positions FROM service_events WHERE department_id=$1", [dept]),
+        pool!.query<{ source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[] }>("SELECT source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room,positions,time_plan FROM service_events WHERE department_id=$1", [dept]),
         pool!.query<{ source_id: string; id: string }>("SELECT source_id,id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]),
       ]);
       const events = services.flatMap((service) => mapElvantoServices(service, new Map(contacts.rows.map((person) => [person.source_id, person.id]))));
       const bySource = new Map(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
       const byTitleDate = new Set(local.rows.map((event) => `${event.event_date}|${event.title.trim().toLocaleLowerCase()}`));
-      const seen = new Set<string>(); const sample: Array<{ title: string; date: string; action: string }> = [];
-      let createCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0;
+      const seen = new Set<string>(); const sample: Array<{ title: string; date: string; action: string; changedFields: string[] }> = [];
+      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0;
       let assignmentCreateCount = 0; let assignmentChangeCount = 0; let missingPeopleLinkCount = 0;
       for (const event of events) {
         let action: string;
         if (!event.sourceId || !event.title || !/^\d{4}-\d{2}-\d{2}$/.test(event.date) || !/^\d{2}:\d{2}$/.test(event.start)) { invalidCount += 1; action = "needs_review"; }
         else if (seen.has(event.sourceId)) { invalidCount += 1; action = "duplicate_source_id"; }
-        else if (bySource.has(event.sourceId)) { alreadyLinkedCount += 1; action = "already_linked"; }
+        else if (bySource.has(event.sourceId)) { action = "already_linked"; }
         else if (byTitleDate.has(`${event.date}|${event.title.trim().toLocaleLowerCase()}`)) { conflictCount += 1; action = "review_event_conflict"; }
         else { createCount += 1; action = "create"; }
         seen.add(event.sourceId);
@@ -2325,12 +2344,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const positionDelta = elvantoPositionDelta(incomingPositions, linked?.positions);
         assignmentCreateCount += positionDelta.created;
         assignmentChangeCount += positionDelta.changed;
-        if (sample.length < 50) sample.push({ title: event.title, date: event.date, action });
+        const changedFields = action === "already_linked" && linked?.source_system === "elvanto" ? elvantoServiceChanges(event, linked) : [];
+        if (changedFields.length) { updateCount += 1; action = "update"; }
+        else if (action === "already_linked") alreadyLinkedCount += 1;
+        if (sample.length < 50) sample.push({ title: event.title, date: event.date, action, changedFields });
       }
       const saved = await pool!.query("UPDATE elvanto_sync_settings SET services_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,services_preview_complete=$2,services_preview_scanned_count=$3,services_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, complete, events.length, total, row.updated_at]);
       if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-      await recordElvantoAudit(pool!, dept, "services", "preview", complete ? "complete" : "incomplete", { scanned: events.length, create: createCount, alreadyLinked: alreadyLinkedCount, conflicts: conflictCount, invalid: invalidCount, assignmentCreate: assignmentCreateCount, assignmentChange: assignmentChangeCount, missingPeopleLinks: missingPeopleLinkCount });
-      return { scannedCount: events.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, conflictCount, invalidCount, assignmentCreateCount, assignmentChangeCount, missingPeopleLinkCount, sample };
+       await recordElvantoAudit(pool!, dept, "services", "preview", complete ? "complete" : "incomplete", { scanned: events.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, conflicts: conflictCount, invalid: invalidCount, assignmentCreate: assignmentCreateCount, assignmentChange: assignmentChangeCount, missingPeopleLinks: missingPeopleLinkCount });
+       return { scannedCount: events.length, reportedTotal: total, complete, createCount, updateCount, alreadyLinkedCount, conflictCount, invalidCount, assignmentCreateCount, assignmentChangeCount, missingPeopleLinkCount, sample };
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/services-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -2363,7 +2385,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const reported = Number((payload.services as JsonObject | undefined)?.total); if (Number.isFinite(reported) && reported >= 0) total = reported;
           const [contacts, existing] = await Promise.all([
             pool!.query<{ id: string; source_id: string }>("SELECT id,source_id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]),
-            pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; positions: JsonObject[] }>("SELECT id,source_id,source_system,title,event_date::text,positions FROM service_events WHERE department_id=$1", [dept]),
+            pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[] }>("SELECT id,source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room,positions,time_plan FROM service_events WHERE department_id=$1", [dept]),
           ]);
           const contactBySource = new Map(contacts.rows.map((contact) => [contact.source_id, contact.id]));
           const eventBySource = new Map(existing.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
@@ -2380,6 +2402,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               if (!linked && ownedTitleDates.has(`${event.date}|${event.title.trim().toLocaleLowerCase()}`)) { pageSkipped += 1; continue; }
               const values = [dept, event.title, event.date, event.isAllDay ?? false, event.start, event.end, event.location, event.description, event.room, JSON.stringify(event.positions), JSON.stringify(event.timePlan), event.sourceId];
               if (linked) {
+                if (!elvantoServiceChanges(event, linked).length) continue;
                 const positions = mergeElvantoPositionResponses(event.positions, linked.positions);
                 const changed = await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,source_system='elvanto',source_id=$13,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values.slice(0, 9), JSON.stringify(positions), values[10], values[11]]);
                 if (!changed.rowCount) { pageSkipped += 1; continue; } pageUpdated += 1;
