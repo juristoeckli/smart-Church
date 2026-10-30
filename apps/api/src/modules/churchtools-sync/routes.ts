@@ -643,6 +643,14 @@ function rows(payload: JsonObject): JsonObject[] {
   const options = [payload.data, payload.data?.data, payload.persons, payload.groups, payload.events, payload.appointments, payload.resources, payload.members, payload.data?.persons, payload.data?.groups, payload.data?.events, payload.data?.resources, payload.data?.appointments, payload.data?.members, payload.items];
   return (options.find(Array.isArray) ?? []).filter((value: unknown) => value && typeof value === "object");
 }
+function sanitizeChurchToolsProfile(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => sanitizeChurchToolsProfile(item));
+  const secretKey = /(password|passphrase|token|secret|credential|api.?key|access.?key|private.?key|authorization)/i;
+  return Object.fromEntries(Object.entries(value as JsonObject)
+    .filter(([key]) => !secretKey.test(key))
+    .map(([key, item]) => [key, sanitizeChurchToolsProfile(item)]));
+}
 function idOf(row: JsonObject) {
   const value = row.id ?? row.personId ?? row.groupId ?? row.eventId ?? row.appointmentId ?? row.resourceId;
   return value === undefined || value === null ? "" : String(value);
@@ -950,7 +958,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           return { sourceId: idOf(resource), name: firstText(resource.name, resource.title, resource.resourceName).slice(0, 120), category: resourceCategory(resource), description: firstText(resource.description, resource.note, resource.information).slice(0, 1000), location: firstText(resource.location?.name, resource.location, resource.place?.name, resource.place).slice(0, 160), capacity: Number.isInteger(capacityValue) && capacityValue > 0 && capacityValue <= 10000 ? capacityValue : null, requiresApproval: approvalValue === true || approvalValue === 1 || approvalValue === "1", active: resource.active !== false && resource.archived !== true && resource.isArchived !== true };
         });
         const records: JsonObject[] = [
-          ...peopleResult.items.map((person) => ({ area: "person", sourceId: idOf(person), firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) })),
+          ...peopleResult.items.map((person) => ({ area: "person", sourceId: idOf(person), firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: sanitizeChurchToolsProfile(person), unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) })),
           ...groupsResult.items.map((group) => {
             const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
             return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
@@ -1043,11 +1051,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
               }
               if (linked.rowCount) {
-                await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]);
+                await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',churchtools_profile=$7::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone, JSON.stringify(record.sourceProfile ?? {})]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
                 batchUpdated += 1;
               } else {
-                const inserted = await db.query<{ id: string }>("INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'member') ON CONFLICT DO NOTHING RETURNING id", [dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]);
+                const inserted = await db.query<{ id: string }>("INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status,churchtools_profile) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'member',$6::jsonb) ON CONFLICT DO NOTHING RETURNING id", [dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone, JSON.stringify(record.sourceProfile ?? {})]);
                 if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
               }
             } else if (record.area === "group") {
