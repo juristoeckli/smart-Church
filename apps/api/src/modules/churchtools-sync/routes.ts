@@ -2703,7 +2703,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const dept = await department(request, reply, true); if (!dept) return reply;
       let directions: ElvantoDirections;
       try { directions = normalizeElvantoDirections(request.body.directions); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Choose valid sync directions." }); }
-      for (const area of ["peopleFlows", "services", "financial"] as const) {
+      for (const area of ["services", "financial"] as const) {
         if (directions[area] !== "off" && directions[area] !== "elvanto_to_smart_church") {
           return reply.code(400).send({ error: `The ${area} sync direction is read-only because Smart Church has no outbound writer for this data area. Choose Off or Elvanto to Smart Church.` });
         }

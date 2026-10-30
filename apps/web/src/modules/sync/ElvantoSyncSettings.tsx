@@ -70,7 +70,7 @@ const areas: Array<{ id: Area; label: string }> = [
   { id: "calendar", label: "Calendar events" },
   { id: "financial", label: "Financial and giving data" },
 ];
-const readOnlyAreas: Area[] = ["peopleFlows", "services", "financial"];
+const readOnlyAreas: Area[] = ["services", "financial"];
 const offDirections: Directions = { people: "off", peopleFlows: "off", groups: "off", services: "off", songs: "off", calendar: "off", financial: "off" };
 
 export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) {
