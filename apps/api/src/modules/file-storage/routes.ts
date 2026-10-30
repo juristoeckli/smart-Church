@@ -37,8 +37,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const files = (input as { files: Array<Record<string, unknown>> }).files;
       await client.query("DELETE FROM stored_files WHERE department_id=$1", [departmentId]);
       for (const file of files) {
-        if (typeof file.id !== "string" || typeof file.title !== "string" || typeof file.category !== "string" || typeof file.file_name !== "string" || typeof file.content_type !== "string" || typeof file.file_size !== "number" || typeof file.file_data !== "string" || !/^\d+$/.test(file.file_data.replace(/[\r\n]/g, ""))) throw new Error("The File Storage snapshot contains an invalid file record.");
-        const buffer = Buffer.from(file.file_data, "base64");
+        const encodedData = typeof file.file_data === "string" ? file.file_data.replace(/[\r\n]/g, "") : "";
+        if (typeof file.id !== "string" || typeof file.title !== "string" || typeof file.category !== "string" || typeof file.file_name !== "string" || typeof file.content_type !== "string" || typeof file.file_size !== "number" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedData)) throw new Error("The File Storage snapshot contains an invalid file record.");
+        const buffer = Buffer.from(encodedData, "base64");
         if (buffer.length !== file.file_size || buffer.length > resourceLimit) throw new Error("A replicated file does not match its declared size or exceeds 25 MiB.");
         await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.created_at, file.updated_at]);
       }

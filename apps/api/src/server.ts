@@ -186,6 +186,14 @@ async function lockDepartmentForWrite(client: PoolClient, selectedDepartmentId: 
   return state.rows[0]?.role === "primary";
 }
 
+function isRedundancyTransitionMutation(request: FastifyRequest) {
+  if (request.method.toUpperCase() !== "POST") return false;
+  const path = request.url.split("?", 1)[0];
+  return path === "/api/modules/sync/federation/redundancy/standby"
+    || path === "/api/modules/sync/federation/redundancy/promote"
+    || path === "/api/modules/sync/federation/redundancy/fence";
+}
+
 async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, requireSiteAdmin = false, allowQueryLocation = false, requiredPermission?: LocationPermission) {
   if (!pool) return null;
   const header = request.headers["x-department-id"];
@@ -197,7 +205,7 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
     reply.code(400).send({ error: "Choose a valid location." });
     return null;
   }
-  if (new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase()) && !await isDepartmentWritable(selectedId)) {
+  if (new Set(["POST", "PUT", "PATCH", "DELETE"]).has(request.method.toUpperCase()) && !isRedundancyTransitionMutation(request) && !await isDepartmentWritable(selectedId)) {
     reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
     return null;
   }

@@ -10,6 +10,17 @@ const snapshotTableNames = [
 type SnapshotTable = typeof snapshotTableNames[number];
 type CoreSnapshot = { version: 2; sourceDepartmentId: string; department: { name: string; time_zone: string; enabled_modules: string[] }; tables: Partial<Record<SnapshotTable, Array<Record<string, unknown>>>> };
 
+async function standbyReplicatedUserIds(client: Pick<PoolClient, "query">, departmentId: string) {
+  const result = await client.query<{ role: string; replicated_user_ids: string[] }>("SELECT role,replicated_user_ids FROM sync_site_redundancy WHERE department_id=$1", [departmentId]);
+  return result.rows[0]?.role === "standby" ? new Set(result.rows[0].replicated_user_ids ?? []) : null;
+}
+
+function replicationValue(value: unknown, dataType: string | undefined) {
+  if (value === null || value === undefined) return null;
+  if (dataType === "json" || dataType === "jsonb") return JSON.stringify(value);
+  return value;
+}
+
 const exportQueries: Record<SnapshotTable, string> = {
   contacts: "SELECT * FROM contacts WHERE department_id=$1 ORDER BY id",
   service_events: "SELECT * FROM service_events WHERE department_id=$1 ORDER BY id",
@@ -74,10 +85,17 @@ function mapUserFields(row: Record<string, unknown>, userIdMap: Map<string, stri
 async function collect(client: PoolClient, departmentId: string): Promise<CoreSnapshot> {
   const department = await client.query<{ name: string; time_zone: string; enabled_modules: string[] }>("SELECT name,time_zone,enabled_modules FROM departments WHERE id=$1", [departmentId]);
   if (!department.rowCount) throw new Error("The replicated site no longer exists.");
+  const replicatedUserIds = await standbyReplicatedUserIds(client, departmentId);
   const tables: CoreSnapshot["tables"] = {};
   for (const table of snapshotTableNames) {
     const result = await client.query(exportQueries[table], [departmentId]);
-    tables[table] = result.rows as Array<Record<string, unknown>>;
+    let rows = result.rows as Array<Record<string, unknown>>;
+    if (replicatedUserIds) {
+      if (table === "app_users") rows = rows.filter((row) => replicatedUserIds.has(String(row.id)));
+      else if (table === "department_memberships" || table === "user_phone_numbers") rows = rows.filter((row) => replicatedUserIds.has(String(row.user_id)));
+      else if (table === "user_relationships") rows = rows.filter((row) => replicatedUserIds.has(String(row.user_id)) && replicatedUserIds.has(String(row.related_user_id)));
+    }
+    tables[table] = rows;
   }
   return { version: 2, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
@@ -148,14 +166,27 @@ export function registerCoreReplicationAdapter(pool: Pool) {
         recordCount += 1;
       }
 
+      const replicatedUserIds = new Set(userIdMap.values());
+      const localServerAdminMemberships = (await client.query<Record<string, unknown>>(
+        `SELECT membership.user_id,membership.role,membership.contact_id,membership.permissions,membership.video_permissions,membership.presenter_permissions,membership.module_permissions
+           FROM department_memberships membership JOIN app_users account ON account.id=membership.user_id
+          WHERE membership.department_id=$1 AND account.role='server_admin'`, [targetDepartmentId],
+      )).rows.filter((membership) => !replicatedUserIds.has(String(membership.user_id)));
+      const localServerAdminIds = new Set(localServerAdminMemberships.map((membership) => String(membership.user_id)));
       const membershipIdsResult = await client.query<{ user_id: string }>("SELECT user_id FROM department_memberships WHERE department_id=$1", [targetDepartmentId]);
       const previousUsers = membershipIdsResult.rows.map((row) => row.user_id);
+      const usersBeingReplaced = previousUsers.filter((userId) => !localServerAdminIds.has(userId));
       await client.query("UPDATE departments SET name=$2,time_zone=$3,enabled_modules=$4 WHERE id=$1", [targetDepartmentId, snapshot.department.name, snapshot.department.time_zone, snapshot.department.enabled_modules]);
       for (const query of deleteQueries) await client.query(query, [targetDepartmentId]);
-      await client.query("DELETE FROM user_relationships WHERE user_id=ANY($1::uuid[]) OR related_user_id=ANY($1::uuid[])", [previousUsers]);
-      await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [previousUsers]);
+      await client.query("DELETE FROM user_relationships WHERE user_id=ANY($1::uuid[]) OR related_user_id=ANY($1::uuid[])", [usersBeingReplaced]);
+      await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersBeingReplaced]);
 
       const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_attendance_checkins", "event_registrations"];
+      const jsonColumns = await client.query<{ table_name: string; column_name: string; data_type: string }>(
+        "SELECT table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='public' AND table_name=ANY($1::text[]) AND data_type IN ('json','jsonb')",
+        [insertOrder],
+      );
+      const jsonTypes = new Map(jsonColumns.rows.map((column) => [`${column.table_name}.${column.column_name}`, column.data_type]));
       for (const table of insertOrder) {
         for (const raw of tables[table] ?? []) {
           const row = { ...objectRecord(raw, table) };
@@ -169,13 +200,25 @@ export function registerCoreReplicationAdapter(pool: Pool) {
           if (table === "resource_bookings") row.requested_by = userIdMap.get(String(row.requested_by)) ?? row.requested_by;
           if (table === "church_team_leaders") row.user_id = userIdMap.get(String(row.user_id)) ?? row.user_id;
           const columns = Object.keys(row);
-          const values = columns.map((column) => row[column]);
+          const values = columns.map((column) => replicationValue(row[column], jsonTypes.get(`${table}.${column}`)));
           const placeholders = columns.map((_, index) => `$${index + 1}`);
           const inserted = await client.query(`INSERT INTO public."${table}" (${columns.map((column) => `"${column}"`).join(",")}) VALUES (${placeholders.join(",")}) ON CONFLICT DO NOTHING`, values);
           if (inserted.rowCount !== 1) throw new Error(`The core site snapshot conflicts with existing ${table} data. Restore was rolled back.`);
           recordCount += 1;
         }
       }
+      for (const membership of localServerAdminMemberships) {
+        const contactId = typeof membership.contact_id === "string"
+          && (await client.query("SELECT 1 FROM contacts WHERE id=$1 AND department_id=$2", [membership.contact_id, targetDepartmentId])).rowCount
+          ? membership.contact_id
+          : null;
+        await client.query(
+          `INSERT INTO department_memberships(user_id,department_id,role,contact_id,permissions,video_permissions,presenter_permissions,module_permissions)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb) ON CONFLICT(user_id,department_id) DO NOTHING`,
+          [membership.user_id, targetDepartmentId, membership.role, contactId, membership.permissions ?? [], membership.video_permissions ?? [], membership.presenter_permissions ?? [], JSON.stringify(membership.module_permissions ?? {})],
+        );
+      }
+      await client.query("UPDATE sync_site_redundancy SET replicated_user_ids=$2::uuid[] WHERE department_id=$1 AND role='standby'", [targetDepartmentId, [...replicatedUserIds]]);
       return { recordCount };
     },
     verifySnapshot: async (client, departmentId, input, context) => {
@@ -184,7 +227,13 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       const userIdMap = context?.userIdMap ?? new Map<string, string>();
       for (const table of snapshotTableNames) {
         const expectedRows = snapshot.tables[table] ?? [];
-        const actualRows = (await client.query(exportQueries[table], [departmentId])).rows as Array<Record<string, unknown>>;
+        let actualRows = (await client.query(exportQueries[table], [departmentId])).rows as Array<Record<string, unknown>>;
+        const replicatedUserIds = await standbyReplicatedUserIds(client, departmentId);
+        if (replicatedUserIds) {
+          if (table === "app_users") actualRows = actualRows.filter((row) => replicatedUserIds.has(String(row.id)));
+          else if (table === "department_memberships" || table === "user_phone_numbers") actualRows = actualRows.filter((row) => replicatedUserIds.has(String(row.user_id)));
+          else if (table === "user_relationships") actualRows = actualRows.filter((row) => replicatedUserIds.has(String(row.user_id)) && replicatedUserIds.has(String(row.related_user_id)));
+        }
         if (actualRows.length !== expectedRows.length) return { ready: false, blockers: [`${table} has ${actualRows.length} rows; expected ${expectedRows.length}.`] };
         if (table === "app_users") {
           for (const source of expectedRows) {
