@@ -46,7 +46,7 @@ async function collect(client: Pick<PoolClient, "query">, departmentId: string):
     client.query("SELECT default_addresses,addresses,updated_at FROM video_device_address_settings WHERE department_id=$1", [departmentId]),
     client.query("SELECT id,event_id,title,description,speaker,theme,scheduled_start_at,privacy_status,youtube_broadcast_id,youtube_status,youtube_error,created_by,created_at,updated_at,youtube_playlist_id,youtube_playlist_title,youtube_playlist_added_at FROM video_planned_streams WHERE department_id=$1 ORDER BY id", [departmentId]),
     client.query("SELECT encrypted_refresh_token,channel_id,channel_title,connected_by,connected_at,updated_at,oauth_client_id FROM video_youtube_connections WHERE department_id=$1", [departmentId]),
-    client.query("SELECT singleton,youtube_client_id,youtube_client_secret_encrypted,youtube_redirect_uri,updated_by,updated_at FROM video_module_settings WHERE singleton=true"),
+    client.query("SELECT youtube_client_id,youtube_client_secret_encrypted,youtube_redirect_uri,updated_by,updated_at FROM video_module_department_settings WHERE department_id=$1", [departmentId]),
   ]);
   return {
     version: 1,
@@ -60,17 +60,13 @@ async function collect(client: Pick<PoolClient, "query">, departmentId: string):
 export function registerVideoSteffisburgReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "1",
-    getSchemaVersion: async () => `1:${encryptionKeyFingerprint()}:${await workerConfiguration().catch(() => "missing-or-invalid-worker-config")}`,
+    schemaVersion: "2",
+    getSchemaVersion: async () => `2:${encryptionKeyFingerprint()}:${await workerConfiguration().catch(() => "missing-or-invalid-worker-config")}`,
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Video Steffisburg database is unavailable."], recordCount: 0 };
       try {
         const snapshot = await collect(pool, departmentId);
         const blockers: string[] = [];
-        const otherVideoSites = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM departments department
-          LEFT JOIN installation_modules module ON module.installation_id=department.installation_id AND module.module_id='video-steffisburg'
-          WHERE department.id<>$1 AND ('video-steffisburg'=ANY(department.enabled_modules) OR module.enabled=TRUE AND (module.required=TRUE OR module.client_managed=FALSE))`, [departmentId]);
-        if (Number(otherVideoSites.rows[0]?.count ?? 0) > 0) blockers.push("Video OAuth settings are installation-wide and would replace settings used by another Video location. Make Video settings location-scoped before enabling redundancy for multiple locations.");
         try { await workerConfiguration(); }
         catch (error) { blockers.push(error instanceof Error ? error.message : "The Video module worker configuration is unavailable on this server."); }
         const worker = context.getVideoWorker();
@@ -98,13 +94,14 @@ export function registerVideoSteffisburgReplication(context: ModuleServerContext
       await client.query("DELETE FROM video_planned_streams WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM video_youtube_connections WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM video_device_address_settings WHERE department_id=$1", [departmentId]);
+      await client.query("DELETE FROM video_module_department_settings WHERE department_id=$1", [departmentId]);
       for (const row of snapshot.deviceAddresses) await client.query("INSERT INTO video_device_address_settings(department_id,default_addresses,addresses,updated_at) VALUES($1,$2::jsonb,$3::jsonb,$4)", [departmentId, JSON.stringify(row.default_addresses), JSON.stringify(row.addresses), row.updated_at]);
       const streamColumns = ["id", "event_id", "title", "description", "speaker", "theme", "scheduled_start_at", "privacy_status", "youtube_broadcast_id", "youtube_status", "youtube_error", "created_by", "created_at", "updated_at", "youtube_playlist_id", "youtube_playlist_title", "youtube_playlist_added_at"];
       for (const row of snapshot.plannedStreams) await client.query(`INSERT INTO video_planned_streams(id,department_id,${streamColumns.join(",")}) VALUES($1,${streamColumns.map((_, index) => "$" + (index + 2)).join(",")})`, [row.id, departmentId, ...streamColumns.map((column) => row[column] ?? null)]);
       for (const row of snapshot.youtubeConnections) await client.query(`INSERT INTO video_youtube_connections(department_id,encrypted_refresh_token,channel_id,channel_title,connected_by,connected_at,updated_at,oauth_client_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [departmentId, row.encrypted_refresh_token, row.channel_id, row.channel_title, row.connected_by, row.connected_at, row.updated_at, row.oauth_client_id]);
-      for (const row of snapshot.moduleSettings) await client.query(`INSERT INTO video_module_settings(singleton,youtube_client_id,youtube_client_secret_encrypted,youtube_redirect_uri,updated_by,updated_at)
-        VALUES(true,$1,$2,$3,$4,$5) ON CONFLICT(singleton) DO UPDATE SET youtube_client_id=EXCLUDED.youtube_client_id,youtube_client_secret_encrypted=EXCLUDED.youtube_client_secret_encrypted,youtube_redirect_uri=EXCLUDED.youtube_redirect_uri,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`, [row.youtube_client_id, row.youtube_client_secret_encrypted, row.youtube_redirect_uri, row.updated_by, row.updated_at]);
+      for (const row of snapshot.moduleSettings) await client.query(`INSERT INTO video_module_department_settings(department_id,youtube_client_id,youtube_client_secret_encrypted,youtube_redirect_uri,updated_by,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(department_id) DO UPDATE SET youtube_client_id=EXCLUDED.youtube_client_id,youtube_client_secret_encrypted=EXCLUDED.youtube_client_secret_encrypted,youtube_redirect_uri=EXCLUDED.youtube_redirect_uri,updated_by=EXCLUDED.updated_by,updated_at=EXCLUDED.updated_at`, [departmentId, row.youtube_client_id, row.youtube_client_secret_encrypted, row.youtube_redirect_uri, row.updated_by, row.updated_at]);
       return { recordCount: snapshot.deviceAddresses.length + snapshot.plannedStreams.length + snapshot.youtubeConnections.length + snapshot.moduleSettings.length };
     },
     verifySnapshot: async (client, departmentId, input) => {

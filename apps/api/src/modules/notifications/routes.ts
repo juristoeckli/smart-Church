@@ -97,15 +97,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   (SELECT count(*) FROM module_notification_webhook_events event JOIN module_notification_email_deliveries d ON d.provider_email_id=event.provider_email_id JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1)::text "webhookEvents",
                   EXISTS(SELECT 1 FROM module_notification_preferences WHERE department_id=$1 AND email_notifications_enabled) email_enabled`, [departmentId]);
         const row = result.rows[0];
-        const otherNotificationSites = await pool.query<{ count: string }>(`SELECT count(*)::text AS count
-          FROM departments department
-          LEFT JOIN installation_modules module ON module.installation_id=department.installation_id AND module.module_id='notifications'
-          WHERE department.installation_id=(SELECT installation_id FROM departments WHERE id=$1)
-            AND department.id<>$1
-            AND ('notifications'=ANY(department.enabled_modules) OR module.enabled=TRUE AND (module.required=TRUE OR module.client_managed=FALSE))`, [departmentId]);
-        const blockers = Number(otherNotificationSites.rows[0]?.count ?? 0) > 0
-          ? ["Email suppression records are installation-wide and would replace data used by another Notifications location. Make suppression data location-scoped before enabling redundancy for multiple locations."]
-          : [];
+        const blockers: string[] = [];
         const ready = !row.emailEnabled || await context.email.isConfigured();
         if (!ready) blockers.push("Email notifications are enabled for this site but the email connector is not configured on this server.");
         return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.deliveries) + Number(row.webhookEvents) };
@@ -139,8 +131,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("INSERT INTO module_notification_preferences(department_id,user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7)", [departmentId, userId, row.event_reminders_enabled, row.service_requests_enabled, row.follow_ups_enabled, row.email_notifications_enabled, row.updated_at]);
       }
       for (const row of snapshot.deliveries) await client.query("INSERT INTO module_notification_email_deliveries(notification_id,recipient_email,provider_email_id,status,attempt_count,next_attempt_at,last_error,sent_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(notification_id) DO UPDATE SET recipient_email=EXCLUDED.recipient_email,provider_email_id=EXCLUDED.provider_email_id,status=EXCLUDED.status,attempt_count=EXCLUDED.attempt_count,next_attempt_at=EXCLUDED.next_attempt_at,last_error=EXCLUDED.last_error,sent_at=EXCLUDED.sent_at,updated_at=EXCLUDED.updated_at", [row.notification_id, row.recipient_email, row.provider_email_id, row.status, row.attempt_count, row.next_attempt_at, row.last_error, row.sent_at, row.created_at, row.updated_at]);
-      await client.query("DELETE FROM module_notification_email_suppressions");
-      for (const row of snapshot.suppressions) await client.query("INSERT INTO module_notification_email_suppressions(email,reason,provider_event_id,created_at) VALUES($1,$2,$3,$4)", [row.email, row.reason, row.provider_event_id, row.created_at]);
+      // Suppressions are installation-wide by design. Merge them during a
+      // per-location restore so syncing one location never removes entries
+      // created by another location on this server.
+      for (const row of snapshot.suppressions) await client.query(`INSERT INTO module_notification_email_suppressions(email,reason,provider_event_id,created_at)
+        VALUES($1,$2,$3,$4)
+        ON CONFLICT(email) DO UPDATE SET
+          reason=CASE WHEN module_notification_email_suppressions.reason='email.complained' THEN module_notification_email_suppressions.reason ELSE EXCLUDED.reason END,
+          provider_event_id=EXCLUDED.provider_event_id,
+          created_at=LEAST(module_notification_email_suppressions.created_at,EXCLUDED.created_at)`, [row.email, row.reason, row.provider_event_id, row.created_at]);
       for (const row of snapshot.webhookEvents) await client.query("INSERT INTO module_notification_webhook_events(provider_event_id,event_type,provider_email_id,received_at,processed_at) VALUES($1,$2,$3,$4,$5)", [row.provider_event_id,row.event_type,row.provider_email_id,row.received_at,row.processed_at]);
       return { recordCount: snapshot.notifications.length + snapshot.preferences.length + snapshot.deliveries.length + snapshot.webhookEvents.length };
     },
@@ -167,7 +166,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         || !same(snapshot.deliveries, actualDeliveries)
         || !same(snapshot.webhookEvents, actualWebhookEvents)) return { ready: false, blockers: ["Notification, email delivery, or webhook records differ from the source snapshot after restore."] };
       const actualSuppressions = (await client.query("SELECT email,reason,provider_event_id,created_at FROM module_notification_email_suppressions ORDER BY email")).rows as Array<Record<string, unknown>>;
-      if (!same(snapshot.suppressions, actualSuppressions)) return { ready: false, blockers: ["Email bounce suppressions differ from the source snapshot after restore."] };
+      const actualSuppressionByEmail = new Map(actualSuppressions.map((row) => [String(row.email), row]));
+      const suppressionStrength = (reason: unknown) => reason === "email.complained" ? 2 : ["email.bounced", "email.suppressed"].includes(String(reason)) ? 1 : 0;
+      if (snapshot.suppressions.some((row) => {
+        const actual = actualSuppressionByEmail.get(String(row.email));
+        if (!actual) return true;
+        // A stronger suppression from another location satisfies the source
+        // entry; provider event IDs and timestamps may legitimately differ.
+        return suppressionStrength(actual.reason) < suppressionStrength(row.reason);
+      })) return { ready: false, blockers: ["Email bounce suppressions from the source are missing or weaker on the standby."] };
       return { ready: true, blockers: [] };
     },
   });
