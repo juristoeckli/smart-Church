@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Check, CircleAlert, Link2, RefreshCw, Unplug } from "lucide-react";
 import { ElvantoSongLibraryImport } from "./ElvantoSongLibraryImport";
+import { ElvantoPeopleFlowCrosswalk } from "./ElvantoPeopleFlowCrosswalk";
 
 type Direction = "off" | "bidirectional" | "elvanto_to_smart_church" | "smart_church_to_elvanto";
 type Area = "people" | "peopleFlows" | "groups" | "services" | "songs" | "calendar" | "financial";
@@ -581,6 +582,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
       <small className="sync-help">Assignments link to stable Elvanto person IDs. Imported flow definitions and assignments are read-only; records absent from Elvanto are not deleted. Continue in batches of five flows.</small>
       <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importPeopleFlows()} disabled={busy || !peopleFlowsPreview.complete || peopleFlowsPreview.flowCount === 0}><Check size={15} />{busy ? "Importing…" : status?.peopleFlowsImport?.complete ? "Refresh People Flows from Elvanto" : status?.peopleFlowsImport ? "Continue People Flows import" : "Import People Flows"}</button></div>
     </div>}
+    {status?.configured && status.peopleFlowsImport?.complete && <ElvantoPeopleFlowCrosswalk departmentId={departmentId} />}
     {groupsPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Groups import preview</strong><span>{groupsPreview.scannedCount} scanned{groupsPreview.reportedTotal !== null && <> of {groupsPreview.reportedTotal} reported by Elvanto</>}{!groupsPreview.complete && <em> — preview is incomplete</em>}</span></div>
       <div className="sync-feedback"><span>{groupsPreview.createCount} new groups</span> · <span>{groupsPreview.alreadyLinkedCount} already linked</span> · <span>{groupsPreview.nameConflictCount} name conflicts to review</span> · <span>{groupsPreview.invalidCount} invalid groups</span></div>
