@@ -39,7 +39,7 @@ import { Overview } from "./Overview";
 import { smartChurchBuildInfo } from "./build-info";
 import { Groups } from "./Groups";
 import { BookableResources } from "./BookableResources";
-import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleRegistryReady, moduleTranslation, registeredModules } from "./module-registry";
+import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleRegistryReady, moduleTranslation, registeredModules, translateModuleText } from "./module-registry";
 import { translateKnownModuleMessage, translateModuleMessage, translationsForModule } from "./modules/translations";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
@@ -747,7 +747,7 @@ function WorkspaceApp() {
   }
 
   async function deleteContact(contact: Contact) {
-    if (!(department.role === "site_admin" || (department.permissions ?? []).includes("people_manage")) || !window.confirm(`Delete ${contact.firstName} ${contact.lastName} from this site? This also removes them from their groups.`)) return;
+    if (!(department.role === "site_admin" || (department.permissions ?? []).includes("people_manage")) || !window.confirm(translateModuleText(`Delete ${contact.firstName} ${contact.lastName} from this site? This also removes them from their groups.`, translationsForModule("core-people"), activeLanguage))) return;
     try {
       const response = await departmentFetch(`/api/contacts/${encodeURIComponent(contact.id)}`, { method: "DELETE" }, department.id);
       const result = await response.json() as { error?: string };
@@ -1059,7 +1059,7 @@ function WorkspaceApp() {
 
   async function deleteSiteUser() {
     if (!editingUser || editingUser.id === authUser?.id) return;
-    const confirmed = window.confirm(`Delete ${editingUser.displayName} (@${editingUser.username})? Their account, site access, and active sessions will be removed.`);
+    const confirmed = window.confirm(translateModuleText(`Delete ${editingUser.displayName} (@${editingUser.username})? Their account, site access, and active sessions will be removed.`, translationsForModule("core-admin"), activeLanguage));
     if (!confirmed) return;
     setUserAccessFeedback(null);
     setIsUserDeleting(true);
@@ -1101,7 +1101,7 @@ function WorkspaceApp() {
 
   async function resetSiteUserPassword() {
     if (!editingUser || editingUser.id === authUser?.id || resetPassword.length < 12) return;
-    if (!window.confirm(`Reset the password for ${editingUser.displayName}? Their active sessions will end.`)) return;
+    if (!window.confirm(translateModuleText(`Reset the password for ${editingUser.displayName}? Their active sessions will end.`, translationsForModule("core-admin"), activeLanguage))) return;
     setUserAccessFeedback(null);
     setIsPasswordResetting(true);
     try {
