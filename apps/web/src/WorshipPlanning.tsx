@@ -44,7 +44,7 @@ export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, o
 
   const filteredSongs = useMemo(() => {
     const value = search.trim().toLocaleLowerCase();
-    return songs.filter((song) => song.active && (!value || `${song.title} ${song.authors ?? ""}`.toLocaleLowerCase().includes(value)));
+    return songs.filter((song) => song.active && (!value || `${song.title} ${song.authors ?? ""} ${song.defaultKey ?? ""} ${song.arrangements.map((arrangement) => `${arrangement.name} ${arrangement.key ?? ""}`).join(" ")}`.toLocaleLowerCase().includes(value)));
   }, [songs, search]);
 
   function updateArrangement(index: number, patch: Partial<WorshipSongArrangement>) {
@@ -109,6 +109,22 @@ export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, o
     setPlanDraft((current) => current ? { ...current, items: current.items.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item) } : current);
   }
 
+  function updatePlanPosition(index: number, name: string) {
+    setPlanDraft((current) => {
+      if (!current) return current;
+      const previousName = current.positions[index]?.name.trim().toLocaleLowerCase();
+      return { ...current, positions: current.positions.map((item, itemIndex) => itemIndex === index ? { name } : item), items: previousName ? current.items.map((item) => item.position?.trim().toLocaleLowerCase() === previousName ? { ...item, position: name } : item) : current.items };
+    });
+  }
+
+  function removePlanPosition(index: number) {
+    setPlanDraft((current) => {
+      if (!current) return current;
+      const removedName = current.positions[index]?.name.trim().toLocaleLowerCase();
+      return { ...current, positions: current.positions.filter((_, itemIndex) => itemIndex !== index), items: removedName ? current.items.map((item) => item.position?.trim().toLocaleLowerCase() === removedName ? { ...item, position: undefined } : item) : current.items };
+    });
+  }
+
   return <div className="modal-backdrop worship-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <section className="modal worship-modal" role="dialog" aria-modal="true" aria-labelledby="worship-title">
       <div className="modal-heading"><div><span className="eyebrow">{translate("events.worshipLibrary")}</span><h2 id="worship-title">{translate("events.worshipLibrary")}</h2><p>{translate("events.songCatalogHelp")}</p></div><button className="icon-button" type="button" aria-label={translate("events.close")} onClick={onClose}><X size={19} /></button></div>
@@ -134,14 +150,14 @@ export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, o
           <label>{translate("events.templateName")}<input required maxLength={160} value={planDraft.name} onChange={(event) => setPlanDraft((current) => current ? { ...current, name: event.target.value } : current)} /></label>
           <label>{translate("events.templateDescription")}<textarea rows={2} maxLength={1000} value={planDraft.description ?? ""} onChange={(event) => setPlanDraft((current) => current ? { ...current, description: event.target.value } : current)} /></label>
           <div className="worship-section-heading"><strong>{translate("events.planPositions")}</strong><button className="button button-secondary" type="button" onClick={() => setPlanDraft((current) => current ? { ...current, positions: [...current.positions, { name: "" }] } : current)}><Plus size={14} />{translate("events.addPosition")}</button></div>
-          {planDraft.positions.map((position, index) => <div className="worship-position" key={index}><input aria-label={translate("events.planPositions")} required maxLength={80} value={position.name} onChange={(event) => setPlanDraft((current) => current ? { ...current, positions: current.positions.map((item, itemIndex) => itemIndex === index ? { name: event.target.value } : item) } : current)} /><button className="community-row-action community-row-delete" type="button" aria-label={translate("events.remove")} onClick={() => setPlanDraft((current) => current ? { ...current, positions: current.positions.filter((_, itemIndex) => itemIndex !== index) } : current)}><Trash2 size={14} /></button></div>)}
+          {planDraft.positions.map((position, index) => <div className="worship-position" key={index}><input aria-label={translate("events.planPositions")} required maxLength={80} value={position.name} onChange={(event) => updatePlanPosition(index, event.target.value)} /><button className="community-row-action community-row-delete" type="button" aria-label={translate("events.remove")} onClick={() => removePlanPosition(index)}><Trash2 size={14} /></button></div>)}
           <div className="worship-section-heading"><strong>{translate("events.planItems")}</strong><button className="button button-secondary" type="button" onClick={() => setPlanDraft((current) => current ? { ...current, items: [...current.items, { title: "" }] } : current)}><Plus size={14} />{translate("events.addPlanItem")}</button></div>
           {planDraft.items.map((item, index) => {
             const selectedSong = songs.find((song) => song.id === item.songId);
             return <div className="worship-plan-item" key={index}><div className="worship-plan-item-heading"><strong>{translate("events.planItems")} {index + 1}</strong><div><button className="community-row-action" type="button" aria-label={`${translate("events.planItems")} ${translate("events.add")}`} disabled={index === 0} onClick={() => setPlanDraft((current) => { if (!current) return current; const items = [...current.items]; [items[index - 1], items[index]] = [items[index], items[index - 1]]; return { ...current, items }; })}><ArrowUp size={14} /></button><button className="community-row-action" type="button" aria-label={`${translate("events.planItems")} ${translate("events.add")}`} disabled={index === planDraft.items.length - 1} onClick={() => setPlanDraft((current) => { if (!current) return current; const items = [...current.items]; [items[index], items[index + 1]] = [items[index + 1], items[index]]; return { ...current, items }; })}><ArrowDown size={14} /></button><button className="community-row-action community-row-delete" type="button" aria-label={translate("events.remove")} onClick={() => setPlanDraft((current) => current ? { ...current, items: current.items.filter((_, itemIndex) => itemIndex !== index) } : current)}><Trash2 size={14} /></button></div></div>
               <div className="form-row"><label>{translate("events.chooseSong")}<select value={item.songId ?? ""} onChange={(event) => { const song = songs.find((candidate) => candidate.id === event.target.value); updatePlanItem(index, { songId: song?.id, arrangementId: undefined, title: song?.title ?? item.title }); }}><option value="">{translate("events.noSong")}</option>{songs.filter((song) => song.active).map((song) => <option key={song.id} value={song.id}>{song.title}</option>)}</select></label>{selectedSong && <label>{translate("events.arrangement")}<select value={item.arrangementId ?? ""} onChange={(event) => updatePlanItem(index, { arrangementId: event.target.value || undefined })}><option value="">{translate("events.noSong")}</option>{selectedSong.arrangements.filter((arrangement) => arrangement.active).map((arrangement) => <option key={arrangement.id} value={arrangement.id}>{arrangement.name}{arrangement.key ? ` · ${arrangement.key}` : ""}</option>)}</select></label>}</div>
               <div className="form-row"><label>{translate("events.planItems")}<input required maxLength={160} value={item.title} onChange={(event) => updatePlanItem(index, { title: event.target.value })} /></label><label>{translate("events.startTime")}<input type="time" value={item.startTime ?? ""} onChange={(event) => updatePlanItem(index, { startTime: event.target.value || undefined })} /></label><label>{translate("events.minutes")}<input type="number" min="1" max="1440" value={item.durationMinutes ?? ""} onChange={(event) => updatePlanItem(index, { durationMinutes: event.target.value ? Number(event.target.value) : undefined })} /></label></div>
-              <label>{translate("events.itemNotes")}<input maxLength={500} value={item.notes ?? ""} onChange={(event) => updatePlanItem(index, { notes: event.target.value })} /></label>
+              <label>{translate("events.responsiblePosition")}<select value={item.position ?? ""} onChange={(event) => updatePlanItem(index, { position: event.target.value || undefined })}><option value="">{translate("events.noPosition")}</option>{planDraft.positions.filter((position) => position.name.trim()).map((position, positionIndex) => <option key={positionIndex} value={position.name}>{position.name}</option>)}</select></label><label>{translate("events.itemNotes")}<input maxLength={500} value={item.notes ?? ""} onChange={(event) => updatePlanItem(index, { notes: event.target.value })} /></label>
             </div>;
           })}
           <div className="form-actions">{planDraft.id && <button className="button button-danger" type="button" disabled={busy} onClick={() => { const current = plans.find((plan) => plan.id === planDraft.id); if (current) void archivePlan(current); }}><Trash2 size={14} />{translate("events.archiveTemplate")}</button>}<button className="button button-secondary" type="button" onClick={() => setPlanDraft(null)}>{translate("events.cancel")}</button><button className="button button-primary" type="submit" disabled={busy}>{translate("events.saveTemplate")}</button></div>
