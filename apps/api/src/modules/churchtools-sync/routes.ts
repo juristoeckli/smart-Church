@@ -300,6 +300,57 @@ function elvantoServiceChanges(event: JsonObject, linked: {
   if (JSON.stringify(canonicalJson(objectRows(event.timePlan))) !== JSON.stringify(canonicalJson(objectRows(linked.time_plan)))) changedFields.push("service plan");
   return changedFields;
 }
+function elvantoServiceSnapshot(event: JsonObject) {
+  return {
+    title: String(event.title ?? ""), date: String(event.date ?? ""), isAllDay: Boolean(event.isAllDay),
+    start: event.start == null ? null : String(event.start).slice(0, 5), end: event.end == null ? null : String(event.end).slice(0, 5),
+    location: String(event.location ?? ""), description: String(event.description ?? ""), room: String(event.room ?? ""),
+    positions: canonicalJson(objectRows(event.positions)), timePlan: canonicalJson(objectRows(event.timePlan)),
+  };
+}
+function elvantoServiceLocalSnapshot(linked: {
+  title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null;
+  location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[];
+}) {
+  return {
+    title: linked.title, date: linked.event_date, isAllDay: linked.is_all_day,
+    start: linked.start_time?.slice(0, 5) ?? null, end: linked.end_time?.slice(0, 5) ?? null,
+    location: linked.location ?? "", description: linked.description ?? "", room: linked.room ?? "",
+    positions: canonicalJson(objectRows(linked.positions)), timePlan: canonicalJson(objectRows(linked.time_plan)),
+  };
+}
+function elvantoServiceSnapshotChanges(snapshot: ReturnType<typeof elvantoServiceSnapshot>, linked: {
+  title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null;
+  location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[];
+}) {
+  return elvantoServiceChanges({ title: snapshot.title, date: snapshot.date, isAllDay: snapshot.isAllDay, start: snapshot.start, end: snapshot.end, location: snapshot.location, description: snapshot.description, room: snapshot.room, positions: snapshot.positions, timePlan: snapshot.timePlan }, linked);
+}
+function elvantoServiceSnapshotAsLinked(snapshot: JsonObject) {
+  return {
+    title: String(snapshot.title ?? ""), event_date: String(snapshot.date ?? ""), is_all_day: Boolean(snapshot.isAllDay),
+    start_time: snapshot.start == null ? null : String(snapshot.start), end_time: snapshot.end == null ? null : String(snapshot.end),
+    location: String(snapshot.location ?? ""), description: String(snapshot.description ?? ""), room: String(snapshot.room ?? ""),
+    positions: objectRows(snapshot.positions), time_plan: objectRows(snapshot.timePlan),
+  };
+}
+function elvantoServiceSnapshotHash(snapshot: ReturnType<typeof elvantoServiceSnapshot>) {
+  return JSON.stringify(canonicalJson(snapshot));
+}
+function elvantoCalendarSnapshot(event: NonNullable<ReturnType<typeof mapElvantoCalendarEvent>>) {
+  return { title: event.title, date: event.date, isAllDay: event.isAllDay, start: event.start, end: event.end, location: event.location, description: event.description, room: event.room };
+}
+function elvantoCalendarLocalSnapshot(linked: { title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null }) {
+  return { title: linked.title, date: linked.event_date, isAllDay: linked.is_all_day, start: linked.is_all_day ? "00:00" : linked.start_time?.slice(0, 5) ?? "", end: linked.end_time?.slice(0, 5) ?? null, location: linked.location ?? "", description: linked.description ?? "", room: linked.room ?? "" };
+}
+function elvantoCalendarSnapshotAsLinked(snapshot: JsonObject) {
+  return { title: String(snapshot.title ?? ""), event_date: String(snapshot.date ?? ""), is_all_day: Boolean(snapshot.isAllDay), start_time: snapshot.start == null ? null : String(snapshot.start), end_time: snapshot.end == null ? null : String(snapshot.end), location: String(snapshot.location ?? ""), description: String(snapshot.description ?? ""), room: String(snapshot.room ?? "") };
+}
+function elvantoCalendarSnapshotChanges(snapshot: ReturnType<typeof elvantoCalendarSnapshot>, linked: Parameters<typeof elvantoCalendarEventChanges>[1]) {
+  return elvantoCalendarEventChanges({ sourceId: "", ...snapshot }, linked);
+}
+function elvantoCalendarSnapshotHash(snapshot: ReturnType<typeof elvantoCalendarSnapshot>) {
+  return JSON.stringify(canonicalJson(snapshot));
+}
 function mapElvantoCalendarEvent(event: JsonObject) {
   const id = idOf(event);
   const start = elvantoTime(event.start_date ?? event.startDate ?? event.starts);
@@ -2358,9 +2409,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       ]);
       const events = services.flatMap((service) => mapElvantoServices(service, new Map(contacts.rows.map((person) => [person.source_id, person.id]))));
       const bySource = new Map(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
+      const sourceIds = [...new Set(events.map((event) => event.sourceId).filter(Boolean))];
+      const stateRows = sourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null }>("SELECT source_id,baseline FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND source_id=ANY($2::text[])", [dept, sourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null }> };
+      const stateBySource = new Map(stateRows.rows.map((state) => [state.source_id, state]));
       const byTitleDate = new Set(local.rows.map((event) => `${event.event_date}|${event.title.trim().toLocaleLowerCase()}`));
-      const seen = new Set<string>(); const sample: Array<{ title: string; date: string; action: string; changedFields: string[] }> = [];
-      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0;
+      const seen = new Set<string>(); const sample: Array<{ sourceId: string; title: string; date: string; action: string; changedFields: string[]; local?: ReturnType<typeof elvantoServiceLocalSnapshot>; remote?: ReturnType<typeof elvantoServiceSnapshot> }> = [];
+      const localConflicts: Array<{ sourceId: string; local: ReturnType<typeof elvantoServiceLocalSnapshot>; remote: ReturnType<typeof elvantoServiceSnapshot> }> = [];
+      const seedBaselines: Array<{ sourceId: string; snapshot: ReturnType<typeof elvantoServiceSnapshot> }> = [];
+      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let localConflictCount = 0; let invalidCount = 0;
       let assignmentCreateCount = 0; let assignmentChangeCount = 0; let missingPeopleLinkCount = 0;
       for (const event of events) {
         let action: string;
@@ -2376,15 +2432,59 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const positionDelta = elvantoPositionDelta(incomingPositions, linked?.positions);
         assignmentCreateCount += positionDelta.created;
         assignmentChangeCount += positionDelta.changed;
-        const changedFields = action === "already_linked" && linked?.source_system === "elvanto" ? elvantoServiceChanges(event, linked) : [];
-        if (changedFields.length) { updateCount += 1; action = "update"; }
-        else if (action === "already_linked") alreadyLinkedCount += 1;
-        if (sample.length < 50) sample.push({ title: event.title, date: event.date, action, changedFields });
+        let changedFields = action === "already_linked" && linked?.source_system === "elvanto" ? elvantoServiceChanges(event, linked) : [];
+        let localVersion: ReturnType<typeof elvantoServiceLocalSnapshot> | undefined;
+        let remoteVersion: ReturnType<typeof elvantoServiceSnapshot> | undefined;
+        if (action === "already_linked" && linked?.source_system === "elvanto") {
+          remoteVersion = elvantoServiceSnapshot(event);
+          localVersion = elvantoServiceLocalSnapshot(linked);
+          const baseline = stateBySource.get(event.sourceId)?.baseline;
+          if (!baseline) {
+            if (!changedFields.length) seedBaselines.push({ sourceId: event.sourceId, snapshot: remoteVersion });
+            else { action = "review_baseline_missing"; localConflictCount += 1; localConflicts.push({ sourceId: event.sourceId, local: localVersion, remote: remoteVersion }); }
+          } else {
+            const localChanges = elvantoServiceSnapshotChanges(baseline as ReturnType<typeof elvantoServiceSnapshot>, linked);
+            const remoteChanges = elvantoServiceSnapshotChanges(remoteVersion, elvantoServiceSnapshotAsLinked(baseline));
+            changedFields = remoteChanges;
+            if (localChanges.length && remoteChanges.length) {
+              action = "review_local_conflict"; localConflictCount += 1; localConflicts.push({ sourceId: event.sourceId, local: localVersion, remote: remoteVersion });
+            } else if (remoteChanges.length) { action = "update"; updateCount += 1; }
+            else if (localChanges.length) { action = "local_changes_kept"; alreadyLinkedCount += 1; }
+            else alreadyLinkedCount += 1;
+          }
+        }
+        if (sample.length < 50) sample.push({ sourceId: event.sourceId, title: event.title, date: event.date, action, changedFields, ...(localVersion ? { local: localVersion } : {}), ...(remoteVersion ? { remote: remoteVersion } : {}) });
       }
-      const saved = await pool!.query("UPDATE elvanto_sync_settings SET services_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,services_preview_complete=$2,services_preview_scanned_count=$3,services_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, complete, events.length, total, row.updated_at]);
+      const saved = await pool!.query<{ department_id: string; services_preview_at: Date | string | null }>("UPDATE elvanto_sync_settings SET services_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,services_preview_complete=$2,services_preview_scanned_count=$3,services_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id,services_preview_at", [dept, complete, events.length, total, row.updated_at]);
       if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-       await recordElvantoAudit(pool!, dept, "services", "preview", complete ? "complete" : "incomplete", { scanned: events.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, conflicts: conflictCount, invalid: invalidCount, assignmentCreate: assignmentCreateCount, assignmentChange: assignmentChangeCount, missingPeopleLinks: missingPeopleLinkCount });
-       return { scannedCount: events.length, reportedTotal: total, complete, createCount, updateCount, alreadyLinkedCount, conflictCount, invalidCount, assignmentCreateCount, assignmentChangeCount, missingPeopleLinkCount, sample };
+      const previewAt = saved.rows[0]?.services_preview_at;
+      if (previewAt) {
+        await pool!.query("DELETE FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND pending_remote IS NOT NULL", [dept]);
+        for (const baseline of seedBaselines) await pool!.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'services',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=COALESCE(elvanto_event_sync_state.baseline,EXCLUDED.baseline),updated_at=now()", [dept, baseline.sourceId, JSON.stringify(baseline.snapshot)]);
+        for (const conflict of localConflicts) await pool!.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,pending_preview_at,pending_local,pending_remote,pending_remote_hash,resolution,updated_at) VALUES($1,'services',$2,$3,$4::jsonb,$5::jsonb,$6,NULL,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET pending_preview_at=EXCLUDED.pending_preview_at,pending_local=EXCLUDED.pending_local,pending_remote=EXCLUDED.pending_remote,pending_remote_hash=EXCLUDED.pending_remote_hash,resolution=NULL,updated_at=now()", [dept, conflict.sourceId, previewAt, JSON.stringify(conflict.local), JSON.stringify(conflict.remote), elvantoServiceSnapshotHash(conflict.remote)]);
+      }
+      await recordElvantoAudit(pool!, dept, "services", "preview", complete ? "complete" : "incomplete", { scanned: events.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, conflicts: conflictCount + localConflictCount, invalid: invalidCount, assignmentCreate: assignmentCreateCount, assignmentChange: assignmentChangeCount, missingPeopleLinks: missingPeopleLinkCount });
+      return { scannedCount: events.length, reportedTotal: total, complete, createCount, updateCount, alreadyLinkedCount, conflictCount, localConflictCount, invalidCount, assignmentCreateCount, assignmentChangeCount, missingPeopleLinkCount, previewAt: previewAt ? new Date(previewAt).toISOString() : null, sample };
+    });
+    routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/services-conflicts", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 50 } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings?.services_preview_at || !settings.services_preview_complete || Date.now() - new Date(settings.services_preview_at).getTime() > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a fresh complete Services preview before reviewing conflicts." });
+      const offset = request.query.offset ?? 0; const limit = request.query.limit ?? 20;
+      const [rows, count] = await Promise.all([
+        pool!.query<{ source_id: string; pending_local: JsonObject; pending_remote: JsonObject; pending_remote_hash: string; resolution: "use_elvanto" | "keep_local" | null }>("SELECT source_id,pending_local,pending_remote,pending_remote_hash,resolution FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND pending_preview_at=$2 AND pending_remote IS NOT NULL ORDER BY source_id OFFSET $3 LIMIT $4", [dept, settings.services_preview_at, offset, limit]),
+        pool!.query<{ total: number; unresolved: number }>("SELECT count(*)::int AS total,count(*) FILTER (WHERE resolution IS NULL)::int AS unresolved FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND pending_preview_at=$2 AND pending_remote IS NOT NULL", [dept, settings.services_preview_at]),
+      ]);
+      return { rows: rows.rows.map((row) => ({ sourceId: row.source_id, local: row.pending_local, remote: row.pending_remote, remoteHash: row.pending_remote_hash, resolution: row.resolution })), total: count.rows[0]?.total ?? 0, unresolved: count.rows[0]?.unresolved ?? 0, offset, limit };
+    });
+    routes.put<{ Body: { sourceId: string; previewAt: string; remoteHash: string; resolution: "use_elvanto" | "keep_local" } }>("/api/modules/sync/elvanto/services-conflicts", { schema: { body: { type: "object", additionalProperties: false, required: ["sourceId", "previewAt", "remoteHash", "resolution"], properties: { sourceId: { type: "string", minLength: 1, maxLength: 200 }, previewAt: { type: "string", format: "date-time" }, remoteHash: { type: "string", minLength: 1, maxLength: 10000 }, resolution: { type: "string", enum: ["use_elvanto", "keep_local"] } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings?.services_preview_at || !settings.services_preview_complete || new Date(settings.services_preview_at).toISOString() !== new Date(request.body.previewAt).toISOString() || Date.now() - new Date(settings.services_preview_at).getTime() > 60 * 60 * 1000 || settings.services_importing) return reply.code(409).send({ error: "The Services preview expired, changed, or an import is running. Run a fresh preview before resolving conflicts." });
+      const updated = await pool!.query("UPDATE elvanto_event_sync_state SET resolution=$5,updated_at=now() WHERE department_id=$1 AND area='services' AND source_id=$2 AND pending_preview_at=$3 AND pending_remote_hash=$4 AND pending_remote IS NOT NULL RETURNING source_id", [dept, request.body.sourceId, settings.services_preview_at, request.body.remoteHash, request.body.resolution]);
+      if (!updated.rowCount) return reply.code(409).send({ error: "This service conflict changed after preview. Run a fresh preview and review it again." });
+      await recordElvantoAudit(pool!, dept, "services", "preview", "conflict", { sourceId: request.body.sourceId, resolution: request.body.resolution });
+      return { sourceId: request.body.sourceId, resolution: request.body.resolution };
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/services-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -2394,6 +2494,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (row.directions.services === "off" || row.directions.services === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set Services direction to Elvanto → Smart Church or bidirectional before importing." });
       const previewTime = row.services_preview_at ? new Date(row.services_preview_at).getTime() : 0;
       if (!row.services_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a complete Services preview first. Previews expire after one hour and after connection settings change." });
+      const unresolvedConflicts = await pool!.query<{ count: number }>("SELECT count(*)::int AS count FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND pending_preview_at=$2 AND pending_remote IS NOT NULL AND resolution IS NULL", [dept, row.services_preview_at]);
+      if ((unresolvedConflicts.rows[0]?.count ?? 0) > 0) return reply.code(409).send({ error: "Review every local Services conflict and choose whether to keep local values or use Elvanto values before importing." });
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       elvantoServicesImportRunning.add(dept); let reserved = false;
@@ -2423,6 +2525,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const eventBySource = new Map(existing.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
           const ownedTitleDates = new Set(existing.rows.filter((event) => event.source_system !== "elvanto").map((event) => `${event.event_date}|${event.title.trim().toLocaleLowerCase()}`));
           const eventRows = services.flatMap((service) => mapElvantoServices(service, contactBySource));
+          const sourceIds = [...new Set(eventRows.map((event) => event.sourceId).filter(Boolean))];
+          const syncStates = sourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null; pending_preview_at: Date | string | null; pending_local: JsonObject | null; pending_remote: JsonObject | null; pending_remote_hash: string | null; resolution: "use_elvanto" | "keep_local" | null }>("SELECT source_id,baseline,pending_preview_at,pending_local,pending_remote,pending_remote_hash,resolution FROM elvanto_event_sync_state WHERE department_id=$1 AND area='services' AND source_id=ANY($2::text[])", [dept, sourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null; pending_preview_at: Date | string | null; pending_local: JsonObject | null; pending_remote: JsonObject | null; pending_remote_hash: string | null; resolution: "use_elvanto" | "keep_local" | null }> };
+          const stateBySource = new Map(syncStates.rows.map((state) => [state.source_id, state]));
           const seen = new Set<string>(); let pageCreated = 0; let pageUpdated = 0; let pageSkipped = 0;
           const db = await pool!.connect();
           try {
@@ -2433,14 +2538,36 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               const linked = eventBySource.get(event.sourceId);
               if (!linked && ownedTitleDates.has(`${event.date}|${event.title.trim().toLocaleLowerCase()}`)) { pageSkipped += 1; continue; }
               const values = [dept, event.title, event.date, event.isAllDay ?? false, event.start, event.end, event.location, event.description, event.room, JSON.stringify(event.positions), JSON.stringify(event.timePlan), event.sourceId];
+              const remoteSnapshot = elvantoServiceSnapshot(event);
+              const state = stateBySource.get(event.sourceId);
               if (linked) {
-                if (!elvantoServiceChanges(event, linked).length) continue;
+                if (state?.pending_remote && state.pending_preview_at && new Date(state.pending_preview_at).toISOString() === new Date(row.services_preview_at!).toISOString()) {
+                  if (elvantoServiceSnapshotHash(remoteSnapshot) !== state.pending_remote_hash) throw new Error("Elvanto changed a service after conflict review. Run a fresh complete Services preview.");
+                  if (!state.pending_local || elvantoServiceSnapshotHash(state.pending_local as ReturnType<typeof elvantoServiceSnapshot>) !== elvantoServiceSnapshotHash(elvantoServiceLocalSnapshot(linked))) throw new Error("A local service changed after conflict review. Run a fresh complete Services preview.");
+                  if (!state.resolution) throw new Error("Review every local Services conflict before importing.");
+                  if (state.resolution === "keep_local") {
+                    await db.query("UPDATE elvanto_event_sync_state SET baseline=$4::jsonb,pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,resolution=NULL,updated_at=now() WHERE department_id=$1 AND area='services' AND source_id=$2 AND pending_remote_hash=$3", [dept, event.sourceId, state.pending_remote_hash, JSON.stringify(remoteSnapshot)]);
+                    pageSkipped += 1;
+                    continue;
+                  }
+                } else {
+                  const localChanges = state?.baseline ? elvantoServiceSnapshotChanges(state.baseline as ReturnType<typeof elvantoServiceSnapshot>, linked) : elvantoServiceChanges(event, linked);
+                  const remoteChanges = state?.baseline ? elvantoServiceSnapshotChanges(remoteSnapshot, elvantoServiceSnapshotAsLinked(state.baseline)) : elvantoServiceChanges(event, linked);
+                  if (localChanges.length && remoteChanges.length) throw new Error("A local service changed after preview. Run a fresh Services preview and review the conflict before importing.");
+                  if (!remoteChanges.length) {
+                    if (!state?.baseline && !localChanges.length) await db.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'services',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=COALESCE(elvanto_event_sync_state.baseline,EXCLUDED.baseline),updated_at=now()", [dept, event.sourceId, JSON.stringify(remoteSnapshot)]);
+                    pageSkipped += 1;
+                    continue;
+                  }
+                }
                 const positions = mergeElvantoPositionResponses(event.positions, linked.positions);
                 const changed = await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,source_system='elvanto',source_id=$13,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values.slice(0, 9), JSON.stringify(positions), values[10], values[11]]);
                 if (!changed.rowCount) { pageSkipped += 1; continue; } pageUpdated += 1;
+                await db.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'services',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=EXCLUDED.baseline,pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,resolution=NULL,updated_at=now()", [dept, event.sourceId, JSON.stringify(remoteSnapshot)]);
               } else {
                 const inserted = await db.query("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,'elvanto',$12) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", values);
                 if (!inserted.rowCount) { pageSkipped += 1; continue; } pageCreated += 1;
+                await db.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'services',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=EXCLUDED.baseline,updated_at=now()", [dept, event.sourceId, JSON.stringify(remoteSnapshot)]);
               }
             }
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped; page += 1;
@@ -2988,14 +3115,19 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const local = await pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null }>("SELECT id,source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room FROM service_events WHERE department_id=$1", [dept]);
       const mapped = events.map(mapElvantoCalendarEvent).filter((event): event is NonNullable<typeof event> => Boolean(event));
       const bySource = new Map(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
+      const sourceIds = [...new Set(mapped.map((event) => event.sourceId))];
+      const stateRows = sourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null }>("SELECT source_id,baseline FROM elvanto_event_sync_state WHERE department_id=$1 AND area='calendar' AND source_id=ANY($2::text[])", [dept, sourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null }> };
+      const stateBySource = new Map(stateRows.rows.map((state) => [state.source_id, state]));
       const byTitleDate = new Map<string, typeof local.rows>();
       for (const event of local.rows) {
         const key = `${event.event_date}|${event.title.trim().toLocaleLowerCase()}`;
         byTitleDate.set(key, [...(byTitleDate.get(key) ?? []), event]);
       }
-      const sample: Array<{ title: string; date: string; action: string; changedFields: string[] }> = []; const seen = new Set<string>();
+      const sample: Array<{ sourceId: string; title: string; date: string; action: string; changedFields: string[]; local?: ReturnType<typeof elvantoCalendarLocalSnapshot>; remote?: ReturnType<typeof elvantoCalendarSnapshot> }> = []; const seen = new Set<string>();
+      const localConflicts: Array<{ sourceId: string; local: ReturnType<typeof elvantoCalendarLocalSnapshot>; remote: ReturnType<typeof elvantoCalendarSnapshot> }> = [];
+      const seedBaselines: Array<{ sourceId: string; snapshot: ReturnType<typeof elvantoCalendarSnapshot> }> = [];
       const seenTitleDates = new Set<string>();
-      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0;
+      let createCount = 0; let updateCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let localConflictCount = 0; let invalidCount = 0;
       for (const event of mapped) {
         const linked = bySource.get(event.sourceId);
         const eventKey = `${event.date}|${event.title.trim().toLocaleLowerCase()}`;
@@ -3008,17 +3140,58 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         else { createCount += 1; action = "create"; }
         seen.add(event.sourceId);
         seenTitleDates.add(eventKey);
-        const changedFields = action === "already_linked" && linked ? elvantoCalendarEventChanges(event, linked) : [];
-        if (changedFields.length) { updateCount += 1; action = "update"; }
-        else if (action === "already_linked") alreadyLinkedCount += 1;
-        if (sample.length < 50) sample.push({ title: event.title, date: event.date, action, changedFields });
+        let changedFields = action === "already_linked" && linked ? elvantoCalendarEventChanges(event, linked) : [];
+        let localVersion: ReturnType<typeof elvantoCalendarLocalSnapshot> | undefined;
+        let remoteVersion: ReturnType<typeof elvantoCalendarSnapshot> | undefined;
+        if (action === "already_linked" && linked) {
+          remoteVersion = elvantoCalendarSnapshot(event); localVersion = elvantoCalendarLocalSnapshot(linked);
+          const baseline = stateBySource.get(event.sourceId)?.baseline;
+          if (!baseline) {
+            if (!changedFields.length) seedBaselines.push({ sourceId: event.sourceId, snapshot: remoteVersion });
+            else { action = "review_baseline_missing"; localConflictCount += 1; localConflicts.push({ sourceId: event.sourceId, local: localVersion, remote: remoteVersion }); }
+          } else {
+            const localChanges = elvantoCalendarSnapshotChanges(baseline as ReturnType<typeof elvantoCalendarSnapshot>, linked);
+            const remoteChanges = elvantoCalendarSnapshotChanges(remoteVersion, elvantoCalendarSnapshotAsLinked(baseline));
+            changedFields = remoteChanges;
+            if (localChanges.length && remoteChanges.length) { action = "review_local_conflict"; localConflictCount += 1; localConflicts.push({ sourceId: event.sourceId, local: localVersion, remote: remoteVersion }); }
+            else if (remoteChanges.length) { action = "update"; updateCount += 1; }
+            else { if (localChanges.length) action = "local_changes_kept"; alreadyLinkedCount += 1; }
+          }
+        }
+        if (sample.length < 50) sample.push({ sourceId: event.sourceId, title: event.title, date: event.date, action, changedFields, ...(localVersion ? { local: localVersion } : {}), ...(remoteVersion ? { remote: remoteVersion } : {}) });
       }
       const saved = await pool!.query(`UPDATE elvanto_sync_settings SET calendar_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,calendar_preview_complete=$2,calendar_preview_scanned_count=$3,calendar_preview_total=$4,calendar_preview_start_date=$5::date,calendar_preview_end_date=$6::date,
           calendar_import_page=1,calendar_import_total=NULL,calendar_import_created_count=0,calendar_import_updated_count=0,calendar_import_skipped_count=0,calendar_import_complete=FALSE,calendar_import_start_date=NULL,calendar_import_end_date=NULL
-        WHERE department_id=$1 AND updated_at=$7 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, complete, mapped.length, total, startDate, endDate, row.updated_at]);
+        WHERE department_id=$1 AND updated_at=$7 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id,calendar_preview_at`, [dept, complete, mapped.length, total, startDate, endDate, row.updated_at]);
       if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-      await recordElvantoAudit(pool!, dept, "calendar", "preview", complete ? "complete" : "incomplete", { scanned: mapped.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, conflicts: conflictCount, invalid: invalidCount });
-      return { scannedCount: mapped.length, reportedTotal: total, complete, startDate, endDate, createCount, updateCount, alreadyLinkedCount, conflictCount, invalidCount, sample };
+      const previewAt = saved.rows[0]?.calendar_preview_at;
+      if (previewAt) {
+        await pool!.query("DELETE FROM elvanto_event_sync_state WHERE department_id=$1 AND area='calendar' AND pending_remote IS NOT NULL", [dept]);
+        for (const baseline of seedBaselines) await pool!.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'calendar',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=COALESCE(elvanto_event_sync_state.baseline,EXCLUDED.baseline),updated_at=now()", [dept, baseline.sourceId, JSON.stringify(baseline.snapshot)]);
+        for (const conflict of localConflicts) await pool!.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,pending_preview_at,pending_local,pending_remote,pending_remote_hash,resolution,updated_at) VALUES($1,'calendar',$2,$3,$4::jsonb,$5::jsonb,$6,NULL,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET pending_preview_at=EXCLUDED.pending_preview_at,pending_local=EXCLUDED.pending_local,pending_remote=EXCLUDED.pending_remote,pending_remote_hash=EXCLUDED.pending_remote_hash,resolution=NULL,updated_at=now()", [dept, conflict.sourceId, previewAt, JSON.stringify(conflict.local), JSON.stringify(conflict.remote), elvantoCalendarSnapshotHash(conflict.remote)]);
+      }
+      await recordElvantoAudit(pool!, dept, "calendar", "preview", complete ? "complete" : "incomplete", { scanned: mapped.length, create: createCount, update: updateCount, unchanged: alreadyLinkedCount, conflicts: conflictCount + localConflictCount, invalid: invalidCount });
+      return { scannedCount: mapped.length, reportedTotal: total, complete, startDate, endDate, createCount, updateCount, alreadyLinkedCount, conflictCount, localConflictCount, invalidCount, previewAt: previewAt ? new Date(previewAt).toISOString() : null, sample };
+    });
+    routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/calendar-conflicts", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 50 } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings?.calendar_preview_at || !settings.calendar_preview_complete || Date.now() - new Date(settings.calendar_preview_at).getTime() > 60 * 60 * 1000) return reply.code(409).send({ error: "Run a fresh complete Calendar preview before reviewing conflicts." });
+      const offset = request.query.offset ?? 0; const limit = request.query.limit ?? 20;
+      const [rows, count] = await Promise.all([
+        pool!.query<{ source_id: string; pending_local: JsonObject; pending_remote: JsonObject; pending_remote_hash: string; resolution: "use_elvanto" | "keep_local" | null }>("SELECT source_id,pending_local,pending_remote,pending_remote_hash,resolution FROM elvanto_event_sync_state WHERE department_id=$1 AND area='calendar' AND pending_preview_at=$2 AND pending_remote IS NOT NULL ORDER BY source_id OFFSET $3 LIMIT $4", [dept, settings.calendar_preview_at, offset, limit]),
+        pool!.query<{ total: number; unresolved: number }>("SELECT count(*)::int AS total,count(*) FILTER (WHERE resolution IS NULL)::int AS unresolved FROM elvanto_event_sync_state WHERE department_id=$1 AND area='calendar' AND pending_preview_at=$2 AND pending_remote IS NOT NULL", [dept, settings.calendar_preview_at]),
+      ]);
+      return { rows: rows.rows.map((row) => ({ sourceId: row.source_id, local: row.pending_local, remote: row.pending_remote, remoteHash: row.pending_remote_hash, resolution: row.resolution })), total: count.rows[0]?.total ?? 0, unresolved: count.rows[0]?.unresolved ?? 0, offset, limit };
+    });
+    routes.put<{ Body: { sourceId: string; previewAt: string; remoteHash: string; resolution: "use_elvanto" | "keep_local" } }>("/api/modules/sync/elvanto/calendar-conflicts", { schema: { body: { type: "object", additionalProperties: false, required: ["sourceId", "previewAt", "remoteHash", "resolution"], properties: { sourceId: { type: "string", minLength: 1, maxLength: 200 }, previewAt: { type: "string", format: "date-time" }, remoteHash: { type: "string", minLength: 1, maxLength: 10000 }, resolution: { type: "string", enum: ["use_elvanto", "keep_local"] } } } } }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const settings = await elvantoSettings(dept);
+      if (!settings?.calendar_preview_at || !settings.calendar_preview_complete || new Date(settings.calendar_preview_at).toISOString() !== new Date(request.body.previewAt).toISOString() || Date.now() - new Date(settings.calendar_preview_at).getTime() > 60 * 60 * 1000 || settings.calendar_importing) return reply.code(409).send({ error: "The Calendar preview expired, changed, or an import is running. Run a fresh preview before resolving conflicts." });
+      const updated = await pool!.query("UPDATE elvanto_event_sync_state SET resolution=$5,updated_at=now() WHERE department_id=$1 AND area='calendar' AND source_id=$2 AND pending_preview_at=$3 AND pending_remote_hash=$4 AND pending_remote IS NOT NULL RETURNING source_id", [dept, request.body.sourceId, settings.calendar_preview_at, request.body.remoteHash, request.body.resolution]);
+      if (!updated.rowCount) return reply.code(409).send({ error: "This Calendar conflict changed after preview. Run a fresh preview and review it again." });
+      await recordElvantoAudit(pool!, dept, "calendar", "preview", "conflict", { sourceId: request.body.sourceId, resolution: request.body.resolution });
+      return { sourceId: request.body.sourceId, resolution: request.body.resolution };
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/calendar-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -3028,6 +3201,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (row.directions.calendar === "off" || row.directions.calendar === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set Calendar direction to Elvanto → Smart Church or bidirectional before importing." });
       const previewTime = row.calendar_preview_at ? new Date(row.calendar_preview_at).getTime() : 0;
       if (!row.calendar_preview_complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !row.calendar_preview_start_date || !row.calendar_preview_end_date) return reply.code(409).send({ error: "Run a complete Calendar preview first. Previews expire after one hour and after connection settings change." });
+      const unresolvedConflicts = await pool!.query<{ count: number }>("SELECT count(*)::int AS count FROM elvanto_event_sync_state WHERE department_id=$1 AND area='calendar' AND pending_preview_at=$2 AND pending_remote IS NOT NULL AND resolution IS NULL", [dept, row.calendar_preview_at]);
+      if ((unresolvedConflicts.rows[0]?.count ?? 0) > 0) return reply.code(409).send({ error: "Review every local Calendar conflict and choose whether to keep local values or use Elvanto values before importing." });
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
       elvantoCalendarImportRunning.add(dept); let reserved = false;
@@ -3048,6 +3223,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const events = elvantoCollection(payload, "events", "event"); const reported = Number((payload.events as JsonObject | undefined)?.total); if (Number.isFinite(reported) && reported >= 0) total = reported;
           const local = await pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null }>("SELECT id,source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room FROM service_events WHERE department_id=$1", [dept]);
           const bySource = new Map(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
+          const pageEvents = events.map(mapElvantoCalendarEvent).filter((event): event is NonNullable<typeof event> => Boolean(event));
+          const sourceIds = [...new Set(pageEvents.map((event) => event.sourceId))];
+          const syncStates = sourceIds.length ? await pool!.query<{ source_id: string; baseline: JsonObject | null; pending_preview_at: Date | string | null; pending_local: JsonObject | null; pending_remote_hash: string | null; resolution: "use_elvanto" | "keep_local" | null }>("SELECT source_id,baseline,pending_preview_at,pending_local,pending_remote_hash,resolution FROM elvanto_event_sync_state WHERE department_id=$1 AND area='calendar' AND source_id=ANY($2::text[])", [dept, sourceIds]) : { rows: [] as Array<{ source_id: string; baseline: JsonObject | null; pending_preview_at: Date | string | null; pending_local: JsonObject | null; pending_remote_hash: string | null; resolution: "use_elvanto" | "keep_local" | null }> };
+          const stateBySource = new Map(syncStates.rows.map((state) => [state.source_id, state]));
           const occupied = new Map<string, typeof local.rows>();
           for (const event of local.rows) {
             const key = `${event.event_date}|${event.title.trim().toLocaleLowerCase()}`;
@@ -3063,10 +3242,31 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               seen.add(event.sourceId); const linked = bySource.get(event.sourceId);
               if ((occupied.get(`${event.date}|${event.title.trim().toLocaleLowerCase()}`) ?? []).some((owner) => owner.id !== linked?.id)) { pageSkipped += 1; continue; }
               const values = [dept, event.title, event.date, event.isAllDay ?? false, event.start, event.end, event.location, event.description, event.room, JSON.stringify([]), JSON.stringify([]), event.sourceId];
+              const remoteSnapshot = elvantoCalendarSnapshot(event);
+              const state = stateBySource.get(event.sourceId);
               if (linked) {
-                if (!elvantoCalendarEventChanges(event, linked).length) continue;
+                if (state?.pending_preview_at && new Date(state.pending_preview_at).toISOString() === new Date(row.calendar_preview_at!).toISOString()) {
+                  if (elvantoCalendarSnapshotHash(remoteSnapshot) !== state.pending_remote_hash) throw new Error("Elvanto changed a calendar event after conflict review. Run a fresh complete Calendar preview.");
+                  if (!state.pending_local || elvantoCalendarSnapshotHash(state.pending_local as ReturnType<typeof elvantoCalendarSnapshot>) !== elvantoCalendarSnapshotHash(elvantoCalendarLocalSnapshot(linked))) throw new Error("A local calendar event changed after conflict review. Run a fresh complete Calendar preview.");
+                  if (!state.resolution) throw new Error("Review every local Calendar conflict before importing.");
+                  if (state.resolution === "keep_local") {
+                    await db.query("UPDATE elvanto_event_sync_state SET baseline=$4::jsonb,pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,resolution=NULL,updated_at=now() WHERE department_id=$1 AND area='calendar' AND source_id=$2 AND pending_remote_hash=$3", [dept, event.sourceId, state.pending_remote_hash, JSON.stringify(remoteSnapshot)]);
+                    pageSkipped += 1;
+                    continue;
+                  }
+                } else {
+                  const localChanges = state?.baseline ? elvantoCalendarSnapshotChanges(state.baseline as ReturnType<typeof elvantoCalendarSnapshot>, linked) : elvantoCalendarEventChanges(event, linked);
+                  const remoteChanges = state?.baseline ? elvantoCalendarSnapshotChanges(remoteSnapshot, elvantoCalendarSnapshotAsLinked(state.baseline)) : elvantoCalendarEventChanges(event, linked);
+                  if (localChanges.length && remoteChanges.length) throw new Error("A local Calendar event changed after preview. Run a fresh Calendar preview and review the conflict before importing.");
+                  if (!remoteChanges.length) {
+                    if (!state?.baseline && !localChanges.length) await db.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'calendar',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=COALESCE(elvanto_event_sync_state.baseline,EXCLUDED.baseline),updated_at=now()", [dept, event.sourceId, JSON.stringify(remoteSnapshot)]);
+                    pageSkipped += 1;
+                    continue;
+                  }
+                }
                 const changed = await db.query("UPDATE service_events SET title=$3,kind='other',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,source_system='elvanto',source_id=$11,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [linked.id, ...values.slice(0, 9), event.sourceId]);
                 if (!changed.rowCount) { pageSkipped += 1; continue; } pageUpdated += 1;
+                await db.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'calendar',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=EXCLUDED.baseline,pending_preview_at=NULL,pending_local=NULL,pending_remote=NULL,pending_remote_hash=NULL,resolution=NULL,updated_at=now()", [dept, event.sourceId, JSON.stringify(remoteSnapshot)]);
                 const updatedEvent = { ...linked, title: event.title, event_date: event.date, is_all_day: event.isAllDay, start_time: event.start, end_time: event.end, location: event.location, description: event.description, room: event.room };
                 const oldKey = `${linked.event_date}|${linked.title.trim().toLocaleLowerCase()}`;
                 const eventKey = `${event.date}|${event.title.trim().toLocaleLowerCase()}`;
@@ -3076,6 +3276,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               } else {
                 const inserted = await db.query<{ id: string }>("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,'other',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,'elvanto',$12) ON CONFLICT (department_id,source_system,source_id) WHERE source_system IS NOT NULL DO NOTHING RETURNING id", values);
                 if (!inserted.rowCount) { pageSkipped += 1; continue; } pageCreated += 1;
+                await db.query("INSERT INTO elvanto_event_sync_state(department_id,area,source_id,baseline,updated_at) VALUES($1,'calendar',$2,$3::jsonb,now()) ON CONFLICT(department_id,area,source_id) DO UPDATE SET baseline=EXCLUDED.baseline,updated_at=now()", [dept, event.sourceId, JSON.stringify(remoteSnapshot)]);
                 const insertedEvent = { id: inserted.rows[0].id, source_id: event.sourceId, source_system: "elvanto", title: event.title, event_date: event.date, is_all_day: event.isAllDay, start_time: event.start, end_time: event.end, location: event.location, description: event.description, room: event.room };
                 const eventKey = `${event.date}|${event.title.trim().toLocaleLowerCase()}`;
                 occupied.set(eventKey, [...(occupied.get(eventKey) ?? []), insertedEvent]);

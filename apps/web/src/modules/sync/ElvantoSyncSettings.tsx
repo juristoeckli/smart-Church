@@ -29,14 +29,15 @@ type GroupsPreview = {
 };
 type ServicesPreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
-  createCount: number; updateCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
+  createCount: number; updateCount: number; alreadyLinkedCount: number; conflictCount: number; localConflictCount: number; invalidCount: number; previewAt: string | null;
   assignmentCreateCount: number; assignmentChangeCount: number; missingPeopleLinkCount: number;
-  sample: Array<{ title: string; date: string; action: string; changedFields: string[] }>;
+  sample: Array<{ sourceId: string; title: string; date: string; action: string; changedFields: string[]; local?: Record<string, unknown>; remote?: Record<string, unknown> }>;
 };
+type ServiceConflict = { sourceId: string; local: Record<string, unknown>; remote: Record<string, unknown>; remoteHash: string; resolution: "use_elvanto" | "keep_local" | null };
 type CalendarPreview = {
-  scannedCount: number; reportedTotal: number | null; complete: boolean; startDate: string; endDate: string;
-  createCount: number; updateCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
-  sample: Array<{ title: string; date: string; action: string; changedFields: string[] }>;
+  scannedCount: number; reportedTotal: number | null; complete: boolean; startDate: string; endDate: string; previewAt: string | null;
+  createCount: number; updateCount: number; alreadyLinkedCount: number; conflictCount: number; localConflictCount: number; invalidCount: number;
+  sample: Array<{ sourceId: string; title: string; date: string; action: string; changedFields: string[]; local?: Record<string, unknown>; remote?: Record<string, unknown> }>;
 };
 type CalendarExportOptions = { calendars: Array<{ id: string; name: string; published: boolean }>; organizers: Array<{ id: string; name: string }>; organizersPage: number; organizersTotal: number };
 type CalendarExportPreview = { complete: boolean; total: number; create: number; update: number; review: number; timeZone: string; startDate: string; endDate: string; calendar: { id: string; name: string }; organizer: { id: string; name: string }; sample: Array<{ title: string; date: string; isAllDay: boolean; start: string | null; end: string | null; location: string; action: string }> };
@@ -100,9 +101,17 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   const [groupsPreview, setGroupsPreview] = useState<GroupsPreview | null>(null);
   const [groupsExportPreview, setGroupsExportPreview] = useState<GroupsExportPreview | null>(null);
   const [servicesPreview, setServicesPreview] = useState<ServicesPreview | null>(null);
+  const [serviceConflicts, setServiceConflicts] = useState<ServiceConflict[]>([]);
+  const [serviceConflictOffset, setServiceConflictOffset] = useState(0);
+  const [serviceConflictTotal, setServiceConflictTotal] = useState(0);
+  const [serviceConflictUnresolved, setServiceConflictUnresolved] = useState(0);
   const [calendarStartDate, setCalendarStartDate] = useState(() => shiftUtcYear(-5));
   const [calendarEndDate, setCalendarEndDate] = useState(() => shiftUtcYear(5));
   const [calendarPreview, setCalendarPreview] = useState<CalendarPreview | null>(null);
+  const [calendarConflicts, setCalendarConflicts] = useState<ServiceConflict[]>([]);
+  const [calendarConflictOffset, setCalendarConflictOffset] = useState(0);
+  const [calendarConflictTotal, setCalendarConflictTotal] = useState(0);
+  const [calendarConflictUnresolved, setCalendarConflictUnresolved] = useState(0);
   const [calendarExportOptions, setCalendarExportOptions] = useState<CalendarExportOptions | null>(null);
   const [calendarExportCalendarId, setCalendarExportCalendarId] = useState("");
   const [calendarExportOrganizerId, setCalendarExportOrganizerId] = useState("");
@@ -342,13 +351,34 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   }
 
   async function previewServices() {
-    setBusy(true); setFeedback(""); setError(""); setServicesPreview(null);
+    setBusy(true); setFeedback(""); setError(""); setServicesPreview(null); setServiceConflicts([]); setServiceConflictTotal(0); setServiceConflictUnresolved(0);
     try {
       const response = await fetch("/api/modules/sync/elvanto/services-preview", { method: "POST", headers: { "x-department-id": departmentId } });
       const result = await response.json() as ServicesPreview & { error?: string };
       if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto services.");
       setServicesPreview(result);
+      if (result.previewAt) await loadServiceConflicts(0);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto services."); }
+    finally { setBusy(false); }
+  }
+
+  async function loadServiceConflicts(offset: number) {
+    const response = await fetch(`/api/modules/sync/elvanto/services-conflicts?offset=${offset}&limit=20`, { headers: { "x-department-id": departmentId } });
+    const result = await response.json() as { rows?: ServiceConflict[]; total?: number; unresolved?: number; error?: string };
+    if (!response.ok || !Array.isArray(result.rows)) throw new Error(result.error ?? "Could not load service conflicts.");
+    setServiceConflicts(result.rows); setServiceConflictOffset(offset); setServiceConflictTotal(result.total ?? 0); setServiceConflictUnresolved(result.unresolved ?? 0);
+  }
+
+  async function resolveServiceConflict(conflict: ServiceConflict, resolution: "use_elvanto" | "keep_local") {
+    if (!servicesPreview?.previewAt) return;
+    setBusy(true); setError(""); setFeedback("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/services-conflicts", { method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ sourceId: conflict.sourceId, previewAt: servicesPreview.previewAt, remoteHash: conflict.remoteHash, resolution }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not save the service conflict decision.");
+      await loadServiceConflicts(serviceConflictOffset);
+      setFeedback(tr("Service conflict decision saved."));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the service conflict decision."); }
     finally { setBusy(false); }
   }
 
@@ -528,19 +558,40 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
   }
 
   async function previewCalendar() {
-    setBusy(true); setFeedback(""); setError(""); setCalendarPreview(null);
+    setBusy(true); setFeedback(""); setError(""); setCalendarPreview(null); setCalendarConflicts([]); setCalendarConflictTotal(0); setCalendarConflictUnresolved(0);
     try {
       const response = await fetch("/api/modules/sync/elvanto/calendar-preview", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ startDate: calendarStartDate, endDate: calendarEndDate }) });
       const result = await response.json() as CalendarPreview & { error?: string };
       if (!response.ok || !Array.isArray(result.sample)) throw new Error(result.error ?? "Could not preview Elvanto calendar events.");
       await load();
       setCalendarPreview(result);
+      if (result.previewAt) await loadCalendarConflicts(0);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not preview Elvanto calendar events."); }
     finally { setBusy(false); }
   }
 
+  async function loadCalendarConflicts(offset: number) {
+    const response = await fetch(`/api/modules/sync/elvanto/calendar-conflicts?offset=${offset}&limit=20`, { headers: { "x-department-id": departmentId } });
+    const result = await response.json() as { rows?: ServiceConflict[]; total?: number; unresolved?: number; error?: string };
+    if (!response.ok || !Array.isArray(result.rows)) throw new Error(result.error ?? "Could not load calendar conflicts.");
+    setCalendarConflicts(result.rows); setCalendarConflictOffset(offset); setCalendarConflictTotal(result.total ?? 0); setCalendarConflictUnresolved(result.unresolved ?? 0);
+  }
+
+  async function resolveCalendarConflict(conflict: ServiceConflict, resolution: "use_elvanto" | "keep_local") {
+    if (!calendarPreview?.previewAt) return;
+    setBusy(true); setError(""); setFeedback("");
+    try {
+      const response = await fetch("/api/modules/sync/elvanto/calendar-conflicts", { method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ sourceId: conflict.sourceId, previewAt: calendarPreview.previewAt, remoteHash: conflict.remoteHash, resolution }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not save the calendar conflict decision.");
+      await loadCalendarConflicts(calendarConflictOffset);
+      setFeedback(tr("Calendar conflict decision saved."));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the calendar conflict decision."); }
+    finally { setBusy(false); }
+  }
+
   async function importCalendar() {
-    if (!calendarPreview?.complete || calendarPreview.createCount + calendarPreview.updateCount + calendarPreview.alreadyLinkedCount <= 0) return;
+    if (!calendarPreview?.complete || calendarConflictUnresolved > 0 || calendarPreview.createCount + calendarPreview.updateCount + calendarPreview.alreadyLinkedCount <= 0) return;
     setBusy(true); setFeedback(""); setError("");
     try {
       const response = await fetch("/api/modules/sync/elvanto/calendar-import", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, ...(status?.calendarImport?.complete ? { body: JSON.stringify({ restart: true }) } : {}) });
@@ -676,18 +727,20 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {groupsExportPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Groups export preview</strong><span>{groupsExportPreview.groups} local groups · {groupsExportPreview.create} new · {groupsExportPreview.update} updates · {groupsExportPreview.addMembers} members to add · {groupsExportPreview.review} needing review</span></div><div className="sync-feedback"><span>{groupsExportPreview.missingPeople} active members need a People export first</span> · <span>{groupsExportPreview.remoteOnlyMembers} Elvanto memberships will be kept for review</span></div>{groupsExportPreview.sample.map((group, index) => <div className="sync-feedback" key={`${group.name}-${index}`}><strong>{group.name}</strong><span>{group.action.replaceAll("_", " ")} · {group.membersToAdd} members to add · {group.missingPeople} people not linked · {group.remoteOnlyMembers} remote-only memberships</span></div>)}<small className="sync-help">Only group names and active member links are exported. Member removals are never automatic; Elvanto-only members stay in place for manual review. Writes are resumable in batches of at most five API calls.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void exportGroups()} disabled={busy || !groupsExportPreview.complete || groupsExportPreview.create + groupsExportPreview.update + groupsExportPreview.addMembers === 0}><Check size={15} />{busy ? "Exporting…" : status?.groupsExport && !status.groupsExport.complete ? "Continue Groups export" : "Export Groups to Elvanto"}</button></div></div>}
     {servicesPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Services import preview</strong><span>{servicesPreview.scannedCount} service times scanned{servicesPreview.reportedTotal !== null && <> across {servicesPreview.reportedTotal} Elvanto services</>}{!servicesPreview.complete && <em> — preview is incomplete</em>}</span></div>
-      <div className="sync-feedback"><span>{servicesPreview.createCount} {tr("new")}</span> · <span>{servicesPreview.updateCount} {tr("updates")}</span> · <span>{servicesPreview.alreadyLinkedCount} {tr("unchanged")}</span> · <span>{servicesPreview.conflictCount} same-title/date conflicts</span> · <span>{servicesPreview.invalidCount} invalid or duplicate rows</span></div>
+      <div className="sync-feedback"><span>{servicesPreview.createCount} {tr("new")}</span> · <span>{servicesPreview.updateCount} {tr("updates")}</span> · <span>{servicesPreview.alreadyLinkedCount} {tr("unchanged")}</span> · <span>{servicesPreview.conflictCount} same-title/date conflicts</span> · <span>{servicesPreview.localConflictCount} {tr("local edits need a decision")}</span> · <span>{servicesPreview.invalidCount} invalid or duplicate rows</span></div>
       <div className="sync-feedback"><span>{servicesPreview.assignmentCreateCount} new volunteer assignments</span> · <span>{servicesPreview.assignmentChangeCount} assignment changes</span> · <span>{servicesPreview.missingPeopleLinkCount} assignments need People links</span></div>
-      {servicesPreview.sample.map((service, index) => <div className="sync-feedback" key={`${service.date}-${service.title}-${index}`}><strong>{service.title}</strong><span>{service.date} · {service.action === "update" ? `${tr("Update")}: ${service.changedFields.map((field) => tr(field)).join(", ")}` : service.action === "already_linked" ? tr("Unchanged") : service.action === "review_event_conflict" ? "Review event conflict" : service.action === "needs_review" ? "Needs review" : service.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New service"}</span></div>)}
+      {servicesPreview.sample.map((service, index) => <div className="sync-feedback" key={`${service.date}-${service.title}-${index}`}><strong>{service.title}</strong><span>{service.date} · {service.action === "update" ? `${tr("Update")}: ${service.changedFields.map((field) => tr(field)).join(", ")}` : service.action === "local_changes_kept" ? tr("Local edits kept; Elvanto has no newer changes") : service.action.startsWith("review_local") || service.action === "review_baseline_missing" ? tr("Local and Elvanto versions need review") : service.action === "already_linked" ? tr("Unchanged") : service.action === "review_event_conflict" ? tr("Review event conflict") : service.action === "needs_review" ? tr("Needs review") : service.action === "duplicate_source_id" ? tr("Duplicate Elvanto ID") : tr("New service")}</span></div>)}
+      {serviceConflictTotal > 0 && <div className="sync-connection-form"><strong>{tr("Resolve service conflicts")} ({serviceConflictUnresolved} {tr("decisions remaining")})</strong><small className="sync-help">{tr("Compare the local event with the current Elvanto version. Choose which version to keep for each event before importing.")}</small>{serviceConflicts.map((conflict) => <div className="sync-feedback" key={conflict.sourceId}><strong>Elvanto service {conflict.sourceId}</strong><div><strong>{tr("Local version")}</strong><pre className="sync-song-json">{JSON.stringify(conflict.local, null, 2)}</pre><strong>{tr("Elvanto version")}</strong><pre className="sync-song-json">{JSON.stringify(conflict.remote, null, 2)}</pre><span>{conflict.resolution ? `Decision: ${tr(conflict.resolution === "use_elvanto" ? "Use Elvanto values" : "Keep local values")}` : tr("No decision saved")}</span><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void resolveServiceConflict(conflict, "keep_local")} disabled={busy}>{tr("Keep local values")}</button><button className="button button-secondary" type="button" onClick={() => void resolveServiceConflict(conflict, "use_elvanto")} disabled={busy}>{tr("Use Elvanto values")}</button></div></div></div>)}<div className="community-inline-actions"><button className="button button-secondary" type="button" disabled={busy || serviceConflictOffset <= 0} onClick={() => void loadServiceConflicts(Math.max(0, serviceConflictOffset - 20))}>{tr("Previous")}</button><span className="sync-help">Showing {serviceConflictTotal ? serviceConflictOffset + 1 : 0}–{Math.min(serviceConflictOffset + serviceConflicts.length, serviceConflictTotal)} of {serviceConflictTotal}</span><button className="button button-secondary" type="button" disabled={busy || serviceConflictOffset + 20 >= serviceConflictTotal} onClick={() => void loadServiceConflicts(serviceConflictOffset + 20)}>{tr("Next")}</button></div></div>}
       <small className="sync-help">Only complete previews can be imported. Each batch advances up to five Elvanto pages. Imported events are read-only and are not deleted when absent from Elvanto.</small>
-      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importServices()} disabled={busy || !servicesPreview.complete || servicesPreview.createCount + servicesPreview.updateCount + servicesPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.servicesImport?.complete ? "Refresh Services from Elvanto" : status?.servicesImport ? "Continue Services import" : "Import eligible services"}</button></div>
+      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importServices()} disabled={busy || !servicesPreview.complete || serviceConflictUnresolved > 0 || servicesPreview.createCount + servicesPreview.updateCount + servicesPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.servicesImport?.complete ? "Refresh Services from Elvanto" : status?.servicesImport ? "Continue Services import" : "Import eligible services"}</button></div>
     </div>}
     {calendarPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Calendar import preview</strong><span>{calendarPreview.scannedCount} events scanned, {calendarPreview.startDate} – {calendarPreview.endDate}{!calendarPreview.complete && <em> — preview is incomplete</em>}</span></div>
-      <div className="sync-feedback"><span>{calendarPreview.createCount} {tr("new")}</span> · <span>{calendarPreview.updateCount} {tr("updates")}</span> · <span>{calendarPreview.alreadyLinkedCount} {tr("unchanged")}</span> · <span>{calendarPreview.conflictCount} same-title/date conflicts</span> · <span>{calendarPreview.invalidCount} invalid or duplicate rows</span></div>
-      {calendarPreview.sample.map((event, index) => <div className="sync-feedback" key={`${event.date}-${event.title}-${index}`}><strong>{event.title}</strong><span>{event.date} · {event.action === "update" ? `${tr("Update")}: ${event.changedFields.map((field) => tr(field)).join(", ")}` : event.action === "already_linked" ? tr("Unchanged") : event.action === "review_event_conflict" ? "Review event conflict" : event.action === "needs_review" ? "Needs review" : event.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New event"}</span></div>)}
+      <div className="sync-feedback"><span>{calendarPreview.createCount} {tr("new")}</span> · <span>{calendarPreview.updateCount} {tr("updates")}</span> · <span>{calendarPreview.alreadyLinkedCount} {tr("unchanged")}</span> · <span>{calendarPreview.conflictCount} same-title/date conflicts</span> · <span>{calendarPreview.localConflictCount} {tr("local edits need a decision")}</span> · <span>{calendarPreview.invalidCount} invalid or duplicate rows</span></div>
+      {calendarPreview.sample.map((event, index) => <div className="sync-feedback" key={`${event.date}-${event.title}-${index}`}><strong>{event.title}</strong><span>{event.date} · {event.action === "update" ? `${tr("Update")}: ${event.changedFields.map((field) => tr(field)).join(", ")}` : event.action === "local_changes_kept" ? tr("Local edits kept; Elvanto has no newer changes") : event.action.startsWith("review_local") || event.action === "review_baseline_missing" ? tr("Local and Elvanto versions need review") : event.action === "already_linked" ? tr("Unchanged") : event.action === "review_event_conflict" ? tr("Review event conflict") : event.action === "needs_review" ? tr("Needs review") : event.action === "duplicate_source_id" ? tr("Duplicate Elvanto ID") : tr("New event")}</span></div>)}
+      {calendarConflictTotal > 0 && <div className="sync-connection-form"><strong>{tr("Resolve calendar conflicts")} ({calendarConflictUnresolved} {tr("decisions remaining")})</strong><small className="sync-help">{tr("Compare the local event with the current Elvanto version. Choose which version to keep for each event before importing.")}</small>{calendarConflicts.map((conflict) => <div className="sync-feedback" key={conflict.sourceId}><strong>Elvanto event {conflict.sourceId}</strong><div><strong>{tr("Local version")}</strong><pre className="sync-song-json">{JSON.stringify(conflict.local, null, 2)}</pre><strong>{tr("Elvanto version")}</strong><pre className="sync-song-json">{JSON.stringify(conflict.remote, null, 2)}</pre><span>{conflict.resolution ? `Decision: ${tr(conflict.resolution === "use_elvanto" ? "Use Elvanto values" : "Keep local values")}` : tr("No decision saved")}</span><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void resolveCalendarConflict(conflict, "keep_local")} disabled={busy}>{tr("Keep local values")}</button><button className="button button-secondary" type="button" onClick={() => void resolveCalendarConflict(conflict, "use_elvanto")} disabled={busy}>{tr("Use Elvanto values")}</button></div></div></div>)}<div className="community-inline-actions"><button className="button button-secondary" type="button" disabled={busy || calendarConflictOffset <= 0} onClick={() => void loadCalendarConflicts(Math.max(0, calendarConflictOffset - 20))}>{tr("Previous")}</button><span className="sync-help">Showing {calendarConflictTotal ? calendarConflictOffset + 1 : 0}–{Math.min(calendarConflictOffset + calendarConflicts.length, calendarConflictTotal)} of {calendarConflictTotal}</span><button className="button button-secondary" type="button" disabled={busy || calendarConflictOffset + 20 >= calendarConflictTotal} onClick={() => void loadCalendarConflicts(calendarConflictOffset + 20)}>{tr("Next")}</button></div></div>}
       <small className="sync-help">Only the selected date range is imported. All-day items retain their date; multi-day calendar records are not supported.</small>
-      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importCalendar()} disabled={busy || !calendarPreview.complete || calendarPreview.createCount + calendarPreview.updateCount + calendarPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.calendarImport?.complete ? "Refresh Calendar from Elvanto" : status?.calendarImport ? "Continue Calendar import" : "Import eligible calendar events"}</button></div>
+      <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importCalendar()} disabled={busy || !calendarPreview.complete || calendarConflictUnresolved > 0 || calendarPreview.createCount + calendarPreview.updateCount + calendarPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.calendarImport?.complete ? "Refresh Calendar from Elvanto" : status?.calendarImport ? "Continue Calendar import" : "Import eligible calendar events"}</button></div>
     </div>}
     {calendarExportPreview && <div className="sync-connection-form" aria-live="polite"><div className="sync-feedback"><strong>Calendar export preview</strong><span>{calendarExportPreview.startDate} – {calendarExportPreview.endDate} · {calendarExportPreview.total} local events · {calendarExportPreview.create} new · {calendarExportPreview.update} updates · {calendarExportPreview.review} needing review · {calendarExportPreview.timeZone}</span><small>Destination: {calendarExportPreview.calendar.name} · Organizer: {calendarExportPreview.organizer.name}</small></div>{calendarExportPreview.sample.map((event, index) => <div className="sync-feedback" key={`${event.date}-${event.title}-${index}`}><strong>{event.title}</strong><span>{event.date} · {event.isAllDay ? "All day" : `${event.start ?? "Invalid time"}–${event.end ?? "—"} UTC`} · {event.action.replaceAll("_", " ")}</span></div>)}<small className="sync-help">Only complete previews can be written. Creates and updates run in batches of at most five. Events imported from Elvanto are never sent back, and remote events are never deleted.</small><div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void exportCalendar()} disabled={busy || !calendarExportPreview.complete || calendarExportPreview.create + calendarExportPreview.update === 0}><Check size={15} />{busy ? "Exporting…" : status?.calendarExport && !status.calendarExport.complete ? "Continue Calendar export" : "Export Calendar to Elvanto"}</button></div></div>}
     {feedback && <p className="sync-feedback" role="status"><Link2 size={15} />{feedback}</p>}
