@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, RefreshCw, RotateCw, Server, Terminal } from "lucide-react";
 import { formatUserDate } from "./date-format";
+import { ModuleTranslationHost } from "./module-registry";
+import { getActiveLanguage } from "./i18n";
+import { translateModuleMessage, translationsForModule } from "./modules/translations";
 import "./runtime-diagnostics.css";
 
 type Memory = { rssBytes: number; heapUsedBytes: number; heapTotalBytes: number; externalBytes?: number; arrayBuffersBytes?: number };
@@ -80,7 +83,9 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
 
   async function restartWorker(worker: WorkerDiagnostic) {
     if (!worker.restartable || restartingWorkerId) return;
-    if (!window.confirm(`Restart ${worker.name}? Active operations may be interrupted.`)) return;
+    const language = getActiveLanguage();
+    const prompt = translationsForModule("core-admin")[language]?.["Restart {worker}? Active operations may be interrupted."]?.replace("{worker}", worker.name) ?? `Restart ${worker.name}? Active operations may be interrupted.`;
+    if (!window.confirm(prompt)) return;
     setRestartingWorkerId(worker.id);
     setError("");
     try {
@@ -107,7 +112,7 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
     ? null
     : Math.max(0, containerMemory.limitBytes - containerMemory.usageBytes);
 
-  return <section className="runtime-diagnostics" aria-labelledby="runtime-diagnostics-title">
+  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><section className="runtime-diagnostics" aria-labelledby="runtime-diagnostics-title">
     <header className="runtime-diagnostics-header">
       <div><span className="runtime-diagnostics-icon"><Activity size={17} /></span><div><h3 id="runtime-diagnostics-title">Runtime diagnostics</h3><p>Process and managed worker usage, uptime, and recent logs.</p></div></div>
       <button className="button button-secondary runtime-refresh" type="button" onClick={() => void refresh()} disabled={loading} aria-label="Refresh diagnostics"><RefreshCw size={14} />Refresh</button>
@@ -143,7 +148,7 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
           const pending = worker.status === "starting" || worker.status === "backoff";
           return <article className="runtime-diagnostic-card" key={worker.id}>
             <div className="runtime-diagnostic-title"><span className={`runtime-status-dot ${ready ? "runtime-status-ok" : pending ? "runtime-status-pending" : "runtime-status-down"}`} /><h4>{worker.name}</h4><b className={`runtime-worker-state ${ready ? "runtime-text-ok" : pending ? "runtime-text-pending" : "runtime-text-down"}`}>{worker.status}</b>{canRestartWorkers && worker.restartable && <button className="button button-secondary runtime-worker-restart" type="button" onClick={() => void restartWorker(worker)} disabled={Boolean(restartingWorkerId) || worker.status === "stopped" || worker.status === "unconfigured"} aria-label={`Restart ${worker.name}`} title={`Restart ${worker.name}`}>{restartingWorkerId === worker.id ? <RefreshCw className="runtime-restart-spin" size={13} /> : <RotateCw size={13} />}{restartingWorkerId === worker.id ? "Restarting…" : "Restart"}</button>}</div>
-            {worker.error && <p className="runtime-worker-error">{worker.error}</p>}
+            {worker.error && <p className="runtime-worker-error">{translateModuleMessage("core-admin", getActiveLanguage(), worker.error)}</p>}
             <dl><div><dt>Worker memory</dt><dd>{formatBytes(worker.memory?.rssBytes)}</dd></div><div><dt>Heap used / total</dt><dd>{formatBytes(worker.memory?.heapUsedBytes)} / {formatBytes(worker.memory?.heapTotalBytes)}</dd></div><div><dt>Uptime</dt><dd>{formatUptime(worker.uptimeSeconds)}</dd></div>{worker.processes?.map((process) => <div key={process.name}><dt>{process.name} memory / uptime</dt><dd>{formatBytes(process.rssBytes)} / {formatUptime(process.uptimeSeconds)}</dd></div>)}</dl>
           </article>;
         })}
@@ -154,5 +159,5 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
         <p className="runtime-log-note">Recent in-memory API and worker logs only; full container logs remain available through Docker.</p>
       </section>
     </>}
-  </section>;
+  </section></ModuleTranslationHost>;
 }
