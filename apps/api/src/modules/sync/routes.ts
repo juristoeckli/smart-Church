@@ -233,12 +233,12 @@ async function remoteIdentity(baseUrl: string, trustedPeer?: RemotePeerAddress, 
     if (remote.installationId !== trustedPeer.installation_id) throw new Error("The identity returned over the federation channel does not match this trusted peer.");
     return remote;
   }
-  // Plain HTTPS is intentionally limited to discovering a key before this
-  // installation is trusted. Every authenticated peer request uses WebSocket.
-  const response = await fetch(`${baseUrl}${prefix}/identity`, { method: "GET", headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000), redirect: "error" });
-  const text = await response.text();
+  if (!localIdentity || !activeFederationChannels) throw new Error("The WebSocket bootstrap service is not ready.");
+  const tunneled = await activeFederationChannels.requestBootstrap(baseUrl, localIdentity, "GET", `${prefix}/identity`, { accept: "application/json" }, "", 12_000);
+  const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
+  const text = tunneled.body;
   if (Buffer.byteLength(text, "utf8") > maxPeerBodyBytes) throw new Error("The remote identity response exceeds the size limit.");
-  if (!response.ok) throw new Error(`The remote server identity endpoint returned HTTP ${response.status}.`);
+  if (!response.ok) throw new Error(`The remote server identity endpoint returned status ${response.status}.`);
   let raw: IdentityPayload;
   try { raw = JSON.parse(text) as IdentityPayload; } catch { throw new Error("The address did not return a Smart-Church Sync identity."); }
   const remote = peerIdentity(raw);
@@ -268,8 +268,8 @@ async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited
 }
 
 async function bootstrapRemoteStatus(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, timeoutMs = 12_000) {
-  if (!peer.base_url) throw new Error("This peer has no reachable HTTPS address for trust bootstrap.");
-  // Pending trust cannot use the authenticated WebSocket RPC channel yet.
+  if (!peer.base_url) throw new Error("This peer has no reachable address for WebSocket trust bootstrap.");
+  if (!activeFederationChannels) throw new Error("The WebSocket bootstrap service is not ready.");
   const path = `${prefix}/status`;
   const timestamp = String(Date.now());
   const nonce = randomBytes(24).toString("base64url");
@@ -281,7 +281,8 @@ async function bootstrapRemoteStatus(peer: RemotePeerAddress, identity: Awaited<
     "x-sc-nonce": nonce,
     "x-sc-signature": signBytes(identity.privateKeyPem, canonicalRequest("GET", path, timestamp, nonce, "")),
   };
-  const response = await fetch(`${peer.base_url}${path}`, { method: "GET", headers, signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
+  const tunneled = await activeFederationChannels.requestBootstrap(peer.base_url, identity, "GET", path, headers, "", timeoutMs);
+  const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
   return readRemoteJson<{ installationId: string; peerInstallationId: string; peerTrustState: string; peerFingerprint: string; protocolVersion: string }>(response, peer.public_key_pem, nonce);
 }
 
@@ -530,7 +531,7 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
 async function verifySignedPeer(request: FastifyRequest, client: PoolClient | import("pg").Pool, allowPending = false) {
   const channelAuthorized = typeof request.headers["x-sc-internal-federation-channel"] === "string"
     && request.headers["x-sc-internal-federation-channel"] === federationInternalRequestToken;
-  if (!channelAuthorized && request.url !== `${prefix}/status`) return null;
+  if (!channelAuthorized) return null;
   const installation = request.headers["x-sc-installation"];
   const timestamp = request.headers["x-sc-timestamp"];
   const nonce = request.headers["x-sc-nonce"];
@@ -808,8 +809,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get(`${prefix}/identity`, async (request, reply) => {
     try {
       const identity = await getIdentity(pool, siteName);
+      if (request.headers["x-sc-internal-federation-channel"] !== federationInternalRequestToken) return reply.code(403).send({ error: "Server identity discovery requires the federation WebSocket bootstrap channel." });
+      const bootstrap = request.headers["x-sc-federation-bootstrap"] === "true";
+      if (bootstrap && request.headers["x-sc-installation"] !== undefined) return reply.code(400).send({ error: "The bootstrap identity request is malformed." });
       const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
-      if (request.headers["x-sc-installation"] !== undefined) {
+      if (!bootstrap && request.headers["x-sc-installation"] !== undefined) {
         const sender = await verifySignedPeer(request, pool);
         if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
         return json(reply, 200, publicIdentity, identity, String(request.headers["x-sc-nonce"] ?? ""));
@@ -821,6 +825,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.post<{ Body: { pairingCode: string; identity: FederationIdentity; baseUrl?: string | null } }>(`${prefix}/pair`, {
     schema: { body: { type: "object", additionalProperties: false, required: ["pairingCode", "identity"], properties: { pairingCode: { type: "string", minLength: 32, maxLength: 128 }, identity: { type: "object" }, baseUrl: { anyOf: [{ type: "string", maxLength: 512 }, { type: "null" }] } } } },
   }, async (request, reply) => {
+    if (request.headers["x-sc-internal-federation-channel"] !== federationInternalRequestToken || request.headers["x-sc-federation-bootstrap"] !== "true") return reply.code(403).send({ error: "Server pairing requires the restricted federation WebSocket bootstrap channel." });
     const clientAddress = request.ip ?? "unknown";
     if (pairAttempts.size > 5000) for (const [key, value] of pairAttempts) if (value.expiresAt <= Date.now()) pairAttempts.delete(key);
     if (pairAttempts.size > 10000 && !pairAttempts.has(clientAddress)) return reply.code(503).send({ error: "The pairing service is busy. Try again later." });
@@ -1762,8 +1767,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!requireManager(request, reply) || !context.validateMutation(request, reply)) return;
     try {
       const baseUrl = normalizeBaseUrl(request.body.baseUrl);
-      const discovered = await remoteIdentity(baseUrl);
       const local = await getIdentity(pool, siteName);
+      const discovered = await remoteIdentity(baseUrl, undefined, local);
       if (discovered.installationId === local.installationId) return reply.code(400).send({ error: "This is the current server. Choose a different Smart-Church installation." });
       const saved = await pool.query<{ fingerprint: string; trust_state: string }>("SELECT fingerprint,trust_state FROM sync_peers WHERE installation_id=$1", [discovered.installationId]);
       if (saved.rowCount && saved.rows[0].fingerprint !== discovered.fingerprint) return reply.code(409).send({ error: "This installation is already known with a different fingerprint. Follow the key rotation procedure." });
@@ -1775,14 +1780,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!requireManager(request, reply) || !context.validateMutation(request, reply)) return;
     try {
       const baseUrl = normalizeBaseUrl(request.body.baseUrl);
-      const discovered = await remoteIdentity(baseUrl);
-      if (discovered.fingerprint !== request.body.expectedFingerprint) return reply.code(409).send({ error: "The remote fingerprint changed. Verify the new fingerprint before pairing." });
       const local = await getIdentity(pool, siteName);
+      const discovered = await remoteIdentity(baseUrl, undefined, local);
+      if (discovered.fingerprint !== request.body.expectedFingerprint) return reply.code(409).send({ error: "The remote fingerprint changed. Verify the new fingerprint before pairing." });
       if (discovered.installationId === local.installationId) return reply.code(400).send({ error: "This is the current server. Choose a different Smart-Church installation." });
       const advertisedBaseUrl = advertisedPeerBaseUrl(request);
       const pairingBody = JSON.stringify({ pairingCode: checkBodyString(request.body.pairingCode, 128, "pairing code"), identity: { installationId: local.installationId, displayName: local.displayName, publicKeyPem: local.publicKeyPem, fingerprint: local.fingerprint, protocolVersion }, baseUrl: advertisedBaseUrl });
-      // One-time pairing creates pending trust; all later peer data uses WebSocket.
-      const response = await fetch(`${baseUrl}${prefix}/pair`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: pairingBody, signal: AbortSignal.timeout(12_000), redirect: "error" });
+      // Pairing is allowed only over the signed, restricted WebSocket bootstrap
+      // channel. Ordinary authenticated peer RPC starts after approval.
+      if (!activeFederationChannels) throw new Error("The WebSocket bootstrap service is not ready.");
+      const timestamp = String(Date.now());
+      const nonce = randomBytes(24).toString("base64url");
+      const pairHeaders = {
+        accept: "application/json",
+        "content-type": "application/json",
+        "x-sc-protocol": protocolVersion,
+        "x-sc-installation": local.installationId,
+        "x-sc-timestamp": timestamp,
+        "x-sc-nonce": nonce,
+        "x-sc-signature": signBytes(local.privateKeyPem, canonicalRequest("POST", `${prefix}/pair`, timestamp, nonce, pairingBody)),
+      };
+      const tunneled = await activeFederationChannels.requestBootstrap(baseUrl, local, "POST", `${prefix}/pair`, pairHeaders, pairingBody, 12_000);
+      const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
       const paired = await readRemoteJson<{ paired: boolean; trustState: string; installationId: string; fingerprint: string }>(response, discovered.publicKeyPem);
       if (!paired.paired || paired.installationId !== discovered.installationId || paired.fingerprint !== discovered.fingerprint || paired.trustState !== "pending") throw new Error("The remote server returned an inconsistent pairing confirmation.");
       await pool.query(
@@ -1804,7 +1823,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state<>'revoked'", [request.params.installationId]);
     const peer = result.rows[0];
     if (!peer) return reply.code(404).send({ error: "This peer is not available." });
-    if (peer.trust_state !== "trusted" && !peer.base_url) return reply.code(409).send({ error: "This pending peer has no reachable HTTPS address for trust bootstrap." });
+    if (peer.trust_state !== "trusted" && !peer.base_url) return reply.code(409).send({ error: "This pending peer has no reachable address for WebSocket trust bootstrap." });
     try {
       const identity = await getIdentity(pool, siteName);
       const status = peer.trust_state === "trusted"
@@ -1825,7 +1844,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const peer = current.rows[0];
     if (!peer) return reply.code(404).send({ error: "Only a pending peer can be approved." });
     if (peer.direction === "outgoing") {
-      if (!peer.base_url) return reply.code(409).send({ error: "This outgoing peer has no reachable address. Re-pair it with a valid HTTPS server URL." });
+      if (!peer.base_url) return reply.code(409).send({ error: "This outgoing peer has no reachable address. Re-pair it with a valid server URL." });
       try {
         const identity = await getIdentity(pool, siteName);
         const status = await bootstrapRemoteStatus(peer, identity);

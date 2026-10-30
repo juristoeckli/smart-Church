@@ -3,7 +3,7 @@ import type { IncomingMessage, Server } from "node:http";
 import type { Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
-import { canonicalRequest, protocolVersion, signBytes, verifyBytes, type LocalIdentity } from "./federation-crypto.js";
+import { canonicalRequest, fingerprintPublicKey, protocolVersion, signBytes, verifyBytes, type LocalIdentity } from "./federation-crypto.js";
 
 // Node's built-in WebSocket dispatches ErrorEvent on failed connections, but
 // some Node 24 builds do not expose ErrorEvent globally. Without this small
@@ -89,9 +89,11 @@ function parseFrameBuffer(state: { buffer: Buffer; lastPongAt?: number }, onMess
 export class FederationChannels {
   private readonly outgoing = new Map<string, WebSocket>();
   private readonly connecting = new Map<string, Promise<void>>();
-  private readonly incoming = new Map<string, { socket: Socket; buffer: Buffer; lastPongAt: number; heartbeat: NodeJS.Timeout | null }>();
+  private readonly incoming = new Map<string, { socket: Socket; buffer: Buffer; lastPongAt: number; heartbeat: NodeJS.Timeout | null; bootstrap?: { publicKeyPem: string } }>();
+  private readonly bootstrapSockets = new WeakMap<Socket, { publicKeyPem: string }>();
   private readonly pending = new Map<string, Pending>();
   private readonly outboundErrors = new Map<string, string>();
+  private readonly bootstrapAttempts = new Map<string, { count: number; expiresAt: number }>();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private closed = false;
   private readonly onUpgrade = (request: IncomingMessage, socket: Socket, head: Buffer) => {
@@ -160,6 +162,44 @@ export class FederationChannels {
     const reverse = this.incoming.get(peer.installation_id);
     if (reverse && !reverse.socket.destroyed) return this.expectBinary(await this.send(reverse.socket, peer.installation_id, method, target, headers, body, timeoutMs, "binary"));
     throw new Error("No authenticated WebSocket channel is open to this peer.");
+  }
+
+  async requestBootstrap(baseUrl: string, identity: LocalIdentity, method: string, target: string, headers: Record<string, string>, body: string, timeoutMs: number) {
+    const timestamp = String(Date.now());
+    const nonce = randomBytes(24).toString("base64url");
+    const parameters = new URLSearchParams({ bootstrap: "1", installationId: identity.installationId, timestamp, nonce, protocol: protocolVersion, publicKey: Buffer.from(identity.publicKeyPem).toString("base64url") });
+    const signedTarget = `${path}?${new URLSearchParams({ bootstrap: "1", installationId: identity.installationId, timestamp, nonce, protocol: protocolVersion }).toString()}`;
+    parameters.set("signature", signBytes(identity.privateKeyPem, canonicalRequest("GET", signedTarget, timestamp, nonce, "")));
+    const origin = new URL(baseUrl);
+    origin.protocol = origin.protocol === "https:" ? "wss:" : "ws:";
+    origin.pathname = path;
+    origin.search = parameters.toString();
+    const socket = new WebSocket(origin);
+    socket.binaryType = "arraybuffer";
+    const id = randomUUID();
+    const request: RpcRequest = { type: "request", id, method, path: target, headers, body };
+    const payload = JSON.stringify(request);
+    if (Buffer.byteLength(payload) > maxTextMessageBytes) throw new Error("The federation WebSocket request exceeds its message limit.");
+    const response = await new Promise<RpcResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => { socket.close(); reject(new Error("The federation WebSocket bootstrap request timed out.")); }, Math.min(maxRequestDurationMs, timeoutMs));
+      timeout.unref();
+      const finish = (error?: Error, value?: RpcResponse) => { clearTimeout(timeout); socket.removeEventListener("message", onMessage); socket.removeEventListener("error", onError); socket.removeEventListener("close", onClose); socket.close(); error ? reject(error) : resolve(value!); };
+      const onMessage = (event: MessageEvent) => {
+        try {
+          const data = typeof event.data === "string" ? event.data : Buffer.from(event.data as ArrayBuffer).toString("utf8");
+          const result = JSON.parse(data) as RpcResponse;
+          if (result.type !== "response" || result.id !== id || !Number.isInteger(result.status) || typeof result.body !== "string" || !result.headers || typeof result.headers !== "object") throw new Error("The remote server returned an invalid bootstrap response.");
+          finish(undefined, result);
+        } catch (error) { finish(error instanceof Error ? error : new Error("The remote server returned an invalid bootstrap response.")); }
+      };
+      const onError = () => finish(new Error(`Could not connect to ${origin.host} over WebSocket.`));
+      const onClose = () => finish(new Error("The remote WebSocket closed before completing bootstrap."));
+      socket.addEventListener("message", onMessage, { once: true });
+      socket.addEventListener("error", onError, { once: true });
+      socket.addEventListener("close", onClose, { once: true });
+      socket.addEventListener("open", () => { try { socket.send(payload); } catch (error) { finish(error instanceof Error ? error : new Error("Could not send the WebSocket bootstrap request.")); } }, { once: true });
+    });
+    return { status: response.status, headers: response.headers, body: response.body };
   }
 
   private expectJson(response: RpcResponse | RpcBinaryResponse) { if (response.type !== "response") throw new Error("The peer returned an unexpected binary response."); return response; }
@@ -240,29 +280,49 @@ export class FederationChannels {
     const nonce = url.searchParams.get("nonce") ?? "";
     const signature = url.searchParams.get("signature") ?? "";
     const protocol = url.searchParams.get("protocol") ?? "";
-    const expectedQueryKeys = ["installationId", "timestamp", "nonce", "protocol", "signature"];
+    const bootstrap = url.searchParams.get("bootstrap") === "1";
+    const publicKeyEncoded = url.searchParams.get("publicKey") ?? "";
+    const expectedQueryKeys = bootstrap ? ["bootstrap", "installationId", "timestamp", "nonce", "protocol", "publicKey", "signature"] : ["installationId", "timestamp", "nonce", "protocol", "signature"];
     if (expectedQueryKeys.some((name) => url.searchParams.getAll(name).length !== 1) || [...url.searchParams.keys()].length !== expectedQueryKeys.length
       || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(installationId)
       || !/^\d{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 5 * 60_000 || !/^[A-Za-z0-9_-]{32,128}$/.test(nonce)
-      || !/^[A-Za-z0-9_-]{80,256}$/.test(signature) || protocol !== protocolVersion) return rejectUpgrade(socket, 401, "The federation WebSocket identity is invalid or stale.");
-    const peer = await this.pool.query<Peer>("SELECT installation_id,base_url,public_key_pem FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [installationId]);
-    if (!peer.rowCount) return rejectUpgrade(socket, 403, "This server is not a trusted Sync peer.");
-    const signedTarget = `${path}?${new URLSearchParams({ installationId, timestamp, nonce, protocol }).toString()}`;
-    if (!verifyBytes(peer.rows[0].public_key_pem, canonicalRequest("GET", signedTarget, timestamp, nonce, ""), signature)) return rejectUpgrade(socket, 401, "The federation WebSocket signature is invalid.");
+      || !/^[A-Za-z0-9_-]{80,256}$/.test(signature) || protocol !== protocolVersion || (bootstrap && publicKeyEncoded.length > 8192)) return rejectUpgrade(socket, 401, "The federation WebSocket identity is invalid or stale.");
+    let bootstrapKey: string | undefined;
+    if (bootstrap) {
+      try { bootstrapKey = Buffer.from(publicKeyEncoded, "base64url").toString("utf8"); if (fingerprintPublicKey(bootstrapKey).length !== 95) throw new Error("Invalid key"); }
+      catch { return rejectUpgrade(socket, 401, "The federation WebSocket bootstrap key is invalid."); }
+    }
+    const peer = await this.pool.query<Peer & { trust_state: string }>("SELECT installation_id,base_url,public_key_pem,trust_state FROM sync_peers WHERE installation_id=$1", [installationId]);
+    if (bootstrap) {
+      if (peer.rows[0]?.trust_state === "revoked" || (peer.rowCount && peer.rows[0].public_key_pem !== bootstrapKey)) return rejectUpgrade(socket, 403, "This bootstrap identity conflicts with the saved peer record.");
+    } else if (!peer.rowCount || peer.rows[0].trust_state !== "trusted") return rejectUpgrade(socket, 403, "This server is not a trusted Sync peer.");
+    const signedTarget = `${path}?${new URLSearchParams({ ...(bootstrap ? { bootstrap: "1" } : {}), installationId, timestamp, nonce, protocol }).toString()}`;
+    const handshakePublicKey = bootstrapKey ?? peer.rows[0].public_key_pem;
+    if (!verifyBytes(handshakePublicKey, canonicalRequest("GET", signedTarget, timestamp, nonce, ""), signature)) return rejectUpgrade(socket, 401, "The federation WebSocket signature is invalid.");
+    if (bootstrap) {
+      const address = request.socket.remoteAddress ?? "unknown";
+      if (this.bootstrapAttempts.size > 5000) for (const [key, attempt] of this.bootstrapAttempts) if (attempt.expiresAt <= Date.now()) this.bootstrapAttempts.delete(key);
+      const attempt = this.bootstrapAttempts.get(address);
+      if (attempt && attempt.expiresAt > Date.now() && attempt.count >= 60) return rejectUpgrade(socket, 429, "Too many federation bootstrap attempts.");
+      this.bootstrapAttempts.set(address, attempt && attempt.expiresAt > Date.now()
+        ? { count: attempt.count + 1, expiresAt: attempt.expiresAt }
+        : { count: 1, expiresAt: Date.now() + 60_000 });
+    }
     const used = await this.pool.query("INSERT INTO sync_request_nonces(installation_id,nonce,expires_at) VALUES($1,$2,now()+interval '10 minutes') ON CONFLICT DO NOTHING RETURNING nonce", [installationId, nonce]);
     if (!used.rowCount) return rejectUpgrade(socket, 401, "The federation WebSocket handshake was already used.");
     const prior = this.incoming.get(installationId);
-    if (prior) { if (prior.heartbeat) clearInterval(prior.heartbeat); prior.socket.end(serverFrame(8, Buffer.alloc(0))); }
+    if (!bootstrap && prior) { if (prior.heartbeat) clearInterval(prior.heartbeat); prior.socket.end(serverFrame(8, Buffer.alloc(0))); }
     const acceptKey = createHash("sha1").update(key + websocketGuid).digest("base64");
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey}\r\n\r\n`);
     const state: { socket: Socket; buffer: Buffer; lastPongAt: number; heartbeat: NodeJS.Timeout | null } = { socket, buffer: Buffer.from(head), lastPongAt: Date.now(), heartbeat: null };
+    if (bootstrapKey) this.bootstrapSockets.set(socket, { publicKeyPem: bootstrapKey });
     state.heartbeat = setInterval(() => {
       if (socket.destroyed) return;
       if (Date.now() - state.lastPongAt > 60_000) return socket.destroy();
       socket.write(serverFrame(9, Buffer.alloc(0)));
     }, 25_000);
     state.heartbeat.unref();
-    this.incoming.set(installationId, state);
+    if (!bootstrap) this.incoming.set(installationId, state);
     await this.pool.query("UPDATE sync_peers SET last_seen_at=now(),last_error=NULL WHERE installation_id=$1", [installationId]);
     socket.on("data", (chunk: Buffer) => {
       state.buffer = Buffer.concat([state.buffer, chunk]);
@@ -291,12 +351,27 @@ export class FederationChannels {
       || typeof request.body !== "string" || Buffer.byteLength(request.body) > 760 * 1024 || !request.headers || typeof request.headers !== "object" || Array.isArray(request.headers)
       || (request.responseMode !== undefined && request.responseMode !== "json" && request.responseMode !== "binary")
       || (request.responseMode === "binary" && (request.method !== "POST" || !request.path.endsWith("/redundancy/pull-snapshot")))) return closePeerSocket(socket);
+    const bootstrap = socket instanceof WebSocket ? undefined : this.bootstrapSockets.get(socket);
+    if (!bootstrap && request.method === "POST" && request.path === "/api/modules/sync/federation/v1/pair") return closePeerSocket(socket, 1008, "Pairing requires the restricted bootstrap channel");
+    if (bootstrap) {
+      const bootstrapPath = "/api/modules/sync/federation/v1/identity";
+      const pairPath = "/api/modules/sync/federation/v1/pair";
+      const statusPath = "/api/modules/sync/federation/v1/status";
+      if (!((request.method === "GET" && request.path === bootstrapPath) || (request.method === "POST" && request.path === pairPath) || (request.method === "GET" && request.path === statusPath))) return closePeerSocket(socket, 1008, "Bootstrap channel is restricted");
+      if (request.path === pairPath) {
+        try {
+          const pair = JSON.parse(request.body) as { identity?: { installationId?: unknown; publicKeyPem?: unknown } };
+          if (pair.identity?.installationId !== installationId || pair.identity.publicKeyPem !== bootstrap.publicKeyPem) return closePeerSocket(socket, 1008, "Pairing identity does not match the signed WebSocket identity");
+        } catch { return closePeerSocket(socket, 1008, "Invalid pairing request"); }
+      }
+    }
     const headers: Record<string, string> = {};
     for (const [name, value] of Object.entries(request.headers)) {
       if (!allowedHeaders.has(name.toLowerCase()) || typeof value !== "string" || value.length > 4096) return closePeerSocket(socket);
       headers[name.toLowerCase()] = value;
     }
-    if (headers["x-sc-installation"] !== installationId) return closePeerSocket(socket);
+    const bootstrapIdentityLookup = Boolean(bootstrap && request.method === "GET" && request.path === "/api/modules/sync/federation/v1/identity" && headers["x-sc-installation"] === undefined);
+    if (headers["x-sc-installation"] !== installationId && !bootstrapIdentityLookup) return closePeerSocket(socket);
     let result: { statusCode: number; headers: Record<string, number | string | string[] | undefined>; body: string; rawPayload: Buffer };
     try {
       const injected = await this.app.inject({
@@ -305,6 +380,7 @@ export class FederationChannels {
         headers: {
           ...headers,
           "x-sc-internal-federation-channel": this.internalRequestToken,
+          ...(bootstrap ? { "x-sc-federation-bootstrap": "true" } : {}),
           "x-forwarded-proto": process.env.NODE_ENV === "production" ? "https" : "http",
         },
         ...(request.body ? { payload: request.body } : {}),
