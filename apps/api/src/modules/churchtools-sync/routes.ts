@@ -452,6 +452,39 @@ async function fetchElvantoFinancialTransactions(apiKey: string, startDate: stri
   if (ids.some((id) => !id)) throw new Error("Elvanto returned a financial transaction without a stable ID.");
   return { transactions, ids, reportedTotal, complete, pagesFetched };
 }
+function hashElvantoSong(value: unknown) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+function elvantoSongArrangementRows(value: unknown): JsonObject[] {
+  return Array.isArray(value) ? value.filter((item): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+}
+async function fetchElvantoSongForExport(apiKey: string, sourceId: string) {
+  const info = await elvantoRequest(apiKey, "songs/getInfo", { id: sourceId, files: false });
+  const rawSongValue = info.song;
+  const song = Array.isArray(rawSongValue) ? rawSongValue[0] as JsonObject | undefined : rawSongValue as JsonObject | undefined;
+  if (!song || idOf(song) !== sourceId) throw new Error("The linked Elvanto song is no longer available. Review a new preview.");
+  const arrangements = await fetchElvantoPagedRows(apiKey, "songs/arrangements/getAll", "arrangements", "arrangement", { song_id: sourceId, files: false });
+  if (!arrangements.complete) throw new Error("Elvanto returned an incomplete arrangements list. No song export was written.");
+  const snapshot = { id: sourceId, title: firstText(song.title), arrangements: arrangements.rows.map((item) => [idOf(item), firstText(item.name), firstText(item.key_male), firstText(item.key_female), firstText(item.date_modified)]) };
+  return { song, arrangements: arrangements.rows, hash: hashElvantoSong(snapshot) };
+}
+function elvantoLocalSongExportHash(song: { id: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }) {
+  return hashElvantoSong([song.id, song.title, song.arrangements.map((arrangement) => [arrangement.id, arrangement.name, arrangement.key])]);
+}
+async function elvantoLocalSongsForExport(departmentId: string, songIds?: string[]) {
+  const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; notes: string; arrangements: Array<{ id: string; name: string; key: string }> }>(
+    `SELECT song.id,song.title,song.authors,song.default_key,song.notes,
+            COALESCE(jsonb_agg(jsonb_build_object('id',arrangement.id,'name',arrangement.name,'key',arrangement.musical_key)
+              ORDER BY lower(arrangement.name),arrangement.id) FILTER (WHERE arrangement.id IS NOT NULL AND arrangement.active=TRUE),'[]'::jsonb) AS arrangements
+       FROM worship_songs song
+       LEFT JOIN worship_song_arrangements arrangement ON arrangement.song_id=song.id
+      WHERE song.department_id=$1 AND song.active=TRUE AND ($2::uuid[] IS NULL OR song.id=ANY($2::uuid[]))
+      GROUP BY song.id ORDER BY lower(song.title),song.id`,
+    [departmentId, songIds ?? null],
+  );
+  return result.rows;
+}
+
 async function fetchElvantoSongs(apiKey: string, songOffset = 0, songLimit = 5, includeDetails = true) {
   const songPage = await fetchElvantoPagedRows(apiKey, "songs/getAll", "songs", "song", { files: false });
   if (songPage.rows.length > 200000) throw new Error("Elvanto returned more than 200,000 songs.");
