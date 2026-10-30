@@ -530,7 +530,7 @@ async function fetchElvantoSongForExport(apiKey: string, sourceId: string) {
 function elvantoLocalSongExportHash(song: { id: string; title: string; arrangements: Array<{ id: string; name: string; key: string }> }) {
   return hashElvantoSong([song.id, song.title, song.arrangements.map((arrangement) => [arrangement.id, arrangement.name, arrangement.key])]);
 }
-async function elvantoLocalSongsForExport(departmentId: string, songIds?: string[]) {
+async function elvantoLocalSongsForExport(pool: Pool, departmentId: string, songIds?: string[]) {
   const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; notes: string; arrangements: Array<{ id: string; name: string; key: string }> }>(
     `SELECT song.id,song.title,song.authors,song.default_key,song.notes,
             COALESCE(jsonb_agg(jsonb_build_object('id',arrangement.id,'name',arrangement.name,'key',arrangement.musical_key)
@@ -771,7 +771,7 @@ function mapEvents(events: JsonObject[], timeZone = "Europe/Zurich") {
         const song = item.song && typeof item.song === "object" ? item.song as JsonObject : {};
         const title = firstText(item.name, item.title, item.label, song.title, song.name);
         if (!title) return [];
-        const when = dateTime(item.startDateTime ?? item.start ?? item.time, start.date, item.startTime);
+        const when = parseChurchToolsEventDateTime(item.startDateTime ?? item.start ?? item.time, start.date, item.startTime, timeZone);
         const duration = Number(item.durationMinutes ?? item.duration);
         const notes = firstText(item.description, item.note, item.notes);
         return [{ title, ...(when ? { startTime: when.time } : {}), ...(duration > 0 ? { durationMinutes: duration } : {}), ...(notes ? { notes: notes.slice(0, 500) } : {}) }];
@@ -2118,7 +2118,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       try {
         const remote = await fetchElvantoPagedRows(apiKey, "songs/getAll", "songs", "song", { files: false });
         if (!remote.complete || remote.rows.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto Songs list. No export preview was saved." });
-        const local = await elvantoLocalSongsForExport(dept);
+        const local = await elvantoLocalSongsForExport(pool!, dept);
         if (local.length > 200000) return reply.code(409).send({ error: "This location has more than 200,000 songs. Narrow the export scope before retrying." });
         const links = await pool!.query<{ song_id: string; source_id: string; local_hash: string; remote_hash: string }>("SELECT song_id,source_id,local_hash,remote_hash FROM elvanto_song_links WHERE department_id=$1", [dept]);
         const linkBySong = new Map(links.rows.map((link) => [link.song_id, link]));
@@ -2195,7 +2195,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         while(index<rows.length && processed<1) {
           const item=rows[index];
           if(item.action!=="create" && item.action!=="update") { skipped++; index++; processed++; await pool!.query("UPDATE elvanto_song_export_state SET page=$2,skipped_count=$3,updated_at=now() WHERE department_id=$1",[dept,index,skipped]); continue; }
-          const current=await elvantoLocalSongsForExport(dept,[item.songId]);
+          const current=await elvantoLocalSongsForExport(pool!, dept,[item.songId]);
           const song=current[0];
           if(!song || elvantoLocalSongExportHash({id:song.id,title:song.title,arrangements:song.arrangements})!==item.localHash) {
             await pool!.query("UPDATE elvanto_song_export_state SET preview_at=NULL,preview_rows='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1",[dept]);
@@ -2578,7 +2578,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             updated += 1;
           } else {
             const result = await elvantoRequest(apiKey, "calendar/events/create", body);
-            const remoteId = idOf(result.event as JsonObject | undefined);
+            const remoteId = idOf((result.event as JsonObject | undefined) ?? {});
             if (!remoteId) throw new Error("Elvanto did not return the ID of the created calendar event.");
             await pool!.query("UPDATE service_events SET source_system='elvanto',source_id=$3,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system IS NULL", [item.eventId, dept, `calendar-export:${remoteId}`]);
             created += 1;

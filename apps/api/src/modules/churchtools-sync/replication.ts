@@ -197,11 +197,7 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
           }
           const values: Record<string, unknown> = { ...row, department_id: departmentId };
           for (const column of table.binaryColumns) if (typeof values[column] === "string") values[column] = Buffer.from(values[column] as string, "base64");
-          await client.query(`INSERT INTO ${q(name)}(${table.columns.map(q).join(",")}) VALUES(${table.columns.map((_, index) => "$" + (index + 1)).join(",")})`, table.columns.map((column) => {
-            const value = values[column.column_name];
-            if (value === null || value === undefined) return null;
-            return column.data_type === "json" || column.data_type === "jsonb" ? JSON.stringify(value) : value;
-          }));
+          await client.query(`INSERT INTO ${q(name)}(${table.columns.map(q).join(",")}) VALUES(${table.columns.map((_, index) => "$" + (index + 1)).join(",")})`, table.columns.map((column) => values[column]));
           records += 1;
         }
       }

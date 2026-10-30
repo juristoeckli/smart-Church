@@ -132,11 +132,7 @@ export function registerEventDeskReplication(context: ModuleServerContext) {
         for (const sourceRow of table.rows) {
           const row = mapUserRefs({ ...sourceRow, department_id: departmentId }, context.userIdMap);
           for (const binaryColumn of table.binaryColumns) if (typeof row[binaryColumn] === "string") row[binaryColumn] = Buffer.from(row[binaryColumn] as string, "base64");
-          await client.query("INSERT INTO " + q(name) + " (" + table.columns.map(q).join(",") + ") VALUES (" + table.columns.map((_, index) => "$" + (index + 1)).join(",") + ")", table.columns.map((column) => {
-            const value = row[column.column_name];
-            if (value === null || value === undefined) return null;
-            return column.data_type === "json" || column.data_type === "jsonb" ? JSON.stringify(value) : value;
-          }));
+          await client.query("INSERT INTO " + q(name) + " (" + table.columns.map(q).join(",") + ") VALUES (" + table.columns.map((_, index) => "$" + (index + 1)).join(",") + ")", table.columns.map((column) => row[column]));
           recordCount += 1;
         }
       }

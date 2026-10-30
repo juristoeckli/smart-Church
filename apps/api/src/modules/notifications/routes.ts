@@ -485,7 +485,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await deliverPendingEmails();
         await processPendingWebhookEvents();
         storageReady = true;
-        reminderTimer = setInterval(() => { void createUpcomingReminders().then(deliverPendingEmails).then(processPendingWebhookEvents).catch((error) => routes.log.error({ err: error }, "Could not process notification jobs.")); }, 60_000);
+        reminderTimer = setInterval(() => { void createUpcomingReminders().then(() => deliverPendingEmails()).then(() => processPendingWebhookEvents()).catch((error) => routes.log.error({ err: error }, "Could not process notification jobs.")); }, 60_000);
         reminderTimer.unref?.();
       } catch (error) {
         routes.log.error({ err: error }, "Optional Notifications storage could not be initialized; the rest of Smart-Church will continue.");

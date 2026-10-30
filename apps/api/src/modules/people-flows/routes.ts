@@ -175,7 +175,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { updated: true };
     });
 
-    routes.get<{ Params: { id: string } }>("/api/people-flows/:id/assignments", { schema: { params: { type: "object", required: ["id"], properties: { id: idSchema } } }, async (request, reply) => {
+    routes.get<{ Params: { id: string } }>("/api/people-flows/:id/assignments", { schema: { params: { type: "object", required: ["id"], properties: { id: idSchema } } } }, async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
