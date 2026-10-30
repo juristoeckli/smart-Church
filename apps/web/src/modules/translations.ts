@@ -1170,12 +1170,87 @@ const churchToolsMigrationTranslations: ModuleLocales = {
   },
 };
 
+const elvantoExportUiTranslations: ModuleLocales = {
+  de: {
+    "Unsupported directions were reset to their supported setting.": "Nicht unterstützte Synchronisierungsrichtungen wurden auf die unterstützte Einstellung zurückgesetzt.",
+    "Elvanto connection verified and settings saved. Sync is not active yet.": "Die Elvanto-Verbindung wurde geprüft und die Einstellungen wurden gespeichert. Die Synchronisierung ist noch nicht aktiv.",
+    "Could not preview Elvanto song export.": "Der Elvanto-Liederexport konnte nicht in der Vorschau angezeigt werden.",
+    "Could not export songs to Elvanto.": "Lieder konnten nicht nach Elvanto exportiert werden.",
+    "Song export to Elvanto is complete.": "Der Liederexport nach Elvanto ist abgeschlossen.",
+    "Song export batch complete. Continue to resume.": "Das Exportpaket ist abgeschlossen. Setze den Export fort, um weiterzumachen.",
+    "Could not load Elvanto calendars and organizers.": "Elvanto-Kalender und -Organisatoren konnten nicht geladen werden.",
+    "Could not preview Elvanto Calendar export.": "Der Elvanto-Kalenderexport konnte nicht in der Vorschau angezeigt werden.",
+    "Could not export Calendar events to Elvanto.": "Kalendertermine konnten nicht nach Elvanto exportiert werden.",
+    "Elvanto Calendar export is complete.": "Der Elvanto-Kalenderexport ist abgeschlossen.",
+    "Calendar export batch complete. Continue the export to resume.": "Das Kalenderexportpaket ist abgeschlossen. Setze den Export fort, um weiterzumachen.",
+    "Refresh calendars and organizers": "Kalender und Organisatoren aktualisieren",
+    "Load calendars and organizers": "Kalender und Organisatoren laden",
+    "Preview Calendar export": "Kalenderexport vorschauen",
+    "Preview Songs export": "Liederexport vorschauen",
+    "Exporting…": "Wird exportiert…",
+    "Continue Songs export": "Liederexport fortsetzen",
+    "Export Songs to Elvanto": "Lieder nach Elvanto exportieren",
+    "All day": "Ganztägig",
+    "Invalid time": "Ungültige Uhrzeit",
+    "Continue Calendar export": "Kalenderexport fortsetzen",
+    "Export Calendar to Elvanto": "Kalender nach Elvanto exportieren",
+  },
+  fr: {
+    "Unsupported directions were reset to their supported setting.": "Les sens de synchronisation non pris en charge ont été rétablis sur le réglage compatible.",
+    "Elvanto connection verified and settings saved. Sync is not active yet.": "La connexion Elvanto a été vérifiée et les réglages enregistrés. La synchronisation n’est pas encore active.",
+    "Could not preview Elvanto song export.": "Impossible de prévisualiser l’exportation des chants vers Elvanto.",
+    "Could not export songs to Elvanto.": "Impossible d’exporter les chants vers Elvanto.",
+    "Song export to Elvanto is complete.": "L’exportation des chants vers Elvanto est terminée.",
+    "Song export batch complete. Continue to resume.": "Le lot d’exportation des chants est terminé. Continuez pour reprendre.",
+    "Could not load Elvanto calendars and organizers.": "Impossible de charger les calendriers et organisateurs Elvanto.",
+    "Could not preview Elvanto Calendar export.": "Impossible de prévisualiser l’exportation du calendrier vers Elvanto.",
+    "Could not export Calendar events to Elvanto.": "Impossible d’exporter les événements du calendrier vers Elvanto.",
+    "Elvanto Calendar export is complete.": "L’exportation du calendrier Elvanto est terminée.",
+    "Calendar export batch complete. Continue the export to resume.": "Le lot d’exportation du calendrier est terminé. Continuez pour reprendre.",
+    "Refresh calendars and organizers": "Actualiser les calendriers et les organisateurs",
+    "Load calendars and organizers": "Charger les calendriers et les organisateurs",
+    "Preview Calendar export": "Prévisualiser l’exportation du calendrier",
+    "Preview Songs export": "Prévisualiser l’exportation des chants",
+    "Exporting…": "Exportation…",
+    "Continue Songs export": "Continuer l’exportation des chants",
+    "Export Songs to Elvanto": "Exporter les chants vers Elvanto",
+    "All day": "Toute la journée",
+    "Invalid time": "Heure invalide",
+    "Continue Calendar export": "Continuer l’exportation du calendrier",
+    "Export Calendar to Elvanto": "Exporter le calendrier vers Elvanto",
+  },
+  it: {
+    "Unsupported directions were reset to their supported setting.": "Le direzioni di sincronizzazione non supportate sono state ripristinate all’impostazione supportata.",
+    "Elvanto connection verified and settings saved. Sync is not active yet.": "La connessione Elvanto è stata verificata e le impostazioni salvate. La sincronizzazione non è ancora attiva.",
+    "Could not preview Elvanto song export.": "Impossibile visualizzare l’anteprima dell’esportazione dei canti verso Elvanto.",
+    "Could not export songs to Elvanto.": "Impossibile esportare i canti verso Elvanto.",
+    "Song export to Elvanto is complete.": "Esportazione dei canti verso Elvanto completata.",
+    "Song export batch complete. Continue to resume.": "Lotto di esportazione dei canti completato. Continua per riprendere.",
+    "Could not load Elvanto calendars and organizers.": "Impossibile caricare calendari e organizzatori Elvanto.",
+    "Could not preview Elvanto Calendar export.": "Impossibile visualizzare l’anteprima dell’esportazione del calendario verso Elvanto.",
+    "Could not export Calendar events to Elvanto.": "Impossibile esportare gli eventi del calendario verso Elvanto.",
+    "Elvanto Calendar export is complete.": "Esportazione del calendario Elvanto completata.",
+    "Calendar export batch complete. Continue the export to resume.": "Lotto di esportazione del calendario completato. Continua per riprendere.",
+    "Refresh calendars and organizers": "Aggiorna calendari e organizzatori",
+    "Load calendars and organizers": "Carica calendari e organizzatori",
+    "Preview Calendar export": "Anteprima esportazione calendario",
+    "Preview Songs export": "Anteprima esportazione canti",
+    "Exporting…": "Esportazione…",
+    "Continue Songs export": "Continua esportazione canti",
+    "Export Songs to Elvanto": "Esporta i canti verso Elvanto",
+    "All day": "Tutto il giorno",
+    "Invalid time": "Orario non valido",
+    "Continue Calendar export": "Continua esportazione calendario",
+    "Export Calendar to Elvanto": "Esporta il calendario verso Elvanto",
+  },
+};
+
 export function translationsForModule(id: string): Partial<Record<UserLanguage, Record<string, string>>> {
   const specific = local[id] ?? {};
   const extra = extended[id] ?? {};
   const more = extendedMore[id] ?? {};
   const final = extendedFinal[id] ?? {};
-  return Object.fromEntries((Object.keys(shared) as UserLanguage[]).map((language) => [language, { ...shared[language], ...(sharedTerms[language] ?? {}), ...(specific[language] ?? {}), ...(extra[language] ?? {}), ...(more[language] ?? {}), ...(final[language] ?? {}), ...(id === "sync" ? syncPermissionTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPeoplePreviewTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsScreenTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPageTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsMigrationTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoImportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoRefreshTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsSafetyTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesErrorTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoContactTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoPeopleProfileTranslations[language] ?? {} : {}), ...(id === "core-admin" ? adminPermissionTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userAdminTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userDataFallbackTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventManagementTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventCheckInTranslations[language] ?? {} : {}), ...(moduleRemainderTranslations[id]?.[language] ?? {}), ...(moduleRemainderAdditions[id]?.[language] ?? {}), ...(moduleRemainderFinal[id]?.[language] ?? {}), ...(coreApiErrors[id]?.[language] ?? {}), ...(coreRouteErrorTranslations[id]?.[language] ?? {}), ...(id === "sync" ? elvantoRouteErrorTranslations[language] : {}), ...(id === "sync" ? elvantoFinancialTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSyncAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleLabels[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSettingsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongLibraryTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsErrorTranslations[language] ?? {} : {}) }])) as Partial<Record<UserLanguage, Record<string, string>>>;
+  return Object.fromEntries((Object.keys(shared) as UserLanguage[]).map((language) => [language, { ...shared[language], ...(sharedTerms[language] ?? {}), ...(specific[language] ?? {}), ...(extra[language] ?? {}), ...(more[language] ?? {}), ...(final[language] ?? {}), ...(id === "sync" ? syncPermissionTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPeoplePreviewTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsScreenTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPageTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsMigrationTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoImportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoRefreshTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsSafetyTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesErrorTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoContactTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoPeopleProfileTranslations[language] ?? {} : {}), ...(id === "core-admin" ? adminPermissionTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userAdminTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userDataFallbackTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventManagementTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventCheckInTranslations[language] ?? {} : {}), ...(moduleRemainderTranslations[id]?.[language] ?? {}), ...(moduleRemainderAdditions[id]?.[language] ?? {}), ...(moduleRemainderFinal[id]?.[language] ?? {}), ...(coreApiErrors[id]?.[language] ?? {}), ...(coreRouteErrorTranslations[id]?.[language] ?? {}), ...(id === "sync" ? elvantoRouteErrorTranslations[language] : {}), ...(id === "sync" ? elvantoFinancialTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSyncAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleLabels[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoExportUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSettingsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongLibraryTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsErrorTranslations[language] ?? {} : {}) }])) as Partial<Record<UserLanguage, Record<string, string>>>;
 }
 
 export function translateModuleMessage(id: string, language: UserLanguage, message: string): string {
