@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
-import { registeredModules } from "./module-registry";
-import { translateModuleMessage } from "./modules/translations";
+import { ModuleTranslationHost, registeredModules } from "./module-registry";
+import { translateModuleMessage, translationsForModule } from "./modules/translations";
 import { getActiveLanguage } from "./i18n";
 import "./LocationAccess.css";
 
@@ -127,7 +127,7 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
     update(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
   }
 
-  return <div className={embedded ? "location-access-embedded" : "modal-backdrop location-access-backdrop"} role={embedded ? undefined : "presentation"} onMouseDown={!embedded ? (event) => event.target === event.currentTarget && onClose() : undefined}>
+  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><div className={embedded ? "location-access-embedded" : "modal-backdrop location-access-backdrop"} role={embedded ? undefined : "presentation"} onMouseDown={!embedded ? (event) => event.target === event.currentTarget && onClose() : undefined}>
     <section className={`modal location-access-modal ${embedded ? "location-access-embedded-panel" : ""}`} role={embedded ? "region" : "dialog"} aria-modal={embedded ? undefined : true} aria-labelledby="location-access-title">
       <div className="modal-heading"><div><span className="eyebrow">LOCATION MANAGEMENT</span><h2 id="location-access-title">People &amp; access</h2><p>Manage who can use {department.location} and what each person can do.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><X size={19} /></button></div>
       <div className="location-access-layout">
@@ -152,5 +152,5 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
         </form>
       </div>
     </section>
-  </div>;
+  </div></ModuleTranslationHost>;
 }
