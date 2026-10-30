@@ -159,6 +159,9 @@ async function readRemoteJson<T>(response: Response, publicKeyPem: string, nonce
   const body = await response.text();
   if (Buffer.byteLength(body, "utf8") > maxPeerBodyBytes) throw new Error("The remote server response exceeds the size limit.");
   const signature = response.headers.get("x-sc-response-signature");
+  if (!response.ok && (!signature || response.headers.get("x-sc-protocol") !== protocolVersion)) {
+    throw new Error(`The remote server returned HTTP ${response.status} without a valid signed response.`);
+  }
   if (response.headers.get("x-sc-protocol") !== protocolVersion || !signature || !verifyBytes(publicKeyPem, canonicalResponse(response.status, nonce, body), signature)) {
     throw new Error("The remote server response signature could not be verified.");
   }
@@ -175,11 +178,12 @@ async function remoteIdentity(baseUrl: string) {
   const response = await fetch(`${baseUrl}${prefix}/identity`, { method: "GET", headers: { accept: "application/json" }, signal: AbortSignal.timeout(12_000), redirect: "error" });
   const text = await response.text();
   if (Buffer.byteLength(text, "utf8") > maxPeerBodyBytes) throw new Error("The remote identity response exceeds the size limit.");
+  if (!response.ok) throw new Error(`The remote server identity endpoint returned HTTP ${response.status}.`);
   let raw: IdentityPayload;
   try { raw = JSON.parse(text) as IdentityPayload; } catch { throw new Error("The address did not return a Smart-Church Sync identity."); }
   const remote = peerIdentity(raw);
   const signature = response.headers.get("x-sc-response-signature");
-  if (response.headers.get("x-sc-protocol") !== protocolVersion || !response.ok || !signature || !verifyBytes(remote.publicKeyPem, canonicalResponse(response.status, "", text), signature)) {
+  if (response.headers.get("x-sc-protocol") !== protocolVersion || !signature || !verifyBytes(remote.publicKeyPem, canonicalResponse(response.status, "", text), signature)) {
     throw new Error("The remote server identity signature could not be verified.");
   }
   return remote;
