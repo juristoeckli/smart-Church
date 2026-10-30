@@ -2056,7 +2056,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped; page += 1;
             complete = services.length === 0 || (total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : services.length < 1000);
             await db.query("UPDATE elvanto_sync_settings SET services_import_page=$2,services_import_total=$3,services_import_created_count=$4,services_import_updated_count=$5,services_import_skipped_count=$6,services_import_complete=$7,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, total, created, updated, skipped, complete]);
-            await db.query("INSERT INTO elvanto_sync_audit (department_id,area,action,outcome,details) VALUES ($1,'services','import','success',$2::jsonb)", [dept, JSON.stringify({ page, created: pageCreated, updated: pageUpdated, skipped: pageSkipped, complete })]);
+            await db.query("INSERT INTO elvanto_sync_audit (department_id,area,action,outcome,details) VALUES ($1,'services','import','success',$2::jsonb)", [dept, JSON.stringify({ page: page - 1, nextPage: page, created: pageCreated, updated: pageUpdated, skipped: pageSkipped, complete })]);
             await db.query("COMMIT");
           } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
           if (!services.length) break;
