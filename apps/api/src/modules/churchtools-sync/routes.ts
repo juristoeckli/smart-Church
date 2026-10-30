@@ -92,7 +92,7 @@ async function testElvantoConnection(apiKey: string) {
   return true;
 }
 async function elvantoRequest(apiKey: string, endpoint: string, body: JsonObject = {}) {
-  const safeToRetry = !/\/(create|edit|remove)$/i.test(endpoint);
+  const safeToRetry = !/\/(create|edit|remove|addPerson|removePerson)$/i.test(endpoint);
   let response: Response | undefined;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -141,6 +141,11 @@ function elvantoGroupPeople(group: JsonObject) {
   const rows = (people as JsonObject).person;
   if (Array.isArray(rows)) return rows.filter((person): person is JsonObject => Boolean(person) && typeof person === "object");
   return rows && typeof rows === "object" ? [rows as JsonObject] : [];
+}
+async function fetchElvantoGroupInfo(apiKey: string, groupId: string) {
+  const payload = await elvantoRequest(apiKey, "groups/getInfo", { id: groupId, fields: ["people"] });
+  const value = payload.group;
+  return Array.isArray(value) ? value[0] as JsonObject | undefined : value as JsonObject | undefined;
 }
 function objectRows(value: unknown): JsonObject[] {
   if (Array.isArray(value)) return value.filter((item): item is JsonObject => Boolean(item) && typeof item === "object");
@@ -509,6 +514,13 @@ function elvantoPeopleExportHash(contact: { id: string; first_name: string; last
 function elvantoRemotePersonHash(person: JsonObject) {
   return createHash("sha256").update(JSON.stringify([idOf(person), firstText(person.firstname), firstText(person.lastname), firstText(person.email), firstText(person.phone), person.contact === true || person.contact === 1 || person.contact === "1"])).digest("hex");
 }
+function elvantoGroupExportHash(group: { id: string; name: string; elvanto_source_id: string | null }, members: Array<{ contact_id: string; person_source_id: string | null; role: string; status: string }>) {
+  const memberSnapshot = members.map((member) => [member.contact_id, member.person_source_id, member.role, member.status]).sort((left, right) => String(left[0]).localeCompare(String(right[0])));
+  return createHash("sha256").update(JSON.stringify([group.id, group.name, memberSnapshot])).digest("hex");
+}
+function elvantoRemoteGroupHash(group: JsonObject) {
+  return createHash("sha256").update(JSON.stringify([idOf(group), firstText(group.name), elvantoGroupPeople(group).map((person) => idOf(person)).filter(Boolean).sort()])).digest("hex");
+}
 function plainDescription(value: unknown) {
   if (typeof value !== "string") return "";
   return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">") .replace(/\s+/g, " ").trim();
@@ -783,7 +795,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const songCount = await pool!.query<{ count: number }>("SELECT count(*)::int AS count FROM elvanto_songs_import WHERE department_id=$1", [dept]);
       const financialState = await pool!.query<{ page: number; total: number | null; created: number; updated: number; skipped: number; complete: boolean; preview_complete: boolean; preview_count: number; start_date: string | null; end_date: string | null }>("SELECT financial_import_page AS page,COALESCE(financial_import_total,financial_preview_count) AS total,financial_import_created_count AS created,financial_import_updated_count AS updated,financial_import_skipped_count AS skipped,financial_import_complete AS complete,financial_preview_complete,financial_preview_count,COALESCE(financial_import_start_date,financial_preview_start_date)::text AS start_date,COALESCE(financial_import_end_date,financial_preview_end_date)::text AS end_date FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const peopleExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT people_export_page AS page,jsonb_array_length(people_export_preview_rows)::int AS total,people_export_created_count AS created,people_export_updated_count AS updated,people_export_skipped_count AS skipped,people_export_complete AS complete,people_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
-      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
+      const groupsExportState = await pool!.query<{ page: number; total: number; created: number; updated: number; added: number; skipped: number; complete: boolean; preview_at: Date | string | null }>("SELECT groups_export_page AS page,jsonb_array_length(groups_export_preview_rows)::int AS total,groups_export_created_count AS created,groups_export_updated_count AS updated,groups_export_added_members_count AS added,groups_export_skipped_count AS skipped,groups_export_complete AS complete,groups_export_preview_at AS preview_at FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      return { configured: Boolean(row), directions, financialEnabled: row?.financial_enabled ?? false, enabled: row?.enabled ?? false, lastConnectedAt: row?.last_connected_at ?? null, lastSyncAt: row?.last_sync_at ?? null, lastSyncError: row?.last_sync_error ?? null, peopleImport: row ? { page: row.people_import_page, total: row.people_import_total, created: row.people_import_created_count, updated: row.people_import_updated_count, skipped: row.people_import_skipped_count, complete: row.people_import_complete } : null, peopleExport: peopleExportState.rows[0] ? { page: peopleExportState.rows[0].page, total: peopleExportState.rows[0].total, created: peopleExportState.rows[0].created, updated: peopleExportState.rows[0].updated, skipped: peopleExportState.rows[0].skipped, complete: peopleExportState.rows[0].complete, previewAt: peopleExportState.rows[0].preview_at } : null, groupsExport: groupsExportState.rows[0] ? { page: groupsExportState.rows[0].page, total: groupsExportState.rows[0].total, created: groupsExportState.rows[0].created, updated: groupsExportState.rows[0].updated, addedMembers: groupsExportState.rows[0].added, skipped: groupsExportState.rows[0].skipped, complete: groupsExportState.rows[0].complete, previewAt: groupsExportState.rows[0].preview_at } : null, groupsImport: row ? { page: row.groups_import_page, total: row.groups_import_total, created: row.groups_import_created_count, updated: row.groups_import_updated_count, skipped: row.groups_import_skipped_count, complete: row.groups_import_complete } : null, servicesImport: row ? { page: row.services_import_page, total: row.services_import_total, created: row.services_import_created_count, updated: row.services_import_updated_count, skipped: row.services_import_skipped_count, complete: row.services_import_complete } : null, calendarImport: row ? { page: row.calendar_import_page, total: row.calendar_import_total, created: row.calendar_import_created_count, updated: row.calendar_import_updated_count, skipped: row.calendar_import_skipped_count, complete: row.calendar_import_complete, startDate: row.calendar_import_start_date, endDate: row.calendar_import_end_date } : null, peopleFlowsImport: row ? { page: row.people_flows_import_page, total: row.people_flows_import_total ?? row.people_flows_preview_count, created: row.people_flows_import_created_count, updated: row.people_flows_import_updated_count, skipped: row.people_flows_import_skipped_count, complete: row.people_flows_import_complete, previewComplete: row.people_flows_preview_complete, previewCount: row.people_flows_preview_count, importedCount: row.people_flows_imported_count, lastImportAt: row.people_flows_last_import_at } : null, peopleFlows: importedFlows.rows.map((flow) => ({ sourceId: flow.source_id, name: flow.name, steps: Array.isArray(flow.definition.steps) ? flow.definition.steps.length : 0, members: Array.isArray(flow.members) ? flow.members.length : 0, importedAt: flow.imported_at })), songsImport: row ? { page: row.songs_import_page, total: row.songs_import_total ?? row.songs_preview_count, created: row.songs_import_created_count, updated: row.songs_import_updated_count, skipped: row.songs_import_skipped_count, complete: row.songs_import_complete, previewComplete: row.songs_preview_complete, previewCount: row.songs_preview_count, importedCount: row.songs_imported_count, lastImportAt: row.songs_last_import_at } : null, songs: importedSongs.rows.map((song) => ({ sourceId: song.source_id, title: song.title, arrangements: Array.isArray(song.arrangements) ? song.arrangements.length : 0, importedAt: song.imported_at })), songsTotal: songCount.rows[0]?.count ?? 0, financialImport: financialState.rows[0] ? { page: financialState.rows[0].page, total: financialState.rows[0].total, created: financialState.rows[0].created, updated: financialState.rows[0].updated, skipped: financialState.rows[0].skipped, complete: financialState.rows[0].complete, previewComplete: financialState.rows[0].preview_complete, previewCount: financialState.rows[0].preview_count, startDate: financialState.rows[0].start_date, endDate: financialState.rows[0].end_date } : null };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/financial", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -929,11 +942,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (total !== null && people.length >= total) { complete = true; break; }
         if (batch.length < pageSize) { complete = true; break; }
       }
-      const existing = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; email: string | null; first_name: string; last_name: string }>(
-        "SELECT id,source_system,source_id,email,first_name,last_name FROM contacts WHERE department_id=$1",
+      const existing = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; email: string | null; first_name: string; last_name: string }>(
+        "SELECT id,source_system,source_id,elvanto_source_id,email,first_name,last_name FROM contacts WHERE department_id=$1",
         [dept],
       );
-      const bySourceId = new Map(existing.rows.filter((contact) => contact.source_system === "elvanto" && contact.source_id).map((contact) => [contact.source_id!, contact]));
+      const bySourceId = new Map(existing.rows.map((contact) => [contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id, contact] as const).filter((entry): entry is [string, typeof existing.rows[number]] => Boolean(entry[0])));
       const byEmail = new Map<string, typeof existing.rows>();
       for (const contact of existing.rows) if (contact.email?.trim()) {
         const email = contact.email.trim().toLocaleLowerCase();
@@ -1150,11 +1163,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const people = elvantoCollection(payload, "people", "person");
           const reportedTotal = Number((payload.people as JsonObject | undefined)?.total);
           if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
-          const contacts = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; email: string | null }>(
-            "SELECT id,source_system,source_id,email FROM contacts WHERE department_id=$1",
+          const contacts = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; email: string | null }>(
+            "SELECT id,source_system,source_id,elvanto_source_id,email FROM contacts WHERE department_id=$1",
             [dept],
           );
           const linkedIds = new Set(contacts.rows.filter((contact) => contact.source_system === "elvanto" && contact.source_id).map((contact) => contact.source_id!));
+          const outboundLinkedIds = new Set(contacts.rows.filter((contact) => contact.source_system === null && contact.elvanto_source_id).map((contact) => contact.elvanto_source_id!));
           const emails = new Map<string, number>();
           for (const contact of contacts.rows) if (contact.email?.trim()) {
             const email = contact.email.trim().toLocaleLowerCase();
@@ -1176,6 +1190,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (!sourceId || seenIds.has(sourceId) || !firstName || !lastName || firstName.length > 80 || lastName.length > 80 || (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) || (phone && phone.length > 40)) { pageSkipped += 1; continue; }
             seenIds.add(sourceId);
             const profile = mapElvantoPeopleProfile(person, previewCustomFields);
+            if (outboundLinkedIds.has(sourceId)) { pageSkipped += 1; continue; }
             if (linkedIds.has(sourceId)) { records.push({ source_id: sourceId, first_name: firstName, last_name: lastName, email, phone, profile }); pageUpdated += 1; continue; }
             if (email && (emails.get(email.toLocaleLowerCase()) ?? 0) > 0) { pageSkipped += 1; continue; }
             if (email) emails.set(email.toLocaleLowerCase(), 1);
@@ -1219,6 +1234,154 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         elvantoPeopleImportRunning.delete(dept);
       }
     });
+    routes.post("/api/modules/sync/elvanto/groups-export-preview", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before previewing Groups export." });
+      if (row.directions.groups !== "smart_church_to_elvanto" && row.directions.groups !== "bidirectional") return reply.code(400).send({ error: "Set Groups direction to Smart Church → Elvanto or bidirectional before previewing an export." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      try {
+        const remoteGroups: JsonObject[] = [];
+        let reportedTotal: number | null = null;
+        let complete = false;
+        for (let page = 1; page <= 200; page += 1) {
+          const payload = await elvantoRequest(apiKey, "groups/getAll", { page, page_size: 1000, fields: ["people"] });
+          const batch = elvantoCollection(payload, "groups", "group");
+          remoteGroups.push(...batch);
+          const reported = Number((payload.groups as JsonObject | undefined)?.total);
+          if (Number.isFinite(reported) && reported >= 0) reportedTotal = reported;
+          if (reportedTotal !== null && remoteGroups.length >= reportedTotal || batch.length < 1000) { complete = true; break; }
+        }
+        if (!complete || remoteGroups.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto Groups list. No export preview was saved." });
+        const localResult = await pool!.query<{ id: string; name: string; elvanto_source_id: string | null; contact_id: string | null; person_source_id: string | null; role: string | null; status: string | null }>(
+          `SELECT g.id,g.name,g.elvanto_source_id,m.contact_id,COALESCE(c.elvanto_source_id,CASE WHEN c.source_system='elvanto' THEN c.source_id END) AS person_source_id,m.role,m.status
+             FROM church_groups g LEFT JOIN group_members m ON m.group_id=g.id LEFT JOIN contacts c ON c.id=m.contact_id AND c.department_id=g.department_id
+            WHERE g.department_id=$1 AND g.source_system IS NULL ORDER BY g.id,m.contact_id`, [dept]);
+        const localGroups = new Map<string, { id: string; name: string; elvanto_source_id: string | null; members: Array<{ contact_id: string; person_source_id: string | null; role: string; status: string }> }>();
+        for (const item of localResult.rows) {
+          let group = localGroups.get(item.id);
+          if (!group) { group = { id: item.id, name: item.name, elvanto_source_id: item.elvanto_source_id, members: [] }; localGroups.set(item.id, group); }
+          if (item.contact_id) group.members.push({ contact_id: item.contact_id, person_source_id: item.person_source_id, role: item.role ?? "Member", status: item.status ?? "active" });
+        }
+        const remoteById = new Map(remoteGroups.map((group) => [idOf(group), group]));
+        const remoteNames = new Map<string, JsonObject[]>();
+        for (const group of remoteGroups) {
+          const key = firstText(group.name).trim().toLocaleLowerCase();
+          if (key) remoteNames.set(key, [...(remoteNames.get(key) ?? []), group]);
+        }
+        const operations: Array<{ kind: "group" | "member"; groupId: string; localHash: string; sourceId?: string | null; remoteHash?: string | null; action: string; name?: string; personId?: string; position?: string }> = [];
+        const sample: Array<{ name: string; action: string; membersToAdd: number; missingPeople: number; remoteOnlyMembers: number }> = [];
+        let createCount = 0; let updateCount = 0; let reviewCount = 0; let addMemberCount = 0; let missingPeopleCount = 0; let remoteOnlyMemberCount = 0;
+        for (const group of localGroups.values()) {
+          const linked = group.elvanto_source_id ? remoteById.get(group.elvanto_source_id) : undefined;
+          const localHash = elvantoGroupExportHash(group, group.members);
+          let action: "create" | "update" | "review_name_conflict" | "missing_remote";
+          if (group.elvanto_source_id) action = linked ? "update" : "missing_remote";
+          else if ((remoteNames.get(group.name.trim().toLocaleLowerCase()) ?? []).length) action = "review_name_conflict";
+          else action = "create";
+          if (action === "create") createCount += 1;
+          else if (action === "update") updateCount += 1;
+          else reviewCount += 1;
+          const remoteMemberIds = new Set(linked ? elvantoGroupPeople(linked).map(idOf).filter(Boolean) : []);
+          const desiredMembers = new Set<string>();
+          let membersToAdd = 0; let missingPeople = 0;
+          for (const member of group.members) {
+            if (member.status !== "active") continue;
+            if (!member.person_source_id) { missingPeople += 1; continue; }
+            desiredMembers.add(member.person_source_id);
+            if (action !== "create" && action !== "update") continue;
+            if (remoteMemberIds.has(member.person_source_id)) continue;
+            const position = /^leader$/i.test(member.role) ? "Leader" : /^assistant\s+leader$/i.test(member.role) ? "Assistant Leader" : undefined;
+            operations.push({ kind: "member", groupId: group.id, localHash, action: "add", personId: member.person_source_id, ...(position ? { position } : {}) });
+            remoteMemberIds.add(member.person_source_id);
+            membersToAdd += 1; addMemberCount += 1;
+          }
+          const remoteOnly = [...remoteMemberIds].filter((personId) => !desiredMembers.has(personId)).length;
+          remoteOnlyMemberCount += remoteOnly; missingPeopleCount += missingPeople;
+          operations.unshift({ kind: "group", groupId: group.id, sourceId: group.elvanto_source_id, localHash, remoteHash: linked ? elvantoRemoteGroupHash(linked) : null, action, name: group.name });
+          if (sample.length < 50) sample.push({ name: group.name, action, membersToAdd, missingPeople, remoteOnlyMembers: remoteOnly });
+        }
+        const saved = await pool!.query(
+          `UPDATE elvanto_sync_settings SET groups_export_preview_at=now(),groups_export_preview_rows=$2::jsonb,groups_export_page=0,groups_export_created_count=0,groups_export_updated_count=0,groups_export_added_members_count=0,groups_export_skipped_count=0,groups_export_complete=($4=0),updated_at=now()
+            WHERE department_id=$1 AND updated_at=$3 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`,
+          [dept, JSON.stringify(operations), row.updated_at, operations.length]);
+        if (!saved.rowCount) return reply.code(409).send({ error: "Another Elvanto import is running or the connection changed. Try the preview again." });
+        return { complete: true, groups: localGroups.size, total: operations.length, create: createCount, update: updateCount, addMembers: addMemberCount, review: reviewCount, missingPeople: missingPeopleCount, remoteOnlyMembers: remoteOnlyMemberCount, sample };
+      } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Groups export preview failed." }); }
+    });
+    routes.post("/api/modules/sync/elvanto/groups-export", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (elvantoGroupsImportRunning.has(dept)) return reply.code(409).send({ error: "A Groups sync is already running for this location." });
+      const row = await elvantoSettings(dept);
+      if (!row) return reply.code(404).send({ error: "Connect Elvanto before exporting Groups." });
+      if (row.directions.groups !== "smart_church_to_elvanto" && row.directions.groups !== "bidirectional") return reply.code(400).send({ error: "Set Groups direction to Smart Church → Elvanto or bidirectional before exporting." });
+      const saved = (await pool!.query<{ preview_at: Date | string | null; rows: Array<{ kind: string; groupId: string; localHash: string; sourceId?: string | null; remoteHash?: string | null; action: string; name?: string; personId?: string; position?: string }>; page: number; created: number; updated: number; added: number; skipped: number }>("SELECT groups_export_preview_at AS preview_at,groups_export_preview_rows AS rows,groups_export_page AS page,groups_export_created_count AS created,groups_export_updated_count AS updated,groups_export_added_members_count AS added,groups_export_skipped_count AS skipped FROM elvanto_sync_settings WHERE department_id=$1", [dept])).rows[0];
+      const previewTime = saved?.preview_at ? new Date(saved.preview_at).getTime() : 0;
+      if (!saved || !previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !Array.isArray(saved.rows)) return reply.code(409).send({ error: "Run a complete Groups export preview first. Previews expire after one hour and after connection settings change." });
+      let apiKey: string;
+      try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
+      elvantoGroupsImportRunning.add(dept); let reserved = false; let writeAttempted = false;
+      try {
+        const lock = await pool!.query("UPDATE elvanto_sync_settings SET groups_importing=TRUE,groups_import_started_at=now(),updated_at=now() WHERE department_id=$1 AND updated_at=$2 AND groups_export_preview_at > now()-interval '1 hour' AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, row.updated_at]);
+        if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a new Groups export preview." });
+        reserved = true;
+        let index = saved.page; let created = saved.created; let updated = saved.updated; let added = saved.added; let skipped = saved.skipped; let writes = 0; let processed = 0;
+        const operations = saved.rows;
+        while (index < operations.length && writes < 5 && processed < 100) {
+          const operation = operations[index];
+          if (operation.action !== "create" && operation.action !== "update" && operation.action !== "add") { skipped += 1; index += 1; processed += 1; await pool!.query("UPDATE elvanto_sync_settings SET groups_export_page=$2,groups_export_skipped_count=$3,updated_at=now() WHERE department_id=$1", [dept, index, skipped]); continue; }
+          const localRows = await pool!.query<{ id: string; name: string; elvanto_source_id: string | null; contact_id: string | null; person_source_id: string | null; role: string | null; status: string | null }>(`SELECT g.id,g.name,g.elvanto_source_id,m.contact_id,COALESCE(c.elvanto_source_id,CASE WHEN c.source_system='elvanto' THEN c.source_id END) AS person_source_id,m.role,m.status FROM church_groups g LEFT JOIN group_members m ON m.group_id=g.id LEFT JOIN contacts c ON c.id=m.contact_id AND c.department_id=g.department_id WHERE g.department_id=$1 AND g.id=$2 AND g.source_system IS NULL ORDER BY m.contact_id`, [dept, operation.groupId]);
+          const group = localRows.rows[0];
+          if (!group) { await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "A local group changed after preview. Run a fresh Groups export preview." }); }
+          const members = localRows.rows.filter((item) => item.contact_id).map((item) => ({ contact_id: item.contact_id!, person_source_id: item.person_source_id, role: item.role ?? "Member", status: item.status ?? "active" }));
+          const localHash = elvantoGroupExportHash(group, members);
+          if (localHash !== operation.localHash) { await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "A local group or its membership changed after preview. Run a fresh Groups export preview." }); }
+          let remoteGroupId = group.elvanto_source_id;
+          if (operation.kind === "group") {
+            if (group.elvanto_source_id !== (operation.action === "update" ? operation.sourceId : null)) { await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "The local Elvanto group link changed after preview. Run a fresh Groups export preview." }); }
+            if (operation.action === "update") {
+              const remote = remoteGroupId ? await fetchElvantoGroupInfo(apiKey, remoteGroupId) : undefined;
+              if (!remote || elvantoRemoteGroupHash(remote) !== operation.remoteHash) { await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "The linked Elvanto group changed after preview. Run a fresh Groups export preview." }); }
+            } else {
+              const currentRemote = await fetchElvantoPagedRows(apiKey, "groups/getAll", "groups", "group");
+              if (!currentRemote.complete || currentRemote.rows.some((item) => firstText(item.name).trim().toLocaleLowerCase() === group.name.trim().toLocaleLowerCase())) { await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "A matching Elvanto group now exists or the complete list could not be checked. Run a fresh Groups export preview." }); }
+            }
+            writeAttempted = true;
+            const result = await elvantoRequest(apiKey, operation.action === "create" ? "groups/create" : "groups/edit", { ...(operation.action === "update" ? { id: remoteGroupId } : {}), name: group.name });
+            if (operation.action === "create") remoteGroupId = idOf((result.group ?? {}) as JsonObject);
+            if (!remoteGroupId) throw new Error("Elvanto accepted the group request without returning a stable group ID. Run a new preview before retrying.");
+            if (operation.action === "create") await pool!.query("UPDATE church_groups SET elvanto_source_id=$3,updated_at=now() WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, operation.groupId, remoteGroupId]);
+            if (operation.action === "create") created += 1; else updated += 1;
+            writes += 1;
+          } else {
+            if (!remoteGroupId) { await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "The Elvanto group link is missing. Run a fresh Groups export preview." }); }
+            const person = await pool!.query<{ source_id: string | null; elvanto_source_id: string | null }>("SELECT source_id,elvanto_source_id FROM contacts WHERE id=$1 AND department_id=$2", [members.find((member) => member.person_source_id === operation.personId)?.contact_id ?? "", dept]);
+            const personId = person.rows[0]?.elvanto_source_id ?? person.rows[0]?.source_id;
+            if (!personId || personId !== operation.personId) { skipped += 1; index += 1; processed += 1; await pool!.query("UPDATE elvanto_sync_settings SET groups_export_page=$2,groups_export_skipped_count=$3,updated_at=now() WHERE department_id=$1", [dept, index, skipped]); continue; }
+            const remote = await fetchElvantoGroupInfo(apiKey, remoteGroupId);
+            if (!remote) throw new Error("Could not re-read the Elvanto group before adding a member.");
+            if (elvantoGroupPeople(remote).some((item) => idOf(item) === operation.personId)) { index += 1; processed += 1; await pool!.query("UPDATE elvanto_sync_settings SET groups_export_page=$2,updated_at=now() WHERE department_id=$1", [dept, index]); continue; }
+            writeAttempted = true;
+            await elvantoRequest(apiKey, "groups/addPerson", { id: remoteGroupId, person_id: operation.personId, ...(operation.position ? { position: operation.position } : {}) });
+            added += 1; writes += 1;
+          }
+          writeAttempted = false; index += 1; processed += 1;
+          const complete = index >= operations.length;
+          await pool!.query("UPDATE elvanto_sync_settings SET groups_export_page=$2,groups_export_created_count=$3,groups_export_updated_count=$4,groups_export_added_members_count=$5,groups_export_skipped_count=$6,groups_export_complete=$7,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, index, created, updated, added, skipped, complete]);
+        }
+        const complete = index >= operations.length;
+        await pool!.query("UPDATE elvanto_sync_settings SET groups_export_complete=$2,updated_at=now() WHERE department_id=$1", [dept, complete]);
+        return { groupsExport: { page: index, total: operations.length, created, updated, addedMembers: added, skipped, complete } };
+      } catch (error) {
+        if (writeAttempted) await pool!.query("UPDATE elvanto_sync_settings SET groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        await pool!.query("UPDATE elvanto_sync_settings SET last_sync_error=$2 WHERE department_id=$1", [dept, (error instanceof Error ? error.message : "Groups export failed.").slice(0, 1000)]).catch(() => {});
+        return reply.code(400).send({ error: error instanceof Error ? error.message : "Groups export failed." });
+      } finally {
+        if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET groups_importing=FALSE,groups_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        elvantoGroupsImportRunning.delete(dept);
+      }
+    });
     routes.post("/api/modules/sync/elvanto/groups-preview", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       const row = await elvantoSettings(dept);
@@ -1246,10 +1409,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (batch.length < 1000) { complete = true; break; }
       }
       const [existingGroups, linkedPeople] = await Promise.all([
-        pool!.query<{ source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
+        pool!.query<{ source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,elvanto_source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
         pool!.query<{ source_id: string; id: string }>("SELECT source_id,id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]),
       ]);
-      const bySourceId = new Map(existingGroups.rows.filter((group) => group.source_system === "elvanto" && group.source_id).map((group) => [group.source_id!, group]));
+      const bySourceId = new Map(existingGroups.rows.map((group) => [group.source_system === "elvanto" ? group.source_id : group.elvanto_source_id, group] as const).filter((entry): entry is [string, typeof existingGroups.rows[number]] => Boolean(entry[0])));
       const names = new Map<string, typeof existingGroups.rows>();
       for (const group of existingGroups.rows) names.set(group.name.trim().toLocaleLowerCase(), [...(names.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
       const linkedIds = new Set(linkedPeople.rows.map((person) => person.source_id));
@@ -1318,8 +1481,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           if (Number.isFinite(reported) && reported >= 0) total = reported;
           const contacts = await pool!.query<{ id: string; source_id: string }>("SELECT id,source_id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]);
           const contactIdBySource = new Map(contacts.rows.map((contact) => [contact.source_id, contact.id]));
-          const existing = await pool!.query<{ id: string; source_id: string | null; source_system: string | null; name: string }>("SELECT id,source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]);
-          const groupIdBySource = new Map(existing.rows.filter((group) => group.source_system === "elvanto" && group.source_id).map((group) => [group.source_id!, group.id]));
+          const existing = await pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string }>("SELECT id,source_id,elvanto_source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]);
+          const groupIdBySource = new Map(existing.rows.map((group) => [group.source_system === "elvanto" ? group.source_id : group.elvanto_source_id, group.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
           const namesByKey = new Map<string, typeof existing.rows>();
           for (const group of existing.rows) namesByKey.set(group.name.trim().toLocaleLowerCase(), [...(namesByKey.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
           const seen = new Set<string>();
@@ -1336,11 +1499,13 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               seen.add(sourceId);
               const existingId = groupIdBySource.get(sourceId);
               const nameKey = name.toLocaleLowerCase();
-              const conflictingOwner = (namesByKey.get(nameKey) ?? []).some((owner) => !(owner.source_system === "elvanto" && owner.source_id === sourceId));
+              const conflictingOwner = (namesByKey.get(nameKey) ?? []).some((owner) => !((owner.source_system === "elvanto" && owner.source_id === sourceId) || owner.elvanto_source_id === sourceId));
               if (conflictingOwner || seenNames.has(nameKey)) { pageSkipped += 1; continue; }
               seenNames.add(nameKey);
               let groupId = existingId;
               if (existingId) {
+                const linkedGroup = existing.rows.find((owner) => owner.id === existingId);
+                if (linkedGroup?.elvanto_source_id === sourceId && linkedGroup.source_system === null) { pageSkipped += 1; continue; }
                 const changed = await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND source_system='elvanto' RETURNING id", [existingId, dept, name, description]);
                 if (!changed.rowCount) { pageSkipped += 1; continue; }
                 pageUpdated += 1;
@@ -1349,7 +1514,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 if (!inserted.rowCount) { pageSkipped += 1; continue; }
                 groupId = inserted.rows[0].id;
                 pageCreated += 1;
-                namesByKey.set(nameKey, [...(namesByKey.get(nameKey) ?? []), { id: groupId, source_id: sourceId, source_system: "elvanto", name }]);
+                namesByKey.set(nameKey, [...(namesByKey.get(nameKey) ?? []), { id: groupId, source_id: sourceId, elvanto_source_id: null, source_system: "elvanto", name }]);
               }
               if (!groupId) { pageSkipped += 1; continue; }
               await db.query("DELETE FROM group_members WHERE group_id=$1", [groupId]);
@@ -1848,6 +2013,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           calendar_preview_at=NULL,calendar_preview_scanned_count=0,calendar_preview_total=NULL,calendar_preview_complete=FALSE,calendar_preview_start_date=NULL,calendar_preview_end_date=NULL,
           people_flows_preview_at=NULL,people_flows_preview_ids='[]'::jsonb,people_flows_preview_complete=FALSE,people_flows_preview_count=0,
           people_export_preview_at=NULL,people_export_preview_rows='[]'::jsonb,people_export_page=0,people_export_created_count=0,people_export_updated_count=0,people_export_skipped_count=0,people_export_complete=FALSE,
+          groups_export_preview_at=NULL,groups_export_preview_rows='[]'::jsonb,groups_export_page=0,groups_export_created_count=0,groups_export_updated_count=0,groups_export_added_members_count=0,groups_export_skipped_count=0,groups_export_complete=FALSE,
           people_importing=FALSE,people_import_started_at=NULL,groups_importing=FALSE,groups_import_started_at=NULL,services_importing=FALSE,services_import_started_at=NULL,calendar_importing=FALSE,calendar_import_started_at=NULL,people_flows_importing=FALSE,people_flows_import_started_at=NULL,songs_importing=FALSE,songs_import_started_at=NULL,financial_importing=FALSE,financial_import_started_at=NULL,people_exporting=FALSE,people_export_started_at=NULL,updated_at=now()
          WHERE (elvanto_sync_settings.people_importing=FALSE OR elvanto_sync_settings.people_import_started_at < now()-interval '15 minutes')
            AND (elvanto_sync_settings.groups_importing=FALSE OR elvanto_sync_settings.groups_import_started_at < now()-interval '15 minutes')
