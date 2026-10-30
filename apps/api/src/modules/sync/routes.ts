@@ -1085,6 +1085,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, formerStandbyInstallationId: former.installationId, formerStandbyDepartmentId: former.departmentId, pullAuthorizedForTarget, siteEpoch: state.site_epoch, snapshotRevision: state.snapshot_revision, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: true, blockers: [] }, identity, request.headers["x-sc-nonce"] as string);
   });
 
+  app.get<{ Querystring: { departmentId?: string } }>(`${prefix}/redundancy/role`, async (request, reply) => {
+    const identity = await getIdentity(pool, siteName);
+    const sender = await verifySignedPeer(request, pool);
+    if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const departmentId = request.query.departmentId;
+    if (!departmentId || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) return json(reply, 400, { error: "Choose a valid site." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const state = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [departmentId]);
+    if (!state.rowCount) return json(reply, 404, { error: "That site is not configured for redundancy." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.rows[0].role, siteEpoch: state.rows[0].site_epoch }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+  });
+
   app.post<{ Body: { departmentId: string; sourceEpoch: number; sourceSnapshotRevision: string; sourceDigest: string } }>(`${prefix}/redundancy/verify`, async (request, reply) => {
     const identity = await getIdentity(pool, siteName);
     const sender = await verifySignedPeer(request, pool);
@@ -1670,7 +1681,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!peer) return reply.code(400).send({ error: "The primary must be paired and trusted first." });
     try {
       const identity = await getIdentity(pool, siteName);
-      const remote = await signedRemoteRequest<{ role: string; siteEpoch: string; departmentId: string }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(body.sourceDepartmentId)}`);
+      const remote = await signedRemoteRequest<{ role: string; siteEpoch: string; departmentId: string }>(peer, identity, "GET", `${prefix}/redundancy/role?departmentId=${encodeURIComponent(body.sourceDepartmentId)}`);
       if (remote.role !== "primary" || remote.departmentId !== body.sourceDepartmentId) return reply.code(409).send({ error: "The selected remote site is not an active primary." });
       const current = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [department]);
       if (!current.rowCount || !["primary", "standby", "fenced"].includes(current.rows[0].role)) return reply.code(409).send({ error: "This site cannot be configured as a standby from its current state." });

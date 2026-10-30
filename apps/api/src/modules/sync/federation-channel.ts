@@ -310,6 +310,7 @@ export class FederationChannels {
       });
       result = { statusCode: injected.statusCode, headers: injected.headers as Record<string, number | string | string[] | undefined>, body: injected.body, rawPayload: injected.rawPayload };
     } catch (error) {
+      this.app.log.error({ err: error, peerInstallationId: installationId, method: request.method, path: request.path }, "A federation WebSocket request failed before producing a signed response.");
       const errorBody = JSON.stringify({ error: error instanceof Error ? error.message : "The tunneled request failed." });
       result = { statusCode: 500, headers: { "content-type": "application/json" }, body: errorBody, rawPayload: Buffer.from(errorBody) };
     }
