@@ -41,7 +41,7 @@ For each row, a church reviewer should record:
 5. The responsible church role and permissions required.
 6. A concrete acceptance example and any linked implementation issue.
 
-Reviewer: _to be nominated by the project owner._
+Reviewer: _project owner (juristoeckli); review pending._
 
 Review date: _pending._
 
