@@ -191,12 +191,19 @@ function elvantoDuration(value: unknown) {
 function elvantoPositionRole(value: unknown) {
   return String(value ?? "").trim().split(" — ")[0].trim().toLocaleLowerCase();
 }
-function countElvantoPositionChanges(incoming: JsonObject[], existing: unknown) {
+function elvantoPositionDelta(incoming: JsonObject[], existing: unknown) {
   const previous = objectRows(existing);
-  return incoming.filter((position) => !previous.some((candidate) =>
-    (position.contactId && candidate.contactId && position.contactId === candidate.contactId)
-    || (elvantoPositionRole(position.name) && elvantoPositionRole(position.name) === elvantoPositionRole(candidate.name)),
-  )).length;
+  let created = 0;
+  let changed = 0;
+  for (const position of incoming) {
+    const match = previous.find((candidate) =>
+      (position.contactId && candidate.contactId && position.contactId === candidate.contactId)
+      || (elvantoPositionRole(position.name) && elvantoPositionRole(position.name) === elvantoPositionRole(candidate.name)),
+    );
+    if (!match) created += 1;
+    else if (String(match.contactId ?? "") !== String(position.contactId ?? "")) changed += 1;
+  }
+  return { created, changed };
 }
 function mergeElvantoPositionResponses(incoming: JsonObject[], existing: unknown) {
   const previous = objectRows(existing);
@@ -1972,8 +1979,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const linked = bySource.get(event.sourceId);
         const incomingPositions = Array.isArray(event.positions) ? event.positions as JsonObject[] : [];
         missingPeopleLinkCount += incomingPositions.filter((position) => !position.contactId && String(position.name ?? "").includes(" — ")).length;
-        if (action === "create") assignmentCreateCount += incomingPositions.length;
-        else if (linked) assignmentChangeCount += countElvantoPositionChanges(incomingPositions, linked.positions);
+        const positionDelta = elvantoPositionDelta(incomingPositions, linked?.positions);
+        assignmentCreateCount += positionDelta.created;
+        assignmentChangeCount += positionDelta.changed;
         if (sample.length < 50) sample.push({ title: event.title, date: event.date, action });
       }
       const saved = await pool!.query("UPDATE elvanto_sync_settings SET services_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,services_preview_complete=$2,services_preview_scanned_count=$3,services_preview_total=$4 WHERE department_id=$1 AND updated_at=$5 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id", [dept, complete, events.length, total, row.updated_at]);
