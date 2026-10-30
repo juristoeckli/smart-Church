@@ -23,6 +23,7 @@ type GroupsPreview = {
 type ServicesPreview = {
   scannedCount: number; reportedTotal: number | null; complete: boolean;
   createCount: number; alreadyLinkedCount: number; conflictCount: number; invalidCount: number;
+  assignmentCreateCount: number; assignmentChangeCount: number; missingPeopleLinkCount: number;
   sample: Array<{ title: string; date: string; action: string }>;
 };
 type CalendarPreview = {
@@ -575,6 +576,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {servicesPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>Services import preview</strong><span>{servicesPreview.scannedCount} service times scanned{servicesPreview.reportedTotal !== null && <> across {servicesPreview.reportedTotal} Elvanto services</>}{!servicesPreview.complete && <em> — preview is incomplete</em>}</span></div>
       <div className="sync-feedback"><span>{servicesPreview.createCount} new</span> · <span>{servicesPreview.alreadyLinkedCount} already linked</span> · <span>{servicesPreview.conflictCount} same-title/date conflicts</span> · <span>{servicesPreview.invalidCount} invalid or duplicate rows</span></div>
+      <div className="sync-feedback"><span>{servicesPreview.assignmentCreateCount} new volunteer assignments</span> · <span>{servicesPreview.assignmentChangeCount} assignment changes</span> · <span>{servicesPreview.missingPeopleLinkCount} assignments need People links</span></div>
       {servicesPreview.sample.map((service, index) => <div className="sync-feedback" key={`${service.date}-${service.title}-${index}`}><strong>{service.title}</strong><span>{service.date} · {service.action === "already_linked" ? "Already linked" : service.action === "review_event_conflict" ? "Review event conflict" : service.action === "needs_review" ? "Needs review" : service.action === "duplicate_source_id" ? "Duplicate Elvanto ID" : "New service"}</span></div>)}
       <small className="sync-help">Only complete previews can be imported. Each batch advances up to five Elvanto pages. Imported events are read-only and are not deleted when absent from Elvanto.</small>
       <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importServices()} disabled={busy || !servicesPreview.complete || servicesPreview.createCount + servicesPreview.alreadyLinkedCount === 0}><Check size={15} />{busy ? "Importing…" : status?.servicesImport?.complete ? "Refresh Services from Elvanto" : status?.servicesImport ? "Continue Services import" : "Import eligible services"}</button></div>
