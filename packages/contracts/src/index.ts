@@ -27,6 +27,36 @@ export interface ServicePlanItem {
   startTime?: string;
   durationMinutes?: number;
   notes?: string;
+  songId?: string;
+  arrangementId?: string;
+}
+
+export interface WorshipSongArrangement {
+  id: string;
+  name: string;
+  key?: string;
+  chartUrl?: string;
+  audioUrl?: string;
+  active: boolean;
+}
+
+export interface WorshipSong {
+  id: string;
+  title: string;
+  authors?: string;
+  defaultKey?: string;
+  notes?: string;
+  arrangements: WorshipSongArrangement[];
+  active: boolean;
+}
+
+export interface ServicePlanTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  positions: Array<{ name: string }>;
+  items: ServicePlanItem[];
+  active: boolean;
 }
 
 export interface ServiceEvent {
