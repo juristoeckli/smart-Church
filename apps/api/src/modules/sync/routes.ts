@@ -52,7 +52,24 @@ async function hasApprovedPullAuthorization(pool: import("pg").Pool, departmentI
 }
 
 function manifestKey(modules: RedundancyModuleManifestEntry[]) {
-  return JSON.stringify([...modules].sort((left, right) => left.moduleId.localeCompare(right.moduleId)).map((module) => [module.moduleId, module.schemaVersion, module.installedVersion]));
+  // Installed versions and activation are server-local. Site snapshots only
+  // require the same module-owned data schema on every participating server.
+  return JSON.stringify([...modules].sort((left, right) => left.moduleId.localeCompare(right.moduleId)).map((module) => [module.moduleId, module.schemaVersion]));
+}
+
+async function manifestSupportedByAdapters(manifest: RedundancyModuleManifestEntry[], adapters: Map<string, ModuleReplicationAdapter>, departmentId: string) {
+  return (await Promise.all(manifest.map(async (module) => {
+    const adapter = adapters.get(module.moduleId);
+    return Boolean(adapter && await adapterSchemaVersion(adapter, departmentId) === module.schemaVersion);
+  }))).every(Boolean);
+}
+
+async function allAdapterManifest(adapters: ModuleReplicationAdapter[], departmentId: string) {
+  return Promise.all(adapters.filter((adapter) => adapter.moduleId !== "sync").map(async (adapter) => ({
+    moduleId: adapter.moduleId,
+    schemaVersion: await adapterSchemaVersion(adapter, departmentId),
+    installedVersion: adapter.schemaVersion,
+  })));
 }
 
 async function redundancyManifest(pool: import("pg").Pool, adapters: ModuleReplicationAdapter[], departmentId: string) {
@@ -68,13 +85,13 @@ async function redundancyManifest(pool: import("pg").Pool, adapters: ModuleRepli
   const blockers: string[] = [];
   for (const item of enabled) {
     const adapter = adapterMap.get(item.module_id);
-    if (!adapter || !adapter.isEnabled()) { blockers.push(`${item.module_id} has no active replication adapter.`); continue; }
+    if (!adapter) { blockers.push(`${item.module_id} has no installed replication adapter.`); continue; }
     const status = await adapter.inspect(departmentId);
     if (!status.ready) blockers.push(...status.blockers.map((blocker) => `${adapter.moduleName}: ${blocker}`));
     modules.push({ moduleId: adapter.moduleId, schemaVersion: await adapterSchemaVersion(adapter, departmentId), installedVersion: item.version ?? "unknown" });
   }
   const core = adapterMap.get("core-site");
-  if (!core || !core.isEnabled()) blockers.push("The core site-data adapter is missing.");
+  if (!core) blockers.push("The core site-data adapter is missing.");
   else {
     const status = await core.inspect(departmentId);
     if (!status.ready) blockers.push(...status.blockers.map((blocker) => `${core.moduleName}: ${blocker}`));
@@ -246,9 +263,8 @@ async function applyRedundancySnapshot(
     await client.query("SET CONSTRAINTS ALL DEFERRED");
     const site = await client.query<{ role: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string }>("SELECT role,upstream_installation_id,upstream_department_id,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [targetDepartmentId]);
     if (site.rows[0]?.role !== "standby" || site.rows[0].upstream_installation_id !== sourceInstallationId || site.rows[0].upstream_department_id !== sourceDepartmentId || sourceEpoch < Number(site.rows[0].site_epoch)) throw new Error("The standby relationship or source epoch changed during the restore.");
-    const readiness = await redundancyManifest(pool, context.replication.list(), targetDepartmentId);
-    if (readiness.blockers.length) throw new Error(`The standby is not ready to receive a complete site snapshot: ${readiness.blockers.join(" ")}`);
-    if (manifestKey(readiness.modules) !== manifestKey(moduleManifest)) throw new Error("The standby module set, versions, or replication schemas do not match the primary.");
+    const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
+    if (!moduleManifest.some((module) => module.moduleId === "core-site") || !await manifestSupportedByAdapters(moduleManifest, adapters, targetDepartmentId)) throw new Error("The standby does not have compatible data adapters for the source snapshot.");
     const entries = [...moduleManifest].sort((left, right) => left.moduleId === "core-site" ? -1 : right.moduleId === "core-site" ? 1 : left.moduleId.localeCompare(right.moduleId));
     if (entries.some((entry) => !(entry.moduleId in modules)) || Object.keys(modules).length !== entries.length) throw new Error("The snapshot does not contain exactly the modules in its signed manifest.");
     const restoreContext = {
@@ -258,7 +274,7 @@ async function applyRedundancySnapshot(
     };
     const restoredSnapshots: Record<string, unknown> = {};
     for (const entry of entries) {
-      const adapter = readiness.adapters.get(entry.moduleId);
+      const adapter = adapters.get(entry.moduleId);
       if (!adapter || await adapterSchemaVersion(adapter, targetDepartmentId) !== entry.schemaVersion) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
       const moduleSnapshot = adapter.restoreSnapshotFromPeer
         ? await adapter.restoreSnapshotFromPeer(modules[entry.moduleId], (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, String(envelope)))
@@ -309,15 +325,15 @@ async function pullRedundancySnapshot(app: FastifyInstance, pool: import("pg").P
     const unchanged = JSON.parse(response.bytes.toString("utf8")) as { unchanged?: unknown; siteEpoch?: unknown; sourceDigest?: unknown; snapshotId?: unknown; moduleManifest?: RedundancyModuleManifestEntry[] };
     if (unchanged.unchanged !== true || unchanged.siteEpoch !== state.site_epoch || typeof unchanged.sourceDigest !== "string" || !state.last_source_digest || unchanged.sourceDigest !== state.last_source_digest || typeof unchanged.snapshotId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(unchanged.snapshotId) || !state.last_replica_digest || !state.last_replica_manifest || !Array.isArray(unchanged.moduleManifest)
       || manifestKey(unchanged.moduleManifest) !== manifestKey(state.last_replica_manifest)) throw new Error("The primary reported an unchanged snapshot, but the standby has no matching verified snapshot metadata.");
-    const local = await redundancyManifest(pool, context.replication.list(), departmentId);
-    if (local.blockers.length || manifestKey(local.modules) !== manifestKey(state.last_replica_manifest)) throw new Error(`The standby is not ready to verify its existing snapshot: ${local.blockers.join(" ") || "the module manifest changed"}`);
+    const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
+    if (!await manifestSupportedByAdapters(state.last_replica_manifest, adapters, departmentId)) throw new Error("The standby no longer has compatible adapters for its verified snapshot.");
     const client = await pool.connect();
     let currentSnapshots: Record<string, unknown>;
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       currentSnapshots = {};
-      for (const item of local.modules) {
-        const adapter = local.adapters.get(item.moduleId);
+      for (const item of state.last_replica_manifest) {
+        const adapter = adapters.get(item.moduleId);
         if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
         currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, departmentId);
       }
@@ -363,8 +379,8 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
     if (remoteIdentityRecord.installationId !== peer.installation_id || remoteIdentityRecord.fingerprint !== peer.fingerprint) throw new Error("The standby server identity changed. Verify it out of band and pair it again before sending site data.");
     const remote = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; upstreamInstallationId: string | null; upstreamDepartmentId: string | null; siteEpoch: string; lastSnapshotId: string | null; lastSnapshotAt: string | null; lastVerifiedAt: string | null; lastSourceDigest: string | null; modules: RedundancyModuleManifestEntry[]; ready: boolean; blockers: string[] }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(targetDepartmentId)}`);
     if (remote.role !== "standby" || remote.upstreamInstallationId !== identity.installationId || remote.upstreamDepartmentId !== departmentId || remote.installationId !== peer.installation_id || remote.departmentId !== targetDepartmentId) throw new Error("The destination has not been configured as this site's standby.");
-    if (remote.blockers.length) throw new Error(`The standby is not ready to receive a complete site snapshot: ${remote.blockers.join(" ")}`);
-    if (manifestKey(local.modules) !== manifestKey(remote.modules)) throw new Error("The primary and standby module versions or replication adapters do not match.");
+    const remoteAdapters = new Map(remote.modules.map((module) => [module.moduleId, { moduleId: module.moduleId, schemaVersion: module.schemaVersion } as ModuleReplicationAdapter]));
+    if (!await manifestSupportedByAdapters(local.modules, remoteAdapters, targetDepartmentId)) throw new Error("The standby does not have compatible data adapters for every module enabled on the primary. Module activation can differ between servers; required module data schemas must be installed on both.");
     const client = await pool.connect();
     let snapshot: Record<string, unknown>;
     try {
@@ -900,11 +916,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!stateResult.rowCount) return json(reply, 404, { error: "That site is not configured for redundancy." }, identity, request.headers["x-sc-nonce"] as string);
     const state = stateResult.rows[0];
     if (state.role === "standby" && (state.upstream_installation_id !== sender.installationId || state.upstream_department_id === null)) return json(reply, 403, { error: "Only the configured primary can inspect this standby." }, identity, request.headers["x-sc-nonce"] as string);
-    const readiness = await redundancyManifest(pool, context.replication.list(), departmentId);
-    const modules = readiness.modules.map((module) => ({ ...module, ready: !readiness.blockers.some((blocker) => blocker.startsWith(`${module.moduleId} `) || blocker.startsWith(`${module.moduleId}:`)) }));
+    const modules = await allAdapterManifest(context.replication.list(), departmentId);
     const pullAuthorizedForTarget = state.role === "primary" && await hasApprovedPullAuthorization(pool, departmentId, sender.installationId, request.query.targetDepartmentId ?? "");
     const former = await formerStandbyAuthorization(pool, departmentId, state.former_standby_installation_id, state.former_standby_department_id);
-    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, formerStandbyInstallationId: former.installationId, formerStandbyDepartmentId: former.departmentId, pullAuthorizedForTarget, siteEpoch: state.site_epoch, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: readiness.blockers.length === 0, blockers: readiness.blockers }, identity, request.headers["x-sc-nonce"] as string);
+    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, formerStandbyInstallationId: former.installationId, formerStandbyDepartmentId: former.departmentId, pullAuthorizedForTarget, siteEpoch: state.site_epoch, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: true, blockers: [] }, identity, request.headers["x-sc-nonce"] as string);
   });
 
   app.post<{ Body: { departmentId: string; sourceEpoch: number; sourceDigest: string } }>(`${prefix}/redundancy/verify`, async (request, reply) => {
@@ -922,14 +937,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return json(reply, 200, { verified: false }, identity, String(request.headers["x-sc-nonce"] ?? ""));
       }
-      const readiness = await redundancyManifest(pool, context.replication.list(), body.departmentId);
-      if (manifestKey(readiness.modules) !== manifestKey(state.last_replica_manifest)) {
+      const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
+      if (!await manifestSupportedByAdapters(state.last_replica_manifest, adapters, body.departmentId)) {
         await client.query("ROLLBACK");
         return json(reply, 200, { verified: false }, identity, String(request.headers["x-sc-nonce"] ?? ""));
       }
       const currentSnapshots: Record<string, unknown> = {};
-      for (const item of readiness.modules) {
-        const adapter = readiness.adapters.get(item.moduleId);
+      for (const item of state.last_replica_manifest) {
+        const adapter = adapters.get(item.moduleId);
         if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
         currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, body.departmentId);
       }
@@ -957,14 +972,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const target = await pool.query<{ role: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string }>("SELECT role,upstream_installation_id,upstream_department_id,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [body.targetDepartmentId]);
     if (!target.rowCount || target.rows[0].role !== "standby" || target.rows[0].upstream_installation_id !== sender.installationId || target.rows[0].upstream_department_id !== body.sourceDepartmentId) return json(reply, 403, { error: "This site is not configured as a standby for the signed source server and location." }, identity, request.headers["x-sc-nonce"] as string);
     if (body.sourceEpoch < Number(target.rows[0].site_epoch)) return json(reply, 409, { error: "This snapshot comes from a stale site epoch." }, identity, request.headers["x-sc-nonce"] as string);
-    const readiness = await redundancyManifest(pool, context.replication.list(), body.targetDepartmentId);
+    const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
     const incoming = new Map<string, RedundancyModuleManifestEntry>();
     for (const module of body.modules) {
       if (!module || typeof module.moduleId !== "string" || typeof module.schemaVersion !== "string" || typeof module.installedVersion !== "string" || incoming.has(module.moduleId)) return json(reply, 400, { error: "The redundancy module manifest contains duplicate or invalid entries." }, identity, request.headers["x-sc-nonce"] as string);
       incoming.set(module.moduleId, module);
     }
-    const targetModules = new Map(readiness.modules.map((module) => [module.moduleId, module]));
-    if (incoming.size !== targetModules.size || [...incoming].some(([id, module]) => { const local = targetModules.get(id); return !local || local.schemaVersion !== module.schemaVersion || local.installedVersion !== module.installedVersion; })) return json(reply, 409, { error: "The primary and standby do not have matching enabled module adapters and versions." }, identity, request.headers["x-sc-nonce"] as string);
+    if (!incoming.has("core-site") || !await manifestSupportedByAdapters([...incoming.values()], adapters, body.targetDepartmentId)) return json(reply, 409, { error: "The standby is missing a compatible data adapter for one or more modules in the source snapshot. Module activation may differ, but snapshot adapter schemas must be supported." }, identity, request.headers["x-sc-nonce"] as string);
     // The FK cascades chunk data, including chunks left behind by applied or
     // rejected imports. Retain import metadata only until its normal expiry.
     await pool.query("DELETE FROM sync_redundancy_imports WHERE expires_at<now()");
@@ -1042,8 +1056,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("SET CONSTRAINTS ALL DEFERRED");
       const site = await client.query<{ role: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string }>("SELECT role,upstream_installation_id,upstream_department_id,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [imported.target_department_id]);
       if (site.rows[0]?.role !== "standby" || site.rows[0].upstream_installation_id !== sender.installationId || site.rows[0].upstream_department_id !== imported.source_department_id || Number(imported.source_epoch) < Number(site.rows[0].site_epoch)) throw new Error("The standby relationship or source epoch changed during the restore.");
-      const readiness = await redundancyManifest(pool, context.replication.list(), imported.target_department_id);
-      if (manifestKey(readiness.modules) !== manifestKey(imported.module_manifest)) throw new Error("The standby module set or version changed during the restore.");
+      const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
+      if (!imported.module_manifest?.length || !imported.module_manifest.some((module) => module.moduleId === "core-site") || !await manifestSupportedByAdapters(imported.module_manifest, adapters, imported.target_department_id)) throw new Error("The standby no longer has compatible data adapters for the source snapshot.");
       const entries = [...imported.module_manifest].sort((left, right) => left.moduleId === "core-site" ? -1 : right.moduleId === "core-site" ? 1 : left.moduleId.localeCompare(right.moduleId));
       const restoreContext = {
         userIdMap: new Map<string, string>(),
@@ -1052,7 +1066,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       };
       const restoredSnapshots: Record<string, unknown> = {};
       for (const entry of entries) {
-        const adapter = readiness.adapters.get(entry.moduleId);
+        const adapter = adapters.get(entry.moduleId);
         if (!adapter || await adapterSchemaVersion(adapter, imported.target_department_id) !== entry.schemaVersion || !(entry.moduleId in payload.modules)) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
         const moduleSnapshot = adapter.restoreSnapshotFromPeer
           ? await adapter.restoreSnapshotFromPeer(payload.modules[entry.moduleId], (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, envelope))
@@ -1270,20 +1284,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         modules.push({ moduleId: adapter.moduleId, moduleName: adapter.moduleName, enabled: true, ready: false, schemaVersion: adapter.schemaVersion, installedVersion: module.version, recordCount: null, blockers: [error instanceof Error ? error.message.slice(0, 240) : "The module adapter readiness check failed."] });
       }
     }
-    const modulesReady = modules.length > 0 && modules.every((module) => module.ready);
+    const standbyAdapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
+    const standbyManifestSupported = Boolean(siteState?.last_replica_manifest?.some((module) => module.moduleId === "core-site")
+      && await manifestSupportedByAdapters(siteState.last_replica_manifest ?? [], standbyAdapters, department));
+    const modulesReady = siteState?.role === "standby" ? standbyManifestSupported : modules.length > 0 && modules.every((module) => module.ready);
     const snapshotIsVerifiedRecently = Boolean(siteState?.last_snapshot_at && siteState?.last_verified_at
       && siteState.last_verified_at.getTime() >= Date.now() - 5 * 60_000
       && siteState.last_replica_digest && siteState.last_replica_manifest);
     let snapshotVerified = false;
     if (siteState?.role === "standby" && modulesReady && snapshotIsVerifiedRecently) {
-      const currentManifest = await redundancyManifest(pool, context.replication.list(), department);
-      if (!currentManifest.blockers.length && manifestKey(currentManifest.modules) === manifestKey(siteState.last_replica_manifest!)) {
+      if (standbyManifestSupported) {
         const client = await pool.connect();
         try {
           await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
           const currentSnapshots: Record<string, unknown> = {};
-          for (const item of currentManifest.modules) {
-            const adapter = currentManifest.adapters.get(item.moduleId);
+          for (const item of siteState.last_replica_manifest!) {
+            const adapter = standbyAdapters.get(item.moduleId);
             if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
             currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, department);
           }
@@ -1510,22 +1526,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!state || state.role !== "standby" || !state.upstream_installation_id) return reply.code(409).send({ error: "This location is not configured as a standby." });
     if (body.fencedInstallationId !== state.upstream_installation_id) return reply.code(409).send({ error: "The installation you confirmed does not match this standby's configured primary." });
     if (!state.last_snapshot_at || !state.last_verified_at || !state.last_replica_digest || !state.last_replica_manifest || state.last_verified_at < new Date(Date.now() - 5 * 60_000)) return reply.code(409).send({ error: "A complete snapshot must have been end-to-end verified within the last five minutes before promotion." });
-    const enabledResult = await pool.query<{ module_id: string }>(`SELECT module.module_id FROM installation_modules module
-      JOIN installations installation ON installation.id=module.installation_id AND installation.is_current=TRUE
-      JOIN departments site ON site.installation_id=installation.id AND site.id=$1
-      WHERE (module.enabled=TRUE OR module.required=TRUE) AND module.module_id<>'sync'
-        AND (module.required=TRUE OR module.client_managed=FALSE OR module.module_id=ANY(site.enabled_modules))
-      ORDER BY module.module_id`, [department]);
     const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
-    if (!adapters.has("core-site") || enabledResult.rows.some((module) => !adapters.get(module.module_id)?.isEnabled())) return reply.code(409).send({ error: "At least one enabled module or the core site-data layer has no replication adapter. Promotion is blocked." });
-    const currentManifest = await redundancyManifest(pool, context.replication.list(), department);
-    if (currentManifest.blockers.length || manifestKey(currentManifest.modules) !== manifestKey(state.last_replica_manifest)) return reply.code(409).send({ error: "The enabled module set or replication schema changed after the last snapshot. Push a fresh snapshot before promotion." });
-    for (const moduleId of ["core-site", ...enabledResult.rows.map((module) => module.module_id)]) {
-      const adapter = adapters.get(moduleId);
-      if (!adapter) return reply.code(409).send({ error: `The ${moduleId} replication adapter is unavailable.` });
-      const inspection = await adapter.inspect(department);
-      if (!inspection.ready) return reply.code(409).send({ error: `${adapter.moduleName} is not ready for promotion: ${inspection.blockers.join(" ")}` });
-    }
+    if (!state.last_replica_manifest.some((module) => module.moduleId === "core-site") || !await manifestSupportedByAdapters(state.last_replica_manifest, adapters, department)) return reply.code(409).send({ error: "A snapshot adapter used by the verified site data is no longer installed or compatible. A fresh snapshot is required before promotion." });
     const identity = await getIdentity(pool, siteName);
     const oldEpoch = BigInt(state.site_epoch);
     const newEpoch = oldEpoch + 1n;
@@ -1534,25 +1536,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
       const locked = await client.query("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [department]);
       if (locked.rows[0]?.role !== "standby" || locked.rows[0]?.site_epoch !== state.site_epoch) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The standby state changed during promotion. Refresh and review it again." }); }
-      const transactionModules = await client.query<{ module_id: string; version: string | null }>(`SELECT module.module_id,module.version FROM installation_modules module
-        JOIN installations installation ON installation.id=module.installation_id AND installation.is_current=TRUE
-        JOIN departments site ON site.installation_id=installation.id AND site.id=$1
-        WHERE (module.enabled=TRUE OR module.required=TRUE) AND module.module_id<>'sync'
-          AND (module.required=TRUE OR module.client_managed=FALSE OR module.module_id=ANY(site.enabled_modules))
-        ORDER BY module.module_id`, [department]);
-      const currentInventory = [
-        ["core-site", adapters.get("core-site")!.schemaVersion] as const,
-        ...transactionModules.rows.map((module) => [module.module_id, module.version ?? "unknown"] as const),
-      ].sort(([left], [right]) => left.localeCompare(right));
-      const replicaInventory = state.last_replica_manifest.map((module) => [module.moduleId, module.installedVersion] as const).sort(([left], [right]) => left.localeCompare(right));
-      if (JSON.stringify(currentInventory) !== JSON.stringify(replicaInventory)) {
+      if (!await manifestSupportedByAdapters(state.last_replica_manifest, adapters, department)) {
         await client.query("ROLLBACK");
-        return reply.code(409).send({ error: "The enabled module inventory changed during promotion. Push a fresh snapshot and retry." });
+        return reply.code(409).send({ error: "A snapshot adapter changed during promotion. Push a fresh snapshot and retry." });
       }
       const currentSnapshots: Record<string, unknown> = {};
-      for (const moduleId of ["core-site", ...transactionModules.rows.map((module) => module.module_id)]) {
-        const adapter = adapters.get(moduleId)!;
-        currentSnapshots[moduleId] = await adapter.exportSnapshot(client, department);
+      for (const module of state.last_replica_manifest) {
+        const adapter = adapters.get(module.moduleId)!;
+        currentSnapshots[module.moduleId] = await adapter.exportSnapshot(client, department);
       }
       if (replicationDigest(currentSnapshots) !== state.last_replica_digest) {
         await client.query("ROLLBACK");

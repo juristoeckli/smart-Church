@@ -61,7 +61,9 @@ export function registerVideoSteffisburgReplication(context: ModuleServerContext
   const { pool, isDatabaseReady } = context;
   context.replication.register({
     schemaVersion: "3",
-    getSchemaVersion: async () => `3:${await workerConfiguration().catch(() => "missing-or-invalid-worker-config")}`,
+    // Worker configuration and hardware are specific to each server. Only
+    // the database snapshot contract determines whether module data can sync.
+    getSchemaVersion: async () => "3",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Video Steffisburg database is unavailable."], recordCount: 0 };
       try {
