@@ -1409,16 +1409,23 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (batch.length < 1000) { complete = true; break; }
       }
       const [existingGroups, linkedPeople] = await Promise.all([
-        pool!.query<{ source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,elvanto_source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
-        pool!.query<{ source_id: string; id: string }>("SELECT source_id,id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]),
+        pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string }>("SELECT id,source_id,elvanto_source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
+        pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null }>("SELECT id,source_id,elvanto_source_id,source_system FROM contacts WHERE department_id=$1 AND ((source_system='elvanto' AND source_id IS NOT NULL) OR (source_system IS NULL AND elvanto_source_id IS NOT NULL))", [dept]),
       ]);
       const bySourceId = new Map(existingGroups.rows.map((group) => [group.source_system === "elvanto" ? group.source_id : group.elvanto_source_id, group] as const).filter((entry): entry is [string, typeof existingGroups.rows[number]] => Boolean(entry[0])));
       const names = new Map<string, typeof existingGroups.rows>();
       for (const group of existingGroups.rows) names.set(group.name.trim().toLocaleLowerCase(), [...(names.get(group.name.trim().toLocaleLowerCase()) ?? []), group]);
-      const linkedIds = new Set(linkedPeople.rows.map((person) => person.source_id));
+      const contactIdBySource = new Map(linkedPeople.rows.map((person) => [person.source_system === "elvanto" ? person.source_id : person.elvanto_source_id, person.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
+      const localMembershipRows = await pool!.query<{ group_id: string; contact_id: string; person_source_id: string | null }>(
+        "SELECT g.id AS group_id,m.contact_id,COALESCE(c.elvanto_source_id,CASE WHEN c.source_system='elvanto' THEN c.source_id END) AS person_source_id FROM church_groups g JOIN group_members m ON m.group_id=g.id JOIN contacts c ON c.id=m.contact_id AND c.department_id=g.department_id WHERE g.department_id=$1 AND g.source_system='elvanto'",
+        [dept],
+      );
+      const existingMembersByGroup = new Map<string, Set<string>>();
+      for (const member of localMembershipRows.rows) existingMembersByGroup.set(member.group_id, new Set([...(existingMembersByGroup.get(member.group_id) ?? []), member.person_source_id ?? `local:${member.contact_id}`]));
       const seen = new Set<string>();
       const sample: Array<{ name: string; action: "create" | "already_linked" | "review_name_conflict" | "needs_review" | "duplicate_source_id"; members: number; linkedMembers: number }> = [];
       let createCount = 0; let alreadyLinkedCount = 0; let conflictCount = 0; let invalidCount = 0; let memberCount = 0; let linkedMemberCount = 0;
+      let localOnlyMemberCount = 0;
       for (const group of groups) {
         const sourceId = idOf(group);
         const name = firstText(group.name, group.title);
@@ -1432,8 +1439,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         else { createCount += 1; action = "create"; }
         if (sourceId) seen.add(sourceId);
         memberCount += members.length;
-        const linkedMembers = members.filter((person) => linkedIds.has(idOf(person))).length;
+        const targetMemberIds = new Set(members.map((person) => idOf(person)).map((personId) => contactIdBySource.get(personId)).filter((contactId): contactId is string => Boolean(contactId)));
+        const linkedMembers = targetMemberIds.size;
         linkedMemberCount += linkedMembers;
+        const existingGroup = bySourceId.get(sourceId);
+        if (existingGroup?.source_system === "elvanto") {
+          const existingMemberIds = existingMembersByGroup.get(existingGroup.id) ?? new Set<string>();
+          localOnlyMemberCount += [...existingMemberIds].filter((memberId) => memberId.startsWith("local:") || !members.some((person) => idOf(person) === memberId)).length;
+        }
         if (sample.length < 50) sample.push({ name, action, members: members.length, linkedMembers });
       }
       const savedPreview = await pool!.query(
@@ -1441,7 +1454,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         [dept, complete, groups.length, total, row.updated_at],
       );
       if (!savedPreview.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-      return { scannedCount: groups.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, nameConflictCount: conflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, sample };
+      return { scannedCount: groups.length, reportedTotal: total, complete, createCount, alreadyLinkedCount, nameConflictCount: conflictCount, invalidCount, memberCount, linkedMemberCount, unmatchedMemberCount: memberCount - linkedMemberCount, localOnlyMemberCount, sample };
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/groups-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -1479,8 +1492,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const groups = elvantoCollection(payload, "groups", "group");
           const reported = Number((payload.groups as JsonObject | undefined)?.total);
           if (Number.isFinite(reported) && reported >= 0) total = reported;
-          const contacts = await pool!.query<{ id: string; source_id: string }>("SELECT id,source_id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]);
-          const contactIdBySource = new Map(contacts.rows.map((contact) => [contact.source_id, contact.id]));
+          const contacts = await pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null }>("SELECT id,source_id,elvanto_source_id,source_system FROM contacts WHERE department_id=$1 AND ((source_system='elvanto' AND source_id IS NOT NULL) OR (source_system IS NULL AND elvanto_source_id IS NOT NULL))", [dept]);
+          const contactIdBySource = new Map(contacts.rows.map((contact) => [contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id, contact.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
           const existing = await pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null; name: string }>("SELECT id,source_id,elvanto_source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]);
           const groupIdBySource = new Map(existing.rows.map((group) => [group.source_system === "elvanto" ? group.source_id : group.elvanto_source_id, group.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
           const namesByKey = new Map<string, typeof existing.rows>();
@@ -1517,7 +1530,6 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 namesByKey.set(nameKey, [...(namesByKey.get(nameKey) ?? []), { id: groupId, source_id: sourceId, elvanto_source_id: null, source_system: "elvanto", name }]);
               }
               if (!groupId) { pageSkipped += 1; continue; }
-              await db.query("DELETE FROM group_members WHERE group_id=$1", [groupId]);
               const memberIds = new Set<string>();
               for (const person of elvantoGroupPeople(group)) {
                 const contactId = contactIdBySource.get(idOf(person));
