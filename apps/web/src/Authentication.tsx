@@ -186,7 +186,7 @@ export function Authentication({
         {error && <div className="auth-message auth-message-error" role="alert">{error}</div>}
 
         {showSignup ? <form className="auth-form" onSubmit={(event) => void requestSignup(event)}>
-          <label>Site<select name="signupSite" required defaultValue=""><option value="" disabled>Choose a site</option>{selfSignupSites.map((site) => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
+          <label>{t("site")}<select name="signupSite" required defaultValue=""><option value="" disabled>{t("chooseSite")}</option>{selfSignupSites.map((site) => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
           <label>{t("email")}<input name="signupEmail" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" autoFocus /></label>
           {signupFeedback && <p className="auth-hint" role="status">{signupFeedback}</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage) || selfSignupEnabled === false}>{isSubmitting ? t("sending") : t("sendSignupLink")}<ArrowRight size={16} /></button>
