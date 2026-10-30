@@ -2683,6 +2683,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const dept = await department(request, reply, true); if (!dept) return reply;
       let directions: ElvantoDirections;
       try { directions = normalizeElvantoDirections(request.body.directions); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Choose valid sync directions." }); }
+      if (directions.services !== "off" && directions.services !== "elvanto_to_smart_church") return reply.code(400).send({ error: "Elvanto Services is read-only because the published API does not document service, plan, or volunteer write methods. Choose Off or Elvanto to Smart Church." });
       if (!request.body.financialEnabled && directions.financial !== "off") return reply.code(400).send({ error: "Enable the explicit financial data permission before selecting a financial sync direction." });
       const existing = await elvantoSettings(dept);
       let apiKey = request.body.apiKey?.trim();
