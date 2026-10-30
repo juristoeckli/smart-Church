@@ -410,7 +410,7 @@ function sanitizeElvantoPeopleValue(value: unknown): unknown {
 }
 async function fetchElvantoPeopleCustomFields(apiKey: string) {
   const result = await fetchElvantoPagedRows(apiKey, "people/customFields/getAll", "custom_fields", "custom_field");
-  const excludedName = /(security[\\s_-]*code|check[\\s_-]*in[\\s_-]*code|receipt|giving|donation|financial|bank|\\biban\\b)/i;
+  const excludedName = /(security[\s_-]*code|check[\s_-]*in[\s_-]*code|receipt|giving|donation|financial|bank|\biban\b)/i;
   const fields: ElvantoCustomField[] = result.rows.map((field) => ({
     id: idOf(field),
     name: firstText(field.name),
