@@ -115,7 +115,7 @@
 .service-position-list,.service-timeplan-list{display:grid;gap:6px}
 .service-position-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 32px;align-items:center;gap:7px}
 .service-position-row>input,.service-position-row>select,.service-timeplan-row>input,.service-timeplan-row>select{width:100%;min-width:0;height:33px;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px}
-.service-timeplan-row{display:grid;grid-template-columns:minmax(125px,1.2fr) minmax(110px,1fr) minmax(130px,1.4fr) 88px 78px auto;align-items:center;gap:6px}
+.service-timeplan-row{display:grid;grid-template-columns:minmax(120px,1.1fr) minmax(110px,1fr) minmax(120px,1.1fr) minmax(130px,1.3fr) 80px 70px auto;align-items:center;gap:6px}
 .service-timeplan-order{display:flex}
 .service-timeplan-order button{width:26px;height:27px}
 .service-timeplan-order button:disabled{opacity:.35}
