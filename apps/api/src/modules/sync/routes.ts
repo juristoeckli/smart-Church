@@ -46,6 +46,11 @@ async function formerStandbyAuthorization(pool: import("pg").Pool, departmentId:
   return { installationId: previous.rows[0]?.source_installation_id ?? null, departmentId: null };
 }
 
+async function hasApprovedPullAuthorization(pool: import("pg").Pool, departmentId: string, installationId: string, targetDepartmentId: string) {
+  const result = await pool.query("SELECT 1 FROM sync_redundancy_pull_authorizations authorization JOIN sync_site_redundancy site ON site.department_id=authorization.source_department_id AND site.site_epoch=authorization.source_epoch WHERE authorization.source_department_id=$1 AND authorization.target_installation_id=$2 AND authorization.target_department_id=$3 AND authorization.state='approved'", [departmentId, installationId, targetDepartmentId]);
+  return Boolean(result.rowCount);
+}
+
 function manifestKey(modules: RedundancyModuleManifestEntry[]) {
   return JSON.stringify([...modules].sort((left, right) => left.moduleId.localeCompare(right.moduleId)).map((module) => [module.moduleId, module.schemaVersion, module.installedVersion]));
 }
@@ -290,11 +295,13 @@ async function pullRedundancySnapshot(app: FastifyInstance, pool: import("pg").P
   const acknowledge = async (snapshotId: string, siteEpoch: number, sourceDigest: string) => signedRemoteRequest<{ accepted: boolean }>(
     peer, identity, "POST", `${prefix}/redundancy/pull-ack`, JSON.stringify({ sourceDepartmentId, targetDepartmentId: departmentId, snapshotId, siteEpoch, sourceDigest }),
   );
-  const sourceStatus = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; siteEpoch: string; formerStandbyInstallationId: string | null; formerStandbyDepartmentId: string | null }>(
-    peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(sourceDepartmentId)}`,
+  const sourceStatus = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; siteEpoch: string; formerStandbyInstallationId: string | null; formerStandbyDepartmentId: string | null; pullAuthorizedForTarget?: boolean }>(
+    peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(sourceDepartmentId)}&targetDepartmentId=${encodeURIComponent(departmentId)}`,
   );
+  const formerStandby = sourceStatus.formerStandbyInstallationId === identity.installationId
+    && (!sourceStatus.formerStandbyDepartmentId || sourceStatus.formerStandbyDepartmentId === departmentId);
   if (sourceStatus.role !== "primary" || sourceStatus.installationId !== peer.installation_id || sourceStatus.departmentId !== sourceDepartmentId
-    || sourceStatus.formerStandbyInstallationId !== identity.installationId || (sourceStatus.formerStandbyDepartmentId && sourceStatus.formerStandbyDepartmentId !== departmentId)) return { skipped: true as const };
+    || (!formerStandby && sourceStatus.pullAuthorizedForTarget !== true)) return { skipped: true as const };
   const requestPath = `${prefix}/redundancy/pull-snapshot`;
   const requestFor = (knownSourceDigest: string | null, knownManifest: RedundancyModuleManifestEntry[] | null) => JSON.stringify({ sourceDepartmentId, targetDepartmentId: departmentId, knownEpoch: Number(state.site_epoch), knownSourceDigest, knownManifest, encryptionPublicKeyPem: identity.encryptionPublicKeyPem });
   let response = await signedRemoteSnapshotRequest(peer, identity, requestPath, requestFor(state.last_source_digest, state.last_replica_manifest));
@@ -743,8 +750,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     const state = stateResult.rows[0];
     const former = state ? await formerStandbyAuthorization(pool, body.sourceDepartmentId, state.former_standby_installation_id, state.former_standby_department_id) : null;
-    if (!state || state.role !== "primary" || former?.installationId !== sender.installationId || (former.departmentId && former.departmentId !== body.targetDepartmentId)) {
-      return json(reply, 403, { error: "This trusted server is not the former standby for this site and cannot pull its snapshot." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const pullAuthorized = state ? await hasApprovedPullAuthorization(pool, body.sourceDepartmentId, sender.installationId, body.targetDepartmentId) : false;
+    const isFormerStandby = former?.installationId === sender.installationId && (!former.departmentId || former.departmentId === body.targetDepartmentId);
+    if (!state || state.role !== "primary" || (!isFormerStandby && !pullAuthorized)) {
+      return json(reply, 403, { error: "This trusted server is not approved as a standby for this site and cannot pull its snapshot." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
     }
     try {
       const local = await redundancyManifest(pool, context.replication.list(), body.sourceDepartmentId);
@@ -758,7 +767,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         const locked = current.rows[0];
         const lockedFormer = locked ? await formerStandbyAuthorization(pool, body.sourceDepartmentId, locked.former_standby_installation_id, locked.former_standby_department_id) : null;
-        if (!locked || locked.role !== "primary" || locked.site_epoch !== state.site_epoch || lockedFormer?.installationId !== sender.installationId || (lockedFormer.departmentId && lockedFormer.departmentId !== body.targetDepartmentId)) throw new Error("The primary role or rejoin authorization changed during snapshot export.");
+        const lockedPullAuthorized = locked ? Boolean((await client.query("SELECT 1 FROM sync_redundancy_pull_authorizations WHERE source_department_id=$1 AND target_installation_id=$2 AND target_department_id=$3 AND source_epoch=$4 AND state='approved'", [body.sourceDepartmentId, sender.installationId, body.targetDepartmentId, locked.site_epoch])).rowCount) : false;
+        const lockedIsFormerStandby = lockedFormer?.installationId === sender.installationId && (!lockedFormer.departmentId || lockedFormer.departmentId === body.targetDepartmentId);
+        if (!locked || locked.role !== "primary" || locked.site_epoch !== state.site_epoch || (!lockedIsFormerStandby && !lockedPullAuthorized)) throw new Error("The primary role or standby authorization changed during snapshot export.");
         snapshots = {};
         for (const module of local.modules) {
           const adapter = local.adapters.get(module.moduleId);
@@ -813,7 +824,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     const row = source.rows[0];
     const former = row ? await formerStandbyAuthorization(pool, body.sourceDepartmentId, row.former_standby_installation_id, row.former_standby_department_id) : null;
-    if (!row || row.role !== "primary" || row.site_epoch !== String(body.siteEpoch) || former?.installationId !== sender.installationId || (former.departmentId && former.departmentId !== body.targetDepartmentId)) return json(reply, 409, { error: "This server is no longer authorized to acknowledge snapshots for this primary." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const pullAuthorized = row ? await hasApprovedPullAuthorization(pool, body.sourceDepartmentId, sender.installationId, body.targetDepartmentId) : false;
+    const isFormerStandby = former?.installationId === sender.installationId && (!former.departmentId || former.departmentId === body.targetDepartmentId);
+    if (!row || row.role !== "primary" || row.site_epoch !== String(body.siteEpoch) || (!isFormerStandby && !pullAuthorized)) return json(reply, 409, { error: "This server is no longer authorized to acknowledge snapshots for this primary." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -856,7 +869,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return json(reply, 201, { requestId: saved.rows[0]?.id ?? requestId, state: saved.rows[0]?.state ?? "pending" }, identity, String(request.headers["x-sc-nonce"] ?? ""));
   });
 
-  app.get<{ Querystring: { departmentId?: string } }>(`${prefix}/redundancy/capabilities`, async (request, reply) => {
+  app.post<{ Body: { sourceDepartmentId: string; sourceEpoch: number; targetDepartmentId: string; targetDepartmentName: string } }>(`${prefix}/redundancy/pull-standby-requests`, async (request, reply) => {
+    const identity = await getIdentity(pool, siteName);
+    const sender = await verifySignedPeer(request, pool);
+    if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const body = request.body;
+    const isUuid = (value: unknown) => typeof value === "string" && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(value);
+    if (!body || !isUuid(body.sourceDepartmentId) || !isUuid(body.targetDepartmentId) || typeof body.targetDepartmentName !== "string" || !body.targetDepartmentName.trim() || body.targetDepartmentName.length > 200 || !Number.isSafeInteger(body.sourceEpoch) || body.sourceEpoch < 1) return json(reply, 400, { error: "The outbound standby request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const source = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [body.sourceDepartmentId]);
+    if (!source.rowCount || source.rows[0].role !== "primary" || source.rows[0].site_epoch !== String(body.sourceEpoch)) return json(reply, 409, { error: "The selected source site is not an active primary at the requested epoch." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const pending = await pool.query<{ id: string; state: string }>(
+      `INSERT INTO sync_redundancy_pull_authorizations(id,source_department_id,target_installation_id,target_department_id,target_department_name,source_epoch,state)
+       VALUES($1,$2,$3,$4,$5,$6,'pending')
+       ON CONFLICT DO NOTHING
+       RETURNING id,state`,
+      [randomUUID(), body.sourceDepartmentId, sender.installationId, body.targetDepartmentId, body.targetDepartmentName.trim(), body.sourceEpoch],
+    );
+    const saved = pending.rows[0] ?? (await pool.query<{ id: string; state: string }>("SELECT id,state FROM sync_redundancy_pull_authorizations WHERE source_department_id=$1 AND target_installation_id=$2 AND target_department_id=$3 AND state IN ('pending','approved') ORDER BY created_at DESC LIMIT 1", [body.sourceDepartmentId, sender.installationId, body.targetDepartmentId])).rows[0];
+    if (!saved) return json(reply, 409, { error: "A standby authorization for this server and location could not be recorded." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    return json(reply, 201, { requestId: saved.id, state: saved.state }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+  });
+
+  app.get<{ Querystring: { departmentId?: string; targetDepartmentId?: string } }>(`${prefix}/redundancy/capabilities`, async (request, reply) => {
     const identity = await getIdentity(pool, siteName);
     const sender = await verifySignedPeer(request, pool);
     if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
@@ -868,8 +902,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (state.role === "standby" && (state.upstream_installation_id !== sender.installationId || state.upstream_department_id === null)) return json(reply, 403, { error: "Only the configured primary can inspect this standby." }, identity, request.headers["x-sc-nonce"] as string);
     const readiness = await redundancyManifest(pool, context.replication.list(), departmentId);
     const modules = readiness.modules.map((module) => ({ ...module, ready: !readiness.blockers.some((blocker) => blocker.startsWith(`${module.moduleId} `) || blocker.startsWith(`${module.moduleId}:`)) }));
+    const pullAuthorizedForTarget = state.role === "primary" && await hasApprovedPullAuthorization(pool, departmentId, sender.installationId, request.query.targetDepartmentId ?? "");
     const former = await formerStandbyAuthorization(pool, departmentId, state.former_standby_installation_id, state.former_standby_department_id);
-    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, formerStandbyInstallationId: former.installationId, formerStandbyDepartmentId: former.departmentId, siteEpoch: state.site_epoch, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: readiness.blockers.length === 0, blockers: readiness.blockers }, identity, request.headers["x-sc-nonce"] as string);
+    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, formerStandbyInstallationId: former.installationId, formerStandbyDepartmentId: former.departmentId, pullAuthorizedForTarget, siteEpoch: state.site_epoch, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: readiness.blockers.length === 0, blockers: readiness.blockers }, identity, request.headers["x-sc-nonce"] as string);
   });
 
   app.post<{ Body: { departmentId: string; sourceEpoch: number; sourceDigest: string } }>(`${prefix}/redundancy/verify`, async (request, reply) => {
@@ -1272,6 +1307,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE request.target_department_id=$1 AND request.state='pending' AND request.expires_at>now()
         ORDER BY request.created_at DESC`, [department],
     );
+    const pendingPullRequests = await pool.query<{ id: string; target_installation_id: string; target_department_id: string; target_department_name: string; source_epoch: string; target_server_name: string; created_at: Date }>(
+      `SELECT authorization.id,authorization.target_installation_id,authorization.target_department_id,authorization.target_department_name,authorization.source_epoch::text,peer.display_name AS target_server_name,authorization.created_at
+         FROM sync_redundancy_pull_authorizations authorization JOIN sync_peers peer ON peer.installation_id=authorization.target_installation_id AND peer.trust_state='trusted'
+        WHERE authorization.source_department_id=$1 AND authorization.state='pending'
+        ORDER BY authorization.created_at DESC`, [department],
+    );
     const reason = !modulesReady
       ? "Every enabled module and the core site-data adapter must pass local recovery checks before a snapshot can be promoted."
       : ready
@@ -1279,7 +1320,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         : siteState?.role === "standby"
           ? "A recent complete snapshot must be verified, and its data and module configuration must remain unchanged, before promotion is ready."
           : "Module checks pass. Promotion remains not ready until a standby receives and verifies a complete snapshot.";
-    return { departmentId: department, role: siteState?.role ?? "unknown", primaryInstallationId: siteState?.primary_installation_id ?? null, upstreamInstallationId: siteState?.upstream_installation_id ?? null, upstreamDepartmentId: siteState?.upstream_department_id ?? null, siteEpoch: siteState?.site_epoch ?? null, lastSnapshotId: siteState?.last_snapshot_id ?? null, lastSnapshotAt: siteState?.last_snapshot_at ?? null, lastVerifiedAt: siteState?.last_verified_at ?? null, lastError: siteState?.last_error ?? null, replicas: replicaResult.rows, pendingStandbyRequests: standbyRequests.rows.map((item) => ({ id: item.id, sourceInstallationId: item.source_installation_id, sourceDepartmentId: item.source_department_id, sourceDepartmentName: item.source_department_name, sourceEpoch: item.source_epoch, sourceServerName: item.source_server_name, createdAt: item.created_at })), modulesReady, snapshotVerified, ready, reason, modules };
+    return { departmentId: department, role: siteState?.role ?? "unknown", primaryInstallationId: siteState?.primary_installation_id ?? null, upstreamInstallationId: siteState?.upstream_installation_id ?? null, upstreamDepartmentId: siteState?.upstream_department_id ?? null, siteEpoch: siteState?.site_epoch ?? null, lastSnapshotId: siteState?.last_snapshot_id ?? null, lastSnapshotAt: siteState?.last_snapshot_at ?? null, lastVerifiedAt: siteState?.last_verified_at ?? null, lastError: siteState?.last_error ?? null, replicas: replicaResult.rows, pendingStandbyRequests: standbyRequests.rows.map((item) => ({ id: item.id, sourceInstallationId: item.source_installation_id, sourceDepartmentId: item.source_department_id, sourceDepartmentName: item.source_department_name, sourceEpoch: item.source_epoch, sourceServerName: item.source_server_name, createdAt: item.created_at })), pendingPullRequests: pendingPullRequests.rows.map((item) => ({ id: item.id, targetInstallationId: item.target_installation_id, targetDepartmentId: item.target_department_id, targetDepartmentName: item.target_department_name, sourceEpoch: item.source_epoch, targetServerName: item.target_server_name, createdAt: item.created_at })), modulesReady, snapshotVerified, ready, reason, modules };
   });
 
   app.post<{ Body: { peerInstallationId: string; targetDepartmentId: string } }>(`${adminPrefix}/redundancy/request-standby`, async (request, reply) => {
@@ -1302,6 +1343,39 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await signedRemoteRequest<{ requestId: string; state: string }>(peer, identity, "POST", `${prefix}/redundancy/standby-requests`, JSON.stringify({ sourceDepartmentId: department, sourceDepartmentName: sourceSite.rows[0].name, targetDepartmentId: target.id, sourceEpoch: Number(state.rows[0].site_epoch) }));
       return { ...result, destination: target.name };
     } catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not request standby approval from the destination." }); }
+  });
+
+  app.post<{ Body: { peerInstallationId: string; sourceDepartmentId: string; replaceExistingData: boolean } }>(`${adminPrefix}/redundancy/request-pull-standby`, async (request, reply) => {
+    const department = await context.resolveDepartmentId(request, reply, true);
+    if (!department || !requireManager(request, reply) || !context.validateMutation(request, reply)) return reply;
+    const body = request.body;
+    if (!body || typeof body.peerInstallationId !== "string" || typeof body.sourceDepartmentId !== "string" || body.replaceExistingData !== true
+      || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(body.peerInstallationId) || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(body.sourceDepartmentId)) return reply.code(400).send({ error: "Choose a trusted primary and confirm that its snapshot will replace this site's data." });
+    const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [body.peerInstallationId]);
+    const peer = peerResult.rows[0];
+    if (!peer?.base_url) return reply.code(409).send({ error: "Choose a trusted primary reachable over the existing HTTPS/API connection." });
+    const current = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [department]);
+    if (!current.rowCount || !["primary", "standby", "fenced"].includes(current.rows[0].role)) return reply.code(409).send({ error: "This site cannot be configured as a standby from its current state." });
+    try {
+      const identity = await getIdentity(pool, siteName);
+      const remote = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; siteEpoch: string }>(peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(body.sourceDepartmentId)}`);
+      if (remote.installationId !== peer.installation_id || remote.departmentId !== body.sourceDepartmentId || remote.role !== "primary") return reply.code(409).send({ error: "The selected remote location is not an active primary." });
+      if (BigInt(remote.siteEpoch) < BigInt(current.rows[0].site_epoch)) return reply.code(409).send({ error: "The selected primary has an older epoch and cannot replace this site's newer data." });
+      const site = await pool.query<{ name: string }>("SELECT name FROM departments WHERE id=$1", [department]);
+      if (!site.rowCount) return reply.code(404).send({ error: "This site is no longer available." });
+      const result = await signedRemoteRequest<{ requestId: string; state: string }>(peer, identity, "POST", `${prefix}/redundancy/pull-standby-requests`, JSON.stringify({ sourceDepartmentId: body.sourceDepartmentId, sourceEpoch: Number(remote.siteEpoch), targetDepartmentId: department, targetDepartmentName: site.rows[0].name }));
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const locked = await client.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [department]);
+        if (!locked.rowCount || !["primary", "standby", "fenced"].includes(locked.rows[0].role) || BigInt(remote.siteEpoch) < BigInt(locked.rows[0].site_epoch)) throw new Error("This site's redundancy state changed while requesting the primary.");
+        await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, peer.installation_id, body.sourceDepartmentId, remote.siteEpoch]);
+        await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'standby_configured',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, locked.rows[0].site_epoch, remote.siteEpoch, peer.installation_id, "Administrator requested that this outbound-only site become a standby; the source site must approve before its snapshot can be pulled."]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+      return { requestId: result.requestId, requestState: result.state, role: "standby", upstreamInstallationId: peer.installation_id, upstreamDepartmentId: body.sourceDepartmentId, siteEpoch: remote.siteEpoch };
+    } catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not request outbound standby authorization." }); }
   });
 
   app.post<{ Params: { id: string }; Body: { decision: "approve" | "reject"; confirmReplace?: boolean } }>(`${adminPrefix}/redundancy/standby-requests/:id/review`, async (request, reply) => {
@@ -1333,6 +1407,31 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("COMMIT");
       return { requestId: row.id, state: "approved", role: "standby", upstreamInstallationId: row.source_installation_id, upstreamDepartmentId: row.source_department_id, siteEpoch: row.source_epoch };
     } catch (error) { await client.query("ROLLBACK"); return reply.code(409).send({ error: error instanceof Error ? error.message : "Could not review the standby request." }); }
+    finally { client.release(); }
+  });
+
+  app.post<{ Params: { id: string }; Body: { decision: "approve" | "reject"; confirmReplace?: boolean } }>(`${adminPrefix}/redundancy/pull-standby-requests/:id/review`, async (request, reply) => {
+    const department = await context.resolveDepartmentId(request, reply, true);
+    if (!department || !requireManager(request, reply) || !context.validateMutation(request, reply)) return reply;
+    const { decision, confirmReplace } = request.body ?? {};
+    if (!new Set(["approve", "reject"]).has(decision)) return reply.code(400).send({ error: "Choose whether to approve or reject the outbound standby request." });
+    if (decision === "approve" && confirmReplace !== true) return reply.code(400).send({ error: "Confirm that this primary may send its complete site snapshot to the approved standby." });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const requested = await client.query<{ id: string; target_installation_id: string; target_department_id: string; source_epoch: string; state: string }>("SELECT id,target_installation_id,target_department_id,source_epoch::text,state FROM sync_redundancy_pull_authorizations WHERE id=$1 AND source_department_id=$2 FOR UPDATE", [request.params.id, department]);
+      const row = requested.rows[0];
+      if (!row || row.state !== "pending") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This outbound standby request is no longer pending." }); }
+      const source = await client.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [department]);
+      const peer = await client.query("SELECT 1 FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [row.target_installation_id]);
+      if (decision === "approve" && (source.rows[0]?.role !== "primary" || source.rows[0]?.site_epoch !== row.source_epoch || !peer.rowCount)) {
+        await client.query("ROLLBACK"); return reply.code(409).send({ error: "The source site changed epoch or role, or the requesting server is no longer trusted." });
+      }
+      await client.query("UPDATE sync_redundancy_pull_authorizations SET state=$2,reviewed_at=now(),reviewed_by=$3 WHERE id=$1", [row.id, decision === "approve" ? "approved" : "rejected", request.authenticatedUser!.id]);
+      await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,$4,$5,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, decision === "approve" ? "standby_pull_approved" : "standby_pull_rejected", row.source_epoch, row.target_installation_id, decision === "approve" ? "Site administrator approved complete snapshots to be pulled by this trusted standby." : "Site administrator rejected the outbound standby request."]);
+      await client.query("COMMIT");
+      return { requestId: row.id, state: decision === "approve" ? "approved" : "rejected" };
+    } catch (error) { await client.query("ROLLBACK"); return reply.code(409).send({ error: error instanceof Error ? error.message : "Could not review the outbound standby request." }); }
     finally { client.release(); }
   });
 
@@ -1566,6 +1665,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "This active peer was not found." });
     await pool.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,actor_user_id,fingerprint) VALUES($1,$2,'revoked',$3,$4)", [randomUUID(), request.params.installationId, request.authenticatedUser!.id, result.rows[0].fingerprint]);
     await pool.query("UPDATE sync_share_grants SET state='revoked',revision=revision+1,revoked_at=now(),updated_at=now() WHERE recipient_installation_id=$1 AND state='active'", [request.params.installationId]);
+    await pool.query("UPDATE sync_redundancy_pull_authorizations SET state='revoked',reviewed_at=now(),reviewed_by=$2 WHERE target_installation_id=$1 AND state IN ('pending','approved')", [request.params.installationId, request.authenticatedUser!.id]);
     const subscriptions = await pool.query<{ id: string; current_run_id: string | null }>("SELECT id,current_run_id FROM sync_subscriptions WHERE source_installation_id=$1 AND state='active'", [request.params.installationId]);
     await pool.query("UPDATE sync_subscriptions SET state='revoked',current_run_id=NULL,sync_started_at=NULL,last_error='Peer trust was revoked.',updated_at=now() WHERE source_installation_id=$1 AND state='active'", [request.params.installationId]);
     await pool.query("DELETE FROM sync_replica_records WHERE subscription_id=ANY($1::uuid[])", [subscriptions.rows.map((item) => item.id)]);
