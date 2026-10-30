@@ -195,7 +195,7 @@ standby can reach the primary, its administrator selects the primary and sends
 a signed outbound standby request. A Server Administrator on the primary
 approves that exact installation and site before any snapshot is released.
 After approval, the standby pulls snapshots over its existing outbound
-HTTPS/API connection. Both paths bind authorization to the source site, target
+WebSocket channel. Both paths bind authorization to the source site, target
 installation, target site, and source epoch. Neither path requires a callback
 to an outbound-only server or an additional network port.
 
@@ -297,8 +297,8 @@ both isolated servers cannot otherwise know which one is allowed to write.
 The primary pushes complete site snapshots to each configured, reachable
 standby automatically. The default interval is 60 seconds and can be set with
 `SMART_CHURCH_REDUNDANCY_SYNC_INTERVAL_SECONDS` (30–240 seconds). Transfers use
-only the existing signed HTTPS/API connection. A verified snapshot proves that
-the standby matches the source at that snapshot time, not that it contains
+only the existing authenticated WebSocket channel. A verified snapshot proves
+that the standby matches the source at that snapshot time, not that it contains
 writes made during or after the transfer. The interface shows per-standby
 replication health and requires explicit acknowledgment before promotion with
 possible data loss. Promotion is blocked if the last verified snapshot is more
@@ -307,7 +307,7 @@ After promotion, the old primary can only rejoin as a standby and must discard
 or explicitly reconcile any unreplicated writes; it must not merge concurrent
 site histories automatically. The promoted primary retains the former standby
 identity and site ID. Once the old primary is manually reconfigured as that
-primary's standby, it initiates signed snapshot pulls over its outbound HTTPS
+primary's standby, it initiates signed snapshot pulls over its outbound WebSocket
 connection. This supports rejoin when the old primary has no inbound port
 forwarding. Each pull replaces the standby with a complete module-owned
 snapshot and verifies it before marking the replica current. New promotions
