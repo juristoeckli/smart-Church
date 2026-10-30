@@ -35,6 +35,17 @@ async function adapterSchemaVersion(adapter: ModuleReplicationAdapter, departmen
   return adapter.getSchemaVersion ? adapter.getSchemaVersion(departmentId) : adapter.schemaVersion;
 }
 
+async function formerStandbyAuthorization(pool: import("pg").Pool, departmentId: string, installationId: string | null, formerDepartmentId: string | null) {
+  if (installationId) return { installationId, departmentId: formerDepartmentId };
+  // Older promoted sites cleared their upstream columns before the explicit
+  // rejoin identity was persisted. The most recent promotion audit still
+  // identifies the former primary; its admin must choose the local site again.
+  const previous = await pool.query<{ source_installation_id: string | null }>(
+    "SELECT source_installation_id FROM sync_redundancy_audit WHERE department_id=$1 AND action='promoted' ORDER BY created_at DESC LIMIT 1", [departmentId],
+  );
+  return { installationId: previous.rows[0]?.source_installation_id ?? null, departmentId: null };
+}
+
 function manifestKey(modules: RedundancyModuleManifestEntry[]) {
   return JSON.stringify([...modules].sort((left, right) => left.moduleId.localeCompare(right.moduleId)).map((module) => [module.moduleId, module.schemaVersion, module.installedVersion]));
 }
@@ -167,6 +178,163 @@ async function signedRemoteRequest<T>(peer: RemotePeerAddress, identity: Awaited
   if (body) headers["content-type"] = "application/json";
   const response = await fetch(`${peer.base_url}${path}`, { method, headers, ...(body ? { body } : {}), signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
   return readRemoteJson<T>(response, peer.public_key_pem, nonce);
+}
+
+async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Awaited<ReturnType<typeof getIdentity>>, path: string, body: string, timeoutMs = 300_000) {
+  if (!peer.base_url) throw new Error("This peer is outbound-only and cannot be called from this server.");
+  const method = "POST";
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(24).toString("base64url");
+  const response = await fetch(`${peer.base_url}${path}`, {
+    method,
+    headers: {
+      accept: "application/vnd.smart-church.redundancy-snapshot, application/json",
+      "content-type": "application/json",
+      "x-sc-protocol": protocolVersion,
+      "x-sc-installation": identity.installationId,
+      "x-sc-timestamp": timestamp,
+      "x-sc-nonce": nonce,
+      "x-sc-signature": signBytes(identity.privateKeyPem, canonicalRequest(method, path, timestamp, nonce, body)),
+    },
+    body,
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: "error",
+  });
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (bytes.length > maxRedundancyBytes || response.headers.get("x-sc-protocol") !== protocolVersion) throw new Error("The remote redundancy snapshot response is invalid or exceeds the transfer limit.");
+  const signature = response.headers.get("x-sc-response-signature");
+  if (!signature || !verifyBytes(peer.public_key_pem, canonicalResponse(response.status, nonce, bytes), signature)) throw new Error("The remote snapshot response signature could not be verified.");
+  if (!response.ok) {
+    try {
+      const parsed = JSON.parse(bytes.toString("utf8")) as { error?: unknown };
+      if (typeof parsed.error === "string") throw new Error(parsed.error);
+    } catch (error) {
+      if (error instanceof Error && error.message !== "Unexpected end of JSON input") throw error;
+    }
+    throw new Error("The remote server rejected the redundancy snapshot request.");
+  }
+  return { contentType: response.headers.get("content-type")?.split(";", 1)[0] ?? "", bytes };
+}
+
+async function applyRedundancySnapshot(
+  app: FastifyInstance,
+  pool: import("pg").Pool,
+  context: ModuleServerContext,
+  identity: Awaited<ReturnType<typeof getIdentity>>,
+  sourceInstallationId: string,
+  snapshotId: string,
+  sourceDepartmentId: string,
+  targetDepartmentId: string,
+  sourceEpoch: number,
+  sourceDigest: string,
+  modules: Record<string, unknown>,
+  moduleManifest: RedundancyModuleManifestEntry[],
+) {
+  if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch < 1 || !/^[0-9a-f]{64}$/.test(sourceDigest) || !Array.isArray(moduleManifest) || moduleManifest.length < 1 || moduleManifest.length > 100) throw new Error("The pulled snapshot metadata is invalid.");
+  const client = await pool.connect();
+  const commitCallbacks: Array<() => Promise<void>> = [];
+  const rollbackCallbacks: Array<() => Promise<void>> = [];
+  let transactionCommitted = false;
+  try {
+    await client.query("BEGIN");
+    await client.query("SET LOCAL smart_church.redundancy_restore='on'");
+    await client.query("SET CONSTRAINTS ALL DEFERRED");
+    const site = await client.query<{ role: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string }>("SELECT role,upstream_installation_id,upstream_department_id,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1 FOR UPDATE", [targetDepartmentId]);
+    if (site.rows[0]?.role !== "standby" || site.rows[0].upstream_installation_id !== sourceInstallationId || site.rows[0].upstream_department_id !== sourceDepartmentId || sourceEpoch < Number(site.rows[0].site_epoch)) throw new Error("The standby relationship or source epoch changed during the restore.");
+    const readiness = await redundancyManifest(pool, context.replication.list(), targetDepartmentId);
+    if (readiness.blockers.length) throw new Error(`The standby is not ready to receive a complete site snapshot: ${readiness.blockers.join(" ")}`);
+    if (manifestKey(readiness.modules) !== manifestKey(moduleManifest)) throw new Error("The standby module set, versions, or replication schemas do not match the primary.");
+    const entries = [...moduleManifest].sort((left, right) => left.moduleId === "core-site" ? -1 : right.moduleId === "core-site" ? 1 : left.moduleId.localeCompare(right.moduleId));
+    if (entries.some((entry) => !(entry.moduleId in modules)) || Object.keys(modules).length !== entries.length) throw new Error("The snapshot does not contain exactly the modules in its signed manifest.");
+    const restoreContext = {
+      userIdMap: new Map<string, string>(),
+      onCommit: (callback: () => Promise<void>) => commitCallbacks.push(callback),
+      onRollback: (callback: () => Promise<void>) => rollbackCallbacks.push(callback),
+    };
+    const restoredSnapshots: Record<string, unknown> = {};
+    for (const entry of entries) {
+      const adapter = readiness.adapters.get(entry.moduleId);
+      if (!adapter || await adapterSchemaVersion(adapter, targetDepartmentId) !== entry.schemaVersion) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
+      const moduleSnapshot = adapter.restoreSnapshotFromPeer
+        ? await adapter.restoreSnapshotFromPeer(modules[entry.moduleId], (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, String(envelope)))
+        : modules[entry.moduleId];
+      await adapter.restoreSnapshot(client, targetDepartmentId, moduleSnapshot, restoreContext);
+      const verified = await adapter.verifySnapshot(client, targetDepartmentId, moduleSnapshot, restoreContext);
+      if (!verified.ready) throw new Error(`${adapter.moduleName} restore verification failed: ${verified.blockers.join(" ")}`);
+      restoredSnapshots[entry.moduleId] = await adapter.exportSnapshot(client, targetDepartmentId);
+    }
+    const digest = replicationDigest(restoredSnapshots);
+    await client.query("UPDATE sync_site_redundancy SET primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,site_epoch=$3,last_snapshot_id=$4,last_replica_digest=$5,last_source_digest=$6,last_replica_manifest=$7::jsonb,last_snapshot_at=now(),last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1", [targetDepartmentId, sourceInstallationId, sourceEpoch, snapshotId, digest, sourceDigest, JSON.stringify(moduleManifest)]);
+    await client.query("INSERT INTO sync_redundancy_audit(id,department_id,action,new_epoch,source_installation_id,note) VALUES($1,$2,'snapshot_applied',$3,$4,'Verified module-owned full-site snapshot applied.')", [randomUUID(), targetDepartmentId, sourceEpoch, sourceInstallationId]);
+    await client.query("COMMIT");
+    transactionCommitted = true;
+    for (const callback of commitCallbacks) await callback().catch((error) => app.log.warn({ err: error, module: "sync" }, "A module cleanup after successful snapshot restore failed."));
+    return { applied: true as const, snapshotId, siteEpoch: String(sourceEpoch), verifiedAt: new Date().toISOString() };
+  } catch (error) {
+    if (!transactionCommitted) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      for (const callback of rollbackCallbacks.reverse()) await callback().catch((rollbackError) => app.log.error({ err: rollbackError, module: "sync" }, "A module file rollback after failed snapshot restore failed."));
+    }
+    throw error;
+  } finally { client.release(); }
+}
+
+async function pullRedundancySnapshot(app: FastifyInstance, pool: import("pg").Pool, context: ModuleServerContext, siteName: string, departmentId: string, peer: PeerRow, sourceDepartmentId: string) {
+  if (!peer.base_url) throw new Error("The current primary has no reachable callback address; this standby cannot pull a snapshot.");
+  const stateResult = await pool.query<{ role: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string; last_source_digest: string | null; last_replica_digest: string | null; last_replica_manifest: RedundancyModuleManifestEntry[] | null }>(
+    "SELECT role,upstream_installation_id,upstream_department_id,site_epoch::text,last_source_digest,last_replica_digest,last_replica_manifest FROM sync_site_redundancy WHERE department_id=$1", [departmentId],
+  );
+  const state = stateResult.rows[0];
+  if (!state || state.role !== "standby" || state.upstream_installation_id !== peer.installation_id || state.upstream_department_id !== sourceDepartmentId) throw new Error("This site is no longer configured as a standby for that primary.");
+  const identity = await getIdentity(pool, siteName);
+  const acknowledge = async (snapshotId: string, siteEpoch: number, sourceDigest: string) => signedRemoteRequest<{ accepted: boolean }>(
+    peer, identity, "POST", `${prefix}/redundancy/pull-ack`, JSON.stringify({ sourceDepartmentId, targetDepartmentId: departmentId, snapshotId, siteEpoch, sourceDigest }),
+  );
+  const sourceStatus = await signedRemoteRequest<{ installationId: string; departmentId: string; role: string; siteEpoch: string; formerStandbyInstallationId: string | null; formerStandbyDepartmentId: string | null }>(
+    peer, identity, "GET", `${prefix}/redundancy/capabilities?departmentId=${encodeURIComponent(sourceDepartmentId)}`,
+  );
+  if (sourceStatus.role !== "primary" || sourceStatus.installationId !== peer.installation_id || sourceStatus.departmentId !== sourceDepartmentId
+    || sourceStatus.formerStandbyInstallationId !== identity.installationId || (sourceStatus.formerStandbyDepartmentId && sourceStatus.formerStandbyDepartmentId !== departmentId)) return { skipped: true as const };
+  const requestPath = `${prefix}/redundancy/pull-snapshot`;
+  const requestFor = (knownSourceDigest: string | null, knownManifest: RedundancyModuleManifestEntry[] | null) => JSON.stringify({ sourceDepartmentId, targetDepartmentId: departmentId, knownEpoch: Number(state.site_epoch), knownSourceDigest, knownManifest, encryptionPublicKeyPem: identity.encryptionPublicKeyPem });
+  let response = await signedRemoteSnapshotRequest(peer, identity, requestPath, requestFor(state.last_source_digest, state.last_replica_manifest));
+  if (response.contentType === "application/json") {
+    const unchanged = JSON.parse(response.bytes.toString("utf8")) as { unchanged?: unknown; siteEpoch?: unknown; sourceDigest?: unknown; snapshotId?: unknown; moduleManifest?: RedundancyModuleManifestEntry[] };
+    if (unchanged.unchanged !== true || unchanged.siteEpoch !== state.site_epoch || typeof unchanged.sourceDigest !== "string" || !state.last_source_digest || unchanged.sourceDigest !== state.last_source_digest || typeof unchanged.snapshotId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(unchanged.snapshotId) || !state.last_replica_digest || !state.last_replica_manifest || !Array.isArray(unchanged.moduleManifest)
+      || manifestKey(unchanged.moduleManifest) !== manifestKey(state.last_replica_manifest)) throw new Error("The primary reported an unchanged snapshot, but the standby has no matching verified snapshot metadata.");
+    const local = await redundancyManifest(pool, context.replication.list(), departmentId);
+    if (local.blockers.length || manifestKey(local.modules) !== manifestKey(state.last_replica_manifest)) throw new Error(`The standby is not ready to verify its existing snapshot: ${local.blockers.join(" ") || "the module manifest changed"}`);
+    const client = await pool.connect();
+    let currentSnapshots: Record<string, unknown>;
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      currentSnapshots = {};
+      for (const item of local.modules) {
+        const adapter = local.adapters.get(item.moduleId);
+        if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
+        currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, departmentId);
+      }
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    if (replicationDigest(currentSnapshots) !== state.last_replica_digest) {
+      response = await signedRemoteSnapshotRequest(peer, identity, requestPath, requestFor(null, null));
+      if (response.contentType === "application/json") throw new Error("The standby data changed, and the primary did not provide a replacement snapshot.");
+    } else {
+      await pool.query("UPDATE sync_site_redundancy SET last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1 AND role='standby'", [departmentId]);
+      await acknowledge(unchanged.snapshotId, Number(unchanged.siteEpoch), unchanged.sourceDigest);
+      return { skipped: false as const, unchanged: true as const, verifiedAt: new Date().toISOString() };
+    }
+  }
+  if (response.contentType !== "application/vnd.smart-church.redundancy-snapshot") throw new Error("The primary returned an unsupported redundancy snapshot format.");
+  const plain = gunzipSync(response.bytes, { maxOutputLength: 1024 * 1024 * 1024 });
+  const payload = JSON.parse(plain.toString("utf8")) as { sourceDepartmentId?: unknown; targetDepartmentId?: unknown; siteEpoch?: unknown; sourceDigest?: unknown; snapshotId?: unknown; modules?: unknown; moduleManifest?: unknown };
+  if (!payload || payload.sourceDepartmentId !== sourceDepartmentId || payload.targetDepartmentId !== departmentId || !Number.isSafeInteger(payload.siteEpoch) || typeof payload.sourceDigest !== "string" || !/^[0-9a-f]{64}$/.test(payload.sourceDigest)
+    || typeof payload.snapshotId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(payload.snapshotId)
+    || !payload.modules || typeof payload.modules !== "object" || Array.isArray(payload.modules) || !Array.isArray(payload.moduleManifest)) throw new Error("The primary returned an invalid redundancy snapshot payload.");
+  const result = await applyRedundancySnapshot(app, pool, context, identity, peer.installation_id, payload.snapshotId, sourceDepartmentId, departmentId, Number(payload.siteEpoch), payload.sourceDigest, payload.modules as Record<string, unknown>, payload.moduleManifest as RedundancyModuleManifestEntry[]);
+  await acknowledge(payload.snapshotId, Number(payload.siteEpoch), payload.sourceDigest);
+  return { skipped: false as const, unchanged: false as const, ...result };
 }
 
 async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleServerContext, siteName: string, departmentId: string, peer: RemotePeerAddress & { fingerprint: string }, targetDepartmentId: string) {
@@ -377,11 +545,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     automaticPushError = null;
     try {
       const primaries = await pool.query<{ department_id: string; site_epoch: string; primary_installation_id: string }>("SELECT department_id,site_epoch::text,primary_installation_id FROM sync_site_redundancy WHERE role='primary' ORDER BY department_id");
-      if (!primaries.rowCount) return;
       const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE trust_state='trusted' ORDER BY installation_id");
-      if (!peers.rowCount) return;
-      const identity = await getIdentity(pool, siteName);
-      for (const peer of peers.rows) {
+      const identity = peers.rowCount ? await getIdentity(pool, siteName) : null;
+      if (identity) for (const peer of peers.rows) {
         if (!peer.base_url) continue;
         let remoteSites: { installationId: string; sites: Array<{ id: string; role: string; primary_installation_id: string | null; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string }> };
         try { remoteSites = await signedRemoteRequest(peer, identity, "GET", `${prefix}/redundancy/sites`); }
@@ -423,6 +589,35 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               app.log.warn({ err: error, peer: peer.installation_id, departmentId: primary.department_id, module: "sync" }, "Automatic site redundancy push failed.");
             }
           }
+        }
+      }
+      const standbyResult = await pool.query<{ department_id: string; upstream_installation_id: string; upstream_department_id: string; peer: PeerRow }>(
+        `SELECT redundancy.department_id,redundancy.upstream_installation_id,redundancy.upstream_department_id,
+                to_jsonb(peer) AS peer
+           FROM sync_site_redundancy redundancy
+           JOIN sync_peers peer ON peer.installation_id=redundancy.upstream_installation_id AND peer.trust_state='trusted'
+          WHERE redundancy.role='standby' AND redundancy.upstream_department_id IS NOT NULL
+          ORDER BY redundancy.department_id`,
+      );
+      for (const standby of standbyResult.rows) {
+        const peer = standby.peer;
+        if (!peer.base_url) continue;
+        const lockClient = await pool.connect();
+        const lockName = `smart-church-redundancy-pull:${standby.department_id}:${peer.installation_id}:${standby.upstream_department_id}`;
+        let locked = false;
+        try {
+          const lock = await lockClient.query<{ locked: boolean }>("SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS locked", [lockName]);
+          locked = lock.rows[0]?.locked === true;
+          if (!locked) continue;
+          await pullRedundancySnapshot(app, pool, context, siteName, standby.department_id, peer, standby.upstream_department_id);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message.slice(0, 500) : "Automatic standby rejoin failed.";
+          automaticPushError = reason;
+          await pool.query("UPDATE sync_site_redundancy SET last_error=$2,updated_at=now() WHERE department_id=$1 AND role='standby'", [standby.department_id, reason]).catch(() => undefined);
+          app.log.warn({ err: error, peer: peer.installation_id, departmentId: standby.department_id, module: "sync" }, "Automatic standby snapshot pull failed.");
+        } finally {
+          if (locked) await lockClient.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [lockName]).catch(() => undefined);
+          lockClient.release();
         }
       }
     } catch (error) {
@@ -528,6 +723,117 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return json(reply, 200, { installationId: identity.installationId, sites: sites.rows }, identity, String(request.headers["x-sc-nonce"] ?? ""));
   });
 
+  app.post<{ Body: { sourceDepartmentId: string; targetDepartmentId: string; knownEpoch: number; knownSourceDigest: string | null; knownManifest: RedundancyModuleManifestEntry[] | null; encryptionPublicKeyPem: string } }>(`${prefix}/redundancy/pull-snapshot`, async (request, reply) => {
+    const identity = await getIdentity(pool, siteName);
+    const sender = await verifySignedPeer(request, pool);
+    if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const body = request.body;
+    const isUuid = (value: unknown) => typeof value === "string" && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(value);
+    if (!body || !isUuid(body.sourceDepartmentId) || !isUuid(body.targetDepartmentId) || !Number.isSafeInteger(body.knownEpoch) || body.knownEpoch < 0
+      || (body.knownSourceDigest !== null && (typeof body.knownSourceDigest !== "string" || !/^[0-9a-f]{64}$/.test(body.knownSourceDigest)))
+      || (body.knownManifest !== null && (!Array.isArray(body.knownManifest) || body.knownManifest.some((module) => !module || typeof module.moduleId !== "string" || typeof module.schemaVersion !== "string" || typeof module.installedVersion !== "string")))
+      || typeof body.encryptionPublicKeyPem !== "string" || body.encryptionPublicKeyPem.length > 4096) return json(reply, 400, { error: "The redundancy pull request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    let recipientKey;
+    try { recipientKey = createPublicKey(body.encryptionPublicKeyPem); }
+    catch { return json(reply, 400, { error: "The standby snapshot-encryption key is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? "")); }
+    if (recipientKey.asymmetricKeyType !== "x25519") return json(reply, 400, { error: "The standby snapshot-encryption key is not an X25519 key." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+
+    const stateResult = await pool.query<{ role: string; site_epoch: string; former_standby_installation_id: string | null; former_standby_department_id: string | null }>(
+      "SELECT role,site_epoch::text,former_standby_installation_id,former_standby_department_id FROM sync_site_redundancy WHERE department_id=$1", [body.sourceDepartmentId],
+    );
+    const state = stateResult.rows[0];
+    const former = state ? await formerStandbyAuthorization(pool, body.sourceDepartmentId, state.former_standby_installation_id, state.former_standby_department_id) : null;
+    if (!state || state.role !== "primary" || former?.installationId !== sender.installationId || (former.departmentId && former.departmentId !== body.targetDepartmentId)) {
+      return json(reply, 403, { error: "This trusted server is not the former standby for this site and cannot pull its snapshot." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    }
+    try {
+      const local = await redundancyManifest(pool, context.replication.list(), body.sourceDepartmentId);
+      if (local.blockers.length) return json(reply, 409, { error: `The primary is not ready to export a complete site snapshot: ${local.blockers.join(" ")}` }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+      const client = await pool.connect();
+      let snapshots: Record<string, unknown>;
+      try {
+        await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        const current = await client.query<{ role: string; site_epoch: string; former_standby_installation_id: string | null; former_standby_department_id: string | null }>(
+          "SELECT role,site_epoch::text,former_standby_installation_id,former_standby_department_id FROM sync_site_redundancy WHERE department_id=$1", [body.sourceDepartmentId],
+        );
+        const locked = current.rows[0];
+        const lockedFormer = locked ? await formerStandbyAuthorization(pool, body.sourceDepartmentId, locked.former_standby_installation_id, locked.former_standby_department_id) : null;
+        if (!locked || locked.role !== "primary" || locked.site_epoch !== state.site_epoch || lockedFormer?.installationId !== sender.installationId || (lockedFormer.departmentId && lockedFormer.departmentId !== body.targetDepartmentId)) throw new Error("The primary role or rejoin authorization changed during snapshot export.");
+        snapshots = {};
+        for (const module of local.modules) {
+          const adapter = local.adapters.get(module.moduleId);
+          if (!adapter) throw new Error(`The ${module.moduleId} replication adapter is unavailable.`);
+          snapshots[module.moduleId] = await adapter.exportSnapshot(client, body.sourceDepartmentId);
+        }
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+
+      const confirmed = await redundancyManifest(pool, context.replication.list(), body.sourceDepartmentId);
+      if (confirmed.blockers.length || manifestKey(confirmed.modules) !== manifestKey(local.modules)) throw new Error("The primary module inventory changed while the snapshot was being prepared; retry after its modules are stable.");
+      const sourceDigest = sourceSnapshotDigest(snapshots);
+      const snapshotId = randomUUID();
+      await pool.query("DELETE FROM sync_redundancy_pull_offers WHERE expires_at<=now()");
+      await pool.query("INSERT INTO sync_redundancy_pull_offers(snapshot_id,source_department_id,target_installation_id,target_department_id,source_epoch,source_digest,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '15 minutes')",
+        [snapshotId, body.sourceDepartmentId, sender.installationId, body.targetDepartmentId, state.site_epoch, sourceDigest]);
+      if (body.knownEpoch === Number(state.site_epoch) && body.knownSourceDigest === sourceDigest && body.knownManifest && manifestKey(body.knownManifest) === manifestKey(local.modules)) {
+        return json(reply, 200, { unchanged: true, snapshotId, siteEpoch: state.site_epoch, sourceDigest, moduleManifest: local.modules }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+      }
+      const transferSnapshots: Record<string, unknown> = {};
+      for (const module of local.modules) {
+        const adapter = local.adapters.get(module.moduleId)!;
+        transferSnapshots[module.moduleId] = adapter.prepareSnapshotForPeer
+          ? await adapter.prepareSnapshotForPeer(snapshots[module.moduleId], (plaintext) => sealForPeer(body.encryptionPublicKeyPem, plaintext))
+          : snapshots[module.moduleId];
+      }
+      const payload = Buffer.from(JSON.stringify({ sourceDepartmentId: body.sourceDepartmentId, targetDepartmentId: body.targetDepartmentId, snapshotId, siteEpoch: Number(state.site_epoch), sourceDigest, modules: transferSnapshots, moduleManifest: local.modules }), "utf8");
+      if (payload.length > 1024 * 1024 * 1024) return json(reply, 413, { error: "The uncompressed site snapshot exceeds the 1 GiB safety limit." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+      const compressed = gzipSync(payload, { level: 6 });
+      if (compressed.length > maxRedundancyBytes) return json(reply, 413, { error: "The compressed site snapshot exceeds the 256 MiB transfer limit." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+      const nonce = String(request.headers["x-sc-nonce"] ?? "");
+      reply.code(200).header("content-type", "application/vnd.smart-church.redundancy-snapshot").header("cache-control", "no-store")
+        .header("x-sc-protocol", protocolVersion)
+        .header("x-sc-response-signature", signBytes(identity.privateKeyPem, canonicalResponse(200, nonce, compressed)));
+      return reply.send(compressed);
+    } catch (error) {
+      app.log.error({ err: error, module: "sync", departmentId: body.sourceDepartmentId }, "A standby snapshot pull could not be prepared.");
+      return json(reply, 409, { error: error instanceof Error ? error.message.slice(0, 500) : "The standby snapshot pull failed." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    }
+  });
+
+  app.post<{ Body: { sourceDepartmentId: string; targetDepartmentId: string; snapshotId: string; siteEpoch: number; sourceDigest: string } }>(`${prefix}/redundancy/pull-ack`, async (request, reply) => {
+    const identity = await getIdentity(pool, siteName);
+    const sender = await verifySignedPeer(request, pool);
+    if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const body = request.body;
+    const isUuid = (value: unknown) => typeof value === "string" && /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(value);
+    if (!body || !isUuid(body.sourceDepartmentId) || !isUuid(body.targetDepartmentId) || !isUuid(body.snapshotId) || !Number.isSafeInteger(body.siteEpoch) || body.siteEpoch < 1 || typeof body.sourceDigest !== "string" || !/^[0-9a-f]{64}$/.test(body.sourceDigest)) return json(reply, 400, { error: "The standby verification acknowledgment is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const source = await pool.query<{ site_epoch: string; role: string; former_standby_installation_id: string | null; former_standby_department_id: string | null }>(
+      "SELECT site_epoch::text,role,former_standby_installation_id,former_standby_department_id FROM sync_site_redundancy WHERE department_id=$1", [body.sourceDepartmentId],
+    );
+    const row = source.rows[0];
+    const former = row ? await formerStandbyAuthorization(pool, body.sourceDepartmentId, row.former_standby_installation_id, row.former_standby_department_id) : null;
+    if (!row || row.role !== "primary" || row.site_epoch !== String(body.siteEpoch) || former?.installationId !== sender.installationId || (former.departmentId && former.departmentId !== body.targetDepartmentId)) return json(reply, 409, { error: "This server is no longer authorized to acknowledge snapshots for this primary." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const previous = await client.query<{ last_snapshot_id: string | null; source_digest: string | null }>("SELECT last_snapshot_id,source_digest FROM sync_site_redundancy_replicas WHERE department_id=$1 AND peer_installation_id=$2 AND peer_department_id=$3 FOR UPDATE", [body.sourceDepartmentId, sender.installationId, body.targetDepartmentId]);
+      if (previous.rows[0]?.last_snapshot_id === body.snapshotId && previous.rows[0]?.source_digest === body.sourceDigest) {
+        await client.query("COMMIT");
+        return json(reply, 200, { accepted: true }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+      }
+      const offer = await client.query("SELECT 1 FROM sync_redundancy_pull_offers WHERE snapshot_id=$1 AND source_department_id=$2 AND target_installation_id=$3 AND target_department_id=$4 AND source_epoch=$5 AND source_digest=$6 AND expires_at>now() FOR UPDATE", [body.snapshotId, body.sourceDepartmentId, sender.installationId, body.targetDepartmentId, body.siteEpoch, body.sourceDigest]);
+      if (!offer.rowCount) { await client.query("ROLLBACK"); return json(reply, 409, { error: "The snapshot offer is missing, expired, or does not match this acknowledgment." }, identity, String(request.headers["x-sc-nonce"] ?? "")); }
+      await client.query(`INSERT INTO sync_site_redundancy_replicas(department_id,peer_installation_id,peer_department_id,last_snapshot_id,source_digest,last_snapshot_at,last_verified_at,last_error,updated_at)
+        VALUES($1,$2,$3,$4,$5,now(),now(),NULL,now())
+        ON CONFLICT(department_id,peer_installation_id,peer_department_id) DO UPDATE SET last_snapshot_id=EXCLUDED.last_snapshot_id,source_digest=EXCLUDED.source_digest,last_snapshot_at=EXCLUDED.last_snapshot_at,last_verified_at=EXCLUDED.last_verified_at,last_error=NULL,updated_at=now()`, [body.sourceDepartmentId, sender.installationId, body.targetDepartmentId, body.snapshotId, body.sourceDigest]);
+      await client.query("DELETE FROM sync_redundancy_pull_offers WHERE snapshot_id=$1", [body.snapshotId]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    return json(reply, 200, { accepted: true }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+  });
+
   app.post<{ Body: { sourceDepartmentId: string; sourceDepartmentName: string; targetDepartmentId: string; sourceEpoch: number } }>(`${prefix}/redundancy/standby-requests`, async (request, reply) => {
     const identity = await getIdentity(pool, siteName);
     const sender = await verifySignedPeer(request, pool);
@@ -556,13 +862,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
     const departmentId = request.query.departmentId;
     if (!departmentId || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) return json(reply, 400, { error: "Choose a valid site." }, identity, request.headers["x-sc-nonce"] as string);
-    const stateResult = await pool.query<{ role: string; primary_installation_id: string; upstream_installation_id: string | null; upstream_department_id: string | null; site_epoch: string; last_snapshot_id: string | null; last_snapshot_at: Date | null; last_verified_at: Date | null; last_source_digest: string | null }>("SELECT role,primary_installation_id,upstream_installation_id,upstream_department_id,site_epoch::text,last_snapshot_id,last_snapshot_at,last_verified_at,last_source_digest FROM sync_site_redundancy WHERE department_id=$1", [departmentId]);
+    const stateResult = await pool.query<{ role: string; primary_installation_id: string; upstream_installation_id: string | null; upstream_department_id: string | null; former_standby_installation_id: string | null; former_standby_department_id: string | null; site_epoch: string; last_snapshot_id: string | null; last_snapshot_at: Date | null; last_verified_at: Date | null; last_source_digest: string | null }>("SELECT role,primary_installation_id,upstream_installation_id,upstream_department_id,former_standby_installation_id,former_standby_department_id,site_epoch::text,last_snapshot_id,last_snapshot_at,last_verified_at,last_source_digest FROM sync_site_redundancy WHERE department_id=$1", [departmentId]);
     if (!stateResult.rowCount) return json(reply, 404, { error: "That site is not configured for redundancy." }, identity, request.headers["x-sc-nonce"] as string);
     const state = stateResult.rows[0];
     if (state.role === "standby" && (state.upstream_installation_id !== sender.installationId || state.upstream_department_id === null)) return json(reply, 403, { error: "Only the configured primary can inspect this standby." }, identity, request.headers["x-sc-nonce"] as string);
     const readiness = await redundancyManifest(pool, context.replication.list(), departmentId);
     const modules = readiness.modules.map((module) => ({ ...module, ready: !readiness.blockers.some((blocker) => blocker.startsWith(`${module.moduleId} `) || blocker.startsWith(`${module.moduleId}:`)) }));
-    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, siteEpoch: state.site_epoch, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: readiness.blockers.length === 0, blockers: readiness.blockers }, identity, request.headers["x-sc-nonce"] as string);
+    const former = await formerStandbyAuthorization(pool, departmentId, state.former_standby_installation_id, state.former_standby_department_id);
+    return json(reply, 200, { installationId: identity.installationId, departmentId, role: state.role, primaryInstallationId: state.primary_installation_id, upstreamInstallationId: state.upstream_installation_id, upstreamDepartmentId: state.upstream_department_id, formerStandbyInstallationId: former.installationId, formerStandbyDepartmentId: former.departmentId, siteEpoch: state.site_epoch, lastSnapshotId: state.last_snapshot_id, lastSnapshotAt: state.last_snapshot_at, lastVerifiedAt: state.last_verified_at, lastSourceDigest: state.last_source_digest, modules, ready: readiness.blockers.length === 0, blockers: readiness.blockers }, identity, request.headers["x-sc-nonce"] as string);
   });
 
   app.post<{ Body: { departmentId: string; sourceEpoch: number; sourceDigest: string } }>(`${prefix}/redundancy/verify`, async (request, reply) => {
@@ -722,7 +1029,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const digest = replicationDigest(restoredSnapshots);
       const sourceDigest = payload.sourceDigest ?? sourceSnapshotDigest(payload.modules);
-      await client.query("UPDATE sync_site_redundancy SET primary_installation_id=$2,site_epoch=$3,last_snapshot_id=$4,last_replica_digest=$5,last_source_digest=$6,last_replica_manifest=$7::jsonb,last_snapshot_at=now(),last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1", [imported.target_department_id, sender.installationId, imported.source_epoch, request.params.snapshotId, digest, sourceDigest, JSON.stringify(imported.module_manifest)]);
+      await client.query("UPDATE sync_site_redundancy SET primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,site_epoch=$3,last_snapshot_id=$4,last_replica_digest=$5,last_source_digest=$6,last_replica_manifest=$7::jsonb,last_snapshot_at=now(),last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1", [imported.target_department_id, sender.installationId, imported.source_epoch, request.params.snapshotId, digest, sourceDigest, JSON.stringify(imported.module_manifest)]);
       await client.query("UPDATE sync_redundancy_imports SET state='applied' WHERE snapshot_id=$1", [request.params.snapshotId]);
       await client.query("DELETE FROM sync_redundancy_chunks WHERE snapshot_id=$1", [request.params.snapshotId]);
       await client.query("INSERT INTO sync_redundancy_audit(id,department_id,action,new_epoch,source_installation_id,note) VALUES($1,$2,'snapshot_applied',$3,$4,'Verified module-owned full-site snapshot applied.')", [randomUUID(), imported.target_department_id, imported.source_epoch, sender.installationId]);
@@ -1020,7 +1327,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const current = target.rows[0];
       if (!current || (current.role === "standby" && (current.upstream_installation_id !== row.source_installation_id || current.upstream_department_id !== row.source_department_id))) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This site has since been configured for a different primary." }); }
       if (BigInt(row.source_epoch) < BigInt(current.site_epoch)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The request comes from an older site epoch; it cannot replace newer data." }); }
-      await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, row.source_installation_id, row.source_department_id, row.source_epoch]);
+      await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, row.source_installation_id, row.source_department_id, row.source_epoch]);
       await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'standby_configured',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, current.site_epoch, row.source_epoch, row.source_installation_id, "Administrator approved an outbound standby request and acknowledged that the next primary snapshot replaces this site's replicated data."]);
       await client.query("UPDATE sync_redundancy_standby_requests SET state='approved',reviewed_at=now(),reviewed_by=$2 WHERE id=$1", [row.id, request.authenticatedUser!.id]);
       await client.query("COMMIT");
@@ -1083,7 +1390,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
-        await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, peer.installation_id, body.sourceDepartmentId, remote.siteEpoch]);
+        await client.query("UPDATE sync_site_redundancy SET role='standby',primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,upstream_installation_id=$2,upstream_department_id=$3,site_epoch=$4,last_snapshot_id=NULL,last_replica_digest=NULL,last_source_digest=NULL,last_replica_manifest=NULL,replicated_user_ids='{}'::uuid[],last_snapshot_at=NULL,last_verified_at=NULL,last_error=NULL,promoted_at=NULL,fenced_at=NULL,updated_at=now() WHERE department_id=$1", [department, peer.installation_id, body.sourceDepartmentId, remote.siteEpoch]);
         await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'standby_configured',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, current.rows[0].site_epoch, remote.siteEpoch, peer.installation_id, "Administrator acknowledged that the primary snapshot will replace this site's records."]);
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -1152,7 +1459,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "The standby data changed after its last verified snapshot. Push a fresh snapshot before promotion." });
       }
-      await client.query("UPDATE sync_site_redundancy SET role='primary',primary_installation_id=$2,upstream_installation_id=NULL,upstream_department_id=NULL,site_epoch=$3,promoted_at=now(),fenced_at=NULL,updated_at=now(),last_error=NULL WHERE department_id=$1", [department, identity.installationId, newEpoch.toString()]);
+      await client.query("UPDATE sync_site_redundancy SET role='primary',primary_installation_id=$2,former_standby_installation_id=upstream_installation_id,former_standby_department_id=upstream_department_id,upstream_installation_id=NULL,upstream_department_id=NULL,site_epoch=$3,promoted_at=now(),fenced_at=NULL,updated_at=now(),last_error=NULL WHERE department_id=$1", [department, identity.installationId, newEpoch.toString()]);
       await client.query("INSERT INTO sync_redundancy_audit(id,department_id,actor_user_id,action,old_epoch,new_epoch,source_installation_id,note) VALUES($1,$2,$3,'promoted',$4,$5,$6,$7)", [randomUUID(), department, request.authenticatedUser!.id, oldEpoch.toString(), newEpoch.toString(), body.fencedInstallationId, `Snapshot data-loss risk acknowledged. External fencing: ${body.fencingNote.trim()}`.slice(0, 1000)]);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }

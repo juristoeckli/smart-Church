@@ -292,7 +292,16 @@ possible data loss. Promotion is blocked if the last verified snapshot is more
 than five minutes old; manual push remains available for planned failover.
 After promotion, the old primary can only rejoin as a standby and must discard
 or explicitly reconcile any unreplicated writes; it must not merge concurrent
-site histories automatically.
+site histories automatically. The promoted primary retains the former standby
+identity and site ID. Once the old primary is manually reconfigured as that
+primary's standby, it initiates signed snapshot pulls over its outbound HTTPS
+connection. This supports rejoin when the old primary has no inbound port
+forwarding. Each pull replaces the standby with a complete module-owned
+snapshot and verifies it before marking the replica current. New promotions
+retain both the former standby installation and site identity. For promotions
+recorded by older builds, the new primary falls back to its latest promotion
+audit to identify the former installation; its administrator must select the
+correct local site when reconnecting.
 
 Serving the same complete site requires every active module to provide a
 module-owned replication adapter for all authoritative records, files,
