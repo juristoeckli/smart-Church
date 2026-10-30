@@ -223,12 +223,17 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     }));
   }
 
-  async function refreshServicePlanTemplates() {
+  async function refreshWorshipLibrary() {
     try {
-      const response = await fetch("/api/service-plan-templates", { headers: { "x-department-id": departmentId } });
-      const result = await response.json() as ServicePlanTemplate[];
-      if (response.ok && Array.isArray(result)) setServicePlanTemplates(result);
-    } catch { /* Templates remain available from the last successful load. */ }
+      const headers = { "x-department-id": departmentId };
+      const [templateResponse, songResponse] = await Promise.all([
+        fetch("/api/service-plan-templates", { headers }),
+        fetch("/api/worship/songs", { headers }),
+      ]);
+      const [templates, songs] = await Promise.all([templateResponse.json(), songResponse.json()]) as [ServicePlanTemplate[] | { error?: string }, WorshipSong[] | { error?: string }];
+      if (templateResponse.ok && Array.isArray(templates)) setServicePlanTemplates(templates);
+      if (songResponse.ok && Array.isArray(songs)) setWorshipSongs(songs);
+    } catch { /* Keep the last successfully loaded library data. */ }
   }
 
   async function saveEvent(formEvent: FormEvent<HTMLFormElement>) {
@@ -489,7 +494,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       </section>
 
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>
-      {isWorshipLibraryOpen && <WorshipPlanning departmentId={departmentId} canManage={canManage} onClose={() => setIsWorshipLibraryOpen(false)} onChanged={() => void refreshServicePlanTemplates()} onNotice={onNotice} />}
+      {isWorshipLibraryOpen && <WorshipPlanning departmentId={departmentId} canManage={canManage} onClose={() => setIsWorshipLibraryOpen(false)} onChanged={() => void refreshWorshipLibrary()} onNotice={onNotice} />}
 
       {isModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsModalOpen(false)}><section className="modal event-modal" role="dialog" aria-modal="true" aria-labelledby="event-modal-title"><div className="modal-heading"><div><span className="eyebrow">CHURCH SCHEDULE</span><h2 id="event-modal-title">{editingEvent ? "Edit gathering" : "Add a gathering"}</h2><p>Share the details so everyone knows when and where to meet.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setIsModalOpen(false)}><X size={19} /></button></div><form key={editingEvent?.id ?? "new-event"} onSubmit={saveEvent}>{servicePlanTemplates.length > 0 && <label className="event-plan-template-select">{translate("events.planTemplate")}<select value={selectedPlanTemplateId} onChange={(event) => applyServicePlanTemplate(event.target.value)}><option value="">{translate("events.chooseTemplate")}</option>{servicePlanTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select><small>{translate("events.selectPlanTemplate")}</small></label>}
         <label>Title<input name="title" autoFocus required maxLength={160} defaultValue={editingEvent?.title ?? ""} placeholder="Sunday worship service" /></label>
@@ -512,3 +517,4 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     </ModuleTranslationHost>
   );
 }
+
