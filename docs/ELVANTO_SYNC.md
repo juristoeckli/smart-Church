@@ -31,6 +31,8 @@ Read-only Elvanto API calls retry network timeouts, HTTP 429 responses, and serv
 
 After choosing directions, an administrator can check read access for each selected area; each permission check fetches at most one record per list endpoint, and results contain only access status and a count. Songs also checks the arrangements endpoint when a song is available. Calendar and financial checks query a rolling five-year window. No records from these permission checks are stored. Direction choices do not activate a background job. People and Groups now have reviewed, resumable exports as well as imports, but only the explicitly mapped fields described above are synchronized. Services, Calendar, People Flows, Songs, and financial transactions still have limited one-way imports. Other data areas are not currently imported, exported, or synchronized; a saved direction does not mean that direction is implemented.
 
+People family mapping is intentionally conservative: Elvanto's API accepts an existing `family_id` and `family_relationship`, while a special `new` value can create a family. Smart Church only sends an explicitly entered positive numeric family ID and a supported relationship; it does not send `new`, blank values, or automated family joins/removals/merges. See Elvanto's [People Fields](https://www.elvanto.com/api/people-fields/) and [people/edit](https://www.elvanto.com/api/people/edit/) API documentation.
+
 ## Set up a connection
 
 1. Sign in to Elvanto with an administrator account.

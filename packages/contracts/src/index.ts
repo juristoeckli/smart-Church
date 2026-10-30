@@ -9,6 +9,8 @@ export interface ContactProfileData {
   schoolGrade?: string;
   maritalStatus?: "Single" | "Engaged" | "Married" | "Widowed" | "Divorced" | "Separated" | "Defacto";
   mailingAddress?: string;
+  familyId?: string;
+  familyRelationship?: "Primary Contact" | "Spouse" | "Partner" | "Child" | "Sibling" | "Grandfather" | "Grandmother" | "Other";
   developmentChild?: boolean;
   specialNeedsChild?: boolean;
   departments?: string[];

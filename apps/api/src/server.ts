@@ -1889,7 +1889,7 @@ function normalizeContactProfileData(value: ContactProfileData | undefined) {
   const profile = JSON.parse(JSON.stringify(value)) as ContactProfileData;
   if (JSON.stringify(profile).length > 64_000) throw new Error("People profile details cannot exceed 64 KiB.");
   const record = profile as Record<string, unknown>;
-  for (const key of ["preferredName", "mobile", "birthday", "gender", "anniversary", "schoolGrade", "maritalStatus", "mailingAddress"]) {
+  for (const key of ["preferredName", "mobile", "birthday", "gender", "anniversary", "schoolGrade", "maritalStatus", "mailingAddress", "familyId", "familyRelationship"]) {
     if (typeof record[key] === "string") {
       const normalized = (record[key] as string).trim();
       if (normalized) record[key] = normalized; else delete record[key];

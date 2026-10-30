@@ -576,8 +576,13 @@ function elvantoPeopleProfileExport(profileValue: unknown, remotePerson?: JsonOb
   const body: JsonObject = {};
   const preferredName = firstText(profile.preferredName);
   const mobile = firstText(profile.mobile);
+  const familyId = firstText(profile.familyId);
+  const familyRelationship = firstText(profile.familyRelationship);
   if (preferredName) body.preferred_name = preferredName;
   if (mobile) body.mobile = mobile;
+  const numericFamilyId = Number(familyId);
+  if (/^[1-9][0-9]{0,14}$/.test(familyId) && Number.isSafeInteger(numericFamilyId)) body.family_id = numericFamilyId;
+  if (familyRelationship) body.family_relationship = familyRelationship;
   const fields: JsonObject = {};
   for (const [local, remote] of [["birthday", "birthday"], ["gender", "gender"], ["anniversary", "anniversary"], ["schoolGrade", "school_grade"], ["maritalStatus", "marital_status"], ["mailingAddress", "mailing_address"]]) {
     const value = firstText(profile[local]);
