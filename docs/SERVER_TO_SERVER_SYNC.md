@@ -22,9 +22,12 @@ because the servers are paired.
 
 - Each installation has one persistent Ed25519 signing identity. It is separate
   from TLS certificates, passwords, OAuth credentials, and encryption keys.
-- Every network operation is initiated by the configured sync-client server.
-  The source only answers authenticated requests and never opens a connection
-  back to the client.
+- Each trusted peer may open an outbound WebSocket to the other peer when it
+  has a reachable HTTPS/API origin. Either peer can send authenticated requests
+  over any open channel, including replies, snapshot pushes, and pulls. One
+  direction is sufficient when one server is behind NAT; when both servers can
+  reach one another, both directions may be open at once. No peer initiates a
+  second connection just to answer a request received on an existing channel.
 - Federation uses the existing Smart-Church HTTPS/API origin and listener. Peer
   discovery, pairing, status, replication, and data transfer use the
   authenticated WebSocket channel; federation v1 HTTP handlers are internal
@@ -172,21 +175,22 @@ Trust is installation-wide; sharing is location-scoped. Each grant contains:
 The owner creates or revokes grants. The recipient may accept or reject an
 incoming grant; a rejected grant cannot be reactivated without a new explicit
 request. Each grant selects one initiator: either the receiving server pulls,
-or the owner server pushes outbound to the receiving server. This supports a
-source behind NAT with no port forwarding when the destination has its normal
-HTTPS/API endpoint reachable. The destination never opens a callback to the
-source. There is no extra listener, service, or port. Neither server may widen
-the other's field scope. A person, group,
+or the owner server requests a push over an already-open WebSocket channel.
+This supports a server behind NAT with no port forwarding when the other peer
+can open an outbound WebSocket to it. The responding peer sends data back over
+that same connection; it does not need to accept a callback or open a new
+connection. There is no extra listener, service, or port. Neither server may
+widen the other's field scope. A person, group,
 event, or resource remains owned by the source installation and location.
 
 Peer pairing can also be outbound-only. Set
 `SMART_CHURCH_SYNC_PEER_BASE_URL=outbound-only` on a server with no inbound
-HTTPS URL; it can still initiate signed requests to its reachable peer. The
-receiving server stores the peer without a callback address, so operations
-that require reaching that server must be initiated there. The default `auto`
-uses `SMART_CHURCH_WEB_ORIGIN` (or the request origin in production); set the
-variable to the server's externally reachable HTTPS origin when callback
-access is available.
+HTTPS URL; that server opens its outbound WebSocket to its reachable peer.
+Both sides can then initiate signed requests over that open channel. The
+default `auto` uses `SMART_CHURCH_WEB_ORIGIN` (or the request origin in
+production); set the variable to the server's externally reachable HTTPS origin
+when it can accept inbound connections. This setting controls the advertised
+connection address, not a separate transport or request direction.
 
 For full-site redundancy, either server can initiate setup. If the primary can
 reach the standby, it sends a standby request and the standby's Server
