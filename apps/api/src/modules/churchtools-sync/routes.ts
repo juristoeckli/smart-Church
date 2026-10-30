@@ -2992,6 +2992,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const existing = await pool!.query<{ source_id: string; name: string; definition: JsonObject; members: JsonObject[] }>("SELECT source_id,name,definition,members FROM elvanto_people_flows_import WHERE department_id=$1", [dept]);
         const linked = new Map(existing.rows.map((flow) => [flow.source_id, elvantoPeopleFlowFingerprint({ sourceId: flow.source_id, name: flow.name, definition: flow.definition, members: Array.isArray(flow.members) ? flow.members : [] })]));
         const complete = snapshot.reportedFlows === snapshot.flows.length;
+        const remoteIds = new Set(snapshot.flowIds);
+        const missingRemoteCount = complete ? existing.rows.filter((flow) => !remoteIds.has(flow.source_id)).length : 0;
         const fingerprints = Object.fromEntries(snapshot.flows.map((flow) => [flow.sourceId, elvantoPeopleFlowFingerprint(flow)]));
         const createCount = snapshot.flows.filter((flow) => !linked.has(flow.sourceId)).length;
         const updateCount = snapshot.flows.filter((flow) => linked.has(flow.sourceId) && linked.get(flow.sourceId) !== fingerprints[flow.sourceId]).length;
@@ -3002,7 +3004,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           people_flows_import_page=1,people_flows_import_total=NULL,people_flows_import_created_count=0,people_flows_import_updated_count=0,people_flows_import_skipped_count=0,people_flows_import_complete=FALSE
           WHERE department_id=$1 AND updated_at=$6 AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, complete, snapshot.reportedFlows, JSON.stringify(snapshot.flowIds), JSON.stringify(fingerprints), row.updated_at]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the preview. Save the connection again and run a new preview." });
-        return { flowCount: snapshot.flows.length, reportedFlowCount: snapshot.reportedFlows, stepCount: snapshot.stepCount, assignmentCount: snapshot.memberCount, complete, createCount, updateCount, unchangedCount, sample };
+        return { flowCount: snapshot.flows.length, reportedFlowCount: snapshot.reportedFlows, stepCount: snapshot.stepCount, assignmentCount: snapshot.memberCount, complete, createCount, updateCount, unchangedCount, missingRemoteCount, sample };
       } catch (error) {
         return reply.code(400).send({ error: error instanceof Error ? error.message : "People Flows preview failed." });
       }

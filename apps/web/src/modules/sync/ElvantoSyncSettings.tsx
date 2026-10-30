@@ -43,7 +43,7 @@ type CalendarExportOptions = { calendars: Array<{ id: string; name: string; publ
 type CalendarExportPreview = { complete: boolean; total: number; create: number; update: number; review: number; timeZone: string; startDate: string; endDate: string; calendar: { id: string; name: string }; organizer: { id: string; name: string }; sample: Array<{ title: string; date: string; isAllDay: boolean; start: string | null; end: string | null; location: string; action: string }> };
 type PeopleFlowsPreview = {
   flowCount: number; reportedFlowCount: number; stepCount: number; assignmentCount: number; complete: boolean;
-  createCount: number; updateCount: number; unchangedCount: number;
+  createCount: number; updateCount: number; unchangedCount: number; missingRemoteCount: number;
   sample: Array<{ name: string; steps: number; assignments: number; action: string }>;
 };
 type PeopleFlowsImportProgress = ImportProgress & { lastImportAt: string | null };
@@ -736,6 +736,7 @@ export function ElvantoSyncSettings({ departmentId }: { departmentId: string }) 
     {peopleFlowsPreview && <div className="sync-connection-form" aria-live="polite">
       <div className="sync-feedback"><strong>{tr("People Flows import preview")}</strong><span>{tr("{count} flows scanned of {total} reported by Elvanto").replace("{count}", String(peopleFlowsPreview.flowCount)).replace("{total}", String(peopleFlowsPreview.reportedFlowCount))} · {peopleFlowsPreview.stepCount} {tr("steps")} · {peopleFlowsPreview.assignmentCount} {tr("assignments")}{!peopleFlowsPreview.complete && <em> — {tr("preview is incomplete")}</em>}</span></div>
       <div className="sync-feedback"><span>{peopleFlowsPreview.createCount} {tr("new flows")}</span> · <span>{peopleFlowsPreview.updateCount} {tr("changed flows")}</span> · <span>{peopleFlowsPreview.unchangedCount} {tr("unchanged flows")}</span></div>
+      {peopleFlowsPreview.complete && peopleFlowsPreview.missingRemoteCount > 0 && <div className="sync-feedback"><span>{peopleFlowsPreview.missingRemoteCount} {tr("previously imported flows are absent from Elvanto")}</span><small>{tr("These imported flows stay in Smart Church for manual review.")}</small></div>}
       {peopleFlowsPreview.sample.map((flow) => <div className="sync-feedback" key={flow.name}><strong>{flow.name}</strong><span>{flow.steps} {tr("steps")} · {flow.assignments} {tr("assignments")} · {tr(flow.action === "update" ? "Refresh" : flow.action === "unchanged" ? "Unchanged" : "New")}</span></div>)}
       <small className="sync-help">{tr("Assignments link to stable Elvanto person IDs. Imported flow definitions and assignments are read-only; records absent from Elvanto are not deleted. Continue in batches of five flows.")}</small>
       <div className="community-inline-actions"><button className="button button-primary" type="button" onClick={() => void importPeopleFlows()} disabled={busy || !peopleFlowsPreview.complete || peopleFlowsPreview.flowCount === 0}><Check size={15} />{busy ? tr("Importing…") : status?.peopleFlowsImport?.complete ? tr("Refresh People Flows from Elvanto") : status?.peopleFlowsImport ? tr("Continue People Flows import") : tr("Import People Flows")}</button></div>
