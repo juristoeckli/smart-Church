@@ -844,9 +844,9 @@ const elvantoPeopleFlowsTranslations: ModuleLocales = {
 };
 
 const elvantoPeopleFlowsUiTranslations: ModuleLocales = {
-  de: { "People Flows import preview": "Vorschau des Personenprozesse-Imports", "{count} flows scanned of {total} reported by Elvanto": "{count} Personenprozesse durchsucht, von {total} in Elvanto gemeldeten", flows: "Personenprozesse" },
-  fr: { "People Flows import preview": "Aperçu de l’importation des parcours", "{count} flows scanned of {total} reported by Elvanto": "{count} parcours parcourus sur {total} signalés par Elvanto", flows: "parcours" },
-  it: { "People Flows import preview": "Anteprima importazione percorsi persone", "{count} flows scanned of {total} reported by Elvanto": "Esaminati {count} percorsi su {total} segnalati da Elvanto", flows: "percorsi" }
+  de: { "People Flows import preview": "Vorschau des Personenprozesse-Imports", "{count} flows scanned of {total} reported by Elvanto": "{count} Personenprozesse durchsucht, von {total} in Elvanto gemeldeten", flows: "Personenprozesse", "Assignments ({count} of {total})": "Zuweisungen ({count} von {total})", "Elvanto person {id}": "Elvanto-Person {id}", due: "fällig", "assigned to": "zugewiesen an", completed: "abgeschlossen", "completed by": "abgeschlossen von", days: "Tagen" },
+  fr: { "People Flows import preview": "Aperçu de l’importation des parcours", "{count} flows scanned of {total} reported by Elvanto": "{count} parcours parcourus sur {total} signalés par Elvanto", flows: "parcours", "Assignments ({count} of {total})": "Affectations ({count} sur {total})", "Elvanto person {id}": "Personne Elvanto {id}", due: "à échéance", "assigned to": "attribué à", completed: "terminé", "completed by": "terminé par", days: "jours" },
+  it: { "People Flows import preview": "Anteprima importazione percorsi persone", "{count} flows scanned of {total} reported by Elvanto": "Esaminati {count} percorsi su {total} segnalati da Elvanto", flows: "percorsi", "Assignments ({count} of {total})": "Assegnazioni ({count} di {total})", "Elvanto person {id}": "Persona Elvanto {id}", due: "scadenza", "assigned to": "assegnato a", completed: "completato", "completed by": "completato da", days: "giorni" }
 };
 
 const elvantoPeopleFlowsErrorTranslations: ModuleLocales = {
