@@ -4,12 +4,13 @@ type Preview = {
   previewId: string;
   total: number;
   importCount: number;
+  updateCount: number;
   alreadyLinkedCount: number;
   reviewCount: number;
   expiresAt: string;
   sample: Array<{ sourceId: string; title: string; action: string }>;
 };
-type Progress = { cursor: number; total: number; created: number; review: number; complete: boolean; processedThisBatch: number };
+type Progress = { cursor: number; total: number; created: number; updated: number; review: number; complete: boolean; processedThisBatch: number };
 
 export function ElvantoSongLibraryImport({ departmentId }: { departmentId: string }) {
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -49,6 +50,9 @@ export function ElvantoSongLibraryImport({ departmentId }: { departmentId: strin
   function actionLabel(action: string) {
     if (action === "import") return "Ready to import";
     if (action === "already_linked") return "Already linked";
+    if (action === "update") return "Update linked song";
+    if (action === "local_changed") return "Local song changed; review manually";
+    if (action === "baseline_missing") return "Previous import has no local baseline; review before updating";
     if (action === "title_conflict") return "Same-title song needs review";
     if (action === "duplicate_source_title") return "Duplicate Elvanto title needs review";
     if (action === "changed") return "Snapshot changed; preview again";
@@ -58,20 +62,20 @@ export function ElvantoSongLibraryImport({ departmentId }: { departmentId: strin
 
   return <section className="sync-connection-form" aria-live="polite">
     <h3>Copy imported songs to the Worship library</h3>
-    <p className="sync-help">Copy title, artist, notes, arrangements, and keys from the imported Elvanto snapshots into the searchable local library. Existing library songs are never overwritten. Same-title songs stay for manual review; licensed files are not copied.</p>
+    <p className="sync-help">Copy title, artist, notes, arrangements, and keys from imported Elvanto snapshots into the searchable local library. Linked songs update only when the local song still matches the last imported version. Local edits are kept for review, and arrangements missing from Elvanto are never removed. Same-title songs stay for manual review; licensed files are not copied.</p>
     <div className="community-inline-actions">
       <button className="button button-secondary" type="button" onClick={() => void createPreview()} disabled={busy}>Preview library import</button>
-      {preview && preview.importCount > 0 && !progress?.complete && <button className="button button-primary" type="button" onClick={() => void importBatch()} disabled={busy}>{busy ? "Importing…" : progress ? "Continue import" : "Import to library"}</button>}
+      {preview && preview.importCount + preview.updateCount > 0 && !progress?.complete && <button className="button button-primary" type="button" onClick={() => void importBatch()} disabled={busy}>{busy ? "Importing…" : progress ? "Continue import" : "Import to library"}</button>}
     </div>
     {error && <p className="sync-inline-error" role="alert">{error}</p>}
     {preview && <div className="sync-feedback">
       <strong>Library import preview</strong>
-      <span>{preview.total} snapshots · {preview.importCount} new · {preview.alreadyLinkedCount} already linked · {preview.reviewCount} need review</span>
+      <span>{preview.total} snapshots · {preview.importCount} new · {preview.updateCount} updates · {preview.alreadyLinkedCount} already linked · {preview.reviewCount} need review</span>
       <small>Preview expires {new Date(preview.expiresAt).toLocaleString()}.</small>
     </div>}
     {progress && <div className="sync-feedback" role="status">
       <strong>{progress.complete ? "Library import complete" : "Library import progress"}</strong>
-      <span>{progress.created} created · {progress.review} need review · {progress.cursor} of {progress.total} snapshots reviewed</span>
+      <span>{progress.created} created · {progress.updated} updated · {progress.review} need review · {progress.cursor} of {progress.total} snapshots reviewed</span>
     </div>}
     {preview?.sample.map((song) => <div className="sync-feedback" key={song.sourceId}>
       <strong>{song.title}</strong><span>{actionLabel(song.action)}</span>
