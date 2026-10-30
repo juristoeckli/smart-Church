@@ -882,7 +882,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         }
         const encryptedSnapshot = encrypt(JSON.stringify(records));
         await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
-          VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,complete=FALSE,updated_at=now()`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
+          VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now()`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
         return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
@@ -890,7 +890,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/churchtools/migration", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Another ChurchTools operation is running for this location." });
-      const snapshotResult = await pool!.query<{ encrypted_snapshot: string; preview_at: Date | string; page: number; total: number; created_count: number; updated_count: number; skipped_count: number; complete: boolean }>("SELECT encrypted_snapshot,preview_at,page,total,created_count,updated_count,skipped_count,complete FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
+      const snapshotResult = await pool!.query<{ encrypted_snapshot: string; preview_at: Date | string; page: number; total: number; created_count: number; updated_count: number; skipped_count: number; failed_count: number; failed_records: Array<{ area: string; sourceId: string }>; complete: boolean }>("SELECT encrypted_snapshot,preview_at,page,total,created_count,updated_count,skipped_count,failed_count,failed_records,complete FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
       const saved = snapshotResult.rows[0]; if (!saved) return reply.code(409).send({ error: "Run a complete ChurchTools migration preview before importing." });
       const pageBefore = request.body?.restart ? 0 : saved.page;
       if (!request.body?.restart && pageBefore === 0 && Date.now() - new Date(saved.preview_at).getTime() > 60 * 60 * 1000) return reply.code(409).send({ error: "The migration preview expired. Create a fresh preview before importing." });
@@ -903,14 +903,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           WHERE department_id=$1 AND (migration_running=FALSE OR migration_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept]);
         if (!reservation.rowCount) return reply.code(409).send({ error: "Another migration batch is already running for this location." });
         reserved = true;
-        let page = pageBefore; let created = request.body?.restart ? 0 : saved.created_count; let updated = request.body?.restart ? 0 : saved.updated_count; let skipped = request.body?.restart ? 0 : saved.skipped_count;
-        if (request.body?.restart) await pool!.query("UPDATE churchtools_migration_snapshots SET page=0,created_count=0,updated_count=0,skipped_count=0,complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
-        const batch = snapshot.slice(page, page + 50); let batchCreated = 0; let batchUpdated = 0; let batchSkipped = 0;
+        let page = pageBefore; let created = request.body?.restart ? 0 : saved.created_count; let updated = request.body?.restart ? 0 : saved.updated_count; let skipped = request.body?.restart ? 0 : saved.skipped_count; let failed = request.body?.restart ? 0 : saved.failed_count; const failures = request.body?.restart ? [] : saved.failed_records;
+        if (request.body?.restart) await pool!.query("UPDATE churchtools_migration_snapshots SET page=0,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
+        const batch = snapshot.slice(page, page + 50); let batchCreated = 0; let batchUpdated = 0; let batchSkipped = 0; let batchFailed = 0; const batchFailures: Array<{ area: string; sourceId: string }> = [];
         const db = await pool!.connect();
         try {
           await db.query("BEGIN");
           for (const record of batch) {
             const sourceId = String(record.sourceId ?? ""); const action = String(record.action ?? "invalid");
+            const countersBefore = { created: batchCreated, updated: batchUpdated, skipped: batchSkipped };
+            await db.query("SAVEPOINT migration_record");
+            try {
             if (!sourceId || action.startsWith("review_") || action === "invalid") { batchSkipped += 1; page += 1; continue; }
             if (record.area === "person") {
               let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN contacts local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='person' AND link.source_id=$2", [dept, sourceId]);
@@ -920,8 +923,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
               }
               if (linked.rowCount) {
-                await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]); batchUpdated += 1;
+                await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+                batchUpdated += 1;
               } else {
                 const inserted = await db.query<{ id: string }>("INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'member') ON CONFLICT DO NOTHING RETURNING id", [dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone]);
                 if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
@@ -961,8 +965,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               const positions = sourcePositions.map((position) => ({ name: position.name, ...(position.personId && contactsBySource.has(String(position.personId)) ? { contactId: contactsBySource.get(String(position.personId)) } : {}) }));
               const values = [dept, record.title, record.date, record.isAllDay === true, record.start, record.end, record.location || "ChurchTools", record.description ?? null, record.room ?? "", JSON.stringify(positions), JSON.stringify(record.timePlan ?? []), sourceId];
               if (linked.rowCount) {
-                await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(1, 11)]); batchUpdated += 1;
+                await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(1, 11)]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+                batchUpdated += 1;
               } else {
                 const inserted = await db.query<{ id: string }>("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 11));
                 if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
@@ -984,12 +989,19 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
             } else batchSkipped += 1;
             page += 1;
+            } catch {
+              await db.query("ROLLBACK TO SAVEPOINT migration_record");
+              batchCreated = countersBefore.created; batchUpdated = countersBefore.updated; batchSkipped = countersBefore.skipped;
+              batchFailed += 1; page += 1;
+              batchFailures.push({ area: String(record.area ?? "unknown"), sourceId: sourceId.slice(0, 120) });
+            } finally { await db.query("RELEASE SAVEPOINT migration_record"); }
           }
-          created += batchCreated; updated += batchUpdated; skipped += batchSkipped;
+          created += batchCreated; updated += batchUpdated; skipped += batchSkipped; failed += batchFailed;
           const complete = page >= snapshot.length;
-          await db.query("UPDATE churchtools_migration_snapshots SET page=$2,created_count=$3,updated_count=$4,skipped_count=$5,complete=$6,updated_at=now() WHERE department_id=$1", [dept, page, created, updated, skipped, complete]);
+          const combinedFailures = [...failures, ...batchFailures].slice(-200);
+          await db.query("UPDATE churchtools_migration_snapshots SET page=$2,created_count=$3,updated_count=$4,skipped_count=$5,failed_count=$6,failed_records=$7::jsonb,complete=$8,updated_at=now() WHERE department_id=$1", [dept, page, created, updated, skipped, failed, JSON.stringify(combinedFailures), complete]);
           await db.query("COMMIT");
-          return { migration: { page, total: snapshot.length, created, updated, skipped, complete, processedThisBatch: batch.length } };
+          return { migration: { page, total: snapshot.length, created, updated, skipped, failed, failedRecords: combinedFailures, complete, processedThisBatch: batch.length } };
         } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "The ChurchTools migration batch failed." }); }
       finally { if (reserved) await pool!.query("UPDATE churchtools_migration_snapshots SET migration_running=FALSE,migration_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {}); running.delete(dept); }
@@ -998,9 +1010,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const dept = await department(request, reply, true); if (!dept) return reply;
       const result = await pool!.query("SELECT s.instance_url,s.enabled,s.last_sync_at,s.last_sync_error,(SELECT count(*)::int FROM contacts c WHERE c.department_id=s.department_id AND c.source_system='churchtools') AS people_count,(SELECT count(*)::int FROM church_groups g WHERE g.department_id=s.department_id AND g.source_system='churchtools') AS group_count,(SELECT count(*)::int FROM service_events e WHERE e.department_id=s.department_id AND e.source_system='churchtools') AS service_count,(SELECT count(*)::int FROM bookable_resources r WHERE r.department_id=s.department_id AND r.source_system='churchtools') AS resource_count FROM churchtools_sync_settings s WHERE s.department_id=$1", [dept]);
       const row = result.rows[0];
-      const migrationResult = await pool!.query<{ page: number; total: number; created_count: number; updated_count: number; skipped_count: number; complete: boolean; preview_at: Date | string; start_date: string; end_date: string }>("SELECT page,total,created_count,updated_count,skipped_count,complete,preview_at,start_date::text,end_date::text FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
+      const migrationResult = await pool!.query<{ page: number; total: number; created_count: number; updated_count: number; skipped_count: number; failed_count: number; failed_records: Array<{ area: string; sourceId: string }>; complete: boolean; preview_at: Date | string; start_date: string; end_date: string }>("SELECT page,total,created_count,updated_count,skipped_count,failed_count,failed_records,complete,preview_at,start_date::text,end_date::text FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
       const migration = migrationResult.rows[0];
-      return row ? { configured: true, instanceUrl: row.instance_url, enabled: row.enabled, lastSyncAt: row.last_sync_at, lastSyncError: row.last_sync_error, peopleCount: row.people_count, groupCount: row.group_count, serviceCount: row.service_count, resourceCount: row.resource_count, migration: migration ? { page: migration.page, total: migration.total, created: migration.created_count, updated: migration.updated_count, skipped: migration.skipped_count, complete: migration.complete, previewAt: migration.preview_at, startDate: migration.start_date, endDate: migration.end_date } : null } : { configured: false, enabled: false, peopleCount: 0, groupCount: 0, serviceCount: 0, resourceCount: 0, migration: migration ? { page: migration.page, total: migration.total, created: migration.created_count, updated: migration.updated_count, skipped: migration.skipped_count, complete: migration.complete, previewAt: migration.preview_at, startDate: migration.start_date, endDate: migration.end_date } : null };
+      return row ? { configured: true, instanceUrl: row.instance_url, enabled: row.enabled, lastSyncAt: row.last_sync_at, lastSyncError: row.last_sync_error, peopleCount: row.people_count, groupCount: row.group_count, serviceCount: row.service_count, resourceCount: row.resource_count, migration: migration ? { page: migration.page, total: migration.total, created: migration.created_count, updated: migration.updated_count, skipped: migration.skipped_count, failed: migration.failed_count, failedRecords: migration.failed_records, complete: migration.complete, previewAt: migration.preview_at, startDate: migration.start_date, endDate: migration.end_date } : null } : { configured: false, enabled: false, peopleCount: 0, groupCount: 0, serviceCount: 0, resourceCount: 0, migration: migration ? { page: migration.page, total: migration.total, created: migration.created_count, updated: migration.updated_count, skipped: migration.skipped_count, failed: migration.failed_count, failedRecords: migration.failed_records, complete: migration.complete, previewAt: migration.preview_at, startDate: migration.start_date, endDate: migration.end_date } : null };
     });
     routes.put<{ Body: { instanceUrl: string; loginToken?: string } }>("/api/modules/sync/churchtools", { schema: { body: { type: "object", additionalProperties: false, required: ["instanceUrl"], properties: { instanceUrl: { type: "string", minLength: 10, maxLength: 255 }, loginToken: { type: "string", maxLength: 2048 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
