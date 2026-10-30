@@ -140,11 +140,28 @@ async function expireOldSignupRequests(pool: NonNullable<ModuleServerContext["po
   }
 }
 
+export async function emailModuleInstallationWritable(context: ModuleServerContext) {
+  const { pool, isDatabaseReady } = context;
+  if (!pool || !isDatabaseReady()) return false;
+  try {
+    const redundancy = await pool.query<{ table_name: string | null }>("SELECT to_regclass('public.sync_site_redundancy')::text AS table_name");
+    if (!redundancy.rows[0]?.table_name) return true;
+    const sites = await pool.query<{ role: string }>(`SELECT COALESCE(redundancy.role,'primary') AS role
+      FROM departments department
+      JOIN installations installation ON installation.id=department.installation_id AND installation.is_current=TRUE
+      LEFT JOIN sync_site_redundancy redundancy ON redundancy.department_id=department.id`);
+    return sites.rows.length > 0 && sites.rows.every((site) => site.role === "primary");
+  } catch {
+    return false;
+  }
+}
+
 export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   let confirmationTimer: ReturnType<typeof setInterval> | undefined;
 
   const runSignupLifecycle = async () => {
+    if (!await emailModuleInstallationWritable(context)) return;
     if (pool) await expireOldSignupRequests(pool, isDatabaseReady, context, app.log);
     await deliverDueConfirmations();
   };
@@ -206,6 +223,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
   }, async (request, reply) => {
     if (!admin(request, reply)) return reply;
     if (!context.validateMutation(request, reply)) return reply;
+    if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up settings are read-only while a location is in standby or fenced state." });
     if (!pool || !isDatabaseReady()) return reply.code(503).send({ error: "The settings database is unavailable." });
     if (request.body.enabled && !await context.email.isConfigured()) return reply.code(400).send({ error: "Configure and enable email delivery before enabling self sign-up." });
     const installation = await pool.query<{ id: string }>("SELECT id FROM installations WHERE is_current=true");
@@ -222,6 +240,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
     schema: { body: { type: "object", additionalProperties: false, required: ["email"], properties: { email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }, language: { type: "string", enum: [...signupLanguages] } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return reply.code(503).send({ error: "Sign-up is temporarily unavailable." });
+    if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up is temporarily unavailable while a location is in standby or fenced state." });
     const config = await signupConfig(context);
     if (!config?.enabled || !await context.email.isConfigured()) return reply.code(404).send({ error: "Self sign-up is currently unavailable." });
     const email = request.body.email.trim().toLowerCase();
@@ -286,6 +305,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
     schema: { body: { type: "object", additionalProperties: false, required: ["token", "firstName", "lastName"], properties: { token: { type: "string", minLength: 40, maxLength: 60 }, language: { type: "string", enum: [...signupLanguages] }, firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, phone: { type: "string", maxLength: 32 }, street: { type: "string", maxLength: 160 }, streetNumber: { type: "string", maxLength: 24 }, postalCode: { type: "string", maxLength: 20 }, city: { type: "string", maxLength: 100 } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady() || !tokenIsValid(request.body.token)) return reply.code(404).send({ error: "This sign-up link is invalid or expired." });
+    if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up is temporarily unavailable while a location is in standby or fenced state." });
     const config = await signupConfig(context);
     if (!config?.enabled) return reply.code(404).send({ error: "Self sign-up is currently unavailable." });
     const email = await pool.query<{ email: string; language: SignupLanguage }>(
@@ -302,6 +322,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
 
   app.post<{ Body: { token: string } }>("/api/public/self-signup/confirm", { schema: { body: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 60 } } } } }, async (request, reply) => {
     if (!pool || !isDatabaseReady() || !tokenIsValid(request.body.token)) return reply.code(404).send({ error: "This confirmation link is invalid or expired." });
+    if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up is temporarily unavailable while a location is in standby or fenced state." });
     const config = await signupConfig(context);
     if (!config?.enabled) return reply.code(404).send({ error: "Self sign-up is currently unavailable." });
     const result = await pool.query(
@@ -331,6 +352,7 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
   }, async (request, reply) => {
     if (!admin(request, reply)) return reply;
     if (!context.validateMutation(request, reply)) return reply;
+    if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Self sign-up requests are read-only while a location is in standby or fenced state." });
     if (!pool || !isDatabaseReady()) return reply.code(503).send({ error: "The sign-up queue is unavailable." });
     const id = request.params.id;
     if (request.body.action === "deny") {

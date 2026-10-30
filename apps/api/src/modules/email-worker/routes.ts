@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { emailEncryptionKeyFingerprint, readEmailSettings, saveEmailSettings, type EmailSettingsDraft } from "./service.js";
-import { registerSelfSignupRoutes } from "./self-signup.js";
+import { emailModuleInstallationWritable, registerSelfSignupRoutes } from "./self-signup.js";
 
 type EmailSnapshot = {
   version: 2;
@@ -163,6 +163,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.put<{ Body: EmailSettingsDraft }>("/api/modules/email-worker/settings", { schema: settingsSchema }, async (request, reply) => {
     if (request.authenticatedUser?.role !== "server_admin") return reply.code(403).send({ error: "Server administrator access is required." });
     if (!context.validateMutation(request, reply)) return reply;
+    if (!await emailModuleInstallationWritable(context)) return reply.code(423).send({ error: "Email settings are read-only while a location is in standby or fenced state." });
     if (!context.pool || !context.isDatabaseReady()) return reply.code(503).send({ error: "The settings database is unavailable." });
     const { body } = request;
     if (body.enabled && !body.fromEmail.trim()) return reply.code(400).send({ error: "Enter the sender email address before enabling email delivery." });
