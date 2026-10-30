@@ -579,6 +579,26 @@ function personIdOf(row: JsonObject) {
   const value = row.personId ?? row.person?.id ?? row.person_id ?? row.memberId ?? row.person?.personId ?? row.id;
   return value === undefined || value === null ? "" : String(value);
 }
+function membershipDate(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const date = value.match(/^(\d{4}-\d{2}-\d{2})/)?.[1];
+    if (!date) continue;
+    const parsed = new Date(date + "T00:00:00Z");
+    if (!Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === date) return date;
+  }
+  return null;
+}
+function groupMembershipSnapshot(member: JsonObject): JsonObject | null {
+  const sourcePersonId = personIdOf(member);
+  if (!sourcePersonId) return null;
+  const role = firstText(member.groupMemberRole?.name, member.group_member_role?.name, member.groupRole?.name, member.group_role?.name, member.role?.name, member.roleName, member.role_name, member.groupRole, member.group_role, member.role, member.groupMemberRole, member.group_member_role).slice(0, 80) || "Member";
+  const rawStatus = firstText(member.groupMemberStatus?.name, member.group_member_status?.name, member.membershipStatus?.name, member.membership_status?.name, member.status?.name, member.statusName, member.status_name, member.status);
+  const statusText = rawStatus.toLocaleLowerCase();
+  const status = /wait|warteliste/.test(statusText) ? "waitlist" : /pause|inactive|passiv|ruhend/.test(statusText) ? "paused" : "active";
+  const joinedOn = membershipDate(member.joinedOn, member.joined_on, member.startDate, member.start_date, member.entryDate, member.entry_date, member.dateOfEntry, member.membership?.startDate, member.membership?.start_date, member.groupMembership?.startDate, member.group_membership?.start_date);
+  return { sourcePersonId, role, status, ...(joinedOn ? { joinedOn } : {}) };
+}
 async function mapConcurrent<T, R>(items: T[], concurrency: number, run: (item: T) => Promise<R>): Promise<R[]> {
   const result = new Array<R>(items.length);
   let next = 0;
@@ -834,7 +854,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         });
         const records: JsonObject[] = [
           ...peopleResult.items.map((person) => ({ area: "person", sourceId: idOf(person), firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) })),
-          ...groupsResult.items.map((group) => ({ area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), memberSourceIds: (membersByGroup.get(idOf(group)) ?? []).map(personIdOf).filter(Boolean) })),
+          ...groupsResult.items.map((group) => {
+            const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
+            return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
+          }),
           ...mappedEvents.map((event) => ({ area: "event", ...event })),
           ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
         ];
@@ -943,13 +966,30 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.name, record.description ?? ""]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchUpdated += 1;
               }
-              const memberSourceIds = Array.isArray(record.memberSourceIds) ? record.memberSourceIds.map(String).filter(Boolean) : [];
-              if (memberSourceIds.length) await db.query(`INSERT INTO group_members (group_id,contact_id)
-                SELECT $1,COALESCE(link.local_record_id,c.id) FROM unnest($3::text[]) AS source(source_id)
-                LEFT JOIN churchtools_migration_links link ON link.department_id=$2 AND link.area='person' AND link.source_id=source.source_id
-                LEFT JOIN contacts c ON c.department_id=$2 AND c.source_system='churchtools' AND c.source_id=source.source_id
-                WHERE COALESCE(link.local_record_id,c.id) IS NOT NULL
-                ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, memberSourceIds]);
+              const memberDetails = Array.isArray(record.memberDetails) ? record.memberDetails.filter((item: unknown): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
+              if (memberDetails.length) {
+                for (const member of memberDetails) {
+                  const sourcePersonId = firstText(member.sourcePersonId);
+                  if (!sourcePersonId) continue;
+                  const role = firstText(member.role).slice(0, 80) || "Member";
+                  const status = member.status === "paused" || member.status === "waitlist" ? member.status : "active";
+                  const joinedOn = membershipDate(member.joinedOn);
+                  await db.query(`INSERT INTO group_members (group_id,contact_id,role,status,joined_on)
+                    SELECT $1,COALESCE(link.local_record_id,c.id),$4,$5,$6 FROM (VALUES ($3::text)) AS source(source_id)
+                    LEFT JOIN churchtools_migration_links link ON link.department_id=$2 AND link.area='person' AND link.source_id=source.source_id
+                    LEFT JOIN contacts c ON c.department_id=$2 AND c.source_system='churchtools' AND c.source_id=source.source_id
+                    WHERE COALESCE(link.local_record_id,c.id) IS NOT NULL
+                    ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, sourcePersonId, role, status, joinedOn]);
+                }
+              } else {
+                const memberSourceIds = Array.isArray(record.memberSourceIds) ? record.memberSourceIds.map(String).filter(Boolean) : [];
+                if (memberSourceIds.length) await db.query(`INSERT INTO group_members (group_id,contact_id)
+                  SELECT $1,COALESCE(link.local_record_id,c.id) FROM unnest($3::text[]) AS source(source_id)
+                  LEFT JOIN churchtools_migration_links link ON link.department_id=$2 AND link.area='person' AND link.source_id=source.source_id
+                  LEFT JOIN contacts c ON c.department_id=$2 AND c.source_system='churchtools' AND c.source_id=source.source_id
+                  WHERE COALESCE(link.local_record_id,c.id) IS NOT NULL
+                  ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, memberSourceIds]);
+              }
             } else if (record.area === "event") {
               let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN service_events local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='event' AND link.source_id=$2", [dept, sourceId]);
               if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
