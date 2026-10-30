@@ -41,6 +41,11 @@
 .eventdesk-workspace{display:grid;grid-template-columns:minmax(280px,.82fr) minmax(400px,1.5fr);gap:14px;align-items:start}
 .eventdesk-jobs-panel{max-height:calc(100vh - 260px);overflow:auto}
 .eventdesk-detail-panel{padding-bottom:14px}
+.eventdesk-job-tabs{display:flex;gap:5px;overflow-x:auto;padding:0 18px;border-bottom:1px solid var(--border);scrollbar-width:thin}
+.eventdesk-job-tabs button{flex:0 0 auto;border:0;border-bottom:2px solid transparent;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:650;padding:12px 10px;cursor:pointer;white-space:nowrap}
+.eventdesk-job-tabs button:hover,.eventdesk-job-tabs .eventdesk-job-tab-active{color:var(--foreground);border-bottom-color:var(--primary)}
+.eventdesk-job-tab-content{padding:18px}
+.eventdesk-job-tab-content[hidden]{display:none}
 .eventdesk-status-select{max-width:140px;height:34px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font-size:11px}
 .eventdesk-detail-meta{display:grid;gap:9px;padding:14px 18px;color:var(--muted);font-size:11px}
 .eventdesk-detail-meta span{display:flex;align-items:center;gap:7px}

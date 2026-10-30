@@ -142,6 +142,39 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
     async function rollback(client: PoolClient) { await client.query("ROLLBACK"); }
 
+    async function syncDirectoryContactRoles(client: PoolClient, departmentId: string, contact: { id: string; kind: "company" | "person"; name: string; email: string; phone: string; street: string; postalCode: string; city: string; country: string; notes: string; roles: string[]; active: boolean }) {
+      const active = contact.active;
+      if (active && contact.roles.includes("customer")) {
+        await client.query(`INSERT INTO eventdesk_customers(id,department_id,directory_contact_id,kind,name,email,phone,street,postal_code,city,country,notes)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+          ON CONFLICT(department_id,directory_contact_id) WHERE directory_contact_id IS NOT NULL DO UPDATE SET kind=EXCLUDED.kind,name=EXCLUDED.name,email=EXCLUDED.email,phone=EXCLUDED.phone,street=EXCLUDED.street,postal_code=EXCLUDED.postal_code,city=EXCLUDED.city,country=EXCLUDED.country,notes=EXCLUDED.notes,active=true,updated_at=now()`,
+          [randomUUID(), departmentId, contact.id, contact.kind, contact.name, contact.email, contact.phone, contact.street, contact.postalCode, contact.city, contact.country, contact.notes]);
+      } else await client.query("UPDATE eventdesk_customers SET active=false,updated_at=now() WHERE department_id=$1 AND directory_contact_id=$2", [departmentId, contact.id]);
+
+      for (const kind of ["supplier", "venue"] as const) {
+        if (active && contact.roles.includes(kind)) {
+          await client.query(`INSERT INTO eventdesk_partners(id,department_id,directory_contact_id,kind,name,email,phone,street,postal_code,city,country,notes)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            ON CONFLICT(department_id,directory_contact_id,kind) WHERE directory_contact_id IS NOT NULL DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,phone=EXCLUDED.phone,street=EXCLUDED.street,postal_code=EXCLUDED.postal_code,city=EXCLUDED.city,country=EXCLUDED.country,notes=EXCLUDED.notes,active=true,updated_at=now()`,
+            [randomUUID(), departmentId, contact.id, kind, contact.name, contact.email, contact.phone, contact.street, contact.postalCode, contact.city, contact.country, contact.notes]);
+        } else await client.query("UPDATE eventdesk_partners SET active=false,updated_at=now() WHERE department_id=$1 AND directory_contact_id=$2 AND kind=$3", [departmentId, contact.id, kind]);
+      }
+
+      if (active && contact.roles.includes("freelancer")) {
+        await client.query(`INSERT INTO eventdesk_freelancers(id,department_id,directory_contact_id,name,email,phone,notes)
+          VALUES($1,$2,$3,$4,$5,$6,$7)
+          ON CONFLICT(department_id,directory_contact_id) WHERE directory_contact_id IS NOT NULL DO UPDATE SET name=EXCLUDED.name,email=EXCLUDED.email,phone=EXCLUDED.phone,notes=EXCLUDED.notes,active=true,updated_at=now()`,
+          [randomUUID(), departmentId, contact.id, contact.name, contact.email, contact.phone, contact.notes]);
+      } else await client.query("UPDATE eventdesk_freelancers SET active=false,updated_at=now() WHERE department_id=$1 AND directory_contact_id=$2", [departmentId, contact.id]);
+    }
+
+    async function upsertDirectoryContactFromRole(client: PoolClient, departmentId: string, contact: { id: string; kind: "company" | "person"; name: string; email: string; phone: string; street: string; postalCode: string; city: string; country: string; notes: string; role: "customer" | "supplier" | "venue" | "freelancer"; active: boolean }) {
+      await client.query(`INSERT INTO eventdesk_contacts(id,department_id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,ARRAY[$12]::text[],$13)
+        ON CONFLICT(id) DO UPDATE SET kind=EXCLUDED.kind,name=EXCLUDED.name,email=EXCLUDED.email,phone=EXCLUDED.phone,street=EXCLUDED.street,postal_code=EXCLUDED.postal_code,city=EXCLUDED.city,country=EXCLUDED.country,notes=EXCLUDED.notes,roles=ARRAY(SELECT DISTINCT unnest(eventdesk_contacts.roles || EXCLUDED.roles)),active=EXCLUDED.active,updated_at=now()`,
+        [contact.id, departmentId, contact.kind, contact.name, contact.email, contact.phone, contact.street, contact.postalCode, contact.city, contact.country, contact.notes, contact.role, contact.active]);
+    }
+
     async function rentalRate(client: PoolClient, departmentId: string, rateCardId: string | null, startsAt: Date | string, asset: { id: string; category: string; daily_rate_cents: number; supplier_id: string | null }) {
       if (!rateCardId) return Number(asset.daily_rate_cents);
       const result = await client.query(`SELECT l.daily_rate_cents
@@ -363,7 +396,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await ensureDefaultWarehouse(departmentId);
       const canFinance = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true;
       const canCrew = request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true;
-      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases, serviceTickets, inspectionSchedules, staff, directoryContacts] = await Promise.all([
+      const [jobs, assets, bookings, maintenance, crew, contacts, freelancers, unavailability, events, customers, partners, packages, rateCards, documents, docSettings, deliveries, reminderSettings, reminders, warehouses, assetUnits, transfers, cases, serviceTickets, inspectionSchedules, staff, directoryContacts, jobHistory] = await Promise.all([
         pool!.query(`SELECT j.id, j.title, j.customer_name, j.customer_contact_id, j.linked_event_id, j.discount_bps,j.supplier_rate_card_id,
                             j.customer_id, coalesce(c.name,j.customer_name) AS customer_display_name,
                             e.title AS linked_event_title, j.starts_at, j.ends_at, j.venue_id, coalesce(v.name,j.venue) AS venue, j.status, j.notes, j.created_at
@@ -472,6 +505,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                               FROM eventdesk_contact_company_links l JOIN eventdesk_contacts co ON co.id=l.company_id AND co.department_id=l.department_id JOIN eventdesk_contacts pe ON pe.id=l.person_id AND pe.department_id=l.department_id
                               WHERE l.department_id=c.department_id AND (l.company_id=c.id OR l.person_id=c.id)),'[]'::jsonb) AS company_links
                        FROM eventdesk_contacts c WHERE c.department_id=$1 ORDER BY c.active DESC,lower(c.name)`, [departmentId]),
+        pool!.query(`SELECT h.id,h.job_id,h.action,h.details,h.created_at,coalesce(u.display_name,'EventDesk') AS actor_name
+                       FROM eventdesk_job_history h LEFT JOIN app_users u ON u.id=h.actor_user_id
+                      WHERE h.department_id=$1 ORDER BY h.created_at DESC LIMIT 1000`, [departmentId]),
       ]);
       return {
         jobs: jobs.rows.map((row) => ({ id: row.id, title: row.title, customerName: row.customer_display_name, customerId: row.customer_id, customerContactId: row.customer_contact_id, linkedEventId: row.linked_event_id, linkedEventTitle: row.linked_event_title, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), venue: row.venue, venueId: row.venue_id, supplierRateCardId: row.supplier_rate_card_id, status: row.status, notes: row.notes, discountBps: row.discount_bps, createdAt: new Date(row.created_at).toISOString() })),
@@ -499,6 +535,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         inspectionSchedules: inspectionSchedules.rows.map((row) => ({ id: row.id, assetId: row.asset_id, assetName: row.asset_name, unitId: row.unit_id, serialNumber: row.serial_number, intervalDays: row.interval_days, nextDueDate: row.next_due_date, active: row.active, notes: row.notes, ownerUserId: row.owner_user_id, ownerName: row.owner_name, lastReminderStatus: row.last_reminder_status, lastReminderAt: row.last_reminder_at })),
         staff: staff.rows.map((row) => ({ id: row.id, name: row.display_name })),
         directoryContacts: directoryContacts.rows.map((row) => ({ id: row.id, kind: row.kind, name: row.name, email: row.email, phone: row.phone, street: row.street, postalCode: row.postal_code, city: row.city, country: row.country, notes: row.notes, roles: row.roles, active: row.active, companyLinks: row.company_links })),
+        jobHistory: jobHistory.rows.map((row) => ({ id: row.id, jobId: row.job_id, action: row.action, details: row.details, actor: row.actor_name, createdAt: new Date(row.created_at).toISOString() })),
         emailDelivery: { configured: Boolean(resendApiKey() && emailFrom()), from: emailFrom() },
         documentSettings: docSettings.rows[0] ? { businessName: docSettings.rows[0].business_name, street: docSettings.rows[0].street, postalCode: docSettings.rows[0].postal_code, city: docSettings.rows[0].city, country: docSettings.rows[0].country, email: docSettings.rows[0].email, phone: docSettings.rows[0].phone, taxIdentifier: docSettings.rows[0].tax_identifier, paymentTerms: docSettings.rows[0].payment_terms, footer: docSettings.rows[0].footer, logoJpegBase64: docSettings.rows[0].logo_jpeg ? Buffer.from(docSettings.rows[0].logo_jpeg).toString("base64") : null, templates: docSettings.rows[0].document_templates ?? {}, taxProfiles: docSettings.rows[0].tax_profiles ?? [], qrBillEnabled: docSettings.rows[0].qr_bill_enabled, qrBillIban: docSettings.rows[0].qr_bill_iban, qrBillReferenceType: docSettings.rows[0].qr_bill_reference_type, qrBillStreet: docSettings.rows[0].qr_bill_street, qrBillBuildingNumber: docSettings.rows[0].qr_bill_building_number, qrBillCountryCode: docSettings.rows[0].qr_bill_country_code } : { businessName: "", street: "", postalCode: "", city: "", country: "", email: "", phone: "", taxIdentifier: "", paymentTerms: "", footer: "", logoJpegBase64: null, templates: {}, taxProfiles: [], qrBillEnabled: false, qrBillIban: "", qrBillReferenceType: "NON", qrBillStreet: "", qrBillBuildingNumber: "", qrBillCountryCode: "CH" },
         permissions: { jobs: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("jobs_manage") === true, customers: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("customers_manage") === true, inventory: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("inventory_manage") === true, crew: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("crew_manage") === true, finance: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("finance_manage") === true, partners: request.activeDepartmentRole === "site_admin" || request.activeDepartmentModulePermissions?.eventdesk?.includes("partners_manage") === true },
@@ -876,9 +913,52 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         discountBps = Number(customer.rows[0].default_discount_bps);
       }
       if (body.supplierRateCardId && !(await pool!.query(`SELECT 1 FROM eventdesk_supplier_rate_cards WHERE id=$1 AND department_id=$2 AND active=true AND valid_from<=$3::date AND (valid_to IS NULL OR valid_to>=$3::date)`, [body.supplierRateCardId, departmentId, body.startsAt])).rowCount) return reply.code(400).send({ error: "Choose an active supplier rate card that is valid on the job start date." });
-      const result = await pool!.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,venue_id,starts_at,ends_at,venue,notes,discount_bps,supplier_rate_card_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, [randomUUID(), departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? "", discountBps, body.supplierRateCardId ?? null]);
-      return reply.code(201).send({ id: result.rows[0].id });
+      const id = randomUUID();
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(`INSERT INTO eventdesk_jobs (id,department_id,title,customer_name,customer_id,customer_contact_id,linked_event_id,venue_id,starts_at,ends_at,venue,notes,discount_bps,supplier_rate_card_id)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [id, departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? "", discountBps, body.supplierRateCardId ?? null]);
+        await client.query("INSERT INTO eventdesk_job_history(id,department_id,job_id,actor_user_id,action,details) VALUES($1,$2,$3,$4,'created',$5)", [randomUUID(), departmentId, id, request.authenticatedUser?.id ?? null, `Created job “${body.title.trim()}”.`]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { title: string; customerName?: string; customerId?: string | null; customerContactId?: string | null; linkedEventId?: string | null; venueId?: string | null; supplierRateCardId?: string | null; startsAt: string; endsAt: string; venue?: string; notes?: string } }>("/api/eventdesk/jobs/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: jobSchema.body } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply, "jobs_manage");
+      if (!departmentId) return reply;
+      const body = request.body;
+      if (new Date(body.endsAt) <= new Date(body.startsAt)) return reply.code(400).send({ error: "The job end must be after its start." });
+      if (!await sameDepartmentRecord("contacts", body.customerContactId, departmentId) || !await sameDepartmentRecord("service_events", body.linkedEventId, departmentId) || !await sameDepartmentRecord("eventdesk_partners", body.venueId, departmentId)) return reply.code(400).send({ error: "Choose a person, event, or venue from this location." });
+      let venue = body.venue?.trim() ?? "";
+      if (body.venueId) {
+        const savedVenue = await pool!.query("SELECT name FROM eventdesk_partners WHERE id=$1 AND department_id=$2 AND kind='venue' AND active=true", [body.venueId, departmentId]);
+        if (!savedVenue.rowCount) return reply.code(400).send({ error: "Choose an active venue from this location." });
+        venue = savedVenue.rows[0].name;
+      }
+      let customerName = body.customerName?.trim() ?? "";
+      let discountBps = 0;
+      if (body.customerId) {
+        const customer = await pool!.query("SELECT name,default_discount_bps FROM eventdesk_customers WHERE id=$1 AND department_id=$2 AND active=true", [body.customerId, departmentId]);
+        if (!customer.rowCount) return reply.code(400).send({ error: "Choose an active customer from this location." });
+        customerName = customer.rows[0].name;
+        discountBps = Number(customer.rows[0].default_discount_bps);
+      }
+      if (body.supplierRateCardId && !(await pool!.query(`SELECT 1 FROM eventdesk_supplier_rate_cards WHERE id=$1 AND department_id=$2 AND active=true AND valid_from<=$3::date AND (valid_to IS NULL OR valid_to>=$3::date)`, [body.supplierRateCardId, departmentId, body.startsAt])).rowCount) return reply.code(400).send({ error: "Choose an active supplier rate card that is valid on the job start date." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const old = await client.query("SELECT title,starts_at,ends_at,customer_name,venue,status FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!old.rowCount) { await rollback(client); return reply.code(404).send({ error: "Job not found." }); }
+        await client.query(`UPDATE eventdesk_jobs SET title=$3,customer_name=$4,customer_id=$5,customer_contact_id=$6,linked_event_id=$7,venue_id=$8,starts_at=$9,ends_at=$10,venue=$11,notes=$12,discount_bps=$13,supplier_rate_card_id=$14,updated_at=now()
+          WHERE id=$1 AND department_id=$2`, [request.params.id, departmentId, body.title.trim(), customerName, body.customerId ?? null, body.customerContactId ?? null, body.linkedEventId ?? null, body.venueId ?? null, body.startsAt, body.endsAt, venue, body.notes?.trim() ?? "", discountBps, body.supplierRateCardId ?? null]);
+        const details = `Updated job details. Schedule: ${new Date(old.rows[0].starts_at).toISOString()} – ${new Date(old.rows[0].ends_at).toISOString()} → ${new Date(body.startsAt).toISOString()} – ${new Date(body.endsAt).toISOString()}.`;
+        await client.query("INSERT INTO eventdesk_job_history(id,department_id,job_id,actor_user_id,action,details) VALUES($1,$2,$3,$4,'updated',$5)", [randomUUID(), departmentId, request.params.id, request.authenticatedUser?.id ?? null, details]);
+        await client.query("COMMIT");
+        return { id: request.params.id };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; defaultDiscountBps?: number } }>("/api/eventdesk/customers", { schema: customerSchema }, async (request, reply) => {
@@ -886,9 +966,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "customers_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`INSERT INTO eventdesk_customers (id,department_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,default_discount_bps)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.defaultDiscountBps ?? 0]);
-      return reply.code(201).send({ id: result.rows[0].id });
+      const id = randomUUID();
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await upsertDirectoryContactFromRole(client, departmentId, { id, kind: b.kind, name: b.name.trim(), email: b.email?.trim() ?? "", phone: b.phone?.trim() ?? "", street: b.street?.trim() ?? "", postalCode: b.postalCode?.trim() ?? "", city: b.city?.trim() ?? "", country: b.country?.trim() ?? "", notes: b.notes?.trim() ?? "", role: "customer", active: true });
+        await client.query(`INSERT INTO eventdesk_customers (id,department_id,directory_contact_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,default_discount_bps)
+          VALUES ($1,$2,$1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.defaultDiscountBps ?? 0]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.put<{ Params: { id: string }; Body: { kind: "company" | "person"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; active?: boolean; defaultDiscountBps?: number } }>("/api/eventdesk/customers/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: customerSchema.body } }, async (request, reply) => {
@@ -896,9 +983,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "customers_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`UPDATE eventdesk_customers SET kind=$3,name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),default_discount_bps=$14,updated_at=now()
-        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null, b.defaultDiscountBps ?? 0]);
-      return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Customer not found." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query(`UPDATE eventdesk_customers SET kind=$3,name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),default_discount_bps=$14,updated_at=now()
+          WHERE id=$1 AND department_id=$2 RETURNING id,directory_contact_id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null, b.defaultDiscountBps ?? 0]);
+        if (!result.rowCount) { await rollback(client); return reply.code(404).send({ error: "Customer not found." }); }
+        await client.query(`UPDATE eventdesk_contacts SET kind=$3,name=$4,email=$5,phone=$6,street=$7,postal_code=$8,city=$9,country=$10,notes=$11,active=coalesce($12,active),updated_at=now() WHERE id=$1 AND department_id=$2`, [result.rows[0].directory_contact_id, departmentId, b.kind, b.name.trim(), b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
+        const master = await client.query("SELECT id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active FROM eventdesk_contacts WHERE id=$1 AND department_id=$2", [result.rows[0].directory_contact_id, departmentId]);
+        if (master.rowCount) { const c = master.rows[0]; await syncDirectoryContactRoles(client, departmentId, { id: c.id, kind: c.kind, name: c.name, email: c.email, phone: c.phone, street: c.street, postalCode: c.postal_code, city: c.city, country: c.country, notes: c.notes, roles: c.roles, active: c.active }); }
+        await client.query("COMMIT");
+        return { id: request.params.id };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Body: { kind: "supplier" | "venue"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string } }>("/api/eventdesk/partners", { schema: partnerSchema }, async (request, reply) => {
@@ -906,9 +1002,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "partners_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`INSERT INTO eventdesk_partners (id,department_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? ""]);
-      return reply.code(201).send({ id: result.rows[0].id });
+      const id = randomUUID();
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await upsertDirectoryContactFromRole(client, departmentId, { id, kind: "company", name: b.name.trim(), email: b.email?.trim() ?? "", phone: b.phone?.trim() ?? "", street: b.street?.trim() ?? "", postalCode: b.postalCode?.trim() ?? "", city: b.city?.trim() ?? "", country: b.country?.trim() ?? "", notes: b.notes?.trim() ?? "", role: b.kind, active: true });
+        await client.query(`INSERT INTO eventdesk_partners (id,department_id,directory_contact_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes)
+          VALUES ($1,$2,$1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? ""]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.put<{ Params: { id: string }; Body: { kind: "supplier" | "venue"; name: string; contactPerson?: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; active?: boolean } }>("/api/eventdesk/partners/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: partnerSchema.body } }, async (request, reply) => {
@@ -916,9 +1019,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "partners_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`UPDATE eventdesk_partners SET name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),updated_at=now()
-        WHERE id=$1 AND department_id=$2 AND kind=$3 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
-      return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Supplier or venue not found, or its type does not match." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const result = await client.query(`UPDATE eventdesk_partners SET name=$4,contact_person=$5,email=$6,phone=$7,street=$8,postal_code=$9,city=$10,country=$11,notes=$12,active=coalesce($13,active),updated_at=now()
+          WHERE id=$1 AND department_id=$2 AND kind=$3 RETURNING id,directory_contact_id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.contactPerson?.trim() ?? "", b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
+        if (!result.rowCount) { await rollback(client); return reply.code(404).send({ error: "Supplier or venue not found, or its type does not match." }); }
+        await client.query(`UPDATE eventdesk_contacts SET name=$3,email=$4,phone=$5,street=$6,postal_code=$7,city=$8,country=$9,notes=$10,active=coalesce($11,active),updated_at=now() WHERE id=$1 AND department_id=$2`, [result.rows[0].directory_contact_id, departmentId, b.name.trim(), b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.active ?? null]);
+        const master = await client.query("SELECT id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active FROM eventdesk_contacts WHERE id=$1 AND department_id=$2", [result.rows[0].directory_contact_id, departmentId]);
+        if (master.rowCount) { const c = master.rows[0]; await syncDirectoryContactRoles(client, departmentId, { id: c.id, kind: c.kind, name: c.name, email: c.email, phone: c.phone, street: c.street, postalCode: c.postal_code, city: c.city, country: c.country, notes: c.notes, roles: c.roles, active: c.active }); }
+        await client.query("COMMIT");
+        return { id: request.params.id };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Body: { kind: "company" | "person"; name: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; roles?: string[]; active?: boolean } }>("/api/eventdesk/directory-contacts", { schema: { body: directoryContactSchema } }, async (request, reply) => {
@@ -926,9 +1038,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "customers_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`INSERT INTO eventdesk_contacts(id,department_id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id`, [randomUUID(), departmentId, b.kind, b.name.trim(), b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.roles ?? [], b.active ?? true]);
-      return reply.code(201).send({ id: result.rows[0].id });
+      if ((b.roles ?? []).includes("freelancer") && b.kind !== "person") return reply.code(400).send({ error: "Freelancer contacts must be people." });
+      const client = await pool!.connect();
+      const contact = { id: randomUUID(), kind: b.kind, name: b.name.trim(), email: b.email?.trim() ?? "", phone: b.phone?.trim() ?? "", street: b.street?.trim() ?? "", postalCode: b.postalCode?.trim() ?? "", city: b.city?.trim() ?? "", country: b.country?.trim() ?? "", notes: b.notes?.trim() ?? "", roles: b.roles ?? [], active: b.active ?? true };
+      try {
+        await client.query("BEGIN");
+        await client.query(`INSERT INTO eventdesk_contacts(id,department_id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [contact.id, departmentId, contact.kind, contact.name, contact.email, contact.phone, contact.street, contact.postalCode, contact.city, contact.country, contact.notes, contact.roles, contact.active]);
+        await syncDirectoryContactRoles(client, departmentId, contact);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id: contact.id });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.put<{ Params: { id: string }; Body: { kind: "company" | "person"; name: string; email?: string; phone?: string; street?: string; postalCode?: string; city?: string; country?: string; notes?: string; roles?: string[]; active?: boolean } }>("/api/eventdesk/directory-contacts/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: directoryContactSchema } }, async (request, reply) => {
@@ -936,9 +1056,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "customers_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const result = await pool!.query(`UPDATE eventdesk_contacts SET kind=$3,name=$4,email=$5,phone=$6,street=$7,postal_code=$8,city=$9,country=$10,notes=$11,roles=$12,active=$13,updated_at=now()
-        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.kind, b.name.trim(), b.email?.trim() ?? "", b.phone?.trim() ?? "", b.street?.trim() ?? "", b.postalCode?.trim() ?? "", b.city?.trim() ?? "", b.country?.trim() ?? "", b.notes?.trim() ?? "", b.roles ?? [], b.active ?? true]);
-      return result.rowCount ? { id: request.params.id } : reply.code(404).send({ error: "Contact not found." });
+      if ((b.roles ?? []).includes("freelancer") && b.kind !== "person") return reply.code(400).send({ error: "Freelancer contacts must be people." });
+      const client = await pool!.connect();
+      const contact = { id: request.params.id, kind: b.kind, name: b.name.trim(), email: b.email?.trim() ?? "", phone: b.phone?.trim() ?? "", street: b.street?.trim() ?? "", postalCode: b.postalCode?.trim() ?? "", city: b.city?.trim() ?? "", country: b.country?.trim() ?? "", notes: b.notes?.trim() ?? "", roles: b.roles ?? [], active: b.active ?? true };
+      try {
+        await client.query("BEGIN");
+        const links = await client.query("SELECT 1 FROM eventdesk_contact_company_links WHERE department_id=$1 AND (company_id=$2 OR person_id=$2) LIMIT 1", [departmentId, contact.id]);
+        const currentKind = await client.query("SELECT kind FROM eventdesk_contacts WHERE id=$1 AND department_id=$2 FOR UPDATE", [contact.id, departmentId]);
+        if (currentKind.rowCount && currentKind.rows[0].kind !== contact.kind && links.rowCount) { await rollback(client); return reply.code(409).send({ error: "Remove this contact’s company links before changing its type." }); }
+        const updated = await client.query(`UPDATE eventdesk_contacts SET kind=$3,name=$4,email=$5,phone=$6,street=$7,postal_code=$8,city=$9,country=$10,notes=$11,roles=$12,active=$13,updated_at=now()
+          WHERE id=$1 AND department_id=$2 RETURNING id`, [contact.id, departmentId, contact.kind, contact.name, contact.email, contact.phone, contact.street, contact.postalCode, contact.city, contact.country, contact.notes, contact.roles, contact.active]);
+        if (!updated.rowCount) { await rollback(client); return reply.code(404).send({ error: "Contact not found." }); }
+        await syncDirectoryContactRoles(client, departmentId, contact);
+        await client.query("COMMIT");
+        return { id: request.params.id };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Params: { id: string }; Body: { companyId: string; title?: string } }>("/api/eventdesk/directory-contacts/:id/companies", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["companyId"], properties: { companyId: { type: "string", format: "uuid" }, title: { type: "string", maxLength: 120 } } } } }, async (request, reply) => {
@@ -1000,8 +1132,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply, "jobs_manage");
       if (!departmentId) return reply;
-      const result = await pool!.query("UPDATE eventdesk_jobs SET status=$3, updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, departmentId, request.body.status]);
-      return result.rowCount ? { id: request.params.id, status: request.body.status } : reply.code(404).send({ error: "Job not found." });
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const previous = await client.query("SELECT status FROM eventdesk_jobs WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        if (!previous.rowCount) { await rollback(client); return reply.code(404).send({ error: "Job not found." }); }
+        const result = await client.query("UPDATE eventdesk_jobs SET status=$3, updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,status", [request.params.id, departmentId, request.body.status]);
+        if (previous.rows[0].status !== request.body.status) await client.query("INSERT INTO eventdesk_job_history(id,department_id,job_id,actor_user_id,action,details) VALUES($1,$2,$3,$4,'status_changed',$5)", [randomUUID(), departmentId, request.params.id, request.authenticatedUser?.id ?? null, `Status changed from ${String(previous.rows[0].status).replaceAll("_", " ")} to ${request.body.status.replaceAll("_", " ")}.`]);
+        await client.query("COMMIT");
+        return { id: request.params.id, status: request.body.status };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Body: { name: string; category?: string; quantity: number; dailyRateCents?: number; notes?: string; barcode?: string; supplierId?: string | null } }>("/api/eventdesk/assets", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "quantity"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", maxLength: 80 }, quantity: { type: "integer", minimum: 1, maximum: 100000 }, dailyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 1000 }, barcode: { type: "string", maxLength: 120 }, supplierId: { type: ["string", "null"], format: "uuid" } } } } }, async (request, reply) => {
@@ -1397,9 +1537,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "crew_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const created = await pool!.query(`INSERT INTO eventdesk_freelancers (id,department_id,name,email,phone,roles,hourly_rate_cents,notes)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`, [randomUUID(), departmentId, b.name.trim(), b.email?.trim().toLocaleLowerCase("en-US") ?? "", b.phone?.trim() ?? "", (b.roles ?? []).map((role) => role.trim()).filter(Boolean), b.hourlyRateCents ?? 0, b.notes?.trim() ?? ""]);
-      return reply.code(201).send({ id: created.rows[0].id });
+      const id = randomUUID();
+      const email = b.email?.trim().toLocaleLowerCase("en-US") ?? "";
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        await upsertDirectoryContactFromRole(client, departmentId, { id, kind: "person", name: b.name.trim(), email, phone: b.phone?.trim() ?? "", street: "", postalCode: "", city: "", country: "", notes: b.notes?.trim() ?? "", role: "freelancer", active: true });
+        await client.query(`INSERT INTO eventdesk_freelancers (id,department_id,directory_contact_id,name,email,phone,roles,hourly_rate_cents,notes)
+          VALUES ($1,$2,$1,$3,$4,$5,$6,$7,$8)`, [id, departmentId, b.name.trim(), email, b.phone?.trim() ?? "", (b.roles ?? []).map((role) => role.trim()).filter(Boolean), b.hourlyRateCents ?? 0, b.notes?.trim() ?? ""]);
+        await client.query("COMMIT");
+        return reply.code(201).send({ id });
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.put<{ Params: { id: string }; Body: { name?: string; email?: string; phone?: string; roles?: string[]; hourlyRateCents?: number; notes?: string; active?: boolean } }>("/api/eventdesk/freelancers/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, properties: { name: { type: "string", minLength: 1, maxLength: 160 }, email: { type: "string", maxLength: 254, pattern: "^$|^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" }, phone: { type: "string", maxLength: 40 }, roles: { type: "array", maxItems: 30, items: { type: "string", minLength: 1, maxLength: 80 } }, hourlyRateCents: { type: "integer", minimum: 0, maximum: 100000000 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" } } } } }, async (request, reply) => {
@@ -1407,11 +1555,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, "crew_manage");
       if (!departmentId) return reply;
       const b = request.body;
-      const updated = await pool!.query(`UPDATE eventdesk_freelancers SET
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const updated = await client.query(`UPDATE eventdesk_freelancers SET
           name=coalesce($3,name),email=coalesce($4,email),phone=coalesce($5,phone),roles=coalesce($6,roles),hourly_rate_cents=coalesce($7,hourly_rate_cents),notes=coalesce($8,notes),active=coalesce($9,active),updated_at=now()
-        WHERE id=$1 AND department_id=$2 RETURNING id`, [request.params.id, departmentId, b.name?.trim(), b.email?.trim().toLocaleLowerCase("en-US"), b.phone?.trim(), b.roles?.map((role) => role.trim()).filter(Boolean), b.hourlyRateCents, b.notes?.trim(), b.active]);
-      if (!updated.rowCount) return reply.code(404).send({ error: "Freelancer not found." });
-      return { id: updated.rows[0].id };
+        WHERE id=$1 AND department_id=$2 RETURNING id,directory_contact_id`, [request.params.id, departmentId, b.name?.trim(), b.email?.trim().toLocaleLowerCase("en-US"), b.phone?.trim(), b.roles?.map((role) => role.trim()).filter(Boolean), b.hourlyRateCents, b.notes?.trim(), b.active]);
+        if (!updated.rowCount) { await rollback(client); return reply.code(404).send({ error: "Freelancer not found." }); }
+        await client.query(`UPDATE eventdesk_contacts SET name=coalesce($3,name),email=coalesce($4,email),phone=coalesce($5,phone),notes=coalesce($6,notes),active=coalesce($7,active),updated_at=now() WHERE id=$1 AND department_id=$2`, [updated.rows[0].directory_contact_id, departmentId, b.name?.trim(), b.email?.trim().toLocaleLowerCase("en-US"), b.phone?.trim(), b.notes?.trim(), b.active]);
+        const master = await client.query("SELECT id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active FROM eventdesk_contacts WHERE id=$1 AND department_id=$2", [updated.rows[0].directory_contact_id, departmentId]);
+        if (master.rowCount) { const c = master.rows[0]; await syncDirectoryContactRoles(client, departmentId, { id: c.id, kind: c.kind, name: c.name, email: c.email, phone: c.phone, street: c.street, postalCode: c.postal_code, city: c.city, country: c.country, notes: c.notes, roles: c.roles, active: c.active }); }
+        await client.query("COMMIT");
+        return { id: updated.rows[0].id };
+      } catch (error) { await rollback(client); throw error; } finally { client.release(); }
     });
 
     routes.post<{ Params: { id: string }; Body: { startsAt: string; endsAt: string; reason?: string } }>("/api/eventdesk/freelancers/:id/unavailability", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["startsAt", "endsAt"], properties: { startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" }, reason: { type: "string", maxLength: 240 } } } } }, async (request, reply) => {

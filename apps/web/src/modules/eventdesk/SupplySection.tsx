@@ -15,8 +15,8 @@ const money = (cents: number) => new Intl.NumberFormat("en-CH", { style: "curren
 const dateInput = (value: string) => { const date = new Date(value); return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16); };
 const days = (start: string, end: string) => Math.max(1, Math.ceil((new Date(end).getTime() - new Date(start).getTime()) / 86_400_000));
 
-export function SupplySection({ departmentId, csrfToken, jobs, assets, partners, canInventory, canFinance, onCostsChange }: {
-  departmentId: string; csrfToken: string; jobs: SupplyJob[]; assets: SupplyAsset[]; partners: SupplyPartner[]; canInventory: boolean; canFinance: boolean; onCostsChange: (costs: Record<string, number>) => void;
+export function SupplySection({ departmentId, csrfToken, jobs, assets, partners, canInventory, canFinance, onCostsChange, defaultJobId = "" }: {
+  departmentId: string; csrfToken: string; jobs: SupplyJob[]; assets: SupplyAsset[]; partners: SupplyPartner[]; canInventory: boolean; canFinance: boolean; onCostsChange: (costs: Record<string, number>) => void; defaultJobId?: string;
 }) {
   const [data, setData] = useState(emptyData);
   const [error, setError] = useState("");
@@ -27,6 +27,12 @@ export function SupplySection({ departmentId, csrfToken, jobs, assets, partners,
   const [purchase, setPurchase] = useState({ supplierId: "", jobId: "", expectedDeliveryDate: "", notes: "", lines: [{ assetId: "", description: "", quantity: "1", unitCost: "" }] });
   const [rental, setRental] = useState({ jobId: "", supplierId: "", assetId: "", supplierItem: "", quantity: "1", startsAt: "", endsAt: "", dailyCost: "", notes: "" });
   const suppliers = partners.filter((partner) => partner.kind === "supplier" && partner.active);
+
+  useEffect(() => {
+    if (!defaultJobId) return;
+    setPurchase((current) => ({ ...current, jobId: defaultJobId }));
+    setRental((current) => ({ ...current, jobId: defaultJobId }));
+  }, [defaultJobId]);
 
   const request = useCallback(async <T,>(url: string, method = "GET", body?: unknown): Promise<T> => {
     const response = await fetch(url, { method, headers: { "x-department-id": departmentId, ...(method === "GET" ? {} : { "content-type": "application/json", "x-csrf-token": csrfToken }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });

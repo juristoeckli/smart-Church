@@ -56,6 +56,10 @@ Job timestamps use ISO 8601 and must include an end after the start. `customer_r
 
 The SQL migrations are applied during normal Smart-Church startup. EventDesk is optional and off by default. A Server Administrator activates optional modules for the whole installation in Settings → Modules. After activation, site administrators can grant EventDesk access levels separately at each location in People & access.
 
+The Contacts directory is the master record for EventDesk customers, suppliers, venues, and freelancers. Selecting roles creates or updates the records used by job, purchasing, equipment, and crew workflows. Existing records are linked to the directory during migration; edits in either the directory or a role-specific form update the shared contact details. Company/person links support multiple people per company and multiple companies per person.
+
+Jobs open in a tabbed workspace for basic data, timetable, positions, external rentals and purchases, cost plan, documents, status, and history. The History tab records job creation, detail edits, and status changes.
+
 ### Email delivery setup
 
 EventDesk uses the shared [Resend email API](https://resend.com/docs/api-reference/emails/send-email). Configure `SMART_CHURCH_RESEND_API_KEY` and `SMART_CHURCH_EMAIL_FROM` on the Smart-Church server, using a verified sender address. The legacy `RESEND_API_KEY` and `EVENTDESK_EMAIL_FROM` names remain supported for existing deployments. Email delivery is optional; PDF download and browser printing work without a provider.
