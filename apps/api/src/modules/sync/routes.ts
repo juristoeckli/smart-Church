@@ -638,6 +638,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   const pool = context.pool;
   const siteName = process.env.SMART_CHURCH_DEPARTMENT_NAME?.trim() || "Smart-Church";
   federationInternalRequestToken = randomBytes(32).toString("base64url");
+  // Federation v1 is an internal route dispatcher for authenticated WebSocket
+  // messages. Never expose its HTTP handlers as a second peer transport.
+  app.addHook("preHandler", async (request, reply) => {
+    if (request.url.split("?", 1)[0]?.startsWith(`${prefix}/`)
+      && request.headers["x-sc-internal-federation-channel"] !== federationInternalRequestToken) {
+      return reply.code(426).send({ error: "Federation requests must use the authenticated WebSocket channel." });
+    }
+  });
   const federationChannels = new FederationChannels(app, app.server, pool, () => getIdentity(pool, siteName), federationInternalRequestToken);
   activeFederationChannels = federationChannels;
   const unregisterFederationWorker = context.workers.register("federation-channel", () => ({

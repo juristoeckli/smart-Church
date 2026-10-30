@@ -133,7 +133,7 @@ The exact route schemas and per-operation permission checks are maintained besid
 | `GET` | `/api/public/self-signup/form/:token` | Read the applicant form using its expiring token. |
 | `POST` | `/api/public/self-signup/profile`, `/api/public/self-signup/confirm` | Submit profile details or confirm the email using the token. |
 | `POST` | `/api/webhooks/resend` | Resend webhook signature verification. |
-| `GET`, `POST` | `/api/modules/sync/federation/v1/*` | Installation signature, freshness, and replay checks; browser session auth is not used. |
+| `GET`, `POST`, `PUT`, `DELETE` | `/api/modules/sync/federation/v1/*` | Internal federation dispatch only. Direct HTTP requests are rejected; peers exchange signed requests over `/api/modules/sync/federation/v1/channel` WebSocket. Browser session auth is not used. |
 | `GET` | `/api/modules/presenter/public/output/:token/*` | Presenter output token. |
 
 There is no general unauthenticated data API. Do not expose the API port publicly without TLS and the configured origin/proxy protections.

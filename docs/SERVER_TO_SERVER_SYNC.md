@@ -2,11 +2,12 @@
 
 Status: implementation in progress, 30 October 2026. Pairing, signed requests,
 scoped manual sharing, automatic chunked full-site snapshots over the existing
-HTTPS API, and module-owned snapshot adapters are implemented for core site data
-and every module currently shipped in this repository. Sync settings use exactly
-three tabs: ChurchTools, Elvanto, and Server-to-server. The Server-to-server tab
-can configure a standby, push and verify a snapshot, fence this installation as
-read-only, promote a standby, and rejoin a fenced installation as a standby.
+authenticated WebSocket channel, and module-owned snapshot adapters for core
+site data and every module currently shipped in this repository. Sync settings
+use exactly three tabs: ChurchTools, Elvanto, and Server-to-server. The
+Server-to-server tab configures a standby, pushes and verifies a snapshot,
+fences this installation as read-only, promotes a standby, and rejoins a fenced
+installation as a standby.
 Promotion is manual and requires an administrator to attest that the old
 primary was externally fenced. Redundancy remains blocked until all enabled
 modules pass readiness and recovery is verified between two independent
@@ -24,8 +25,12 @@ because the servers are paired.
 - Every network operation is initiated by the configured sync-client server.
   The source only answers authenticated requests and never opens a connection
   back to the client.
-- Federation uses the existing Smart-Church HTTPS/API origin and listener. It
-  adds no listener, network service, or firewall port.
+- Federation uses the existing Smart-Church HTTPS/API origin and listener. Peer
+  discovery, pairing, status, replication, and data transfer use the
+  authenticated WebSocket channel; federation v1 HTTP handlers are internal
+  dispatch targets and reject direct network requests. The WebSocket HTTP
+  upgrade is the only HTTP exchange used by federation. No listener, network
+  service, or firewall port is added.
 - Administrators pair peers explicitly and verify fingerprints through an
   independent channel before approving either direction of trust.
 - HTTPS protects requests in transit. Signed requests bind the sender, method,
@@ -91,8 +96,9 @@ Pairing uses a one-time invitation created by the receiving installation:
    it after 30 minutes. It is single-use and bound to B's current installation
    identity. Revoke it at any time.
 2. An administrator on server A enters B's base URL and invitation code. A
-   fetches B's public identity over HTTPS: protocol version, installation UUID,
-   display name, public key, fingerprint, and a signature over the response.
+   opens the authenticated WebSocket channel to B and requests its public
+   identity: protocol version, installation UUID, display name, public key,
+   fingerprint, and a signature over the response.
    A shows the exact URL, identity, and full fingerprint. The administrator
    compares that fingerprint with B through a separate trusted channel.
 3. After explicit confirmation, A sends a pairing request containing A's
@@ -111,9 +117,10 @@ Pairing uses a one-time invitation created by the receiving installation:
 
 Invitation codes are secrets: never log them, put them in URLs, or store them
 in clear text. The base URL must be an HTTP(S) origin with no credentials,
-query, or fragment. Production peer connections require HTTPS. Local development
-may use HTTP for loopback fixtures only. Redirects are disabled for all peer
-requests.
+query, or fragment; it supplies the existing API listener address used for the
+WebSocket upgrade. Production peer connections require WSS over HTTPS. Local
+development may use WS over HTTP for loopback fixtures only. Federation does
+not fall back to standalone HTTP requests.
 
 ## Signed request protocol
 
@@ -273,7 +280,7 @@ identity verification; do not offer an unauthenticated reset.
 Redundancy is a special replication relationship, not a second ordinary copy
 of selected records. The intended topology is one writable primary and one or
 more read-only standby servers carrying the same location ID. The primary may
-push to a reachable standby over the same existing HTTPS/API endpoint, so the
+push to a reachable standby over the existing bidirectional WSS channel, so the
 primary does not need port forwarding. A standby never sends writes back while
 it is in standby mode. The site administrator explicitly chooses the primary,
 standby, and supported modules/data, and sees per-module replication health.
