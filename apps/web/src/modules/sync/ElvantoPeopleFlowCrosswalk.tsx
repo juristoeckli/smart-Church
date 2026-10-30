@@ -139,12 +139,6 @@ export function ElvantoPeopleFlowCrosswalk({ departmentId }: { departmentId: str
     setLocalFlowId(selected?.localFlowId ?? "");
     setStepSelection(Object.fromEntries((selected?.stepLinks ?? []).map((link) => [link.sourceStepId, link.localStepId])));
     setNotice("");
-    "Loading…": "Caricamento…",
-    "Saving…": "Salvataggio…",
-    "active": "attivo",
-    "archived": "archiviato",
-    "Remove stale link": "Rimuovi collegamento obsoleto",
-    "· Source flow missing": "· Flow sorgente mancante",
   }, [selected?.sourceFlowId, selected?.localFlowId, selected?.stepLinks]);
 
   async function save() {
