@@ -1450,6 +1450,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (contact.phone) body.phone = contact.phone;
           }
           Object.assign(body, elvantoPeopleProfileExport(contact.profile_data, remotePerson));
+          const fieldsSent = [
+            ...Object.keys(body).filter((key) => key !== "fields"),
+            ...Object.keys((body.fields as JsonObject | undefined) ?? {}).map((key) => `field:${key}`),
+          ];
           let remoteId = item.sourceId;
           writeAttempted = true;
           const result = await elvantoRequest(apiKey, item.action === "create" ? "people/create" : "people/edit", { ...(item.action === "update" ? { id: item.sourceId } : {}), ...body });
@@ -1459,6 +1463,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           try {
             await client.query("BEGIN");
             if (item.action === "create") await client.query("UPDATE contacts SET elvanto_source_id=$3,updated_at=now() WHERE department_id=$1 AND id=$2 AND source_system IS NULL", [dept, item.contactId, remoteId]);
+            await client.query(
+              "INSERT INTO elvanto_people_export_audit (department_id,contact_id,source_person_id,operation,fields_sent,actor_user_id) VALUES ($1,$2,$3,$4,$5::jsonb,$6)",
+              [dept, contact.id, remoteId, item.action, JSON.stringify(fieldsSent), request.authenticatedUser?.id ?? null],
+            );
             index += 1; writes += 1; processed += 1;
             if (item.action === "create") created += 1; else updated += 1;
             const complete = index >= records.length;
@@ -1478,6 +1486,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (reserved) await pool!.query("UPDATE elvanto_sync_settings SET people_exporting=FALSE,people_export_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
         elvantoPeopleExportRunning.delete(dept);
       }
+    });
+    routes.get("/api/modules/sync/elvanto/people-export-audit", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const result = await pool!.query<{ source_person_id: string; operation: string; fields_sent: string[]; actor_user_id: string | null; created_at: Date | string }>(
+        "SELECT source_person_id,operation,fields_sent,actor_user_id,created_at FROM elvanto_people_export_audit WHERE department_id=$1 ORDER BY created_at DESC LIMIT 25",
+        [dept],
+      );
+      return result.rows.map((row) => ({ sourcePersonId: row.source_person_id, operation: row.operation, fieldsSent: row.fields_sent, actorUserId: row.actor_user_id, createdAt: row.created_at }));
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/elvanto/people-import", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
