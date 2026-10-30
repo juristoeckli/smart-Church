@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { decryptYoutubeToken, encryptYoutubeToken } from "./youtube.js";
@@ -16,21 +15,6 @@ const maxSnapshotBytes = 50 * 1024 * 1024;
 function encryptionKeyFingerprint() {
   const key = process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim() ?? "";
   return key ? createHash("sha256").update(key).digest("hex") : "missing-key";
-}
-
-async function workerConfiguration() {
-  const configPath = process.env.STREAMING_CONFIG_FILE?.trim();
-  if (!configPath) throw new Error("Set STREAMING_CONFIG_FILE and configure this location in the Video module's worker settings.");
-  const raw = await readFile(configPath, "utf8");
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { throw new Error("The Video module worker configuration is not valid JSON."); }
-  if (!parsed || typeof parsed !== "object" || !Array.isArray((parsed as { sites?: unknown }).sites)) throw new Error("The Video module worker configuration must contain a sites array.");
-  const runtimeSettings = [
-    process.env.BMD_CONVERTER_DS700_HOST?.trim() ?? "",
-    process.env.BMD_CONVERTER_DS700_PORT?.trim() ?? "19540",
-    process.env.BMD_CONVERTER_CLIENT_MAC?.trim() ?? "",
-  ];
-  return createHash("sha256").update(JSON.stringify([parsed, runtimeSettings])).digest("hex");
 }
 
 function canonical(value: unknown): string {
@@ -69,10 +53,9 @@ export function registerVideoSteffisburgReplication(context: ModuleServerContext
       try {
         const snapshot = await collect(pool, departmentId);
         const blockers: string[] = [];
-        try { await workerConfiguration(); }
-        catch (error) { blockers.push(error instanceof Error ? error.message : "The Video module worker configuration is unavailable on this server."); }
-        const worker = context.getVideoWorker();
-        if (!worker || worker.state.state !== "ready") blockers.push(`The local Video worker is ${worker?.state.state ?? "unavailable"}${worker?.state.error ? `: ${worker.state.error}` : "."}`);
+        // Hardware and worker configuration belong to each installation. A
+        // standby can safely replicate the module's site data without access
+        // to the source site's local devices; activation remains server-local.
         if (Buffer.byteLength(JSON.stringify(snapshot)) > maxSnapshotBytes) blockers.push("Video Steffisburg settings and planned streams exceed the 50 MiB snapshot limit.");
         const encryptedValues = [
           ...snapshot.youtubeConnections.map((row) => row.encrypted_refresh_token),

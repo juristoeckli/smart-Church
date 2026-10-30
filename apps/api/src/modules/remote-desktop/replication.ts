@@ -51,23 +51,13 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
         const bytes = Buffer.byteLength(JSON.stringify(snapshot));
         const blockers: string[] = [];
         if (bytes > maxBytes) blockers.push("Remote Desktop settings and destinations exceed the 50 MiB snapshot limit.");
-        const apiUrl = process.env.SYSTEM_LAPTOP_GUACAMOLE_API_URL?.trim() ?? "";
-        try {
-          const url = new URL(apiUrl);
-          if (!new Set(["http:", "https:"]).has(url.protocol) || url.username || url.password) throw new Error("invalid gateway URL");
-        } catch { blockers.push("Configure the local Guacamole API URL on this server before enabling Remote Desktop failover."); }
-        if (apiUrl) {
-          try {
-            const probe = await fetch(`${apiUrl.replace(/\/$/, "")}/guacamole-common-js/all.min.js`, { signal: AbortSignal.timeout(2_500) });
-            await probe.body?.cancel();
-            if (!probe.ok) blockers.push(`The local Guacamole gateway returned HTTP ${probe.status}; Remote Desktop will not be available after failover.`);
-          } catch { blockers.push("The local Guacamole gateway cannot be reached; Remote Desktop will not be available after failover."); }
-        }
         const key = encryptionKey();
-        if (!key) blockers.push("Set SYSTEM_LAPTOP_JSON_SECRET_KEY on this server before using or replicating Remote Desktop credentials.");
-        else for (const destination of snapshot.destinations) {
-          try { decryptPassword(destination, key); }
-          catch { blockers.push(`The saved password for ${String(destination.name ?? destination.id)} cannot be decrypted with SYSTEM_LAPTOP_JSON_SECRET_KEY.`); break; }
+        if (snapshot.destinations.length) {
+          if (!key) blockers.push("Set SYSTEM_LAPTOP_JSON_SECRET_KEY on this server before replicating Remote Desktop credentials.");
+          else for (const destination of snapshot.destinations) {
+            try { decryptPassword(destination, key); }
+            catch { blockers.push(`The saved password for ${String(destination.name ?? destination.id)} cannot be decrypted with SYSTEM_LAPTOP_JSON_SECRET_KEY.`); break; }
+          }
         }
         return { ready: !blockers.length, blockers, recordCount: snapshot.destinations.length + snapshot.settings.length };
       } catch (error) { return { ready: false, blockers: [error instanceof Error ? error.message.slice(0, 240) : "Remote Desktop readiness could not be checked."], recordCount: 0 }; }
