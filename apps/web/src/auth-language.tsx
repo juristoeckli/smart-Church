@@ -92,6 +92,8 @@ export const authTranslations = {
     confirmAddress: "Confirm email address",
     returnToSignIn: "Return to sign in",
     verifiedFootnote: "Your email is verified before the administrator review.",
+    site: "Site",
+    chooseSite: "Choose a site",
   },
   de: {
     language: "Sprache",
@@ -175,6 +177,8 @@ export const authTranslations = {
     confirmAddress: "E-Mail-Adresse bestätigen",
     returnToSignIn: "Zur Anmeldung",
     verifiedFootnote: "Vor der administrativen Prüfung wird deine E-Mail-Adresse bestätigt.",
+    site: "Standort",
+    chooseSite: "Standort auswählen",
   },
   fr: {
     language: "Langue",
@@ -258,6 +262,8 @@ export const authTranslations = {
     confirmAddress: "Confirmer l’adresse e-mail",
     returnToSignIn: "Retour à la connexion",
     verifiedFootnote: "Votre adresse e-mail est vérifiée avant l’examen par l’administration.",
+    site: "Site",
+    chooseSite: "Choisir un site",
   },
   it: {
     language: "Lingua",
@@ -341,6 +347,8 @@ export const authTranslations = {
     confirmAddress: "Conferma indirizzo e-mail",
     returnToSignIn: "Torna all’accesso",
     verifiedFootnote: "L’indirizzo e-mail viene verificato prima della revisione amministrativa.",
+    site: "Sede",
+    chooseSite: "Scegli una sede",
   },
 } satisfies Record<UserLanguage, Record<string, string>>;
 
