@@ -186,7 +186,8 @@ export class FederationChannels {
     });
     socket.addEventListener("error", (event) => {
       if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
-      const detail = event instanceof ErrorEvent && event.message ? `: ${event.message.slice(0, 160)}` : "";
+      const eventMessage = (event as Event & { message?: unknown }).message;
+      const detail = typeof eventMessage === "string" && eventMessage ? `: ${eventMessage.slice(0, 160)}` : "";
       this.outboundErrors.set(peer.installation_id, `Could not connect to ${origin.host} over WebSocket${detail}.`);
     });
     const attempt = new Promise<void>((resolve, reject) => {
