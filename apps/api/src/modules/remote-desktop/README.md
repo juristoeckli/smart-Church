@@ -37,6 +37,8 @@ Each selected destination must be reachable from `guacd` on its configured proto
 
 When the deployment overlay is enabled, `guacd` writes its output to the shared remote-desktop log volume while continuing to write to Docker's normal container log. The API tails that file into the existing runtime diagnostics buffer as source `guacd`; `GET /api/admin/diagnostics` then includes those entries for authorized server diagnostics readers. The default log level is `info`. A server administrator can change it in Settings → Modules → Remote desktop; guacd applies the new level automatically and keeps it across container restarts. `REMOTE_DESKTOP_GUACD_LOG_LEVEL` in `.env` is only the initial default for a fresh log volume.
 
+VNC destinations can disable dynamic display resizing individually in Settings → Modules → Remote desktop destinations. This is useful for fixed-size VNC servers that do not support Guacamole's browser-driven display resize requests.
+
 ## Shared control and display size
 
 One site administrator can control the desktop at a time. The API grants a short pending lease while the controller connects, then holds the lease until that WebSocket closes. Other members of the same location join the active Guacamole connection in read-only mode; they cannot send keyboard or mouse input. A viewer cannot create the session, and a viewer from another location cannot join it.

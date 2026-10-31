@@ -11,7 +11,7 @@ remote_desktop_encode() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
 remote_desktop_decode() { printf '%s' "$1" | base64 -d; }
 
 configure_remote_desktop_destinations() {
-  local department_id="$1" action choice row id name64 host64 port protocol username64 auto name host username password password_mode payload auto_text rows_text ready=0 attempt
+  local department_id="$1" action choice row id name64 host64 port protocol username64 auto disable_resize name host username password password_mode payload auto_text resize_text rows_text ready=0 attempt
   local -a rows=() choices=()
   for attempt in {1..30}; do
     if rows_text="$(remote_desktop_store list "$department_id" 2>/dev/null)"; then ready=1; break; fi
@@ -22,7 +22,7 @@ configure_remote_desktop_destinations() {
   echo "Remote desktop destinations for $(env_value SMART_CHURCH_DEPARTMENT_NAME):"
   local index=1
   for row in "${rows[@]}"; do
-    IFS=$'\t' read -r id name64 host64 port protocol username64 auto <<< "$row"
+    IFS=$'\t' read -r id name64 host64 port protocol username64 auto disable_resize <<< "$row"
     printf '  %s. %s — %s://%s:%s (user: %s)\n' "$index" "$(remote_desktop_decode "$name64")" "$protocol" "$(remote_desktop_decode "$host64")" "$port" "$(remote_desktop_decode "$username64")"
     ((index+=1))
   done
@@ -36,7 +36,7 @@ configure_remote_desktop_destinations() {
     ((${#rows[@]} > 0)) || { echo 'There are no destinations to edit or remove.'; return 0; }
     local -a menu_args=()
     for row in "${rows[@]}"; do
-      IFS=$'\t' read -r id name64 host64 port protocol username64 auto <<< "$row"
+      IFS=$'\t' read -r id name64 host64 port protocol username64 auto disable_resize <<< "$row"
       menu_args+=("$id" "$(remote_desktop_decode "$name64") · $protocol · $(remote_desktop_decode "$host64"):$port")
     done
     if command -v whiptail >/dev/null; then
@@ -54,7 +54,7 @@ configure_remote_desktop_destinations() {
     fi
     id="$choice"
     for row in "${rows[@]}"; do
-      IFS=$'\t' read -r row_id name64 host64 port protocol username64 auto <<< "$row"
+      IFS=$'\t' read -r row_id name64 host64 port protocol username64 auto disable_resize <<< "$row"
       [[ "$row_id" == "$id" ]] && break
     done
     name="$(remote_desktop_decode "$name64")"
@@ -68,6 +68,7 @@ configure_remote_desktop_destinations() {
     protocol="rdp"
     username=""
     auto=1
+    disable_resize=0
   fi
   read -r -p "Destination name [${name:-new destination}]: " choice </dev/tty
   name="${choice:-$name}"
@@ -84,6 +85,13 @@ configure_remote_desktop_destinations() {
   if [[ "$auto" == 1 ]]; then auto_text=1; else auto_text=0; fi
   read -r -p "Autologin with saved username and password? [${auto_text/1/Y}${auto_text/0/n}/Y]: " choice </dev/tty
   [[ "$choice" =~ ^[Nn]$ ]] && auto_text=0 || auto_text=1
+  if [[ "$protocol" == vnc ]]; then
+    if [[ "$disable_resize" == 1 ]]; then resize_text=Y; else resize_text=n; fi
+    read -r -p "Disable dynamic VNC display resizing? [${resize_text}]: " choice </dev/tty
+    if [[ -n "$choice" ]]; then [[ "$choice" =~ ^[Yy]$ ]] && disable_resize=1 || disable_resize=0; fi
+  else
+    disable_resize=0
+  fi
   if [[ "$id" ]]; then
     read -r -s -p 'New password (Enter = empty password; type - to keep current): ' password </dev/tty
     echo >/dev/tty
@@ -93,7 +101,7 @@ configure_remote_desktop_destinations() {
     echo >/dev/tty
     password_mode=set
   fi
-  payload="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$(remote_desktop_encode "$name")" "$(remote_desktop_encode "$host")" "$port" "$protocol" "$(remote_desktop_encode "$username")" "$(remote_desktop_encode "$password")" "$auto_text" "$password_mode")"
+  payload="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$(remote_desktop_encode "$name")" "$(remote_desktop_encode "$host")" "$port" "$protocol" "$(remote_desktop_encode "$username")" "$(remote_desktop_encode "$password")" "$auto_text" "$disable_resize" "$password_mode")"
   remote_desktop_store save "$department_id" "$payload"
 }
 

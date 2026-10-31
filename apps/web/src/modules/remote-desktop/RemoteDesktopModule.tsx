@@ -57,7 +57,7 @@ interface GuacSession {
   tunnelUrl: string;
   libraryUrl: string;
 }
-interface RemoteDesktopDestination { id: string; name: string; host: string; port: number; protocol: "rdp" | "vnc" | "spice"; username: string; autologin: boolean; passwordConfigured: boolean; }
+interface RemoteDesktopDestination { id: string; name: string; host: string; port: number; protocol: "rdp" | "vnc" | "spice"; username: string; autologin: boolean; disableDisplayResize: boolean; passwordConfigured: boolean; }
 declare global {
   interface Window {
     Guacamole?: {

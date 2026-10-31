@@ -17,6 +17,7 @@
 .remote-desktop-form-grid input,.remote-desktop-form-grid select{width:100%;min-width:0;height:36px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:var(--surface);color:var(--ink);font:inherit}
 .remote-desktop-setting-toggle{display:flex;align-items:center;gap:8px;color:var(--ink);font-size:10px}
 .remote-desktop-setting-toggle input{width:15px;height:15px;accent-color:var(--green)}
+.remote-desktop-setting-toggle small{flex:0 0 calc(100% - 23px);margin-left:23px;color:var(--muted);font-size:9px}
 .remote-desktop-form-actions{display:flex;justify-content:flex-end;gap:8px}
 .remote-desktop-settings-feedback,.remote-desktop-settings-error{margin:0;font-size:10px;color:var(--green)}
 .remote-desktop-settings-error{color:var(--danger,#b04f4f)}

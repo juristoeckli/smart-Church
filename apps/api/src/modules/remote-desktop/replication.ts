@@ -35,15 +35,15 @@ function encryptPassword(password: string, key: Buffer) {
 
 async function collect(client: Pick<PoolClient, "query">, departmentId: string): Promise<Snapshot> {
   const settings = await client.query("SELECT managed,updated_at FROM remote_desktop_site_settings WHERE department_id=$1", [departmentId]);
-  const destinations = await client.query("SELECT id,name,host,port,protocol,username,password_ciphertext,password_iv,password_tag,autologin,created_at,updated_at FROM remote_desktop_destinations WHERE department_id=$1 ORDER BY id", [departmentId]);
+  const destinations = await client.query("SELECT id,name,host,port,protocol,username,password_ciphertext,password_iv,password_tag,autologin,disable_display_resize,created_at,updated_at FROM remote_desktop_destinations WHERE department_id=$1 ORDER BY id", [departmentId]);
   return { version: 1, settings: settings.rows as Array<Record<string, unknown>>, destinations: destinations.rows as StoredDestination[] };
 }
 
 export function registerRemoteDesktopReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "2",
-    getSchemaVersion: async () => "2",
+    schemaVersion: "3",
+    getSchemaVersion: async () => "3",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Remote Desktop database is unavailable."], recordCount: 0 };
       try {
@@ -100,15 +100,15 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
       await client.query("DELETE FROM remote_desktop_site_settings WHERE department_id=$1", [departmentId]);
       for (const row of snapshot.settings) await client.query("INSERT INTO remote_desktop_site_settings(department_id,managed,updated_at) VALUES($1,$2,$3)", [departmentId, row.managed, row.updated_at]);
       for (const row of snapshot.destinations) await client.query(`INSERT INTO remote_desktop_destinations
-        (id,department_id,name,host,port,protocol,username,password_ciphertext,password_iv,password_tag,autologin,created_at,updated_at)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [row.id, departmentId, row.name, row.host, row.port, row.protocol, row.username, row.password_ciphertext, row.password_iv, row.password_tag, row.autologin, row.created_at, row.updated_at]);
+        (id,department_id,name,host,port,protocol,username,password_ciphertext,password_iv,password_tag,autologin,disable_display_resize,created_at,updated_at)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [row.id, departmentId, row.name, row.host, row.port, row.protocol, row.username, row.password_ciphertext, row.password_iv, row.password_tag, row.autologin, row.disable_display_resize ?? false, row.created_at, row.updated_at]);
       return { recordCount: snapshot.settings.length + snapshot.destinations.length };
     },
     verifySnapshot: async (client, departmentId, input) => {
       const expected = input as Snapshot;
       if (!expected || expected.version !== 1 || !Array.isArray(expected.settings) || !Array.isArray(expected.destinations)) return { ready: false, blockers: ["No supported Remote Desktop snapshot is available."] };
       const actual = await collect(client, departmentId);
-      return canonical(actual) === canonical({ ...expected, settings: expected.settings.map((row) => ({ ...row })) })
+      return canonical(actual) === canonical({ ...expected, settings: expected.settings.map((row) => ({ ...row })), destinations: expected.destinations.map((row) => ({ ...row, disable_display_resize: row.disable_display_resize ?? false })) })
         ? { ready: true, blockers: [] }
         : { ready: false, blockers: ["Remote Desktop settings or destinations do not match the verified snapshot."] };
     },
