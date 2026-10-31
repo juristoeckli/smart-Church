@@ -258,8 +258,17 @@ export interface AuthenticatedUser {
   dateTimeFormat: DateTimeFormat;
   language: UserLanguage;
   languageIsCustom: boolean;
+  menuPreferences?: UserMenuPreferences | null;
   serverPermissions: ServerPermission[];
   isServiceUser?: boolean;
+}
+
+export interface UserMenuPreferences {
+  order: string[];
+  hidden: string[];
+  sections: Array<{ id: string; name: string; itemIds: string[] }>;
+  hiddenSections: string[];
+  duplicates: Array<{ id: string; targetId: string }>;
 }
 
 export type DateTimeFormat = "DD.MM.YYYY HH:MM" | "DD/MM/YYYY HH:MM" | "MM/DD/YYYY h:mm AM/PM" | "YYYY-MM-DD HH:MM";

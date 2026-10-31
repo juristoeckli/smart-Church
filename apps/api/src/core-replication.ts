@@ -45,7 +45,7 @@ const exportQueries: Record<SnapshotTable, string> = {
   user_relationships: "SELECT relation.* FROM user_relationships relation WHERE relation.user_id IN (SELECT user_id FROM department_memberships WHERE department_id=$1) AND relation.related_user_id IN (SELECT user_id FROM department_memberships WHERE department_id=$1) ORDER BY relation.user_id,relation.related_user_id",
   // Account credentials and profile follow site membership. Server-wide roles
   // and permissions intentionally stay local to each installation.
-  app_users: "SELECT DISTINCT account.id,account.email,account.username,account.display_name,account.password_hash,account.must_change_password,account.can_change_password,account.birthday,account.street,account.street_number,account.postal_code,account.city,account.date_time_format,account.language,account.language_is_custom,account.created_at FROM app_users account JOIN department_memberships member ON member.user_id=account.id WHERE member.department_id=$1 ORDER BY account.id",
+  app_users: "SELECT DISTINCT account.id,account.email,account.username,account.display_name,account.password_hash,account.must_change_password,account.can_change_password,account.birthday,account.street,account.street_number,account.postal_code,account.city,account.date_time_format,account.language,account.language_is_custom,account.created_at,account.menu_preferences FROM app_users account JOIN department_memberships member ON member.user_id=account.id WHERE member.department_id=$1 ORDER BY account.id",
 };
 
 const deleteQueries = [
@@ -143,20 +143,20 @@ export function registerCoreReplicationAdapter(pool: Pool) {
         if (existingByEmail.rowCount && existingByEmail.rows[0].id !== sourceId) {
           userIdMap.set(sourceId, existingByEmail.rows[0].id);
           await client.query(`UPDATE app_users SET email=$2,username=$3,display_name=$4,password_hash=$5,must_change_password=$6,can_change_password=$7,
-              birthday=$8,street=$9,street_number=$10,postal_code=$11,city=$12,date_time_format=$13,language=$14,language_is_custom=$15,created_at=$16
+              birthday=$8,street=$9,street_number=$10,postal_code=$11,city=$12,date_time_format=$13,language=$14,language_is_custom=$15,created_at=$16,menu_preferences=$17
             WHERE id=$1`, [existingByEmail.rows[0].id, email, username, sourceUser.display_name, sourceUser.password_hash,
             sourceUser.must_change_password, sourceUser.can_change_password ?? true, sourceUser.birthday, sourceUser.street, sourceUser.street_number,
-            sourceUser.postal_code, sourceUser.city, sourceUser.date_time_format, sourceUser.language, sourceUser.language_is_custom, sourceUser.created_at]);
+            sourceUser.postal_code, sourceUser.city, sourceUser.date_time_format, sourceUser.language, sourceUser.language_is_custom, sourceUser.created_at, sourceUser.menu_preferences ?? null]);
           continue;
         }
         if (existingById.rowCount && email && existingById.rows[0].email && existingById.rows[0].email.toLowerCase() !== email.toLowerCase()) throw new Error("A local account conflicts with a replicated user ID. Resolve the account mapping before restoring this site.");
         if (existingById.rowCount) {
           userIdMap.set(sourceId, sourceId);
           await client.query(`UPDATE app_users SET email=$2,username=$3,display_name=$4,password_hash=$5,must_change_password=$6,can_change_password=$7,
-              birthday=$8,street=$9,street_number=$10,postal_code=$11,city=$12,date_time_format=$13,language=$14,language_is_custom=$15,created_at=$16
+              birthday=$8,street=$9,street_number=$10,postal_code=$11,city=$12,date_time_format=$13,language=$14,language_is_custom=$15,created_at=$16,menu_preferences=$17
             WHERE id=$1`, [sourceId, email, username, sourceUser.display_name, sourceUser.password_hash,
             sourceUser.must_change_password, sourceUser.can_change_password ?? true, sourceUser.birthday, sourceUser.street, sourceUser.street_number,
-            sourceUser.postal_code, sourceUser.city, sourceUser.date_time_format, sourceUser.language, sourceUser.language_is_custom, sourceUser.created_at]);
+            sourceUser.postal_code, sourceUser.city, sourceUser.date_time_format, sourceUser.language, sourceUser.language_is_custom, sourceUser.created_at, sourceUser.menu_preferences ?? null]);
           continue;
         }
         const existingUsername = await client.query("SELECT 1 FROM app_users WHERE lower(username)=lower($1)", [username]);

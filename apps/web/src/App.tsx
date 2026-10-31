@@ -29,7 +29,7 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, HttpAccessMode, LocationPermission, PresenterPermission, ServerPermission, SiteUser, UserPhoneLabel, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VideoPermission } from "@smart-church/contracts";
+import type { AuthenticatedUser, AuthStatus, Contact, ContactStatus, CreateSiteUser, DepartmentProfile, HttpAccessMode, LocationPermission, PresenterPermission, ServerPermission, SiteUser, UserMenuPreferences, UserPhoneLabel, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VideoPermission } from "@smart-church/contracts";
 import { Authentication, PasswordChangeRequired } from "./Authentication";
 import { SelfSignupPage } from "./SelfSignup";
 import { SelfSignupAdmin } from "./SelfSignupAdmin";
@@ -62,20 +62,20 @@ const navigation = [
   { label: "Groups", icon: ContactRound },
   { label: "Resources", icon: Building2 },
 ];
-type MenuSectionPreference = { id: string; name: string; itemIds: string[] };
-type MenuDuplicatePreference = { id: string; targetId: string };
+type MenuSectionPreference = UserMenuPreferences["sections"][number];
+type MenuDuplicatePreference = UserMenuPreferences["duplicates"][number];
 type MenuItem = { id: string; label: string; targetId?: string; isDuplicate?: boolean; kind?: "module-sub"; moduleId?: string; state?: string; parentId?: string };
-type MenuPreference = { order: string[]; hidden: string[]; sections: MenuSectionPreference[]; hiddenSections: string[]; duplicates: MenuDuplicatePreference[] };
+type MenuPreference = UserMenuPreferences;
 const defaultMenuPreference: MenuPreference = { order: [], hidden: [], sections: [], hiddenSections: [], duplicates: [] };
-function loadMenuPreference(userId: string): MenuPreference {
+function loadLegacyMenuPreference(userId: string): MenuPreference | null {
   try {
     const saved = localStorage.getItem(`smart-church-menu:${userId}`);
-    if (!saved) return defaultMenuPreference;
+    if (!saved) return null;
     const parsed = JSON.parse(saved) as Partial<MenuPreference>;
     const sections = Array.isArray(parsed.sections) ? parsed.sections.filter((section): section is MenuSectionPreference => Boolean(section && typeof section.id === "string" && typeof section.name === "string" && Array.isArray(section.itemIds))).map((section) => ({ ...section, itemIds: section.itemIds.filter((id): id is string => typeof id === "string") })) : [];
     const duplicates = Array.isArray(parsed.duplicates) ? parsed.duplicates.filter((item): item is MenuDuplicatePreference => Boolean(item && typeof item.id === "string" && typeof item.targetId === "string")) : [];
     return { order: Array.isArray(parsed.order) ? parsed.order.filter((id): id is string => typeof id === "string") : [], hidden: Array.isArray(parsed.hidden) ? parsed.hidden.filter((id): id is string => typeof id === "string") : [], sections, hiddenSections: Array.isArray(parsed.hiddenSections) ? parsed.hiddenSections.filter((id): id is string => typeof id === "string") : [], duplicates };
-  } catch { return defaultMenuPreference; }
+  } catch { return null; }
 }
 const videoPermissionOptions: Array<{ value: VideoPermission; label: string; description: string }> = [
   { value: "video_basic", label: "Video Basic", description: "View streaming, routing, status and history." },
@@ -298,6 +298,8 @@ function WorkspaceApp() {
   const [notice, setNotice] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPreferences, setMenuPreferences] = useState<MenuPreference>(defaultMenuPreference);
+  const menuPreferenceSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const loadedMenuPreferencesUserId = useRef("");
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
   const [isAddingMenuSection, setIsAddingMenuSection] = useState(false);
   const [newMenuSectionName, setNewMenuSectionName] = useState("");
@@ -512,8 +514,32 @@ function WorkspaceApp() {
   }, [activeNavSection, compactNavigation]);
 
   useEffect(() => {
-    setMenuPreferences(authUser ? loadMenuPreference(authUser.id) : defaultMenuPreference);
-  }, [authUser?.id]);
+    if (!authUser) {
+      loadedMenuPreferencesUserId.current = "";
+      setMenuPreferences(defaultMenuPreference);
+      return;
+    }
+    if (!csrfToken || loadedMenuPreferencesUserId.current === authUser.id) return;
+    loadedMenuPreferencesUserId.current = authUser.id;
+    if (authUser.menuPreferences) {
+      setMenuPreferences(authUser.menuPreferences);
+      try { localStorage.removeItem(`smart-church-menu:${authUser.id}`); } catch { /* No browser copy is needed once the server setting is available. */ }
+      return;
+    }
+    const legacyPreferences = loadLegacyMenuPreference(authUser.id);
+    setMenuPreferences(legacyPreferences ?? defaultMenuPreference);
+    if (!legacyPreferences) return;
+    menuPreferenceSaveQueue.current = menuPreferenceSaveQueue.current.catch(() => undefined).then(async () => {
+      const response = await fetch("/api/auth/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify({ menuPreferences: legacyPreferences }),
+      });
+      const result = await response.json() as { menuPreferences?: MenuPreference; error?: string };
+      if (!response.ok || !result.menuPreferences) throw new Error(result.error ?? "Could not import your saved menu.");
+      try { localStorage.removeItem(`smart-church-menu:${authUser.id}`); } catch { /* The server copy is saved; legacy browser data can be ignored. */ }
+    }).catch((reason: unknown) => setNotice(reason instanceof Error ? reason.message : "Could not import your saved menu."));
+  }, [authUser, csrfToken]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1245,9 +1271,17 @@ function WorkspaceApp() {
   const customMenuSections = menuPreferences.sections.map((section) => ({ ...section, items: orderedMenuItems(allMenuItems.filter((item) => section.itemIds.includes(item.id))) }));
   const saveMenuPreferences = (next: MenuPreference) => {
     setMenuPreferences(next);
-    if (authUser) {
-      try { localStorage.setItem(`smart-church-menu:${authUser.id}`, JSON.stringify(next)); } catch { /* Menu changes remain available until this page is closed. */ }
-    }
+    if (!authUser) return;
+    menuPreferenceSaveQueue.current = menuPreferenceSaveQueue.current.catch(() => undefined).then(async () => {
+      const token = csrfToken || await refreshCsrfToken();
+      const response = await fetch("/api/auth/preferences", {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-csrf-token": token },
+        body: JSON.stringify({ menuPreferences: next }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not save your menu preferences.");
+    }).catch((reason: unknown) => setNotice(reason instanceof Error ? reason.message : "Could not save your menu preferences."));
   };
   const reorderMenuItems = (sourceId: string, targetId: string, targetSectionId: string) => {
     if (!sourceId || (sourceId === targetId && !targetSectionId.startsWith("custom:"))) return;

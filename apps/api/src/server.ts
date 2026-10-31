@@ -153,13 +153,13 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
         WHERE token_hash = $1 AND expires_at > now()
         RETURNING user_id
      )
-     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.can_change_password, u.date_time_format, u.language, u.language_is_custom
+     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.can_change_password, u.date_time_format, u.language, u.language_is_custom, u.menu_preferences
        FROM active_session s JOIN app_users u ON u.id = s.user_id
       WHERE u.is_service_user = false AND u.is_enabled = true`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, menuPreferences: row.menu_preferences, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
 }
 
 function newApiKey() {
@@ -1235,7 +1235,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, can_change_password, date_time_format, language, language_is_custom, is_service_user, is_enabled FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, can_change_password, date_time_format, language, language_is_custom, menu_preferences, is_service_user, is_enabled FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
@@ -1257,7 +1257,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   for (const key of buckets) failedLogins.delete(key);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, menuPreferences: row.menu_preferences, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
   await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
@@ -1282,23 +1282,33 @@ app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   if (!user.canChangePassword) return reply.code(403).send({ error: "Password changes are disabled for this account." });
   if (request.body.password.length < 12) return reply.code(400).send({ error: "Choose a password with at least 12 characters." });
   const result = await pool.query(
-    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, server_permissions, date_time_format, language, language_is_custom",
+    "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, server_permissions, date_time_format, language, language_is_custom, menu_preferences",
     [user.id, hashPassword(request.body.password)],
   );
   const row = result.rows[0];
   if (!row) return reply.code(401).send({ error: "This account could not be found." });
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [user.id]);
   await createSession(user.id, request, reply, request.protocol === "https");
-  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } };
+  return { user: { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: false, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, menuPreferences: row.menu_preferences, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } };
 });
 
-app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage | null } }>("/api/auth/preferences", {
+app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFormat; language?: import("@smart-church/contracts").UserLanguage | null; menuPreferences?: import("@smart-church/contracts").UserMenuPreferences } }>("/api/auth/preferences", {
   schema: {
     body: {
       type: "object", additionalProperties: false, minProperties: 1,
       properties: {
         dateTimeFormat: { type: "string", enum: ["DD.MM.YYYY HH:MM", "DD/MM/YYYY HH:MM", "MM/DD/YYYY h:mm AM/PM", "YYYY-MM-DD HH:MM"] },
         language: { anyOf: [{ type: "string", enum: ["en", "de", "fr", "it"] }, { type: "null" }] },
+        menuPreferences: {
+          type: "object", additionalProperties: false, required: ["order", "hidden", "sections", "hiddenSections", "duplicates"],
+          properties: {
+            order: { type: "array", maxItems: 500, items: { type: "string", maxLength: 200 } },
+            hidden: { type: "array", maxItems: 500, items: { type: "string", maxLength: 200 } },
+            sections: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["id", "name", "itemIds"], properties: { id: { type: "string", maxLength: 200 }, name: { type: "string", minLength: 1, maxLength: 40 }, itemIds: { type: "array", maxItems: 500, items: { type: "string", maxLength: 200 } } } } },
+            hiddenSections: { type: "array", maxItems: 100, items: { type: "string", maxLength: 200 } },
+            duplicates: { type: "array", maxItems: 500, items: { type: "object", additionalProperties: false, required: ["id", "targetId"], properties: { id: { type: "string", maxLength: 200 }, targetId: { type: "string", maxLength: 200 } } } },
+          },
+        },
       },
     },
   },
@@ -1312,11 +1322,12 @@ app.put<{ Body: { dateTimeFormat?: import("@smart-church/contracts").DateTimeFor
     `UPDATE app_users
         SET date_time_format = COALESCE($2, date_time_format),
             language = CASE WHEN $3 THEN COALESCE($4, language) ELSE language END,
-            language_is_custom = CASE WHEN $3 THEN $4 IS NOT NULL ELSE language_is_custom END
+            language_is_custom = CASE WHEN $3 THEN $4 IS NOT NULL ELSE language_is_custom END,
+            menu_preferences = CASE WHEN $5 THEN $6::jsonb ELSE menu_preferences END
       WHERE id = $1`,
-    [user.id, request.body.dateTimeFormat ?? null, Object.hasOwn(request.body, "language"), request.body.language ?? null],
+    [user.id, request.body.dateTimeFormat ?? null, Object.hasOwn(request.body, "language"), request.body.language ?? null, Object.hasOwn(request.body, "menuPreferences"), request.body.menuPreferences ? JSON.stringify(request.body.menuPreferences) : null],
   );
-  return { dateTimeFormat: request.body.dateTimeFormat ?? user.dateTimeFormat, language: request.body.language ?? user.language, languageIsCustom: request.body.language === undefined ? user.languageIsCustom : request.body.language !== null };
+  return { dateTimeFormat: request.body.dateTimeFormat ?? user.dateTimeFormat, language: request.body.language ?? user.language, languageIsCustom: request.body.language === undefined ? user.languageIsCustom : request.body.language !== null, menuPreferences: request.body.menuPreferences ?? user.menuPreferences ?? null };
 });
 
 app.get("/api/auth/sessions", async (request, reply) => {
