@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.2";
+  const VERSION = "0.3.3";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -15,6 +15,20 @@
   let progress = 0, networkError = "", storageError = "", playbackError = "";
   let currentKey = "", currentShow = null, slideIndex = 0, slideTimer, mediaUrl = "";
   let databasePromise;
+  // TV browsers can run async functions but lack newer DOM and Blob methods.
+  function replaceScreen(...children) {
+    while (screen.firstChild) screen.removeChild(screen.firstChild);
+    children.forEach(child => screen.appendChild(child));
+  }
+  function blobBytes(blob) {
+    if (blob.arrayBuffer) return blob.arrayBuffer();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Could not read downloaded media."));
+      reader.readAsArrayBuffer(blob);
+    });
+  }
   try { credentials = JSON.parse(localStorage.getItem(CONNECTION_KEY) || "null"); } catch {}
   if (credentials && (!credentials.displayId || !credentials.departmentId || !/^sc_[A-Za-z0-9_-]{40,60}$/.test(credentials.apiKey || ""))) credentials = null;
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/signage-sw.js").catch(() => {});
@@ -64,7 +78,7 @@
     screen.className = "";
     const h = document.createElement("h1"), p = document.createElement("p");
     h.textContent = heading; p.textContent = body;
-    screen.replaceChildren(h, p);
+    replaceScreen(h, p);
     requestAnimationFrame(() => {
       if (!h.isConnected) return;
       for (let attempt=0;attempt<24 && (screen.scrollHeight>screen.clientHeight || screen.scrollWidth>screen.clientWidth);attempt++) {
@@ -76,7 +90,7 @@
     clearTimeout(slideTimer);
     currentShow = null; currentKey = ""; slideIndex = 0;
     if (mediaUrl) { URL.revokeObjectURL(mediaUrl); mediaUrl = ""; }
-    screen.replaceChildren();
+    replaceScreen();
   }
   async function disconnect(reason = "") {
     const previous = credentials;
@@ -139,8 +153,8 @@
   }
   async function verified(blob, asset) {
     if (!(blob instanceof Blob) || blob.size !== asset.size) return false;
-    if (crypto.subtle) {
-      const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
+    if (window.crypto && window.crypto.subtle) {
+      const digest = await crypto.subtle.digest("SHA-256", await blobBytes(blob));
       if (Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("") !== asset.sha256) return false;
     }
     return true;
@@ -164,7 +178,7 @@
         let cached = memory.get(key);
         if (!cached || cached.sha256 !== asset.sha256) {
           cached = await cache("get", key);
-          let blob = cached instanceof Blob ? cached : cached?.blob;
+          let blob = cached instanceof Blob ? cached : (cached && cached.blob);
           if (!await verified(blob, asset)) {
             progress = Math.round(i / Math.max(1, assets.length) * 100);
             blob = await (await api("/media/" + asset.id, {}, connection)).blob();
@@ -219,10 +233,10 @@
       if (slide.mediaId) {
         const key = connection.displayId + ":media:" + slide.mediaId;
         const cached = memory.get(key) || await cache("get", key);
-        const blob = cached instanceof Blob ? cached : cached?.blob;
+        const blob = cached instanceof Blob ? cached : (cached && cached.blob);
         if (currentShow !== show || credentials !== connection) return;
-        const asset = plan.media?.find(item => item.id === slide.mediaId);
-        if (!asset || (memory.get(key)?.sha256 !== asset.sha256 && !await verified(blob, asset))) throw new Error("A cached media file is missing or corrupt. Waiting for a new download.");
+        const asset = (plan.media || []).find(item => item.id === slide.mediaId);
+        if (!asset || ((memory.get(key) && memory.get(key).sha256) !== asset.sha256 && !await verified(blob, asset))) throw new Error("A cached media file is missing or corrupt. Waiting for a new download.");
         if (!memory.has(key)) memory.set(key, { blob, sha256: asset.sha256, persisted: true });
         mediaUrl = URL.createObjectURL(blob);
         const element = document.createElement(slide.kind === "video" ? "video" : "img");
@@ -231,7 +245,7 @@
           element.muted = true; element.autoplay = true; element.loop = true; element.playsInline = true;
           element.onerror = () => { playbackError = "This video cannot be played by this browser."; };
         } else { element.alt = slide.heading || ""; element.onerror = () => { playbackError = "This image cannot be displayed."; }; }
-        screen.className = "media"; screen.replaceChildren(element);
+        screen.className = "media"; replaceScreen(element);
       } else text(slide.heading || "", slide.body || "");
       playbackError = "";
     } catch (error) { playbackError = error.message; text("Content is downloading", "Playback will resume automatically."); }
@@ -247,18 +261,18 @@
       await api("/heartbeat", { method: "POST", body: JSON.stringify({
         installationType: /Electron/i.test(navigator.userAgent) ? "Windows app" : matchMedia("(display-mode: standalone)").matches ? "Installed browser" : "Browser",
         uptimeSeconds: Math.floor((performance.now() - boot) / 1000), playerVersion: VERSION,
-        currentShowId: currentShow?.id || "", playbackError: [playbackError, storageError, networkError].filter(Boolean).join(" · ").slice(0, 1000),
+        currentShowId: (currentShow && currentShow.id) || "", playbackError: [playbackError, storageError, networkError].filter(Boolean).join(" · ").slice(0, 1000),
         downloadProgress: progress,
       }) });
     } catch {} finally { reporting = false; }
   }
   function showPairing() {
     setup.hidden=false;
-    if (/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingPending?.code || "")) {
+    if (/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test((pairingPending && pairingPending.code) || "")) {
       const bookmarkPath = "/signage-display.html/" + pairingPending.code;
-      if (location.pathname !== bookmarkPath) history.replaceState(null, "", bookmarkPath);
+      try { if (location.pathname !== bookmarkPath) history.replaceState(null, "", bookmarkPath); } catch {}
     }
-    document.getElementById("pair-code").textContent=pairingPending?.code || "Connecting…";
+    document.getElementById("pair-code").textContent=(pairingPending && pairingPending.code) || "Connecting…";
     const minutes=pairingPending?Math.max(0,Math.ceil((Date.parse(pairingPending.expiresAt)-Date.now())/60000)):0;
     document.getElementById("pair-expiry").textContent=minutes?"Code expires in "+minutes+" minute"+(minutes===1?"":"s")+".":"Waiting for a new code.";
   }
@@ -287,9 +301,10 @@
       const result=await response.json();if(!response.ok)throw new Error(result.error||"Waiting for connection.");
       if(result.status==="connected"){
         const connection={displayId:result.displayId,departmentId:result.departmentId,apiKey:pairingPending.apiKey};
-        localStorage.setItem(CONNECTION_KEY,JSON.stringify(connection));localStorage.removeItem(pendingKey);
+        try { localStorage.setItem(CONNECTION_KEY,JSON.stringify(connection));localStorage.removeItem(pendingKey); }
+        catch { storageError="This browser cannot save its connection. Enable site storage. Pair again after restarting."; }
         credentials=connection;pairingPending=null;plan=null;currentKey="";setup.hidden=true;pairError.textContent="";
-        if(navigator.storage?.persist)void navigator.storage.persist().catch(()=>{});
+        if((navigator.storage && navigator.storage.persist))void navigator.storage.persist().catch(()=>{});
         await synchronize();void heartbeat();return;
       }
       pairError.textContent="";
@@ -309,7 +324,7 @@
     await synchronize(); void heartbeat();
   }
   addEventListener("online", () => { void synchronize(); void heartbeat(); });
-  addEventListener("resize", () => { if(currentShow && !currentShow.slides[slideIndex]?.mediaId)void renderSlide(); });
+  addEventListener("resize", () => { if(currentShow && !(currentShow.slides[slideIndex] && currentShow.slides[slideIndex].mediaId))void renderSlide(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { void selectPlayback(); void synchronize(); } });
   void start();
   setInterval(() => void synchronize(), 30000);

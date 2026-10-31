@@ -29,6 +29,8 @@ The player downloads and verifies content before changing its saved plan, retain
 
 Operational checks: confirm **Connected**, **100% downloads**, the expected player version, and no playback error on the display page; then disconnect the test screen from the network and verify playback and restart recovery. Include PostgreSQL backup/restore in deployment acceptance. Browser playback and dated schedules are supported; native Windows packaging, recurring schedules, and automatic cross-server signage replication are outside this release.
 
+The player avoids newer JavaScript syntax and DOM/Blob methods unavailable in the Samsung 2021 Chromium 76 engine. Run `node apps/web/scripts/test-signage-compatibility.mjs` for simulated legacy-browser pairing and media checks; actual TV playback still requires hardware validation. Unavailable browser storage allows online playback but requires pairing again after restart. Startup errors are displayed on the setup screen.
+
 For repeatable validation, set `SIGNAGE_TEST_DATABASE_URL` to a fresh, disposable PostgreSQL database named `signage_validation`, then run `pnpm --filter @smart-church/api test:signage`. The test refuses a pre-existing application schema. Run `node --import tsx scripts/test-signage-server.mjs` from `apps/api` afterward for actual API authentication and module-catalog checks. `scripts/serve-signage-validation.mjs` starts a localhost test server for browser checks with fictional `signage_admin` and `signage_operator` accounts (password `SignageValidation2026!`); it accepts only the disposable database name. Never point these scripts at an operational database.
 
 ## Technology baseline
