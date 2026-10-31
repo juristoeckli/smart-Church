@@ -2679,7 +2679,7 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
     );
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
     if (!await lockDepartmentForWrite(client, event.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
-    const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2)", [event.rows[0].id, email]);
+    const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2) AND status IN ('registered','waitlisted')", [event.rows[0].id, email]);
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
     const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [event.rows[0].id]);
     const status = event.rows[0].registration_capacity !== null && registered.rows[0].count >= event.rows[0].registration_capacity ? "waitlisted" : "registered";
@@ -2693,13 +2693,15 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
   finally { client.release(); }
 });
 
+type ManagedEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };
+
 app.get<{ Params: { id: string } }>("/api/events/:id/registrations", {
   schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
-}, async (request, reply): Promise<EventRegistration[] | { error: string }> => {
+}, async (request, reply): Promise<ManagedEventRegistration[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
-  const result = await pool.query<EventRegistration>(
+  const result = await pool.query<ManagedEventRegistration>(
     `SELECT registration.id,registration.first_name AS "firstName",registration.last_name AS "lastName",registration.email,
             registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt"
        FROM event_registrations registration JOIN service_events gathering ON gathering.id=registration.event_id
@@ -2707,6 +2709,74 @@ app.get<{ Params: { id: string } }>("/api/events/:id/registrations", {
     [request.params.id, selectedDepartmentId],
   );
   return result.rows;
+});
+
+app.put<{ Params: { id: string; registrationId: string } }>("/api/events/:id/registrations/:registrationId/cancel", {
+  schema: { params: { type: "object", required: ["id", "registrationId"], properties: { id: { type: "string", format: "uuid" }, registrationId: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<ManagedEventRegistration | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const current = await client.query<{ department_id: string; status: ManagedEventRegistration["status"]; checked_in_at: string | null }>(
+      `SELECT gathering.department_id,registration.status,registration.checked_in_at
+         FROM service_events gathering JOIN event_registrations registration ON registration.event_id=gathering.id
+        WHERE gathering.id=$1 AND registration.id=$2 AND gathering.department_id=$3
+        FOR UPDATE OF gathering,registration`,
+      [request.params.id, request.params.registrationId, selectedDepartmentId],
+    );
+    if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This registration could not be found." }); }
+    if (current.rows[0].status === "cancelled") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This registration is already cancelled." }); }
+    if (current.rows[0].checked_in_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A checked-in registration cannot be cancelled." }); }
+    if (!await lockDepartmentForWrite(client, current.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
+    const result = await client.query<ManagedEventRegistration>(
+      `UPDATE event_registrations SET status='cancelled',cancelled_at=now(),cancelled_by=$3
+        WHERE event_id=$1 AND id=$2
+        RETURNING id,first_name AS "firstName",last_name AS "lastName",email,status,registered_at AS "registeredAt",checked_in_at AS "checkedInAt"`,
+      [request.params.id, request.params.registrationId, request.authenticatedUser?.id],
+    );
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.put<{ Params: { id: string; registrationId: string } }>("/api/events/:id/registrations/:registrationId/promote", {
+  schema: { params: { type: "object", required: ["id", "registrationId"], properties: { id: { type: "string", format: "uuid" }, registrationId: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<ManagedEventRegistration | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const current = await client.query<{ department_id: string; registration_capacity: number | null; status: ManagedEventRegistration["status"] }>(
+      `SELECT gathering.department_id,gathering.registration_capacity,registration.status
+         FROM service_events gathering JOIN event_registrations registration ON registration.event_id=gathering.id
+        WHERE gathering.id=$1 AND registration.id=$2 AND gathering.department_id=$3
+        FOR UPDATE OF gathering,registration`,
+      [request.params.id, request.params.registrationId, selectedDepartmentId],
+    );
+    if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This registration could not be found." }); }
+    if (current.rows[0].status !== "waitlisted") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only a waitlisted registration can be promoted." }); }
+    if (!await lockDepartmentForWrite(client, current.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
+    const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [request.params.id]);
+    if (current.rows[0].registration_capacity !== null && registered.rows[0].count >= current.rows[0].registration_capacity) {
+      await client.query("ROLLBACK");
+      return reply.code(409).send({ error: "There is no available place for this event." });
+    }
+    const result = await client.query<ManagedEventRegistration>(
+      `UPDATE event_registrations SET status='registered'
+        WHERE event_id=$1 AND id=$2
+        RETURNING id,first_name AS "firstName",last_name AS "lastName",email,status,registered_at AS "registeredAt",checked_in_at AS "checkedInAt"`,
+      [request.params.id, request.params.registrationId],
+    );
+    await client.query("COMMIT");
+    return result.rows[0];
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 });
 
 app.put<{ Params: { id: string; registrationId: string }; Body: { checkedIn: boolean } }>("/api/events/:id/registrations/:registrationId/check-in", {

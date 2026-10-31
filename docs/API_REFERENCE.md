@@ -80,6 +80,8 @@ Request/response TypeScript contracts, including `Contact`, `ContactProfileData`
 | `PUT` | `/api/events/:id/attendance` | Save adult and child attendance totals. |
 | `GET`, `PUT`, `DELETE` | `/api/events/:id/check-ins` and `/api/events/:id/check-ins/:contactId` | List, record, or remove individual check-ins. |
 | `GET` | `/api/events/:id/registrations` | List registrations and waitlist for an event. |
+| `PUT` | `/api/events/:id/registrations/:registrationId/cancel` | Cancel an unchecked-in registration; retains the row for roster history and frees the place. Requires `events_manage`. |
+| `PUT` | `/api/events/:id/registrations/:registrationId/promote` | Manually move a waitlisted registrant into an available place. Requires `events_manage`. |
 | `PUT` | `/api/events/:id/registrations/:registrationId/check-in` | Check in a registrant. |
 | `PUT` | `/api/events/:id/check-ins/:contactId/follow-up` | Assign or update a visitor follow-up. |
 
