@@ -60,6 +60,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "Each imported person needs a first and last name.": "Für jede importierte Person sind Vor- und Nachname erforderlich.",
     },
     "core-resources": {
+      "Choose a future start and an end time after it.": "Wähle einen zukünftigen Beginn und eine spätere Endzeit.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Eine replizierte Datei entspricht nicht der angegebenen Größe oder überschreitet 25 MiB.",
       "The File Storage snapshot contains an invalid file record.": "Der File-Storage-Snapshot enthält einen ungültigen Dateieintrag.",
       "The File Storage snapshot is invalid.": "Der File-Storage-Snapshot ist ungültig.",
@@ -232,6 +233,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
     },
     "core-people": { "Each imported person needs a first and last name.": "Chaque personne importée doit avoir un prénom et un nom." },
     "core-resources": {
+      "Choose a future start and an end time after it.": "Choisissez une heure de début future et une heure de fin postérieure.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un fichier répliqué ne correspond pas à la taille déclarée ou dépasse 25 Mio.",
       "The File Storage snapshot contains an invalid file record.": "L’instantané File Storage contient une entrée de fichier invalide.",
       "The File Storage snapshot is invalid.": "L’instantané File Storage est invalide.",
@@ -402,6 +404,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
     },
     "core-people": { "Each imported person needs a first and last name.": "Ogni persona importata deve avere nome e cognome." },
     "core-resources": {
+      "Choose a future start and an end time after it.": "Scegli un orario di inizio futuro e un orario di fine successivo.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un file replicato non corrisponde alla dimensione dichiarata o supera 25 MiB.",
       "The File Storage snapshot contains an invalid file record.": "L'istantanea File Storage contiene un record file non valido.",
       "The File Storage snapshot is invalid.": "L'istantanea File Storage non è valida.",
