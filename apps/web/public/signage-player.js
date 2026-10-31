@@ -1,12 +1,13 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.0";
+  const VERSION = "0.3.1";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
   const setup = document.getElementById("setup");
   const pairError = document.getElementById("pair-error");
   const pairButton = document.getElementById("pair-button");
+  const pendingKey="smart-church-signage-pending"; let pairingPending=null,pairingBusy=false,pairingTimer;
   const boot = performance.now();
   const memory = new Map();
   const controllers = new Set();
@@ -86,6 +87,7 @@
     setup.hidden = false; pairError.textContent = reason;
     text("Display disconnected"); status.textContent = "Pair this screen to continue";
     if (previous) await prune(previous.displayId);
+    void beginPairing();
   }
   document.getElementById("disconnect").onclick = () => { if (confirm("Disconnect this screen?")) void disconnect(); };
   async function fetchTimed(url, options = {}, timeout = 20000) {
@@ -250,23 +252,50 @@
       }) });
     } catch {} finally { reporting = false; }
   }
-  setup.onsubmit = async event => {
-    event.preventDefault(); pairButton.disabled = true; pairError.textContent = "";
-    try {
-      const code = document.getElementById("pair-code").value.replace(/\s+/g, "").toUpperCase();
-      const response = await fetchTimed("/api/public/signage/pair", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
-      const connection = await response.json();
-      if (!response.ok) throw new Error(connection.error || "Could not connect this display.");
-      localStorage.setItem(CONNECTION_KEY, JSON.stringify(connection));
-      credentials = connection; plan = null; currentKey = ""; setup.hidden = true;
-      document.getElementById("pair-code").value = "";
-      if (navigator.storage?.persist) void navigator.storage.persist().catch(() => {});
-      await synchronize(); void heartbeat();
-    } catch (error) { pairError.textContent = error.message; } finally { pairButton.disabled = false; }
-  };
+  function showPairing() {
+    setup.hidden=false;
+    document.getElementById("pair-code").textContent=pairingPending?.code || "Connecting…";
+    const minutes=pairingPending?Math.max(0,Math.ceil((Date.parse(pairingPending.expiresAt)-Date.now())/60000)):0;
+    document.getElementById("pair-expiry").textContent=minutes?"Code expires in "+minutes+" minute"+(minutes===1?"":"s")+".":"Waiting for a new code.";
+  }
+  async function beginPairing() {
+    if(credentials||pairingBusy)return;
+    clearTimeout(pairingTimer);pairingBusy=true;pairButton.disabled=true;
+    try{
+      if(!pairingPending){try{pairingPending=JSON.parse(localStorage.getItem(pendingKey)||"null");}catch{}}
+      if(!pairingPending || !/^[A-Za-z0-9_-]{43}$/.test(pairingPending.pairingToken||'') || !/^sc_[A-Za-z0-9_-]{43}$/.test(pairingPending.apiKey||'') || !Number.isFinite(Date.parse(pairingPending.expiresAt)) || Date.parse(pairingPending.expiresAt)<=Date.now()){
+        const response=await fetchTimed("/api/public/signage/pairing/start",{method:"POST"});
+        const result=await response.json();if(!response.ok)throw new Error(result.error||"Could not create a screen code.");
+        pairingPending=result;
+        try{localStorage.setItem(pendingKey,JSON.stringify(result));}catch{storageError="This browser cannot save its connection. Enable site storage.";}
+      }
+      pairError.textContent="";showPairing();
+    }catch(error){pairError.textContent=error.message;showPairing();}
+    finally{pairingBusy=false;pairButton.disabled=false;pairingTimer=setTimeout(pollPairing,3000);}
+  }
+  async function pollPairing(){
+    if(credentials||pairingBusy)return;
+    if(!pairingPending||Date.parse(pairingPending.expiresAt)<=Date.now()){pairingPending=null;return beginPairing();}
+    pairingBusy=true;
+    try{
+      const response=await fetchTimed("/api/public/signage/pairing/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pairingToken:pairingPending.pairingToken})});
+      if(response.status===410){pairingPending=null;try{localStorage.removeItem(pendingKey);}catch{}return;}
+      const result=await response.json();if(!response.ok)throw new Error(result.error||"Waiting for connection.");
+      if(result.status==="connected"){
+        const connection={displayId:result.displayId,departmentId:result.departmentId,apiKey:pairingPending.apiKey};
+        localStorage.setItem(CONNECTION_KEY,JSON.stringify(connection));localStorage.removeItem(pendingKey);
+        credentials=connection;pairingPending=null;plan=null;currentKey="";setup.hidden=true;pairError.textContent="";
+        if(navigator.storage?.persist)void navigator.storage.persist().catch(()=>{});
+        await synchronize();void heartbeat();return;
+      }
+      pairError.textContent="";
+    }catch(error){pairError.textContent=error.message;}
+    finally{pairingBusy=false;if(!credentials)pairingTimer=setTimeout(()=>pairingPending?pollPairing():beginPairing(),3000);}
+  }
+  pairButton.onclick=()=>{if(pairingBusy)return;pairingPending=null;try{localStorage.removeItem(pendingKey);}catch{}void beginPairing();};
   async function start() {
     text("Connecting…");
-    if (!credentials) return;
+    if (!credentials) {void beginPairing();return;}
     setup.hidden = true;
     const saved = await cache("get", credentials.displayId + ":plan:");
     if (saved && validPlan(saved.plan) && Number.isFinite(saved.offset)) {
@@ -281,5 +310,5 @@
   void start();
   setInterval(() => void synchronize(), 30000);
   setInterval(() => void heartbeat(), 30000);
-  setInterval(() => void selectPlayback(), 1000);
+  setInterval(() => {void selectPlayback();if(!credentials)showPairing();}, 1000);
 })();

@@ -20,13 +20,13 @@ try{
  let ready=false;for(let i=0;i<150;i++){try{if((await fetch('http://127.0.0.1:3198/api/health')).ok){ready=true;break;}}catch{}await delay(100);}
  assert.ok(ready,logs);
  const headers=key=>({authorization:'Bearer '+key,'x-department-id':display.department_id,'content-type':'application/json'});
- let r=await fetch('http://127.0.0.1:3198/api/installation/modules',{headers:headers(adminKey)});assert.equal(r.status,200,(await r.clone().text())+JSON.stringify((await pool.query('SELECT role,is_enabled,is_service_user,must_change_password FROM app_users WHERE api_key_hash=$1',[hash(adminKey)])).rows)+logs);const catalog=await r.json();assert.ok(catalog.modules.some(module=>module.id==='signage'&&module.version==='0.3.0'));
+ let r=await fetch('http://127.0.0.1:3198/api/installation/modules',{headers:headers(adminKey)});assert.equal(r.status,200,(await r.clone().text())+JSON.stringify((await pool.query('SELECT role,is_enabled,is_service_user,must_change_password FROM app_users WHERE api_key_hash=$1',[hash(adminKey)])).rows)+logs);const catalog=await r.json();assert.ok(catalog.modules.some(module=>module.id==='signage'&&module.version==='0.3.1'));
  r=await fetch('http://127.0.0.1:3198/api/installation/modules',{method:'PUT',headers:headers(adminKey),body:JSON.stringify({moduleIds:catalog.modules.filter(module=>module.enabled).map(module=>module.id)})});assert.equal(r.status,200,await r.clone().text());
  r=await fetch('http://127.0.0.1:3198/api/signage/device/'+display.id+'/plan',{headers:headers(displayKey)});assert.equal(r.status,200,await r.clone().text());
  r=await fetch('http://127.0.0.1:3198/api/contacts',{headers:headers(displayKey)});assert.equal(r.status,401,'Display accounts must not read core application data');
  r=await fetch('http://127.0.0.1:3198/api/signage/shows',{headers:headers(displayKey)});assert.equal(r.status,401,'Display accounts must not use management APIs');
  r=await fetch('http://127.0.0.1:3198/api/signage/media?name=Unauthenticated&type=image%2Fpng',{method:'POST',headers:{'content-type':'application/unsupported'},body:'not a file'});assert.equal(r.status,401,'Uploads must reject anonymous requests before buffering or parsing their bodies');
- const pair=(await fetch('http://127.0.0.1:3198/api/signage/displays/'+display.id+'/pairing',{method:'POST',headers:headers(adminKey),body:'{}'}));
+ const pair=(await fetch('http://127.0.0.1:3198/api/signage/displays/'+display.id+'/pairing',{method:'POST',headers:headers(adminKey),body:JSON.stringify({code:'TEST-2345'})}));
  // Management mutations require browser CSRF even when authenticated with an API key.
  assert.equal(pair.status,403);
  console.log('Server smoke checks passed: module discovery, activation, real API-key authentication, and display-only access.');

@@ -460,7 +460,7 @@ app.addHook("preHandler", async (request, reply) => {
     const replicatedAccountWrite = path === "/api/auth/change-password" || path === "/api/auth/preferences";
     const redundancyControl = path.startsWith("/api/modules/sync/federation/redundancy/");
     const externalWebhook = path === "/api/webhooks/resend";
-    const publicSelfSignup = path.startsWith("/api/public/self-signup/") || path === "/api/public/signage/pair";
+    const publicSelfSignup = path.startsWith("/api/public/self-signup/") || ["/api/public/signage/pair","/api/public/signage/pairing/start","/api/public/signage/pairing/status"].includes(path);
     if ((!localServerSettings || replicatedAccountWrite) && !redundancyControl && !externalWebhook && !publicSelfSignup && !path.startsWith("/api/modules/sync/federation/")) {
       const requestedDepartment = request.headers["x-department-id"];
       const queryDepartment = new URL(request.url, "http://localhost").searchParams.get("departmentId");
@@ -471,7 +471,7 @@ app.addHook("preHandler", async (request, reply) => {
     }
   }
   if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
-  if (request.url.startsWith("/api/modules/presenter/public/") || request.url === "/api/public/signage/pair") return;
+  if (request.url.startsWith("/api/modules/presenter/public/") || ["/api/public/signage/pair","/api/public/signage/pairing/start","/api/public/signage/pairing/status"].includes(request.url)) return;
   if (!databaseReady) return;
   const authorization = request.headers.authorization;
   const bearerToken = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;

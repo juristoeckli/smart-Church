@@ -1,5 +1,11 @@
 import type {UserLanguage} from '@smart-church/contracts';
 const phrases: Array<[string,string,string,string]> = [
+ ['The display shows a code. Enter it here to connect that screen.','Der Bildschirm zeigt einen Code. Gib ihn hier ein, um diesen Bildschirm zu verbinden.','L’écran affiche un code. Saisissez-le ici pour connecter cet écran.','Lo schermo mostra un codice. Inseriscilo qui per collegarlo.'],
+ ['Enter the code shown on the display below.','Gib unten den Code ein, der auf dem Bildschirm angezeigt wird.','Saisissez ci-dessous le code affiché sur l’écran.','Inserisci qui sotto il codice mostrato sullo schermo.'],
+ ['Code shown on the display','Code auf dem Bildschirm','Code affiché sur l’écran','Codice mostrato sullo schermo'],
+ ['Connect display','Bildschirm verbinden','Connecter l’écran','Collega schermo'],
+ ['Connecting replaces any previous connection for this display.','Die bisherige Verbindung dieses Bildschirms wird ersetzt.','Cette connexion remplace toute connexion précédente de cet écran.','La connessione sostituisce quella precedente per questo schermo.'],
+ ['Screen connected. Playback will start automatically.','Bildschirm verbunden. Die Wiedergabe startet automatisch.','Écran connecté. La lecture démarre automatiquement.','Schermo collegato. La riproduzione inizia automaticamente.'],
  ['Schedules override the display’s default show. Times are in {zone}.','Zeitpläne ersetzen das Standardprogramm. Zeitzone: {zone}.','La programmation remplace le programme par défaut. Fuseau horaire : {zone}.','La pianificazione sostituisce il programma predefinito. Fuso orario: {zone}.'],
  ['Choose what this screen plays when no scheduled show is active.','Wähle das Programm für Zeiten ohne geplante Wiedergabe.','Choisissez ce qui apparaît lorsqu’aucun programme n’est planifié.','Scegli cosa riprodurre quando non ci sono programmi pianificati.'],
  ['Open the player on your screen, then enter a pairing code. Pairing replaces any previous connection.','Öffne den Player auf dem Bildschirm und gib einen Verbindungscode ein. Die vorherige Verbindung wird ersetzt.','Ouvrez le lecteur sur l’écran et saisissez un code. L’association remplace la connexion précédente.','Apri il lettore sullo schermo e inserisci un codice. L’associazione sostituisce la connessione precedente.'],

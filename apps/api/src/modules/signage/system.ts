@@ -1,9 +1,9 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { ModuleServerContext } from '../module-sdk.js';
 type Access = (request: FastifyRequest, reply: FastifyReply) => Promise<string | null>;
 type DeviceAccess = (request: FastifyRequest, reply: FastifyReply, id: string) => Promise<{id:string;department_id:string}|null>;
-const digest = (value:string) => createHash('sha256').update(value).digest('hex');
+import {registerSignagePairing} from "./pairing.js";
 const idParams = {type:'object',required:['id'],properties:{id:{type:'string',format:'uuid'}}};
 
 export function registerSignageSystem(routes: FastifyInstance, context: ModuleServerContext, manager: Access, device: DeviceAccess, admin: Access) {
@@ -64,24 +64,7 @@ export function registerSignageSystem(routes: FastifyInstance, context: ModuleSe
   if(request.body.defaultShowId&&!(await pool!.query('SELECT id FROM signage_shows WHERE id=$1 AND department_id=$2 AND published_at IS NOT NULL',[request.body.defaultShowId,site])).rowCount)return reply.code(400).send({error:'Publish the default show first.'});
   const result=await pool!.query('UPDATE signage_displays SET name=$3,default_show_id=$4 WHERE id=$1 AND department_id=$2 RETURNING id',[request.params.id,site,request.body.name.trim(),request.body.defaultShowId]);return result.rowCount?result.rows[0]:reply.code(404).send({error:'Display not found.'});
  });
- routes.post<{Params:{id:string}}>('/api/signage/displays/:id/pairing',{schema:{params:idParams}},async(request,reply)=>{
-  if(!validateMutation(request,reply))return reply;const site=await admin(request,reply);if(!site)return reply;const alphabet='23456789ABCDEFGHJKLMNPQRSTUVWXYZ';const code=Array.from(randomBytes(8),value=>alphabet[value%alphabet.length]).join('');
-  const result=await pool!.query(`UPDATE signage_displays SET pairing_hash=$3,pairing_expires_at=now()+interval '15 minutes' WHERE id=$1 AND department_id=$2 RETURNING pairing_expires_at AS "expiresAt"`,[request.params.id,site,digest(code)]);return result.rowCount?{code:code.slice(0,4)+'-'+code.slice(4),...result.rows[0]}:reply.code(404).send({error:'Display not found.'});
- });
- routes.post<{Body:{code:string}}>('/api/public/signage/pair',{schema:{body:{type:'object',additionalProperties:false,required:['code'],properties:{code:{type:'string',minLength:8,maxLength:9,pattern:'^[A-HJ-NP-Za-hj-np-z2-9-]+$'}}}}},async(request,reply)=>{
-  if(!pool||!context.isDatabaseReady())return reply.code(503).send({error:'Signage is unavailable.'});
-  const bucket=digest(request.ip);
-  const attempt=await pool.query(`INSERT INTO signage_pairing_attempts(bucket,attempts,resets_at) VALUES($1,1,now()+interval '15 minutes') ON CONFLICT(bucket) DO UPDATE SET attempts=CASE WHEN signage_pairing_attempts.resets_at<=now() THEN 1 ELSE signage_pairing_attempts.attempts+1 END,resets_at=CASE WHEN signage_pairing_attempts.resets_at<=now() THEN now()+interval '15 minutes' ELSE signage_pairing_attempts.resets_at END RETURNING attempts`,[bucket]);
-  if(attempt.rows[0].attempts>20)return reply.header('Retry-After','900').code(429).send({error:'Too many pairing attempts. Try again in 15 minutes.'});
-  await pool.query('DELETE FROM signage_pairing_attempts WHERE resets_at<now()');
-  const client=await pool.connect();try{await client.query('BEGIN');
-   const row=(await client.query(`SELECT d.* FROM signage_displays d JOIN departments s ON s.id=d.department_id WHERE pairing_hash=$1 AND pairing_expires_at>now() AND s.enabled_modules @> ARRAY['signage']::text[] FOR UPDATE OF d`,[digest(request.body.code.replaceAll('-','').toUpperCase())])).rows[0];
-   if(!row||!await context.lockDepartmentForWrite(client,row.department_id)){await client.query('ROLLBACK');return reply.code(400).send({error:'This pairing code has expired or is unavailable. Generate a new code.'});}
-   const key=`sc_${randomBytes(32).toString('base64url')}`;const updated=await client.query(`UPDATE app_users u SET api_key_hash=$2 WHERE id=$1 AND is_service_user AND is_enabled AND EXISTS(SELECT 1 FROM department_memberships m WHERE m.user_id=u.id AND m.department_id=$3 AND m.module_permissions->'signage' ? 'display') RETURNING id`,[row.service_user_id,digest(key),row.department_id]);
-   if(!updated.rowCount){await client.query('ROLLBACK');return reply.code(403).send({error:'Display access has been revoked.'});}
-   await client.query('UPDATE signage_displays SET pairing_hash=NULL,pairing_expires_at=NULL WHERE id=$1',[row.id]);await client.query('COMMIT');await pool.query('DELETE FROM signage_pairing_attempts WHERE bucket=$1',[bucket]);return reply.header('Cache-Control','no-store').send({displayId:row.id,departmentId:row.department_id,apiKey:key});
-  }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
- });
+ registerSignagePairing(routes,context,admin);
  async function plan(site:string,id:string){
   const client=await pool!.connect();try{await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   const shows=(await client.query(`SELECT id,published_title AS title,published_slides AS slides,revision FROM signage_shows WHERE department_id=$1 AND published_at IS NOT NULL AND (id=(SELECT default_show_id FROM signage_displays WHERE id=$2 AND department_id=$1) OR id IN(SELECT show_id FROM signage_schedules WHERE display_id=$2 AND department_id=$1 AND ends_at>now() AND starts_at<now()+interval '7 days'))`,[site,id])).rows;
