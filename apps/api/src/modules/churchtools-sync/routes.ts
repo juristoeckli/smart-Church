@@ -808,6 +808,23 @@ function sanitizeChurchToolsProfile(value: unknown): unknown {
     .filter(([key]) => !secretKey.test(key))
     .map(([key, item]) => [key, sanitizeChurchToolsProfile(item)]));
 }
+function churchToolsRelationshipsByPerson(relationships: JsonObject[]) {
+  const result = new Map<string, JsonObject[]>();
+  for (const relationship of relationships) {
+    const personAId = firstText(relationship.personAId, relationship.personId);
+    const personBId = firstText(relationship.personBId, relationship.relativeId);
+    if (!personAId || !personBId || personAId === personBId) continue;
+    const common = {
+      sourceId: idOf(relationship),
+      relationshipTypeId: relationship.relationshipTypeId ?? null,
+      relationshipName: firstText(relationship.relationshipName, relationship.relationshipType?.name),
+      degreeOfRelationship: firstText(relationship.degreeOfRelationship),
+    };
+    result.set(personAId, [...(result.get(personAId) ?? []), { ...common, relativeSourceId: personBId }]);
+    result.set(personBId, [...(result.get(personBId) ?? []), { ...common, relativeSourceId: personAId }]);
+  }
+  return result;
+}
 function idOf(row: JsonObject) {
   const value = row.id ?? row.personId ?? row.groupId ?? row.eventId ?? row.appointmentId ?? row.resourceId;
   return value === undefined || value === null ? "" : String(value);
@@ -1132,11 +1149,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       running.add(dept);
       try {
         const token = decrypt(config.encrypted_login_token);
-        const [peopleResult, groupsResult, resourcesResult, eventsResult] = await Promise.all([
+        const [peopleResult, groupsResult, resourcesResult, eventsResult, relationshipsPayload] = await Promise.all([
           listComplete(config.instance_url, token, "persons"), listComplete(config.instance_url, token, "groups"), listComplete(config.instance_url, token, "resources"),
           listComplete(config.instance_url, token, `events?from=${encodeURIComponent(request.body.startDate)}&to=${encodeURIComponent(request.body.endDate)}`),
+          get(config.instance_url, token, "persons/relationships"),
         ]);
         if (![peopleResult, groupsResult, resourcesResult, eventsResult].every((result) => result.complete)) return reply.code(413).send({ error: "At least one ChurchTools list exceeds the complete preview limit of 20,000 records. Narrow the migration date range and preview again." });
+        const relationshipRows = rows(relationshipsPayload);
+        if (relationshipRows.length > 200000) return reply.code(413).send({ error: "ChurchTools returned more than 200,000 person relationships. No migration preview was saved." });
+        const relationshipsByPerson = churchToolsRelationshipsByPerson(relationshipRows);
         const memberResults = await mapConcurrent(groupsResult.items, 8, async (group) => {
           const sourceId = idOf(group); if (!sourceId) return { sourceId, members: [] as JsonObject[], complete: true };
           const embedded = Array.isArray(group.members) ? group.members : Array.isArray(group.persons) ? group.persons : null;
@@ -1154,7 +1175,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           return { sourceId: idOf(resource), name: firstText(resource.name, resource.title, resource.resourceName).slice(0, 120), category: resourceCategory(resource), description: firstText(resource.description, resource.note, resource.information).slice(0, 1000), location: firstText(resource.location?.name, resource.location, resource.place?.name, resource.place).slice(0, 160), capacity: Number.isInteger(capacityValue) && capacityValue > 0 && capacityValue <= 10000 ? capacityValue : null, requiresApproval: approvalValue === true || approvalValue === 1 || approvalValue === "1", active: resource.active !== false && resource.archived !== true && resource.isArchived !== true };
         });
         const records: JsonObject[] = [
-          ...peopleResult.items.map((person) => ({ area: "person", sourceId: idOf(person), firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: sanitizeChurchToolsProfile(person), unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) })),
+          ...peopleResult.items.map((person) => {
+            const sourceId = idOf(person);
+            const sourceProfile = sanitizeChurchToolsProfile(person) as JsonObject;
+            const relationships = relationshipsByPerson.get(sourceId) ?? [];
+            return { area: "person", sourceId, firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: { ...sourceProfile, relationships }, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) };
+          }),
           ...groupsResult.items.map((group) => {
             const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
             return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
