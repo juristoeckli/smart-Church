@@ -1,5 +1,6 @@
 import type {UserLanguage} from '@smart-church/contracts';
 const phrases: Array<[string,string,string,string]> = [
+ ['Replace screen','Bildschirm ersetzen','Remplacer l’écran','Sostituisci schermo'],
  ['The display shows a code. Enter it here to connect that screen.','Der Bildschirm zeigt einen Code. Gib ihn hier ein, um diesen Bildschirm zu verbinden.','L’écran affiche un code. Saisissez-le ici pour connecter cet écran.','Lo schermo mostra un codice. Inseriscilo qui per collegarlo.'],
  ['Enter the code shown on the display below.','Gib unten den Code ein, der auf dem Bildschirm angezeigt wird.','Saisissez ci-dessous le code affiché sur l’écran.','Inserisci qui sotto il codice mostrato sullo schermo.'],
  ['Code shown on the display','Code auf dem Bildschirm','Code affiché sur l’écran','Codice mostrato sullo schermo'],
