@@ -646,8 +646,17 @@ async function fetchElvantoFinancialTransactions(apiKey: string, startDate: stri
   }
   if (firstPage === 1 && transactions.length > 200000) throw new Error("Elvanto returned more than 200,000 financial transactions in this date range.");
   const ids = transactions.map(idOf);
-  if (ids.some((id) => !id)) throw new Error("Elvanto returned a financial transaction without a stable ID.");
   return { transactions, ids, reportedTotal, complete, pagesFetched };
+}
+function validElvantoFinancialTransaction(transaction: JsonObject, startDate: string, endDate: string) {
+  const date = firstText(transaction.transaction_date);
+  const parsedDate = /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T00:00:00.000Z`) : null;
+  const amount = transaction.transaction_total;
+  const numericAmount = typeof amount === "number" ? amount : typeof amount === "string" && amount.trim() ? Number(amount) : Number.NaN;
+  return Boolean(idOf(transaction))
+    && Boolean(parsedDate && Number.isFinite(parsedDate.getTime()) && parsedDate.toISOString().slice(0, 10) === date)
+    && date >= startDate && date <= endDate
+    && Number.isFinite(numericAmount);
 }
 function hashElvantoSong(value: unknown) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -1400,7 +1409,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const dept = await department(request, reply, true); if (!dept) return reply;
       const limit = request.query.limit ?? 50;
       const result = await pool!.query<{ area: string; action: string; outcome: string; details: JsonObject; created_at: Date | string }>("SELECT area,action,outcome,details,created_at FROM elvanto_sync_audit WHERE department_id=$1 ORDER BY created_at DESC LIMIT $2", [dept, limit]);
-      return { entries: result.rows.map((entry) => ({ area: entry.area, action: entry.action, outcome: entry.outcome, createdAt: entry.created_at, summary: Object.fromEntries(["scanned", "processed", "created", "updated", "skipped", "review", "conflicts", "complete", "incremental"].filter((key) => typeof entry.details[key] === "number" || typeof entry.details[key] === "boolean").map((key) => [key, entry.details[key]])) })) };
+      return { entries: result.rows.map((entry) => ({ area: entry.area, action: entry.action, outcome: entry.outcome, createdAt: entry.created_at, summary: Object.fromEntries(["scanned", "processed", "created", "updated", "skipped", "invalid", "review", "conflicts", "complete", "incremental"].filter((key) => typeof entry.details[key] === "number" || typeof entry.details[key] === "boolean").map((key) => [key, entry.details[key]])) })) };
     });
     routes.get<{ Querystring: { offset?: number; limit?: number } }>("/api/modules/sync/elvanto/financial", { schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 200000 }, limit: { type: "integer", minimum: 1, maximum: 100 } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
@@ -1437,9 +1446,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       try {
         const snapshot = await fetchElvantoFinancialTransactions(apiKey, request.body.startDate, request.body.endDate);
         const ids = [...new Set(snapshot.ids)];
-        const complete = snapshot.complete && ids.length === snapshot.transactions.length && (snapshot.reportedTotal === null || snapshot.reportedTotal === snapshot.transactions.length);
+        const complete = snapshot.complete && ids.every(Boolean) && ids.length === snapshot.transactions.length && (snapshot.reportedTotal === null || snapshot.reportedTotal === snapshot.transactions.length);
         const fingerprints = complete ? Object.fromEntries(snapshot.transactions.map((transaction) => [idOf(transaction), elvantoFinancialFingerprint(transaction)])) : {};
-        let createCount = 0; let updateCount = 0; let unchangedCount = 0;
+        const sourceIdCounts = new Map<string, number>();
+        for (const transaction of snapshot.transactions) {
+          const sourceId = idOf(transaction);
+          if (sourceId) sourceIdCounts.set(sourceId, (sourceIdCounts.get(sourceId) ?? 0) + 1);
+        }
+        const duplicateSourceIds = new Set([...sourceIdCounts].filter(([, count]) => count > 1).map(([sourceId]) => sourceId));
+        let createCount = 0; let updateCount = 0; let unchangedCount = 0; let invalidCount = 0;
         const sample: Array<{ date: string; total: string; action: string }> = [];
         for (let offset = 0; offset < snapshot.transactions.length; offset += 1000) {
           const batch = snapshot.transactions.slice(offset, offset + 1000);
@@ -1447,6 +1462,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const existing = await pool!.query<{ source_id: string; encrypted_payload: string }>("SELECT source_id,encrypted_payload FROM elvanto_financial_import WHERE department_id=$1 AND source_id=ANY($2::text[])", [dept, batchIds]);
           const linked = new Map(existing.rows.map((item) => [item.source_id, decryptElvantoFinancial(item.encrypted_payload)]));
           for (const item of batch) {
+            if (!validElvantoFinancialTransaction(item, request.body.startDate, request.body.endDate) || duplicateSourceIds.has(idOf(item))) {
+              invalidCount += 1;
+              if (sample.length < 50) sample.push({ date: firstText(item.transaction_date), total: firstText(item.transaction_total), action: "invalid" });
+              continue;
+            }
             const prior = linked.get(idOf(item));
             const action = !prior ? "create" : JSON.stringify(canonicalJson(prior)) === JSON.stringify(canonicalJson(item)) ? "unchanged" : "update";
             if (action === "create") createCount += 1;
@@ -1457,8 +1477,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         }
         const saved = await pool!.query(`UPDATE elvanto_sync_settings SET financial_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,financial_preview_complete=$2,financial_preview_count=$3,financial_preview_ids=$4::jsonb,financial_preview_fingerprints=$5::jsonb,financial_preview_start_date=$6::date,financial_preview_end_date=$7::date,financial_import_page=1,financial_import_total=NULL,financial_import_created_count=0,financial_import_updated_count=0,financial_import_skipped_count=0,financial_import_complete=FALSE,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now() WHERE department_id=$1 AND financial_importing=TRUE RETURNING department_id`, [dept, complete, ids.length, JSON.stringify(ids), JSON.stringify(fingerprints), request.body.startDate, request.body.endDate]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the financial preview. Run a new preview." });
-        await recordElvantoAudit(pool!, dept, "financial", "preview", complete ? "complete" : "incomplete", { scanned: ids.length, create: createCount, update: updateCount, unchanged: unchangedCount });
-        return { transactionCount: ids.length, reportedTotal: snapshot.reportedTotal, complete, createCount, updateCount, unchangedCount, sample };
+        await recordElvantoAudit(pool!, dept, "financial", "preview", complete ? "complete" : "incomplete", { scanned: snapshot.transactions.length, create: createCount, update: updateCount, unchanged: unchangedCount, invalid: invalidCount });
+        return { transactionCount: snapshot.transactions.length, reportedTotal: snapshot.reportedTotal, complete, createCount, updateCount, unchangedCount, invalidCount, sample };
       } catch (error) {
         await pool!.query("UPDATE elvanto_sync_settings SET financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,financial_preview_fingerprints='{}'::jsonb,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
         return reply.code(400).send({ error: error instanceof Error ? error.message : "Financial preview failed." });
@@ -1505,7 +1525,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           await db.query("BEGIN");
           for (const transaction of batch) {
             const sourceId = idOf(transaction); const date = firstText(transaction.transaction_date);
-            if (!sourceId || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date < savedState.start_date || date > savedState.end_date) { skipped += 1; continue; }
+            if (!sourceId || !validElvantoFinancialTransaction(transaction, savedState.start_date, savedState.end_date)) { skipped += 1; continue; }
             const existing = await db.query<{ encrypted_payload: string }>("SELECT encrypted_payload FROM elvanto_financial_import WHERE department_id=$1 AND source_id=$2", [dept, sourceId]);
             if (existing.rows[0] && JSON.stringify(canonicalJson(decryptElvantoFinancial(existing.rows[0].encrypted_payload))) === JSON.stringify(canonicalJson(transaction))) continue;
             await db.query(`INSERT INTO elvanto_financial_import (department_id,source_id,transaction_date,encrypted_payload,imported_at) VALUES ($1,$2,$3::date,$4,now()) ON CONFLICT (department_id,source_id) DO UPDATE SET transaction_date=EXCLUDED.transaction_date,encrypted_payload=EXCLUDED.encrypted_payload,imported_at=now()`, [dept, sourceId, date, encryptElvantoFinancial(transaction)]);
