@@ -6,6 +6,7 @@ import {webcrypto} from 'node:crypto';
 const source = await readFile(new URL('../public/signage-player.js', import.meta.url), 'utf8');
 assert.ok(!source.includes('?.'), 'TV engine cannot parse optional chaining');
 assert.ok(!source.includes('??'), 'TV engine cannot parse nullish coalescing');
+assert.ok(!/catch\s*\{/.test(source), 'Chrome 63 requires a catch parameter');
 const bytes = new TextEncoder().encode('test image');
 const sha256 = Buffer.from(await webcrypto.subtle.digest('SHA-256', bytes)).toString('hex');
 let fileReads = 0;
@@ -22,7 +23,7 @@ function element(tag = '') {
     removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
     appendChild(child) { this.children.push(child); }};
 }
-async function boot({paired = false, blockedStorage = false} = {}) {
+async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false} = {}) {
   const nodes = new Map(), calls = [], timers = [];
   const connection = {displayId: 'display', departmentId: 'department', apiKey: 'sc_' + 'k'.repeat(43)};
   const pending = {code: 'ABCD-EFGH', pairingToken: 't'.repeat(43), apiKey: connection.apiKey, expiresAt: new Date(Date.now()+900000).toISOString()};
@@ -46,6 +47,33 @@ async function boot({paired = false, blockedStorage = false} = {}) {
     }};
   // Response.blob also returns the older Blob shape.
   context.Response = class extends Response { async blob() { return new LegacyBlob([await this.arrayBuffer()]); } };
+  if (legacyTransport) {
+    const fetch = context.fetch;
+    context.AbortController = undefined;
+    context.Headers = Headers;
+    context.fetch = undefined;
+    context.XMLHttpRequest = class {
+      headers = {};
+      open(method, url) { this.method = method; this.url = url; }
+      setRequestHeader(name, value) { this.headers[name] = value; }
+      getAllResponseHeaders() { return 'content-type: application/json\r\n'; }
+      abort() { this.onabort(); }
+      async send(body) {
+        assert.ok(this.timeout > 0, 'legacy requests must time out');
+        if (timeout) { this.ontimeout(); return; }
+        if (this.url.includes('/device/')) {
+          assert.equal(this.headers.Authorization, 'Bearer ' + connection.apiKey);
+          assert.equal(this.headers['x-department-id'], connection.departmentId);
+        }
+        if (this.url.endsWith('/status')) assert.equal(JSON.parse(body).pairingToken, pending.pairingToken);
+        const response = await fetch(this.url);
+        this.status = response.status;
+        this.statusText = response.statusText;
+        this.response = await response.arrayBuffer();
+        this.onload();
+      }
+    };
+  }
   context.window = context;
   vm.runInNewContext(source, context);
   const settle = async () => { for (let i=0; i<30; i++) await new Promise(resolve => setImmediate(resolve)); };
@@ -62,4 +90,13 @@ assert.equal(unpaired.context.location.pathname, '/signage-display.html/ABCD-EFG
 await unpaired.timers.at(-1)(); await unpaired.settle();
 assert.equal(unpaired.nodes.get('setup').hidden, true, 'storage failure must not block approval');
 assert.equal(unpaired.nodes.get('screen').children[0].tag, 'img');
+const chrome63 = await boot({legacyTransport: true});
+assert.equal(chrome63.nodes.get('pair-code').textContent, 'ABCD-EFGH');
+await chrome63.timers.at(-1)(); await chrome63.settle();
+assert.equal(chrome63.nodes.get('setup').hidden, true);
+assert.equal(chrome63.nodes.get('screen').children[0].tag, 'img');
+assert.ok(chrome63.calls.some(path => path.endsWith('/heartbeat')));
+const timedOut = await boot({legacyTransport: true, timeout: true});
+assert.match(timedOut.nodes.get('pair-error').textContent, /timed out/);
+assert.ok(timedOut.timers.length, 'pairing retries after an XHR timeout');
 console.log('PASS: TV pairing, playback, heartbeat, legacy DOM/Blob, unavailable storage');

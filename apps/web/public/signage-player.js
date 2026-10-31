@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.3";
+  const VERSION = "0.3.4";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -29,7 +29,7 @@
       reader.readAsArrayBuffer(blob);
     });
   }
-  try { credentials = JSON.parse(localStorage.getItem(CONNECTION_KEY) || "null"); } catch {}
+  try { credentials = JSON.parse(localStorage.getItem(CONNECTION_KEY) || "null"); } catch (ignored) {}
   if (credentials && (!credentials.displayId || !credentials.departmentId || !/^sc_[A-Za-z0-9_-]{40,60}$/.test(credentials.apiKey || ""))) credentials = null;
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/signage-sw.js").catch(() => {});
 
@@ -72,7 +72,7 @@
         tx.oncomplete = resolve;
         tx.onerror = tx.onabort = () => reject(tx.error);
       });
-    } catch {}
+    } catch (ignored) {}
   }
   function text(heading, body = "") {
     screen.className = "";
@@ -97,7 +97,7 @@
     credentials = null; plan = null;
     controllers.forEach(controller => controller.abort());
     stopPlayback(); memory.clear();
-    try { localStorage.removeItem(CONNECTION_KEY); } catch {}
+    try { localStorage.removeItem(CONNECTION_KEY); } catch (ignored) {}
     setup.hidden = false; pairError.textContent = reason;
     text("Display disconnected"); status.textContent = "Pair this screen to continue";
     if (previous) await prune(previous.displayId);
@@ -105,6 +105,31 @@
   }
   document.getElementById("disconnect").onclick = () => { if (confirm("Disconnect this screen?")) void disconnect(); };
   async function fetchTimed(url, options = {}, timeout = 20000) {
+    // Chrome 63 TV engines lack AbortController. XHR still provides real
+    // cancellation and a timeout covering the complete response body.
+    if (typeof AbortController === "undefined") return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      controllers.add(xhr);
+      const cleanup = () => controllers.delete(xhr);
+      xhr.open(options.method || "GET", url, true);
+      xhr.responseType = "arraybuffer";
+      xhr.timeout = timeout;
+      Object.keys(options.headers || {}).forEach(name => xhr.setRequestHeader(name, options.headers[name]));
+      xhr.onload = () => {
+        cleanup();
+        if (!xhr.status) { reject(new Error("Network request failed. Retrying automatically.")); return; }
+        const headers = new Headers();
+        xhr.getAllResponseHeaders().trim().split(/[\r\n]+/).forEach(line => {
+          const separator = line.indexOf(":");
+          if (separator > 0) headers.append(line.slice(0, separator), line.slice(separator + 1).trim());
+        });
+        resolve(new Response(xhr.status === 204 || xhr.status === 205 || xhr.status === 304 ? null : xhr.response,
+          {status: xhr.status, statusText: xhr.statusText, headers}));
+      };
+      xhr.onerror = xhr.onabort = () => { cleanup(); reject(new Error("Network request failed. Retrying automatically.")); };
+      xhr.ontimeout = () => { cleanup(); reject(new Error("The connection timed out. Retrying automatically.")); };
+      xhr.send(options.body || null);
+    });
     const controller = new AbortController();
     controllers.add(controller);
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -134,7 +159,7 @@
     }
     if (!response.ok) {
       let message = "Server returned " + response.status;
-      try { message = (await response.json()).error || message; } catch {}
+      try { message = (await response.json()).error || message; } catch (ignored) {}
       throw new Error(message);
     }
     return response;
@@ -149,7 +174,7 @@
         (!slide.duration || Number.isInteger(slide.duration) && slide.duration >= 3 && slide.duration <= 600) &&
         (!slide.mediaId || media.has(slide.mediaId)))) &&
       [...media.values()].every(item => Number.isInteger(item.size) && item.size > 0 && item.size <= 104857600 && /^[a-f0-9]{64}$/.test(item.sha256));
-    } catch { return false; }
+    } catch (ignored) { return false; }
   }
   async function verified(blob, asset) {
     if (!(blob instanceof Blob) || blob.size !== asset.size) return false;
@@ -264,13 +289,13 @@
         currentShowId: (currentShow && currentShow.id) || "", playbackError: [playbackError, storageError, networkError].filter(Boolean).join(" · ").slice(0, 1000),
         downloadProgress: progress,
       }) });
-    } catch {} finally { reporting = false; }
+    } catch (ignored) {} finally { reporting = false; }
   }
   function showPairing() {
     setup.hidden=false;
     if (/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test((pairingPending && pairingPending.code) || "")) {
       const bookmarkPath = "/signage-display.html/" + pairingPending.code;
-      try { if (location.pathname !== bookmarkPath) history.replaceState(null, "", bookmarkPath); } catch {}
+      try { if (location.pathname !== bookmarkPath) history.replaceState(null, "", bookmarkPath); } catch (ignored) {}
     }
     document.getElementById("pair-code").textContent=(pairingPending && pairingPending.code) || "Connecting…";
     const minutes=pairingPending?Math.max(0,Math.ceil((Date.parse(pairingPending.expiresAt)-Date.now())/60000)):0;
@@ -280,12 +305,12 @@
     if(credentials||pairingBusy)return;
     clearTimeout(pairingTimer);pairingBusy=true;pairButton.disabled=true;
     try{
-      if(!pairingPending){try{pairingPending=JSON.parse(localStorage.getItem(pendingKey)||"null");}catch{}}
+      if(!pairingPending){try{pairingPending=JSON.parse(localStorage.getItem(pendingKey)||"null");}catch (ignored) {}}
       if(!pairingPending || !/^[A-Za-z0-9_-]{43}$/.test(pairingPending.pairingToken||'') || !/^sc_[A-Za-z0-9_-]{43}$/.test(pairingPending.apiKey||'') || !Number.isFinite(Date.parse(pairingPending.expiresAt)) || Date.parse(pairingPending.expiresAt)<=Date.now()){
         const response=await fetchTimed("/api/public/signage/pairing/start",{method:"POST"});
         const result=await response.json();if(!response.ok)throw new Error(result.error||"Could not create a screen code.");
         pairingPending=result;
-        try{localStorage.setItem(pendingKey,JSON.stringify(result));}catch{storageError="This browser cannot save its connection. Enable site storage.";}
+        try{localStorage.setItem(pendingKey,JSON.stringify(result));}catch (ignored) {storageError="This browser cannot save its connection. Enable site storage.";}
       }
       pairError.textContent="";showPairing();
     }catch(error){pairError.textContent=error.message;showPairing();}
@@ -297,12 +322,12 @@
     pairingBusy=true;
     try{
       const response=await fetchTimed("/api/public/signage/pairing/status",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({pairingToken:pairingPending.pairingToken})});
-      if(response.status===410){pairingPending=null;try{localStorage.removeItem(pendingKey);}catch{}return;}
+      if(response.status===410){pairingPending=null;try{localStorage.removeItem(pendingKey);}catch (ignored) {}return;}
       const result=await response.json();if(!response.ok)throw new Error(result.error||"Waiting for connection.");
       if(result.status==="connected"){
         const connection={displayId:result.displayId,departmentId:result.departmentId,apiKey:pairingPending.apiKey};
         try { localStorage.setItem(CONNECTION_KEY,JSON.stringify(connection));localStorage.removeItem(pendingKey); }
-        catch { storageError="This browser cannot save its connection. Enable site storage. Pair again after restarting."; }
+        catch (ignored) { storageError="This browser cannot save its connection. Enable site storage. Pair again after restarting."; }
         credentials=connection;pairingPending=null;plan=null;currentKey="";setup.hidden=true;pairError.textContent="";
         if((navigator.storage && navigator.storage.persist))void navigator.storage.persist().catch(()=>{});
         await synchronize();void heartbeat();return;
@@ -311,7 +336,7 @@
     }catch(error){pairError.textContent=error.message;}
     finally{pairingBusy=false;if(!credentials)pairingTimer=setTimeout(()=>pairingPending?pollPairing():beginPairing(),3000);}
   }
-  pairButton.onclick=()=>{if(pairingBusy)return;pairingPending=null;try{localStorage.removeItem(pendingKey);}catch{}void beginPairing();};
+  pairButton.onclick=()=>{if(pairingBusy)return;pairingPending=null;try{localStorage.removeItem(pendingKey);}catch (ignored) {}void beginPairing();};
   async function start() {
     text("Connecting…");
     if (!credentials) {void beginPairing();return;}
