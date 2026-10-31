@@ -299,6 +299,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Announcement sent to {count} person.": "Mitteilung an {count} Person gesendet.", "Announcement sent to {count} people.": "Mitteilung an {count} Personen gesendet.",
       "Notifications for this location · {count} unread": "Benachrichtigungen für diesen Standort · {count} ungelesen", "Send inbox notifications to {email}.": "Posteingangsbenachrichtigungen werden an {email} gesendet.",
       "Showing your latest {count} notifications.": "Deine letzten {count} Benachrichtigungen werden angezeigt.", "Mark “{title}” as read": "„{title}“ als gelesen markieren", "Email {status}": "E-Mail {status}",
+      "New announcement": "Neue Ankündigung", "Close announcement": "Ankündigung schließen", "Everyone in this location": "Alle an diesem Standort", "Selected groups": "Ausgewählte Gruppen", Title: "Titel", Message: "Nachricht", "Send announcement": "Ankündigung senden", "Sending…": "Wird gesendet …", "{count} person": "{count} Person", "{count} people": "{count} Personen", "{count} unread": "{count} ungelesen",
       delayed: "verzögert", delivered: "zugestellt", bounced: "unzustellbar", complained: "beanstandet", suppressed: "unterdrückt", failed: "fehlgeschlagen", skipped: "übersprungen",
     },
     fr: {
@@ -326,6 +327,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Announcement sent to {count} person.": "Annonce envoyée à {count} personne.", "Announcement sent to {count} people.": "Annonce envoyée à {count} personnes.",
       "Notifications for this location · {count} unread": "Notifications de ce lieu · {count} non lues", "Send inbox notifications to {email}.": "Les notifications de la boîte de réception sont envoyées à {email}.",
       "Showing your latest {count} notifications.": "Affichage de vos {count} dernières notifications.", "Mark “{title}” as read": "Marquer « {title} » comme lu", "Email {status}": "E-mail {status}",
+      "New announcement": "Nouvelle annonce", "Close announcement": "Fermer l’annonce", "Everyone in this location": "Tout le monde sur ce site", "Selected groups": "Groupes sélectionnés", Title: "Titre", Message: "Message", "Send announcement": "Envoyer l’annonce", "Sending…": "Envoi…", "{count} person": "{count} personne", "{count} people": "{count} personnes", "{count} unread": "{count} non lues",
       delayed: "retardé", delivered: "distribué", bounced: "non distribué", complained: "signalé", suppressed: "bloqué", failed: "échoué", skipped: "ignoré",
     },
     it: {
@@ -353,6 +355,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Announcement sent to {count} person.": "Annuncio inviato a {count} persona.", "Announcement sent to {count} people.": "Annuncio inviato a {count} persone.",
       "Notifications for this location · {count} unread": "Notifiche per questa sede · {count} non lette", "Send inbox notifications to {email}.": "Le notifiche della posta in arrivo vengono inviate a {email}.",
       "Showing your latest {count} notifications.": "Visualizzazione delle ultime {count} notifiche.", "Mark “{title}” as read": "Segna “{title}” come letto", "Email {status}": "E-mail: {status}",
+      "New announcement": "Nuovo annuncio", "Close announcement": "Chiudi annuncio", "Everyone in this location": "Tutti in questa sede", "Selected groups": "Gruppi selezionati", Title: "Titolo", Message: "Messaggio", "Send announcement": "Invia annuncio", "Sending…": "Invio…", "{count} person": "{count} persona", "{count} people": "{count} persone", "{count} unread": "{count} non lette",
       delayed: "in ritardo", delivered: "recapitato", bounced: "non recapitato", complained: "segnalato", suppressed: "soppresso", failed: "non riuscito", skipped: "ignorato",
     },
   },
