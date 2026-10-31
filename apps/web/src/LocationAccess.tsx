@@ -11,7 +11,7 @@ import "./LocationAccess.css";
 type LocationMember = {
   id: string;
   displayName: string;
-  username: string;
+  username?: string;
   isServiceUser?: boolean;
   apiKeyEnabled?: boolean;
   role: "site_admin" | "member";
@@ -121,7 +121,7 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
       if (!response.ok || result.id !== selected.id) throw new Error(result.error ?? "Could not remove location access.");
       const removed = selected;
       setMembers((current) => current.filter((member) => member.id !== removed.id));
-      setAvailableUsers((current) => [...current, { id: removed.id, displayName: removed.displayName, username: removed.username }].sort((a, b) => a.displayName.localeCompare(b.displayName)));
+      if (!removed.isServiceUser && removed.username) setAvailableUsers((current) => [...current, { id: removed.id, displayName: removed.displayName, username: removed.username! }].sort((a, b) => a.displayName.localeCompare(b.displayName)));
       setSelectedId(members.find((member) => member.id !== removed.id)?.id ?? ""); setNotice("Location access removed.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not remove location access."); }
     finally { setSaving(false); }
@@ -137,7 +137,7 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
       <div className="location-access-layout">
         <aside className="location-access-list" aria-label={`${department.location} members`}>
           {availableUsers.length > 0 && <div className="location-access-add"><label htmlFor="location-access-add">Add an existing account</label><select id="location-access-add" value={addUserId} onChange={(event) => setAddUserId(event.target.value)}><option value="">Choose a user</option>{availableUsers.map((user) => <option value={user.id} key={user.id}>{user.displayName} (@{user.username})</option>)}</select><button className="button button-secondary" type="button" disabled={!addUserId || saving} onClick={() => void addUser()}><Plus size={15} />Add access</button></div>}
-          {loading ? <p className="user-access-empty" role="status">Loading people…</p> : members.length === 0 ? <p className="user-access-empty">No people have access to this location.</p> : members.map((member) => <button className={`user-access-item ${member.id === selectedId ? "user-access-item-active" : ""}`} type="button" key={member.id} onClick={() => { setSelectedId(member.id); setError(""); setNotice(""); }}><strong>{member.displayName}{member.id === currentUserId ? " (you)" : ""}</strong><small>@{member.username}</small><span>{member.isServiceUser ? "Service user" : member.role === "site_admin" ? "Site administrator" : "Member"}</span></button>)}
+          {loading ? <p className="user-access-empty" role="status">Loading people…</p> : members.length === 0 ? <p className="user-access-empty">No people have access to this location.</p> : members.map((member) => <button className={`user-access-item ${member.id === selectedId ? "user-access-item-active" : ""}`} type="button" key={member.id} onClick={() => { setSelectedId(member.id); setError(""); setNotice(""); }}><strong>{member.displayName}{member.id === currentUserId ? " (you)" : ""}</strong>{!member.isServiceUser && <small>@{member.username}</small>}<span>{member.isServiceUser ? "Service user" : member.role === "site_admin" ? "Site administrator" : "Member"}</span></button>)}
           {!loading && availableUsers.length === 0 && <p className="location-access-hint">New accounts are created by a Server Administrator in User access.</p>}
         </aside>
         <form className="location-access-form" onSubmit={save}>

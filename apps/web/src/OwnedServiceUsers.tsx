@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiKeySettings } from "./ApiKeySettings";
 
-type OwnedServiceUser = { id: string; displayName: string; username: string; apiKeyEnabled: boolean };
+type OwnedServiceUser = { id: string; displayName: string; apiKeyEnabled: boolean };
 
 export function OwnedServiceUsers() {
   const [users, setUsers] = useState<OwnedServiceUser[]>([]);
@@ -29,7 +29,7 @@ export function OwnedServiceUsers() {
       {!loading && !error && users.length === 0 && <small>No service users are assigned to you.</small>}
     </div>
     <div className="owned-service-user-list">{users.map((user) => <article key={user.id}>
-      <strong>{user.displayName} <small data-no-translate>(@{user.username})</small></strong>
+      <strong>{user.displayName}</strong>
       <ApiKeySettings key={user.id} mode="service" userId={user.id} userName={user.displayName} enabled={user.apiKeyEnabled} onEnabledChange={(enabled) => setUsers((current) => current.map((entry) => entry.id === user.id ? { ...entry, apiKeyEnabled: enabled } : entry))} />
     </article>)}</div>
   </section>;

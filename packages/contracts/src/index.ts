@@ -267,8 +267,10 @@ export type UserLanguage = "en" | "de" | "fr" | "it";
 export interface SiteUser {
   id: string;
   email?: string;
-  username: string;
+  username?: string;
   displayName: string;
+  firstName?: string;
+  lastName?: string;
   birthday?: string;
   street?: string;
   streetNumber?: string;
@@ -289,8 +291,10 @@ export interface SiteUser {
 
 export interface CreateSiteUser {
   email?: string;
-  username: string;
-  displayName: string;
+  username?: string;
+  displayName?: string;
+  firstName?: string;
+  lastName?: string;
   birthday?: string;
   street?: string;
   streetNumber?: string;
