@@ -146,6 +146,7 @@ export function Authentication({
 
     setError("");
     setIsSubmitting(true);
+    let localizedFailure: string | undefined;
     try {
       const response = await fetch(setupRequired ? "/api/auth/setup" : "/api/auth/login", {
         method: "POST",
@@ -157,11 +158,12 @@ export function Authentication({
         const message = response.status === 400 && result.error === "Bad Request"
           ? authValidationMessage(result.message, t)
           : authApiMessage(result.error ?? result.message, t);
+        localizedFailure = message;
         throw new Error(message);
       }
       onAuthenticated(result.user);
     } catch {
-      setError(t("signInError"));
+      setError(localizedFailure ?? t("signInError"));
     } finally {
       setIsSubmitting(false);
     }
