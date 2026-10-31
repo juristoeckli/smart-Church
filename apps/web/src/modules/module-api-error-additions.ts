@@ -62,6 +62,8 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The settings database is unavailable.": "Die Einstellungsdatenbank ist nicht verfügbar.",
       "Could not read worker status.": "Der Status des Hintergrundprozesses konnte nicht gelesen werden.",
       "The worker could not be restarted.": "Der Hintergrundprozess konnte nicht neu gestartet werden.",
+      "Could not launch the module worker.": "Der Worker des Moduls konnte nicht gestartet werden.",
+      "Demo worker did not start within 5 seconds.": "Der Demo-Worker wurde nicht innerhalb von 5 Sekunden gestartet.",
       "The SMTP password was not protected for this standby server.": "Das SMTP-Passwort wurde für diesen Standby-Server nicht geschützt.",
     },
     "core-people": {
@@ -270,6 +272,8 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The settings database is unavailable.": "La base de données des paramètres est indisponible.",
       "Could not read worker status.": "Impossible de lire l’état du processus d’arrière-plan.",
       "The worker could not be restarted.": "Impossible de redémarrer le processus d’arrière-plan.",
+      "Could not launch the module worker.": "Impossible de démarrer le worker du module.",
+      "Demo worker did not start within 5 seconds.": "Le worker de démonstration n’a pas démarré en 5 secondes.",
       "The SMTP password was not protected for this standby server.": "Le mot de passe SMTP n’a pas été protégé pour ce serveur de secours.",
     },
     "core-people": {
@@ -476,6 +480,8 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The settings database is unavailable.": "Il database delle impostazioni non è disponibile.",
       "Could not read worker status.": "Impossibile leggere lo stato del processo in background.",
       "The worker could not be restarted.": "Impossibile riavviare il processo in background.",
+      "Could not launch the module worker.": "Impossibile avviare il worker del modulo.",
+      "Demo worker did not start within 5 seconds.": "Il worker demo non si è avviato entro 5 secondi.",
       "The SMTP password was not protected for this standby server.": "La password SMTP non è stata protetta per questo server di standby.",
     },
     "core-people": {
