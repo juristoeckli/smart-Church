@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.1";
+  const VERSION = "0.3.2";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -254,6 +254,10 @@
   }
   function showPairing() {
     setup.hidden=false;
+    if (/^[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingPending?.code || "")) {
+      const bookmarkPath = "/signage-display.html/" + pairingPending.code;
+      if (location.pathname !== bookmarkPath) history.replaceState(null, "", bookmarkPath);
+    }
     document.getElementById("pair-code").textContent=pairingPending?.code || "Connecting…";
     const minutes=pairingPending?Math.max(0,Math.ceil((Date.parse(pairingPending.expiresAt)-Date.now())/60000)):0;
     document.getElementById("pair-expiry").textContent=minutes?"Code expires in "+minutes+" minute"+(minutes===1?"":"s")+".":"Waiting for a new code.";

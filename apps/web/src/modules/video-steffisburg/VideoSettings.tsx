@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Check, RotateCcw } from "lucide-react";
 import type { ModuleSettingsContext } from "../../module-registry";
+import { ModuleTranslationHost } from "../../module-registry";
+import { translationsForModule } from "../translations";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 import { copyIpText } from "./IpAddress";
 import "./video-settings.css";
 
 type Address = { siteId: string; siteName: string; targetType: "router" | "encoder" | "device"; targetId: string; targetName: string; ip: string };
 type SettingsResponse = { defaults: Address[]; addresses: Address[]; error?: string };
 type YoutubeClientResponse = { clientId?: string; redirectUri?: string; clientSecretConfigured?: boolean; tokenKeyConfigured?: boolean; error?: string };
+
+const videoTranslations = mergeModuleTranslationOverrides("video-steffisburg", translationsForModule("video-steffisburg"));
 
 function key(address: Pick<Address, "siteId" | "targetType" | "targetId">) {
   return `${address.siteId}\u0000${address.targetType}\u0000${address.targetId}`;
@@ -24,7 +29,7 @@ async function readYoutubeClientResponse(response: Response): Promise<YoutubeCli
   return body;
 }
 
-export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSettingsContext) {
+export function VideoSettings({ language, departmentId, csrfToken, departments }: ModuleSettingsContext) {
   const [defaults, setDefaults] = useState<Address[]>([]);
   const [addresses, setAddresses] = useState<Address[]>([]);
   const [savedAddresses, setSavedAddresses] = useState<Address[]>([]);
@@ -141,7 +146,7 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
     return (leftIndex < 0 ? siteOrder.length : leftIndex) - (rightIndex < 0 ? siteOrder.length : rightIndex) || leftName.localeCompare(rightName);
   });
   const youtubeClientSettingsChanged = youtubeClientId.trim() !== savedYoutubeClientId || youtubeRedirectUri.trim() !== savedYoutubeRedirectUri || Boolean(youtubeClientSecret.trim());
-  return <section className="video-settings" aria-labelledby="video-device-settings-title">
+  return <ModuleTranslationHost translations={videoTranslations} language={language}><section className="video-settings" aria-labelledby="video-device-settings-title">
     <div className="server-admin-panel-heading"><h3 id="video-device-settings-title">Video device addresses</h3><p>Configure the router, encoders, and devices used by Video &amp; streaming for {location}. Existing addresses are loaded as the defaults.</p></div>
     {loading ? <p className="video-settings-message">Loading device addresses…</p> : addresses.length === 0 ? <p className="video-settings-message">No Video devices are configured for this location.</p> : <>
       <div className="video-settings-sites">{sites.map((siteId) => {
@@ -165,5 +170,5 @@ export function VideoSettings({ departmentId, csrfToken, departments }: ModuleSe
       <div className="video-settings-actions"><button className="button button-primary" type="button" onClick={() => void saveYoutubeClient()} disabled={youtubeClientLoading || youtubeClientSaving || !youtubeClientSettingsChanged || (Boolean(youtubeClientSecret.trim()) && !youtubeTokenKeyConfigured)}>{youtubeClientSaving ? "Saving…" : "Save OAuth settings"}</button></div>
       {youtubeClientFeedback && <p className={`video-settings-feedback${youtubeClientFeedbackError ? " is-error" : ""}`} role="status">{youtubeClientFeedback}</p>}
     </section>
-  </section>;
+  </section></ModuleTranslationHost>;
 }

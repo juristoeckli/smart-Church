@@ -1,6 +1,6 @@
 import { lazy } from "react";
 import { Video } from "lucide-react";
-import type { ModuleContext, ModuleRegistration } from "../../module-registry";
+import { ModuleTranslationHost, type ModuleContext, type ModuleRegistration } from "../../module-registry";
 import { translationsForModule } from "../translations";
 import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 import { VideoSettings } from "./VideoSettings";
@@ -29,18 +29,19 @@ function videoNavigationItems(context: ModuleContext) {
 
 function VideoWorkspacePage(context: ModuleContext) {
   const tab = videoTabs.includes(context.state as VideoTab) ? context.state as VideoTab : "Overview";
-  return <VideoWorkspace departmentId={context.departmentId} csrfToken={context.csrfToken} realtime={context.realtime} capabilities={capabilities(context)} tab={tab} onTabChange={context.onStateChange} />;
+  return <VideoWorkspace language={context.language} departmentId={context.departmentId} csrfToken={context.csrfToken} realtime={context.realtime} capabilities={capabilities(context)} tab={tab} onTabChange={context.onStateChange} />;
 }
 
 function VideoNavigation({ context }: { context: ModuleContext }) {
   const caps = capabilities(context);
   const tab = videoTabs.includes(context.state as VideoTab) ? context.state as VideoTab : "Overview";
-  return <div className="nav-submenu" aria-label="Video sections">{videoTabs.filter((section) => section !== "Names & locks").flatMap((section) => {
+  const translations = mergeModuleTranslationOverrides("video-steffisburg", translationsForModule("video-steffisburg"));
+  return <ModuleTranslationHost translations={translations} language={context.language}><div className="nav-submenu" aria-label="Video sections">{videoTabs.filter((section) => section !== "Names & locks").flatMap((section) => {
     const active = tab === section || (section === "Routing" && tab === "Names & locks");
     const items = [<button className={`nav-item nav-sub-item ${active && tab !== "Names & locks" ? "nav-item-active" : ""}`} type="button" key={section} aria-current={tab === section ? "page" : undefined} onClick={() => context.onStateChange(section)}><span>{section}</span>{active && tab !== "Names & locks" && <span className="nav-indicator" />}</button>];
     if (section === "Routing" && caps.canAdminRouting) items.push(<button className={`nav-item nav-sub-item nav-sub-item-child ${tab === "Names & locks" ? "nav-item-active" : ""}`} type="button" key="Names & locks" aria-current={tab === "Names & locks" ? "page" : undefined} onClick={() => context.onStateChange("Names & locks")}><span>Names &amp; locks</span>{tab === "Names & locks" && <span className="nav-indicator" />}</button>);
     return items;
-  })}</div>;
+  })}</div></ModuleTranslationHost>;
 }
 
 export const moduleRegistration: ModuleRegistration = {

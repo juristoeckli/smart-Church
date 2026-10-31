@@ -1,5 +1,11 @@
 import { useState } from "react";
 import { Radio, RefreshCw, TriangleAlert, Volume2 } from "lucide-react";
+import type { UserLanguage } from "@smart-church/contracts";
+import { ModuleTranslationHost } from "../../module-registry";
+import { translationsForModule } from "../translations";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
+
+const videoTranslations = mergeModuleTranslationOverrides("video-steffisburg", translationsForModule("video-steffisburg"));
 
 type ProbeResult = {
   configured: boolean;
@@ -13,7 +19,7 @@ type ProbeResult = {
 
 type LevelResult = { configured?: boolean; level?: number; format?: string; applied?: boolean; error?: string };
 
-export function BmdConverterSetup({ departmentId, csrfToken }: { departmentId: string; csrfToken: string }) {
+export function BmdConverterSetup({ language, departmentId, csrfToken }: { language: UserLanguage; departmentId: string; csrfToken: string }) {
   const [result, setResult] = useState<ProbeResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [level, setLevel] = useState<number | null>(null);
@@ -71,7 +77,7 @@ export function BmdConverterSetup({ departmentId, csrfToken }: { departmentId: s
     } finally { setBusy(false); }
   }
 
-  return <>
+  return <ModuleTranslationHost translations={videoTranslations} language={language}>
     <div className="video-heading"><div><h1>Converter Setup</h1><p>Discover the Audio to SDI converter through its Silex DS-700 USB server.</p></div></div>
     <section className="video-panel video-converter-panel">
       <div className="video-panel-heading"><div><h2>DS-700 discovery</h2><p>The dedicated converter worker checks server info, then requests the USB device list.</p></div><button className="video-small-button video-button-primary" type="button" disabled={busy} onClick={() => void discover()}><RefreshCw size={14} />{busy ? "Searching…" : "Discover converter"}</button></div>
@@ -97,5 +103,5 @@ export function BmdConverterSetup({ departmentId, csrfToken }: { departmentId: s
         {levelMessage && <p role="status" className="video-converter-level-message">{levelMessage}</p>}
       </div>
     </section>
-  </>;
+  </ModuleTranslationHost>;
 }

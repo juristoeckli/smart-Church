@@ -69,7 +69,12 @@ def mutate(device, timeout=3, field=None, index=None, value=None, expected=None,
     if field == 'locks':
         if not isinstance(value, bool) or expected not in ('U', 'L', 'O'):
             raise ValueError('Select a valid output lock state')
-        command_value = 'L' if value else 'U'
+        if value:
+            command_value = 'O'
+        elif expected == 'L':
+            command_value = 'F'
+        else:
+            command_value = 'U'
     else:
         if (not isinstance(value, str) or not value or value != value.strip() or len(value) > 64
                 or any(ord(char) < 32 or ord(char) == 127 for char in value)

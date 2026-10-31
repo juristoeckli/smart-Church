@@ -201,14 +201,13 @@ export interface ResourceBooking {
   id: string;
   resourceId: string;
   resourceName: string;
-  requestedBy: string | null;
+  requestedBy: string;
   requesterName: string;
   purpose: string;
   startsAt: string;
   endsAt: string;
   status: "requested" | "approved" | "declined" | "cancelled";
   createdAt: string;
-  importedFrom?: "churchtools";
 }
 
 export interface CreateBookableResource {

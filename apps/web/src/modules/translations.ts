@@ -1481,14 +1481,6 @@ const elvantoExportUiTranslations: ModuleLocales = {
 
 const syncFederationTranslations: ModuleLocales = {
   de: {
-    "Server connections": "Serververbindungen",
-    "Pair Smart-Church installations, create data shares, and configure site replicas.": "Verbinde Smart-Church-Installationen, erstelle Datenfreigaben und richte Standortreplikate ein.",
-    "Smart-Church connections": "Smart-Church-Verbindungen",
-    "Connect sites across trusted Smart-Church servers.": "Verbinde Standorte über vertrauenswürdige Smart-Church-Server.",
-    "Add Sync": "Sync hinzufügen",
-    "Add Share": "Freigabe hinzufügen",
-    "Check": "Prüfen",
-    "Server trust, shares, and redundancy settings": "Einstellungen für Serververtrauen, Freigaben und Redundanz",
     "Approve {server} · {location} as this site's primary? Its next verified snapshot will replace this site's replicated data.": "{server} · {location} als Primärserver für diesen Standort genehmigen? Der nächste verifizierte Snapshot ersetzt die replizierten Standortdaten.",
     "Approve {server} · {location} to pull complete snapshots of this site's data?": "{server} · {location} genehmigen, vollständige Snapshots der Standortdaten abzurufen?",
     "Revoke trust for {server}? All sync grants to this server will stop.": "Vertrauen für {server} widerrufen? Alle Sync-Freigaben für diesen Server werden beendet.",
@@ -1573,14 +1565,6 @@ const syncFederationTranslations: ModuleLocales = {
     "Promote this standby": "Diesen Standby hochstufen",
   },
   fr: {
-    "Server connections": "Connexions entre serveurs",
-    "Pair Smart-Church installations, create data shares, and configure site replicas.": "Associez des installations Smart-Church, créez des partages de données et configurez des réplicas de sites.",
-    "Smart-Church connections": "Connexions Smart-Church",
-    "Connect sites across trusted Smart-Church servers.": "Connectez des sites entre des serveurs Smart-Church de confiance.",
-    "Add Sync": "Ajouter Sync",
-    "Add Share": "Ajouter un partage",
-    "Check": "Vérifier",
-    "Server trust, shares, and redundancy settings": "Paramètres de confiance entre serveurs, de partage et de redondance",
     "Approve {server} · {location} as this site's primary? Its next verified snapshot will replace this site's replicated data.": "Approuver {server} · {location} comme serveur principal de ce site ? Son prochain instantané vérifié remplacera les données répliquées du site.",
     "Approve {server} · {location} to pull complete snapshots of this site's data?": "Autoriser {server} · {location} à récupérer des instantanés complets des données de ce site ?",
     "Revoke trust for {server}? All sync grants to this server will stop.": "Révoquer la confiance accordée à {server} ? Tous les accès de synchronisation de ce serveur seront interrompus.",
@@ -1665,14 +1649,6 @@ const syncFederationTranslations: ModuleLocales = {
     "Promote this standby": "Promouvoir ce serveur secondaire",
   },
   it: {
-    "Server connections": "Connessioni tra server",
-    "Pair Smart-Church installations, create data shares, and configure site replicas.": "Associa le installazioni Smart-Church, crea condivisioni di dati e configura repliche delle sedi.",
-    "Smart-Church connections": "Connessioni Smart-Church",
-    "Connect sites across trusted Smart-Church servers.": "Collega le sedi tra server Smart-Church attendibili.",
-    "Add Sync": "Aggiungi Sync",
-    "Add Share": "Aggiungi condivisione",
-    "Check": "Verifica",
-    "Server trust, shares, and redundancy settings": "Impostazioni di fiducia tra server, condivisioni e ridondanza",
     "Approve {server} · {location} as this site's primary? Its next verified snapshot will replace this site's replicated data.": "Approvare {server} · {location} come primario di questa sede? Il prossimo snapshot verificato sostituirà i dati replicati della sede.",
     "Approve {server} · {location} to pull complete snapshots of this site's data?": "Autorizzare {server} · {location} a scaricare snapshot completi dei dati di questa sede?",
     "Revoke trust for {server}? All sync grants to this server will stop.": "Revocare la fiducia per {server}? Tutte le autorizzazioni di sincronizzazione per questo server verranno interrotte.",
@@ -2308,7 +2284,18 @@ const videoModuleAuditTranslations: ModuleLocales = {
     "Current level read from the converter.": "Aktueller Pegel vom Konverter ausgelesen.",
     "The AES/EBU input level could not be applied.": "Der AES/EBU-Eingangspegel konnte nicht angewendet werden.",
     "Level applied and confirmed by the converter.": "Pegel angewendet und vom Konverter bestätigt.",
-    "The DS-700 discovery request failed.": "Die DS-700-Suchanfrage ist fehlgeschlagen."
+    "The DS-700 discovery request failed.": "Die DS-700-Suchanfrage ist fehlgeschlagen.",
+    "Only for streams between the nursing homes": "Nur für Streams zwischen den Pflegeheimen",
+    "Unlisted": "Nicht gelistet",
+    "Video & streaming": "Video & Streaming",
+    "Control connection available": "Steuerungsverbindung verfügbar",
+    "Output locked.": "Ausgang gesperrt.",
+    "Output unlocked.": "Ausgang entsperrt.",
+    "No current or upcoming service is scheduled.": "Es ist kein aktueller oder bevorstehender Gottesdienst geplant.",
+    "Connect YouTube to preview and control broadcasts.": "Verbinde YouTube, um Übertragungen vorzuschauen und zu steuern.",
+    "Connect YouTube to view past livestreams.": "Verbinde YouTube, um vergangene Livestreams anzusehen.",
+    "Configure the YouTube client ID and secret in Video module settings.": "Konfiguriere die YouTube-Client-ID und das Client-Secret in den Video-Moduleinstellungen.",
+    "Configure the YouTube client ID, client secret, and redirect URL in Video module settings.": "Konfiguriere die YouTube-Client-ID, das Client-Secret und die Weiterleitungs-URL in den Video-Moduleinstellungen."
   },
   "fr": {
     "Set": "Définissez",
@@ -2407,7 +2394,18 @@ const videoModuleAuditTranslations: ModuleLocales = {
     "Current level read from the converter.": "Niveau actuel lu depuis le convertisseur.",
     "The AES/EBU input level could not be applied.": "Impossible d’appliquer le niveau d’entrée AES/EBU.",
     "Level applied and confirmed by the converter.": "Niveau appliqué et confirmé par le convertisseur.",
-    "The DS-700 discovery request failed.": "La requête de recherche DS-700 a échoué."
+    "The DS-700 discovery request failed.": "La requête de recherche DS-700 a échoué.",
+    "Only for streams between the nursing homes": "Uniquement pour les flux entre les maisons de retraite",
+    "Unlisted": "Non répertorié",
+    "Video & streaming": "Vidéo et streaming",
+    "Control connection available": "Connexion de commande disponible",
+    "Output locked.": "Sortie verrouillée.",
+    "Output unlocked.": "Sortie déverrouillée.",
+    "No current or upcoming service is scheduled.": "Aucun culte actuel ou à venir n’est planifié.",
+    "Connect YouTube to preview and control broadcasts.": "Connectez YouTube pour prévisualiser et contrôler les diffusions.",
+    "Connect YouTube to view past livestreams.": "Connectez YouTube pour consulter les diffusions passées.",
+    "Configure the YouTube client ID and secret in Video module settings.": "Configurez l’ID client et le secret YouTube dans les paramètres du module Vidéo.",
+    "Configure the YouTube client ID, client secret, and redirect URL in Video module settings.": "Configurez l’ID client YouTube, le secret client et l’URL de redirection dans les paramètres du module Vidéo."
   },
   "it": {
     "Set": "Imposta",
@@ -2506,7 +2504,18 @@ const videoModuleAuditTranslations: ModuleLocales = {
     "Current level read from the converter.": "Livello corrente letto dal convertitore.",
     "The AES/EBU input level could not be applied.": "Impossibile applicare il livello ingresso AES/EBU.",
     "Level applied and confirmed by the converter.": "Livello applicato e confermato dal convertitore.",
-    "The DS-700 discovery request failed.": "La richiesta di rilevamento DS-700 non è riuscita."
+    "The DS-700 discovery request failed.": "La richiesta di rilevamento DS-700 non è riuscita.",
+    "Only for streams between the nursing homes": "Solo per gli streaming tra le case di cura",
+    "Unlisted": "Non in elenco",
+    "Video & streaming": "Video e streaming",
+    "Control connection available": "Connessione di controllo disponibile",
+    "Output locked.": "Uscita bloccata.",
+    "Output unlocked.": "Uscita sbloccata.",
+    "No current or upcoming service is scheduled.": "Non sono previste celebrazioni in corso o imminenti.",
+    "Connect YouTube to preview and control broadcasts.": "Collega YouTube per visualizzare l’anteprima e controllare le trasmissioni.",
+    "Connect YouTube to view past livestreams.": "Collega YouTube per visualizzare gli streaming passati.",
+    "Configure the YouTube client ID and secret in Video module settings.": "Configura l’ID client e il client secret YouTube nelle impostazioni del modulo Video.",
+    "Configure the YouTube client ID, client secret, and redirect URL in Video module settings.": "Configura l’ID client YouTube, il client secret e l’URL di reindirizzamento nelle impostazioni del modulo Video."
   }
 };
 

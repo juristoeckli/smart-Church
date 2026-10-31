@@ -1,4 +1,10 @@
 import { useState } from "react";
+import type { UserLanguage } from "@smart-church/contracts";
+import { ModuleTranslationHost } from "../../module-registry";
+import { translationsForModule } from "../translations";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
+
+const videoTranslations = mergeModuleTranslationOverrides("video-steffisburg", translationsForModule("video-steffisburg"));
 
 export async function copyIpText(value: string) {
   if (!value) return false;
@@ -19,10 +25,10 @@ export async function copyIpText(value: string) {
   return copied;
 }
 
-export function IpAddress({ value, fallback = "Address not configured" }: { value?: string | null; fallback?: string }) {
+export function IpAddress({ value, fallback = "Address not configured", language = "en" }: { value?: string | null; fallback?: string; language?: UserLanguage }) {
   const [copied, setCopied] = useState(false);
   const ip = value ?? "";
-  if (!ip) return <code className="video-ip-address video-ip-address-empty">{fallback}</code>;
+  if (!ip) return <ModuleTranslationHost translations={videoTranslations} language={language}><code className="video-ip-address video-ip-address-empty">{fallback}</code></ModuleTranslationHost>;
 
   async function copy() {
     const success = await copyIpText(ip);
@@ -30,7 +36,7 @@ export function IpAddress({ value, fallback = "Address not configured" }: { valu
     window.setTimeout(() => setCopied(false), 1600);
   }
 
-  return <code
+  return <ModuleTranslationHost translations={videoTranslations} language={language}><code
     className="video-ip-address"
     role="button"
     tabIndex={0}
@@ -38,5 +44,5 @@ export function IpAddress({ value, fallback = "Address not configured" }: { valu
     aria-label={`IP address ${ip}. Double-click to copy.`}
     onDoubleClick={(event) => { event.preventDefault(); event.stopPropagation(); void copy(); }}
     onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void copy(); } }}
-  >{ip}</code>;
+  >{ip}</code></ModuleTranslationHost>;
 }

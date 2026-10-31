@@ -25,7 +25,8 @@ const server = createServer(async (request, response) => {
   try { pathname = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname); }
   catch { response.writeHead(400).end(); return; }
 
-  const requested = resolve(root, `.${pathname}`);
+  const playerBookmark = /^\/signage-display\.html\/[A-Z2-9]{4}-[A-Z2-9]{4}\/?$/.test(pathname);
+  const requested = resolve(root, playerBookmark ? "signage-display.html" : `.${pathname}`);
   let target = requested.startsWith(`${root}${sep}`) || requested === root ? requested : resolve(root, "index.html");
   try {
     const details = await stat(target);

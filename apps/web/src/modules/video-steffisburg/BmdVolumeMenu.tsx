@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { SlidersHorizontal, Volume2 } from "lucide-react";
+import type { UserLanguage } from "@smart-church/contracts";
+import { ModuleTranslationHost } from "../../module-registry";
+import { translationsForModule } from "../translations";
+import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
+
+const videoTranslations = mergeModuleTranslationOverrides("video-steffisburg", translationsForModule("video-steffisburg"));
 
 type LevelReply = { level?: number; registers?: Record<string, number>; error?: string };
 const analog = [
@@ -10,7 +16,7 @@ const analog = [
 ] as const;
 const aes = { key: "0x0024", label: "AES/EBU" } as const;
 
-export function BmdVolumeMenu({ departmentId, siteId, converterId, csrfToken, canControl }: { departmentId: string; siteId: string; converterId: string; csrfToken: string; canControl: boolean }) {
+export function BmdVolumeMenu({ language, departmentId, siteId, converterId, csrfToken, canControl }: { language: UserLanguage; departmentId: string; siteId: string; converterId: string; csrfToken: string; canControl: boolean }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [values, setValues] = useState<Record<string, number>>({});
@@ -85,7 +91,7 @@ export function BmdVolumeMenu({ departmentId, siteId, converterId, csrfToken, ca
   const analogChanged = analog.some(({ key }) => values[key] !== saved[key]);
   const aesChanged = values[aes.key] !== undefined && values[aes.key] !== saved[aes.key];
 
-  return <div className={`bmd-volume-anchor${open ? " bmd-volume-anchor-open" : ""}`} ref={menuRef}>
+  return <ModuleTranslationHost translations={videoTranslations} language={language}><div className={`bmd-volume-anchor${open ? " bmd-volume-anchor-open" : ""}`} ref={menuRef}>
     <button type="button" className="video-small-button" aria-haspopup="dialog" aria-expanded={open} aria-label="Open Audio to SDI level controls" onClick={() => setOpen((current) => !current)}><SlidersHorizontal size={13} /> Audio controls</button>
     {open && <section className="bmd-volume-popup" role="dialog" aria-label="BMD Mini Converter audio controls">
       <header><div><strong><Volume2 size={15} /> Audio levels</strong><span>0–255 raw device values</span></div><button type="button" className="video-small-button" disabled={busy} onClick={() => void readLevels()}>Read</button></header>
@@ -95,5 +101,5 @@ export function BmdVolumeMenu({ departmentId, siteId, converterId, csrfToken, ca
       <p className="bmd-volume-note">Analog channels apply together. The dB curve between displayed values is still being mapped.</p>
       {message && <p role="status" className="bmd-volume-message">{message}</p>}
     </section>}
-  </div>;
+  </div></ModuleTranslationHost>;
 }

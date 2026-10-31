@@ -218,7 +218,7 @@ export function Authentication({
           </>}
           {setupRequired
             ? <label>{t("email")}<input name="email" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" /></label>
-            : <label>{t("usernameOrEmail")}<input name="identifier" required autoComplete="username" maxLength={254} placeholder={t("identifierPlaceholder")} /></label>}
+            : <label>{t("usernameOrEmail")}<input name="identifier" required autoComplete="username" maxLength={254} placeholder={t("identifierPlaceholder")} autoFocus /></label>}
           <label>{t("password")}<input name="password" type="password" required autoComplete={setupRequired ? "new-password" : "current-password"} minLength={setupRequired ? 12 : 1} maxLength={128} aria-describedby={setupRequired ? "setup-password-help" : undefined} placeholder={setupRequired ? t("passwordPlaceholder") : t("currentPasswordPlaceholder")} /></label>
           {setupRequired && <p className="auth-hint" id="setup-password-help">{t("use12Chars")}</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage)}>
