@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Check, ContactRound } from "lucide-react";
-import { publicLanguage, publicText } from "./public-translations";
+import { publicErrorText, publicLanguage, publicText } from "./public-translations";
 
 type PublicGroup = { name: string; description: string };
 
@@ -18,10 +18,10 @@ export function PublicGroupSignup({ token }: { token: string }) {
     fetch(`/api/public/group-signups/${encodeURIComponent(token)}`)
       .then(async (response) => {
         const result = await response.json() as PublicGroup | { error?: string };
-        if (!response.ok || !("name" in result)) throw new Error("error" in result ? result.error ?? "This group link is unavailable." : "This group link is unavailable.");
+        if (!response.ok || !("name" in result)) throw new Error(publicErrorText(language, "error" in result ? result.error ?? "This group link is unavailable." : "This group link is unavailable."));
         if (active) setGroup(result);
       })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load this group."); })
+      .catch((reason) => { if (active) setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not load this group.")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [token, language]);
@@ -36,9 +36,9 @@ export function PublicGroupSignup({ token }: { token: string }) {
         body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim() }),
       });
       const result = await response.json() as { status?: string; error?: string };
-      if (!response.ok || result.status !== "pending") throw new Error(result.error ?? "Could not send your request.");
+      if (!response.ok || result.status !== "pending") throw new Error(publicErrorText(language, result.error ?? "Could not send your request."));
       setSubmitted(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send your request."); }
+    } catch (reason) { setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not send your request.")); }
     finally { setSending(false); }
   }
 

@@ -62,6 +62,67 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
   },
 };
 
+const publicErrors: Record<UserLanguage, Record<string, string>> = {
+  en: {},
+  de: {
+    "Event registration is temporarily unavailable.": "Die Veranstaltungsanmeldung ist vorübergehend nicht verfügbar.",
+    "This registration link is unavailable.": "Dieser Anmeldelink ist nicht verfügbar.",
+    "Enter your name and email address.": "Gib deinen Namen und deine E-Mail-Adresse ein.",
+    "Registration is closed for this event.": "Die Anmeldung für diese Veranstaltung ist geschlossen.",
+    "This event's location is read-only while it is a redundancy standby or fenced site.": "Der Standort dieser Veranstaltung ist im Redundanz-Standby oder isolierten Zustand schreibgeschützt.",
+    "This email address is already registered for the event.": "Diese E-Mail-Adresse ist bereits für die Veranstaltung angemeldet.",
+    "Could not load this event.": "Die Veranstaltung konnte nicht geladen werden.",
+    "Could not submit your registration.": "Deine Anmeldung konnte nicht gesendet werden.",
+    "Group registration is temporarily unavailable.": "Die Gruppenanmeldung ist vorübergehend nicht verfügbar.",
+    "This group registration link is unavailable.": "Dieser Gruppenanmeldelink ist nicht verfügbar.",
+    "This group link is unavailable.": "Dieser Gruppenlink ist nicht verfügbar.",
+    "Registration is closed for this group.": "Die Anmeldung für diese Gruppe ist geschlossen.",
+    "This group's location is read-only while it is a redundancy standby or fenced site.": "Der Standort dieser Gruppe ist im Redundanz-Standby oder isolierten Zustand schreibgeschützt.",
+    "A request from this email is already waiting for review.": "Eine Anfrage von dieser E-Mail-Adresse wartet bereits auf Prüfung.",
+    "This email is already connected to an active group member.": "Diese E-Mail-Adresse gehört bereits zu einem aktiven Gruppenmitglied.",
+    "Could not load this group.": "Die Gruppe konnte nicht geladen werden.",
+    "Could not send your request.": "Deine Anfrage konnte nicht gesendet werden.",
+  },
+  fr: {
+    "Event registration is temporarily unavailable.": "L’inscription à l’événement est temporairement indisponible.",
+    "This registration link is unavailable.": "Ce lien d’inscription est indisponible.",
+    "Enter your name and email address.": "Saisissez votre nom et votre adresse e-mail.",
+    "Registration is closed for this event.": "Les inscriptions à cet événement sont closes.",
+    "This event's location is read-only while it is a redundancy standby or fenced site.": "Le site de cet événement est en lecture seule lorsqu’il est en secours/redondance ou isolé.",
+    "This email address is already registered for the event.": "Cette adresse e-mail est déjà inscrite à l’événement.",
+    "Could not load this event.": "Impossible de charger cet événement.",
+    "Could not submit your registration.": "Impossible d’envoyer votre inscription.",
+    "Group registration is temporarily unavailable.": "L’inscription au groupe est temporairement indisponible.",
+    "This group registration link is unavailable.": "Ce lien d’inscription au groupe est indisponible.",
+    "This group link is unavailable.": "Ce lien de groupe est indisponible.",
+    "Registration is closed for this group.": "Les inscriptions à ce groupe sont closes.",
+    "This group's location is read-only while it is a redundancy standby or fenced site.": "Le site de ce groupe est en lecture seule lorsqu’il est en secours/redondance ou isolé.",
+    "A request from this email is already waiting for review.": "Une demande provenant de cette adresse e-mail est déjà en attente d’examen.",
+    "This email is already connected to an active group member.": "Cette adresse e-mail est déjà associée à un membre actif du groupe.",
+    "Could not load this group.": "Impossible de charger ce groupe.",
+    "Could not send your request.": "Impossible d’envoyer votre demande.",
+  },
+  it: {
+    "Event registration is temporarily unavailable.": "L’iscrizione all’evento non è temporaneamente disponibile.",
+    "This registration link is unavailable.": "Questo link di iscrizione non è disponibile.",
+    "Enter your name and email address.": "Inserisci nome e indirizzo e-mail.",
+    "Registration is closed for this event.": "Le iscrizioni a questo evento sono chiuse.",
+    "This event's location is read-only while it is a redundancy standby or fenced site.": "La sede di questo evento è di sola lettura in modalità standby di ridondanza o quando è isolata.",
+    "This email address is already registered for the event.": "Questo indirizzo e-mail è già iscritto all’evento.",
+    "Could not load this event.": "Impossibile caricare l’evento.",
+    "Could not submit your registration.": "Impossibile inviare l’iscrizione.",
+    "Group registration is temporarily unavailable.": "L’iscrizione al gruppo non è temporaneamente disponibile.",
+    "This group registration link is unavailable.": "Questo link di iscrizione al gruppo non è disponibile.",
+    "This group link is unavailable.": "Questo link del gruppo non è disponibile.",
+    "Registration is closed for this group.": "Le iscrizioni a questo gruppo sono chiuse.",
+    "This group's location is read-only while it is a redundancy standby or fenced site.": "La sede di questo gruppo è di sola lettura in modalità standby di ridondanza o quando è isolata.",
+    "A request from this email is already waiting for review.": "Una richiesta da questo indirizzo e-mail è già in attesa di revisione.",
+    "This email is already connected to an active group member.": "Questo indirizzo e-mail è già associato a un membro attivo del gruppo.",
+    "Could not load this group.": "Impossibile caricare il gruppo.",
+    "Could not send your request.": "Impossibile inviare la richiesta.",
+  },
+};
+
 export function publicLanguage(): UserLanguage {
   return browserDefaultLanguage();
 }
@@ -70,4 +131,8 @@ export function publicText(language: UserLanguage, key: PublicTranslationKey, va
   let value = dictionaries[language][key] ?? english[key];
   for (const [name, replacement] of Object.entries(values ?? {})) value = value.replaceAll(`{${name}}`, String(replacement));
   return value;
+}
+
+export function publicErrorText(language: UserLanguage, message: string): string {
+  return publicErrors[language][message] ?? message;
 }
