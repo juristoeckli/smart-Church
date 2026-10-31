@@ -124,6 +124,22 @@ async function inspectWebSocketHandshake(endpoint: URL, identity: LocalIdentity,
 }
 
 function explainHandshakeFailure(host: string, result: { status: number | null; body: string; code?: string }, fallback: string) {
+  let responseCode = "";
+  let responseMessage = "";
+  try {
+    const parsed = JSON.parse(result.body) as { error?: { code?: unknown; message?: unknown } };
+    if (typeof parsed.error?.code === "string") responseCode = parsed.error.code;
+    if (typeof parsed.error?.message === "string") responseMessage = parsed.error.message;
+  } catch { /* Non-Smart-Church proxies may return plain text or HTML. */ }
+  if (responseCode === "SYNC_PEER_IDENTITY_CONFLICT") return `The remote server rejected this identity because it conflicts with a saved or revoked peer record. Remove the old connection in Sync settings on ${host}, then pair again.`;
+  if (responseCode === "SYNC_INBOUND_NOT_ENABLED") return responseMessage;
+  if (responseCode === "SYNC_HTTPS_REQUIRED") return `The remote server requires HTTPS for Sync WebSockets. Check that its proxy forwards X-Forwarded-Proto: https.`;
+  if (responseCode === "SYNC_MODULE_DISABLED") return `The remote server has the Sync module disabled.`;
+  if (responseCode === "SYNC_AUTHENTICATION_FAILED") return `The remote server could not authenticate this Sync identity. Check that the saved peer key matches the installation signing key on both servers.`;
+  if (responseCode === "SYNC_IDENTITY_INVALID") return responseMessage;
+  if (responseCode === "SYNC_NONCE_REPLAYED") return `The remote server rejected a reused Sync handshake. Retry; the client will create a fresh handshake.`;
+  if (responseCode === "SYNC_RATE_LIMITED") return responseMessage;
+  if (responseCode && responseMessage) return `Sync handshake rejected (${responseCode}): ${responseMessage}`;
   if (result.status === 101) return `The remote server accepted the authenticated WebSocket upgrade, but the WebSocket client then failed. Check for a proxy or network device closing the connection immediately after upgrade.`;
   if (result.status === 403 && /bootstrap identity conflicts with the saved peer record/i.test(result.body)) return `The remote server has a saved peer record for this installation with a different or revoked key. In Sync settings on ${host}, delete/forget the old server identity for this installation, then retry.`;
   if (result.status === 403 && /require HTTPS/i.test(result.body)) return `The remote server rejected the WebSocket because its HTTPS proxy did not forward the secure protocol indicator. Check that the proxy sets X-Forwarded-Proto: https.`;
@@ -155,10 +171,11 @@ function serverFrame(opcode: number, payload: Buffer) {
   return Buffer.concat([header, payload]);
 }
 
-function rejectUpgrade(socket: Socket, status: number, message: string) {
+function rejectUpgrade(socket: Socket, status: number, code: string, message: string) {
   if (socket.destroyed) return;
-  const body = `${message}\n`;
-  socket.end(`HTTP/1.1 ${status} ${status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : "Bad Request"}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+  const body = `${JSON.stringify({ error: { code, message } })}\n`;
+  const statusText = status === 401 ? "Unauthorized" : status === 403 ? "Forbidden" : status === 404 ? "Not Found" : status === 429 ? "Too Many Requests" : "Bad Request";
+  socket.end(`HTTP/1.1 ${status} ${statusText}\r\nConnection: close\r\nContent-Type: application/json; charset=utf-8\r\nX-SC-Sync-Error: ${code}\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 }
 
 function parseFrameBuffer(state: { buffer: Buffer; lastPongAt?: number }, onMessage: (opcode: number, payload: Buffer) => void, socket: Socket) {
@@ -404,10 +421,12 @@ export class FederationChannels {
     const socket = new WebSocket(origin);
     socket.binaryType = "arraybuffer";
     this.outgoing.set(peer.installation_id, socket);
+    let opened = false;
+    let handshakeError: Promise<string> | null = null;
     socket.addEventListener("message", (event) => this.receivePeerMessage(peer.installation_id, socket, event.data));
     socket.addEventListener("close", (event) => {
       if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
-      if (event.code !== 1000 && !this.outboundErrors.has(peer.installation_id)) {
+      if (event.code !== 1000 && !this.outboundErrors.has(peer.installation_id) && !handshakeError) {
         const reason = `The remote WebSocket closed the channel (code ${event.code}${event.reason ? `: ${event.reason}` : ""}). Check the remote Sync module and server logs.`;
         this.outboundErrors.set(peer.installation_id, reason);
         this.logOutboundFailure(peer.installation_id, origin.host, reason);
@@ -417,8 +436,19 @@ export class FederationChannels {
     socket.addEventListener("error", (event) => {
       if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
       const failure = webSocketFailure(event, origin.host);
-      this.outboundErrors.set(peer.installation_id, failure.reason);
-      this.logOutboundFailure(peer.installation_id, origin.host, failure.reason, (event as Event & { error?: unknown }).error, failure.code);
+      if (opened) {
+        this.outboundErrors.set(peer.installation_id, failure.reason);
+        this.logOutboundFailure(peer.installation_id, origin.host, failure.reason, (event as Event & { error?: unknown }).error, failure.code);
+        return;
+      }
+      handshakeError = inspectWebSocketHandshake(origin, identity, false)
+        .then((result) => explainHandshakeFailure(origin.host, result, failure.reason))
+        .catch(() => failure.reason)
+        .then((reason) => {
+          this.outboundErrors.set(peer.installation_id, reason);
+          this.logOutboundFailure(peer.installation_id, origin.host, reason, (event as Event & { error?: unknown }).error, failure.code);
+          return reason;
+        });
     });
     const attempt = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -429,8 +459,8 @@ export class FederationChannels {
         reject(new Error(reason));
       }, 10_000);
       timeout.unref();
-      socket.addEventListener("open", () => { clearTimeout(timeout); this.outboundErrors.delete(peer.installation_id); this.loggedOutboundErrors.delete(peer.installation_id); this.app.log.info({ module: "sync", peerInstallationId: peer.installation_id, remoteHost: origin.host }, "Authenticated Sync WebSocket channel connected."); resolve(); }, { once: true });
-      socket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error(this.outboundErrors.get(peer.installation_id) ?? "The federation WebSocket connection failed.")); }, { once: true });
+      socket.addEventListener("open", () => { opened = true; clearTimeout(timeout); this.outboundErrors.delete(peer.installation_id); this.loggedOutboundErrors.delete(peer.installation_id); this.app.log.info({ module: "sync", peerInstallationId: peer.installation_id, remoteHost: origin.host }, "Authenticated Sync WebSocket channel connected."); resolve(); }, { once: true });
+      socket.addEventListener("error", () => { clearTimeout(timeout); void (handshakeError ?? Promise.resolve(this.outboundErrors.get(peer.installation_id) ?? "The federation WebSocket connection failed.")).then((reason) => reject(new Error(reason))); }, { once: true });
     }).finally(() => { if (this.connecting.get(peer.installation_id) === attempt) this.connecting.delete(peer.installation_id); });
     this.connecting.set(peer.installation_id, attempt);
     return attempt;
@@ -461,11 +491,11 @@ export class FederationChannels {
   }
 
   private async accept(request: IncomingMessage, socket: Socket, head: Buffer, url: URL) {
-    if (!this.enabled || this.closed) return rejectUpgrade(socket, 404, "The Sync module is disabled.");
+    if (!this.enabled || this.closed) return rejectUpgrade(socket, 404, "SYNC_MODULE_DISABLED", "The Sync module is disabled.");
     const key = request.headers["sec-websocket-key"];
     const connection = request.headers.connection?.toLowerCase().split(",").map((part) => part.trim()) ?? [];
-    if (request.method !== "GET" || request.headers.upgrade?.toLowerCase() !== "websocket" || !connection.includes("upgrade") || request.headers["sec-websocket-version"] !== "13" || typeof key !== "string" || Buffer.from(key, "base64").length !== 16) return rejectUpgrade(socket, 400, "Invalid federation WebSocket handshake.");
-    if (process.env.NODE_ENV === "production" && request.headers["x-forwarded-proto"] !== "https") return rejectUpgrade(socket, 403, "Federation WebSockets require HTTPS.");
+    if (request.method !== "GET" || request.headers.upgrade?.toLowerCase() !== "websocket" || !connection.includes("upgrade") || request.headers["sec-websocket-version"] !== "13" || typeof key !== "string" || Buffer.from(key, "base64").length !== 16) return rejectUpgrade(socket, 400, "SYNC_BAD_WEBSOCKET_HANDSHAKE", "Invalid federation WebSocket handshake.");
+    if (process.env.NODE_ENV === "production" && request.headers["x-forwarded-proto"] !== "https") return rejectUpgrade(socket, 403, "SYNC_HTTPS_REQUIRED", "Federation WebSockets require HTTPS.");
     const installationId = url.searchParams.get("installationId") ?? "";
     const timestamp = url.searchParams.get("timestamp") ?? "";
     const nonce = url.searchParams.get("nonce") ?? "";
@@ -477,30 +507,30 @@ export class FederationChannels {
     if (expectedQueryKeys.some((name) => url.searchParams.getAll(name).length !== 1) || [...url.searchParams.keys()].length !== expectedQueryKeys.length
       || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(installationId)
       || !/^\d{13}$/.test(timestamp) || Math.abs(Date.now() - Number(timestamp)) > 5 * 60_000 || !/^[A-Za-z0-9_-]{32,128}$/.test(nonce)
-      || !/^[A-Za-z0-9_-]{80,256}$/.test(signature) || protocol !== protocolVersion || (bootstrap && publicKeyEncoded.length > 8192)) return rejectUpgrade(socket, 401, "The federation WebSocket identity is invalid or stale.");
+      || !/^[A-Za-z0-9_-]{80,256}$/.test(signature) || protocol !== protocolVersion || (bootstrap && publicKeyEncoded.length > 8192)) return rejectUpgrade(socket, 401, "SYNC_IDENTITY_INVALID", "The Sync identity is invalid or stale. Check the server clocks and Sync protocol versions.");
     let bootstrapKey: string | undefined;
     if (bootstrap) {
       try { bootstrapKey = Buffer.from(publicKeyEncoded, "base64url").toString("utf8"); if (fingerprintPublicKey(bootstrapKey).length !== 95) throw new Error("Invalid key"); }
-      catch { return rejectUpgrade(socket, 401, "The federation WebSocket bootstrap key is invalid."); }
+      catch { return rejectUpgrade(socket, 401, "SYNC_IDENTITY_INVALID", "The Sync identity is invalid or stale."); }
     }
     const peer = await this.pool.query<Peer & { trust_state: string; inbound_enabled: boolean }>("SELECT installation_id,base_url,public_key_pem,trust_state,inbound_enabled FROM sync_peers WHERE installation_id=$1", [installationId]);
-    if (bootstrap) {
-      if (peer.rows[0]?.trust_state === "revoked" || (peer.rowCount && peer.rows[0].public_key_pem !== bootstrapKey)) return rejectUpgrade(socket, 403, "This bootstrap identity conflicts with the saved peer record.");
-    } else if (!peer.rowCount || peer.rows[0].trust_state !== "trusted" || !peer.rows[0].inbound_enabled) return rejectUpgrade(socket, 403, "This server is not an enabled inbound Sync peer.");
     const signedTarget = `${path}?${new URLSearchParams({ ...(bootstrap ? { bootstrap: "1" } : {}), installationId, timestamp, nonce, protocol }).toString()}`;
-    const handshakePublicKey = bootstrapKey ?? peer.rows[0].public_key_pem;
-    if (!verifyBytes(handshakePublicKey, canonicalRequest("GET", signedTarget, timestamp, nonce, ""), signature)) return rejectUpgrade(socket, 401, "The federation WebSocket signature is invalid.");
+    const handshakePublicKey = bootstrapKey ?? peer.rows[0]?.public_key_pem;
+    if (!handshakePublicKey || !verifyBytes(handshakePublicKey, canonicalRequest("GET", signedTarget, timestamp, nonce, ""), signature)) return rejectUpgrade(socket, 401, "SYNC_AUTHENTICATION_FAILED", "The remote server could not authenticate this Sync server. Check that both sides have the matching saved server identity and signing key.");
+    if (bootstrap) {
+      if (peer.rows[0]?.trust_state === "revoked" || (peer.rowCount && peer.rows[0].public_key_pem !== bootstrapKey)) return rejectUpgrade(socket, 403, "SYNC_PEER_IDENTITY_CONFLICT", "This server identity conflicts with a saved or revoked peer record. In Sync settings, remove the old connection before pairing this identity again.");
+    } else if (peer.rows[0].trust_state !== "trusted" || !peer.rows[0].inbound_enabled) return rejectUpgrade(socket, 403, "SYNC_INBOUND_NOT_ENABLED", "This server is authenticated, but inbound Sync is not enabled for this connection. Check the trust and WebSocket direction settings on this server.");
     if (bootstrap) {
       const address = request.socket.remoteAddress ?? "unknown";
       if (this.bootstrapAttempts.size > 5000) for (const [key, attempt] of this.bootstrapAttempts) if (attempt.expiresAt <= Date.now()) this.bootstrapAttempts.delete(key);
       const attempt = this.bootstrapAttempts.get(address);
-      if (attempt && attempt.expiresAt > Date.now() && attempt.count >= 60) return rejectUpgrade(socket, 429, "Too many federation bootstrap attempts.");
+      if (attempt && attempt.expiresAt > Date.now() && attempt.count >= 60) return rejectUpgrade(socket, 429, "SYNC_RATE_LIMITED", "Too many Sync bootstrap attempts. Wait one minute before retrying.");
       this.bootstrapAttempts.set(address, attempt && attempt.expiresAt > Date.now()
         ? { count: attempt.count + 1, expiresAt: attempt.expiresAt }
         : { count: 1, expiresAt: Date.now() + 60_000 });
     }
     const used = await this.pool.query("INSERT INTO sync_request_nonces(installation_id,nonce,expires_at) VALUES($1,$2,now()+interval '10 minutes') ON CONFLICT DO NOTHING RETURNING nonce", [installationId, nonce]);
-    if (!used.rowCount) return rejectUpgrade(socket, 401, "The federation WebSocket handshake was already used.");
+    if (!used.rowCount) return rejectUpgrade(socket, 401, "SYNC_NONCE_REPLAYED", "This Sync handshake was already used. Retry with a fresh connection.");
     const prior = this.incoming.get(installationId);
     if (!bootstrap && prior) { if (prior.heartbeat) clearInterval(prior.heartbeat); prior.socket.end(serverFrame(8, Buffer.alloc(0))); }
     const acceptKey = createHash("sha1").update(key + websocketGuid).digest("base64");
