@@ -761,6 +761,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Start remote session": "Remotesitzung starten",
       "Taking control disconnects the current controller; viewers stay read-only.": "Beim Übernehmen der Steuerung wird die aktuelle steuernde Person getrennt; Zuschauende behalten nur Lesezugriff.",
       "This module checks for the session automatically.": "Dieses Modul prüft automatisch, ob eine Sitzung aktiv ist.",
+      "This module checks for an active session automatically.": "Dieses Modul prüft automatisch, ob eine Sitzung aktiv ist.",
       "Another destination is currently active.": "Ein anderes Ziel ist derzeit aktiv.",
       "Keyboard and mouse input go to the remote computer.": "Tastatur- und Mauseingaben werden an den Remote-Computer gesendet.",
       "Connecting to the AV computer…": "Verbindung zum AV-Computer wird hergestellt …",
@@ -857,6 +858,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Start remote session": "Démarrer la session distante",
       "Taking control disconnects the current controller; viewers stay read-only.": "La prise de contrôle déconnecte le contrôleur actuel ; les observateurs restent en lecture seule.",
       "This module checks for the session automatically.": "Ce module vérifie automatiquement si la session est active.",
+      "This module checks for an active session automatically.": "Ce module vérifie automatiquement si une session est active.",
       "Another destination is currently active.": "Une autre destination est actuellement active.",
       "Keyboard and mouse input go to the remote computer.": "Le clavier et la souris contrôlent l’ordinateur distant.",
       "Connecting to the AV computer…": "Connexion à l’ordinateur audiovisuel…",
@@ -953,6 +955,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Start remote session": "Avvia sessione remota",
       "Taking control disconnects the current controller; viewers stay read-only.": "Assumere il controllo disconnette il controller attuale; gli spettatori restano in sola lettura.",
       "This module checks for the session automatically.": "Questo modulo controlla automaticamente la sessione.",
+      "This module checks for an active session automatically.": "Il modulo controlla automaticamente se è attiva una sessione.",
       "Another destination is currently active.": "È attualmente attiva un’altra destinazione.",
       "Keyboard and mouse input go to the remote computer.": "I comandi da tastiera e mouse vengono inviati al computer remoto.",
       "Connecting to the AV computer…": "Connessione al computer audiovisivo…",
@@ -969,6 +972,8 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
   },
   presenter: {
     de: {
+      DATASETS: "DATENSÄTZE", Datasets: "Datensätze", Library: "Bibliothek", Playlists: "Wiedergabelisten",
+      Operator: "Bediener", Editor: "Bearbeiter", Main: "Hauptausgabe",
       "{name} songs": "{name} Lieder", "Delete playlist {name}": "Wiedergabeliste {name} löschen", "{name} items": "Elemente in {name}",
       Media: "Medien", Transparent: "Durchsichtig", "{name}, page {label}": "{name}, Seite {label}", "Seek {label}": "Zu {label} springen",
       Del: "Entf", "Search events…": "Anlässe suchen …", "Search upcoming events": "Bevorstehende Anlässe suchen", "This dataset is empty.": "Dieser Datensatz ist leer.", "No songs match this name.": "Keine Songs mit diesem Namen gefunden.",
@@ -1021,6 +1026,8 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
 "The server did not return an Output link token.": "Der Server hat kein Token für den Ausgabelink zurückgegeben.", "Session name saved.": "Sitzungsname gespeichert.", "Presenter link copied.": "Presenter-Link kopiert.", "Clipboard access is blocked here. Copy the link from the dialog.": "Der Zugriff auf die Zwischenablage ist hier gesperrt. Kopiere den Link aus dem Dialog.", "Import a .pptx PowerPoint Open XML file.": "Importiere eine PowerPoint-Open-XML-Datei im Format .pptx.", "Choose a PNG picture no larger than 20 MiB.": "Wähle ein PNG-Bild mit höchstens 20 MiB aus.",
     },
     fr: {
+      DATASETS: "JEUX DE DONNÉES", Datasets: "Jeux de données", Library: "Bibliothèque", Playlists: "Listes de lecture",
+      Operator: "Opérateur", Editor: "Éditeur", Main: "Écran principal",
       "{name} songs": "Chansons de {name}", "Delete playlist {name}": "Supprimer la liste de lecture {name}", "{name} items": "Éléments de {name}",
       Media: "Médias", Transparent: "Transparent", "{name}, page {label}": "{name}, page {label}", "Seek {label}": "Aller à {label}",
       Del: "Suppr.", "Search events…": "Rechercher des événements…", "Search upcoming events": "Rechercher les événements à venir", "This dataset is empty.": "Cet ensemble de données est vide.", "No songs match this name.": "Aucun chant ne correspond à ce nom.",
@@ -1073,6 +1080,8 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
 "The server did not return an Output link token.": "Le serveur n’a pas renvoyé de jeton pour le lien de sortie.", "Session name saved.": "Nom de la session enregistré.", "Presenter link copied.": "Lien Presenter copié.", "Clipboard access is blocked here. Copy the link from the dialog.": "L’accès au presse-papiers est bloqué ici. Copiez le lien depuis la boîte de dialogue.", "Import a .pptx PowerPoint Open XML file.": "Importez un fichier PowerPoint Open XML au format .pptx.", "Choose a PNG picture no larger than 20 MiB.": "Choisissez une image PNG de 20 Mio maximum.",
     },
     it: {
+      DATASETS: "SET DI DATI", Datasets: "Set di dati", Library: "Libreria", Playlists: "Playlist",
+      Operator: "Operatore", Editor: "Editor", Main: "Schermo principale",
       "{name} songs": "Brani di {name}", "Delete playlist {name}": "Elimina playlist {name}", "{name} items": "Elementi di {name}",
       Media: "Media", Transparent: "Trasparente", "{name}, page {label}": "{name}, pagina {label}", "Seek {label}": "Vai a {label}",
       Del: "Elim.", "Search events…": "Cerca eventi…", "Search upcoming events": "Cerca eventi imminenti", "This dataset is empty.": "Questo set di dati è vuoto.", "No songs match this name.": "Nessun canto corrisponde a questo nome.",
