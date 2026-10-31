@@ -306,11 +306,11 @@ export function FederationSettings({ csrfToken, departmentId, departments }: { c
 
   async function deletePeer(peer: Peer) {
     const message = peer.trust_state === "revoked"
-      ? `Forget ${peer.display_name}'s saved server identity key? Its revoked connection is already inactive. This allows a new pairing with this installation ID.`
-      : `Delete the connection to ${peer.display_name} and forget its saved identity key? Its WebSocket channel will close, and all shares and replica authorizations with this server will stop.`;
+      ? `Permanently delete ${peer.display_name}'s saved server key, fingerprint history, and peer-specific sync records? This allows a new pairing with this installation ID. Any replica site linked to this server will be fenced; its local site data will be kept.`
+      : `Permanently delete the connection to ${peer.display_name}, including its saved server key, fingerprint history, shares, replica records, and authorizations? Its WebSocket channel will close. Any replica site linked to this server will be fenced; its local site data will be kept.`;
     if (!window.confirm(tr(message))) return;
     setBusy(`delete:${peer.installation_id}`); setError(""); setFeedback("");
-    try { await request(`/api/modules/sync/federation/peers/${peer.installation_id}`, "DELETE"); setFeedback(`Saved identity and connection to ${peer.display_name} deleted.`); await load(); }
+    try { await request(`/api/modules/sync/federation/peers/${peer.installation_id}`, "DELETE"); setFeedback(`Connection, saved key, fingerprint history, and peer-specific sync data for ${peer.display_name} deleted.`); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : `Could not delete ${peer.display_name}.`); }
     finally { setBusy(""); }
   }

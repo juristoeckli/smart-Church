@@ -1945,25 +1945,63 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.delete<{ Params: { installationId: string } }>(`${adminPrefix}/peers/:installationId`, async (request, reply) => {
     if (!requireManager(request, reply) || !context.validateMutation(request, reply)) return;
-    const existing = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1", [request.params.installationId]);
-    if (!existing.rowCount) return reply.code(404).send({ error: "This saved server identity was not found." });
-    const result = await pool.query<{ fingerprint: string }>("UPDATE sync_peers SET trust_state='revoked',revoked_at=now(),last_error=NULL WHERE installation_id=$1 AND trust_state<>'revoked' RETURNING fingerprint", [request.params.installationId]);
-    if (!result.rowCount && existing.rows[0].trust_state !== "revoked") {
-      return reply.code(409).send({ error: "The saved server identity changed while it was being deleted. Refresh and try again." });
+    const client = await pool.connect();
+    let deleted = false;
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 FOR UPDATE", [request.params.installationId]);
+      if (!existing.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "This saved server identity was not found." });
+      }
+      const local = await client.query<{ id: string }>("SELECT id FROM installations WHERE is_current=TRUE");
+      if (!local.rowCount) throw new Error("The current installation identity is unavailable.");
+
+      const subscriptionRuns = await client.query<{ run_id: string }>(
+        `SELECT current_run_id AS run_id FROM sync_subscriptions WHERE source_installation_id=$1 AND current_run_id IS NOT NULL
+         UNION SELECT last_snapshot_id AS run_id FROM sync_subscriptions WHERE source_installation_id=$1 AND last_snapshot_id IS NOT NULL
+         UNION SELECT snapshot_id AS run_id FROM sync_replica_push_runs WHERE subscription_id IN (SELECT id FROM sync_subscriptions WHERE source_installation_id=$1)
+         UNION SELECT snapshot_id AS run_id FROM sync_redundancy_imports WHERE source_installation_id=$1`,
+        [request.params.installationId],
+      );
+      const runIds = subscriptionRuns.rows.map((item) => item.run_id);
+      if (runIds.length) await client.query("DELETE FROM sync_replica_staging WHERE run_id=ANY($1::uuid[])", [runIds]);
+
+      await client.query("DELETE FROM sync_share_grants WHERE recipient_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_subscriptions WHERE source_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_redundancy_imports WHERE source_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_redundancy_pull_authorizations WHERE target_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_redundancy_pull_offers WHERE target_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_redundancy_standby_requests WHERE source_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_site_redundancy_replicas WHERE peer_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_redundancy_audit WHERE source_installation_id=$1", [request.params.installationId]);
+      await client.query(
+        `UPDATE sync_site_redundancy SET
+          role=CASE WHEN primary_installation_id=$1 OR upstream_installation_id=$1 THEN 'fenced' ELSE role END,
+          primary_installation_id=CASE WHEN primary_installation_id=$1 THEN $2 ELSE primary_installation_id END,
+          upstream_installation_id=CASE WHEN upstream_installation_id=$1 THEN NULL ELSE upstream_installation_id END,
+          upstream_department_id=CASE WHEN upstream_installation_id=$1 THEN NULL ELSE upstream_department_id END,
+          former_standby_installation_id=CASE WHEN former_standby_installation_id=$1 THEN NULL ELSE former_standby_installation_id END,
+          former_standby_department_id=CASE WHEN former_standby_installation_id=$1 THEN NULL ELSE former_standby_department_id END,
+          last_error=CASE WHEN primary_installation_id=$1 OR upstream_installation_id=$1 THEN 'The linked server was deleted. Reconfigure this site before promotion.' ELSE last_error END,
+          fenced_at=CASE WHEN primary_installation_id=$1 OR upstream_installation_id=$1 THEN now() ELSE fenced_at END,
+          updated_at=now()
+         WHERE primary_installation_id=$1 OR upstream_installation_id=$1 OR former_standby_installation_id=$1`,
+        [request.params.installationId, local.rows[0].id],
+      );
+      await client.query("DELETE FROM sync_request_nonces WHERE installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_peer_audit WHERE peer_installation_id=$1", [request.params.installationId]);
+      await client.query("DELETE FROM sync_peers WHERE installation_id=$1", [request.params.installationId]);
+      await client.query("COMMIT");
+      deleted = true;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-    activeFederationChannels?.disconnectPeer(request.params.installationId);
-    if (result.rowCount) await pool.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,actor_user_id,fingerprint) VALUES($1,$2,'revoked',$3,$4)", [randomUUID(), request.params.installationId, request.authenticatedUser!.id, result.rows[0].fingerprint]);
-    await pool.query("UPDATE sync_share_grants SET state='revoked',revision=revision+1,revoked_at=now(),updated_at=now() WHERE recipient_installation_id=$1 AND state='active'", [request.params.installationId]);
-    await pool.query("UPDATE sync_redundancy_pull_authorizations SET state='revoked',reviewed_at=now(),reviewed_by=$2 WHERE target_installation_id=$1 AND state IN ('pending','approved')", [request.params.installationId, request.authenticatedUser!.id]);
-    const subscriptions = await pool.query<{ id: string; current_run_id: string | null }>("SELECT id,current_run_id FROM sync_subscriptions WHERE source_installation_id=$1 AND state='active'", [request.params.installationId]);
-    await pool.query("UPDATE sync_subscriptions SET state='revoked',current_run_id=NULL,sync_started_at=NULL,last_error='Peer trust was revoked.',updated_at=now() WHERE source_installation_id=$1 AND state='active'", [request.params.installationId]);
-    await pool.query("DELETE FROM sync_replica_records WHERE subscription_id=ANY($1::uuid[])", [subscriptions.rows.map((item) => item.id)]);
-    await pool.query("DELETE FROM sync_replica_staging WHERE run_id=ANY($1::uuid[])", [subscriptions.rows.map((item) => item.current_run_id).filter(Boolean)]);
-    await pool.query("DELETE FROM sync_replica_staging WHERE run_id IN (SELECT snapshot_id FROM sync_replica_push_runs WHERE subscription_id=ANY($1::uuid[]))", [subscriptions.rows.map((item) => item.id)]);
-    await pool.query("DELETE FROM sync_replica_push_runs WHERE subscription_id=ANY($1::uuid[])", [subscriptions.rows.map((item) => item.id)]);
-    // Keep the audit fingerprint, but remove the saved public key and identity tombstone.
-    await pool.query("DELETE FROM sync_peers WHERE installation_id=$1", [request.params.installationId]);
-    return { installationId: request.params.installationId, deleted: true };
+    if (deleted) activeFederationChannels?.disconnectPeer(request.params.installationId);
+    return { installationId: request.params.installationId, deleted };
   });
 
   app.get(`${adminPrefix}/shares`, async (request, reply) => {
