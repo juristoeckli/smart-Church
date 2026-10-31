@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   Bell,
   Building2,
@@ -303,6 +303,8 @@ function WorkspaceApp() {
   const [isMenuEditorOpen, setIsMenuEditorOpen] = useState(false);
   const [isAddingMenuSection, setIsAddingMenuSection] = useState(false);
   const [newMenuSectionName, setNewMenuSectionName] = useState("");
+  const [renamingMenuSectionId, setRenamingMenuSectionId] = useState<string | null>(null);
+  const [menuSectionNameDraft, setMenuSectionNameDraft] = useState("");
   const [draggedMenuItemId, setDraggedMenuItemId] = useState<string | null>(null);
   const [dragOverMenuItemId, setDragOverMenuItemId] = useState<string | null>(null);
   const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
@@ -1334,6 +1336,13 @@ function WorkspaceApp() {
     setIsAddingMenuSection(false);
   };
   const deleteMenuSection = (id: string) => saveMenuPreferences({ ...menuPreferences, sections: menuPreferences.sections.filter((section) => section.id !== id) });
+  const beginRenameMenuSection = (section: MenuSectionPreference) => { setRenamingMenuSectionId(section.id); setMenuSectionNameDraft(section.name); };
+  const saveMenuSectionName = (id: string) => {
+    const name = menuSectionNameDraft.trim();
+    if (name) saveMenuPreferences({ ...menuPreferences, sections: menuPreferences.sections.map((section) => section.id === id ? { ...section, name } : section) });
+    setRenamingMenuSectionId(null);
+    setMenuSectionNameDraft("");
+  };
   const selectedModuleSettings = registeredModules.find((module) => module.id === selectedModuleSettingsId && module.settings);
   const moduleContext = {
     language: activeLanguage,
@@ -1397,8 +1406,47 @@ function WorkspaceApp() {
     return targetId === `module:${item.moduleId}` && !menuPreferences.hidden.includes(parent.id);
   }));
   const defaultModuleNavigationItems: MenuItem[] = orderedMenuItems<MenuItem>([...availableModuleMenuItems.filter((item) => !menuPreferences.hidden.includes(item.id)), ...standaloneModuleSubMenuItems]);
-  const menuEditorItemsWithOwners = (items: MenuItem[]) => items.map((item) => item.kind === "module-sub" && item.moduleName ? { ...item, label: `${item.moduleName} · ${item.label}` } : item);
-  const renderMenuEditorGroup = (sectionId: string, title: string, items: MenuItem[], onDelete?: () => void) => <section className="menu-editor-group" aria-label={title}><header><h3>{title}</h3><label className="menu-editor-section-visibility"><input type="checkbox" checked={!menuPreferences.hiddenSections.includes(sectionId)} onChange={(event) => toggleMenuSection(sectionId, event.currentTarget.checked)} /><span>{translate("nav.showByDefault")}</span></label>{onDelete && <button className="menu-editor-section-delete" type="button" title={translate("nav.deleteSection")} aria-label={`${translate("nav.deleteSection")}: ${title}`} onClick={onDelete}><Trash2 size={13} /></button>}</header><ul>{items.map((item) => <li key={item.id} className={`${item.kind === "module-sub" ? "menu-editor-subitem" : ""} ${dragOverMenuItemId === item.id ? "menu-editor-drop-target" : ""} ${draggedMenuItemId === item.id ? "menu-editor-dragging" : ""}`} draggable onDragStart={(event) => { if ((event.target as HTMLElement).closest("button,input")) { event.preventDefault(); return; } setDraggedMenuItemId(item.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.id); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDragOverMenuItemId(item.id); }} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", item.id, sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }} onDragEnd={() => { setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}><GripVertical size={15} className="menu-editor-grip" aria-hidden="true" /><label><input type="checkbox" checked={!menuPreferences.hidden.includes(item.id)} onChange={(event) => toggleMenuItem(item.id, event.currentTarget.checked)} /><span>{item.label}</span></label><button className="menu-editor-row-action" type="button" title={translate("nav.duplicateItem")} aria-label={`${translate("nav.duplicateItem")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); duplicateMenuItem(item, sectionId); }}><Copy size={13} /></button>{item.isDuplicate && <button className="menu-editor-row-action menu-editor-delete-duplicate" type="button" title={translate("nav.deleteDuplicate")} aria-label={`${translate("nav.deleteDuplicate")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); deleteDuplicateMenuItem(item.id); }}><Trash2 size={13} /></button>}</li>)}<li className="menu-editor-empty-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", "", sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}>{translate("nav.dropHere")}</li></ul></section>;
+  const menuItemModuleId = (item: MenuItem) => {
+    if (item.moduleId) return item.moduleId;
+    const targetId = item.targetId ?? item.id;
+    return targetId.startsWith("module:") ? targetId.slice("module:".length) : "";
+  };
+  const renderMenuEditorItemRow = (item: MenuItem, sectionId: string, depth = 0) => <li key={item.id} style={depth ? { paddingLeft: `${6 + depth * 15}px` } : undefined} className={`${item.kind === "module-sub" ? "menu-editor-subitem" : ""} ${dragOverMenuItemId === item.id ? "menu-editor-drop-target" : ""} ${draggedMenuItemId === item.id ? "menu-editor-dragging" : ""}`} draggable onDragStart={(event) => { if ((event.target as HTMLElement).closest("button,input")) { event.preventDefault(); return; } setDraggedMenuItemId(item.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.id); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDragOverMenuItemId(item.id); }} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", item.id, sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }} onDragEnd={() => { setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}><GripVertical size={15} className="menu-editor-grip" aria-hidden="true" /><label><input type="checkbox" checked={!menuPreferences.hidden.includes(item.id)} onChange={(event) => toggleMenuItem(item.id, event.currentTarget.checked)} /><span>{item.label}</span></label><button className="menu-editor-row-action" type="button" title={translate("nav.duplicateItem")} aria-label={`${translate("nav.duplicateItem")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); duplicateMenuItem(item, sectionId); }}><Copy size={13} /></button>{item.isDuplicate && <button className="menu-editor-row-action menu-editor-delete-duplicate" type="button" title={translate("nav.deleteDuplicate")} aria-label={`${translate("nav.deleteDuplicate")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); deleteDuplicateMenuItem(item.id); }}><Trash2 size={13} /></button>}</li>;
+  const renderMenuEditorTree = (items: MenuItem[], sectionId: string): ReactNode[] => {
+    const groups = new Map<string, MenuItem[]>();
+    const sequence: Array<{ moduleId: string } | { item: MenuItem }> = [];
+    for (const item of items) {
+      const moduleId = menuItemModuleId(item);
+      if (!moduleId) { sequence.push({ item }); continue; }
+      if (!groups.has(moduleId)) { groups.set(moduleId, []); sequence.push({ moduleId }); }
+      groups.get(moduleId)!.push(item);
+    }
+    const renderedRows: ReactNode[] = [];
+    for (const node of sequence) {
+      if ("item" in node) {
+        renderedRows.push(renderMenuEditorItemRow(node.item, sectionId));
+        continue;
+      }
+      const moduleItems = groups.get(node.moduleId) ?? [];
+      const moduleEntries = moduleItems.filter((item) => item.kind === "module-sub");
+      const moduleLinks = moduleItems.filter((item) => item.kind !== "module-sub");
+      const moduleName = moduleEntries[0]?.moduleName ?? enabledDynamicModules.find((module) => module.id === node.moduleId)?.name ?? node.moduleId;
+      const treeRows: ReactNode[] = moduleLinks.map((item) => renderMenuEditorItemRow(item, sectionId));
+      if (!moduleLinks.length) treeRows.push(<li key={`owner:${sectionId}:${node.moduleId}`} className="menu-editor-tree-owner">{moduleName}</li>);
+      const entryIds = new Set(moduleEntries.map((item) => item.id));
+      const appendChildren = (parentId: string | undefined, depth: number): ReactNode[] => moduleEntries
+        .filter((item) => item.parentId === parentId)
+        .flatMap((item) => [renderMenuEditorItemRow(item, sectionId, depth), ...appendChildren(item.id, depth + 1)]);
+      const rootEntries = moduleEntries.filter((item) => !item.parentId || !entryIds.has(item.parentId));
+      for (const item of rootEntries) treeRows.push(renderMenuEditorItemRow(item, sectionId, 1), ...appendChildren(item.id, 2));
+      renderedRows.push(...treeRows);
+    }
+    return renderedRows;
+  };
+  const renderMenuEditorGroup = (sectionId: string, title: string, items: MenuItem[], onDelete?: () => void, treeByModule = false) => {
+    const section = onDelete ? menuPreferences.sections.find((item) => item.id === sectionId) : undefined;
+    return <section className="menu-editor-group" aria-label={title}><header>{section && renamingMenuSectionId === sectionId ? <form className="menu-editor-section-rename" onSubmit={(event) => { event.preventDefault(); saveMenuSectionName(sectionId); }}><input autoFocus aria-label={translate("nav.sectionName")} value={menuSectionNameDraft} onChange={(event) => setMenuSectionNameDraft(event.currentTarget.value)} onKeyDown={(event) => { if (event.key === "Escape") { setRenamingMenuSectionId(null); setMenuSectionNameDraft(""); } }} maxLength={40} /><button className="menu-editor-section-rename-action" type="submit" aria-label={translate("nav.done")} disabled={!menuSectionNameDraft.trim()}><Check size={13} /></button><button className="menu-editor-section-rename-action" type="button" aria-label={translate("nav.close")} onClick={() => { setRenamingMenuSectionId(null); setMenuSectionNameDraft(""); }}><X size={13} /></button></form> : <h3>{title}</h3>}<label className="menu-editor-section-visibility"><input type="checkbox" checked={!menuPreferences.hiddenSections.includes(sectionId)} onChange={(event) => toggleMenuSection(sectionId, event.currentTarget.checked)} /><span>{translate("nav.showByDefault")}</span></label>{section && renamingMenuSectionId !== sectionId && <button className="menu-editor-section-rename-action" type="button" title={translate("nav.sectionName")} aria-label={`${translate("nav.sectionName")}: ${title}`} onClick={() => beginRenameMenuSection(section)}><Pencil size={13} /></button>}{onDelete && <button className="menu-editor-section-delete" type="button" title={translate("nav.deleteSection")} aria-label={`${translate("nav.deleteSection")}: ${title}`} onClick={onDelete}><Trash2 size={13} /></button>}</header><ul>{treeByModule ? renderMenuEditorTree(items, sectionId) : items.map((item) => renderMenuEditorItemRow(item, sectionId))}<li className="menu-editor-empty-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", "", sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}>{translate("nav.dropHere")}</li></ul></section>;
+  };
   const editingUser = siteUsers.find((user) => user.id === editingUserId) ?? null;
   setUserDateTimeFormat(authUser.dateTimeFormat ?? defaultDateTimeFormat);
   setActiveLanguage(activeLanguage);
@@ -1421,11 +1469,21 @@ function WorkspaceApp() {
           </section>}
           {(isMenuEditorOpen || (enabledDynamicModules.length > 0 && !menuPreferences.hiddenSections.includes("modules"))) && <section className={`nav-category ${isMenuEditorOpen ? "nav-category-editing" : ""}`}>
             {!isMenuEditorOpen && <button className="nav-label nav-section-label nav-module-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections.modules} onClick={() => setCollapsedNavSections((current) => ({ ...current, modules: !current.modules }))}><span>{translate("nav.modules")}</span><ChevronDown size={13} aria-hidden="true" /></button>}
-            {isMenuEditorOpen ? renderMenuEditorGroup("modules", translate("nav.modules"), menuEditorItemsWithOwners(orderedMenuItems([...availableModuleMenuItems, ...availableModuleSubMenuItems]))) : !collapsedNavSections.modules && <div className="nav-category-items">{defaultModuleNavigationItems.map((item) => item.kind === "module-sub" ? renderModuleSubItem(item) : renderModuleMenuItem(item))}</div>}
+            {isMenuEditorOpen ? renderMenuEditorGroup("modules", translate("nav.modules"), orderedMenuItems([...availableModuleMenuItems, ...availableModuleSubMenuItems]), undefined, true) : !collapsedNavSections.modules && <div className="nav-category-items">{defaultModuleNavigationItems.map((item) => item.kind === "module-sub" ? renderModuleSubItem(item) : renderModuleMenuItem(item))}</div>}
           </section>}
-          {customMenuSections.map((section) => (isMenuEditorOpen || !menuPreferences.hiddenSections.includes(section.id)) && <section className={`nav-category ${isMenuEditorOpen ? "nav-category-editing" : ""}`} key={section.id}>
-            {isMenuEditorOpen ? renderMenuEditorGroup(section.id, section.name, menuEditorItemsWithOwners(section.items), () => deleteMenuSection(section.id)) : <><button className="nav-label nav-section-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections[section.id]} onClick={() => setCollapsedNavSections((current) => ({ ...current, [section.id]: !current[section.id] }))}><span>{section.name}</span><ChevronDown size={13} aria-hidden="true" /></button>{!collapsedNavSections[section.id] && <div className="nav-category-items">{section.items.filter((item) => !menuPreferences.hidden.includes(item.id)).map(renderCustomMenuItem)}</div>}</>}
-          </section>)}
+          {customMenuSections.map((section) => {
+            if (!isMenuEditorOpen && menuPreferences.hiddenSections.includes(section.id)) return null;
+            return (
+              <section className={`nav-category ${isMenuEditorOpen ? "nav-category-editing" : ""}`} key={section.id}>
+                {isMenuEditorOpen
+                  ? renderMenuEditorGroup(section.id, section.name, section.items, () => deleteMenuSection(section.id), true)
+                  : <>
+                      <button className="nav-label nav-section-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections[section.id]} onClick={() => setCollapsedNavSections((current) => ({ ...current, [section.id]: !current[section.id] }))}><span>{section.name}</span><ChevronDown size={13} aria-hidden="true" /></button>
+                      {!collapsedNavSections[section.id] && <div className="nav-category-items">{section.items.filter((item) => !menuPreferences.hidden.includes(item.id)).map(renderCustomMenuItem)}</div>}
+                    </>}
+              </section>
+            );
+          })}
         </nav>
 
         <div className="sidebar-bottom">

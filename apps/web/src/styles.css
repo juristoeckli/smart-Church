@@ -213,6 +213,11 @@
 .menu-editor-row-action:hover{background:#eaf3ec;color:#286c4b}
 .menu-editor-row-action.menu-editor-delete-duplicate:hover{background:#f8e9e9;color:#a34242}
 .menu-editor-group li.menu-editor-subitem{padding-left:21px}
+.menu-editor-group li.menu-editor-tree-owner{min-height:28px;align-items:center;padding:6px 8px 0 10px;border-bottom:1px solid var(--line);border-radius:0;color:var(--muted);font-size:9px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;cursor:default}
+.menu-editor-section-rename{display:flex;align-items:center;gap:3px;flex:1;min-width:0;padding-left:5px}
+.menu-editor-section-rename input{height:27px;min-width:0;flex:1;padding:0 6px;border:1px solid var(--line);border-radius:5px;background:var(--panel);color:var(--ink);font-size:10px}
+.menu-editor-section-rename-action{width:24px;height:24px;flex:0 0 auto;display:grid;place-items:center;border:0;border-radius:5px;background:transparent;color:var(--muted);cursor:pointer}
+.menu-editor-section-rename-action:hover{background:#eaf3ec;color:#286c4b}
 .menu-editor-group li.menu-editor-empty-drop{min-height:33px;justify-content:center;border:1px dashed var(--line);color:var(--muted);font-size:9px;cursor:default}
 .menu-editor-group li.menu-editor-empty-drop:hover{background:var(--bg)}
 .menu-section-create{display:flex;align-items:center;gap:5px;padding:4px 5px}
