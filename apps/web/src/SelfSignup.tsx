@@ -50,9 +50,9 @@ export function SelfSignupPage({ confirmation }: { confirmation: boolean }) {
     setSaving(true); setError("");
     try {
       const response = await fetch("/api/public/self-signup/confirm", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ token }) });
-      const result = await response.json() as { message?: string; error?: string };
-      if (!response.ok) throw new Error(t("confirmError"));
-      setMessage(result.message ?? t("confirmSuccess"));
+      const result = await response.json() as { confirmed?: boolean };
+      if (!response.ok || !result.confirmed) throw new Error(t("confirmError"));
+      setMessage(t("confirmSuccess"));
     } catch { setError(t("confirmError")); }
     finally { setSaving(false); }
   }
