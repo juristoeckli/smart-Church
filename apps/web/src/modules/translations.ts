@@ -2079,12 +2079,114 @@ const syncFederationAuditTranslations: ModuleLocales = {
   }
 };
 
+const peopleFlowsModuleTranslations: ModuleLocales = {
+  "de": {
+    "PEOPLE WORKFLOWS": "PERSONENABLÄUFE",
+    "People Flows": "Personenabläufe",
+    "Create follow-up workflows, assign them to people, and track each next step.": "Erstelle Abläufe zur Begleitung, weise sie Personen zu und verfolge die nächsten Schritte.",
+    "Workflows": "Abläufe",
+    "No workflows yet.": "Noch keine Abläufe vorhanden.",
+    "New workflow": "Neuer Ablauf",
+    "Create workflow": "Ablauf erstellen",
+    "Start with a workflow": "Mit einem Ablauf beginnen",
+    "Create a workflow to guide follow-up, onboarding, or pastoral next steps.": "Erstelle einen Ablauf für Begleitung, Einführung oder weitere pastorale Schritte.",
+    "Workflow details": "Ablaufdetails",
+    "Save workflow": "Ablauf speichern",
+    "Steps": "Schritte",
+    "New assignments receive the currently active steps.": "Neue Zuweisungen erhalten die derzeit aktiven Schritte.",
+    "Add steps to define the workflow.": "Füge Schritte hinzu, um den Ablauf festzulegen.",
+    "Step": "Schritt",
+    "Instructions": "Anweisungen",
+    "Due after days": "Fällig nach (Tagen)",
+    "Required to complete": "Für den Abschluss erforderlich",
+    "Save step": "Schritt speichern",
+    "Add a step": "Einen Schritt hinzufügen",
+    "Add step": "Schritt hinzufügen",
+    "Assignments": "Zuweisungen",
+    "Assign a workflow to people at this location.": "Weise Personen an diesem Standort einen Ablauf zu.",
+    "Overall due date": "Gesamtfrist",
+    "Assign selected": "Ausgewählte zuweisen",
+    "No assignments yet.": "Noch keine Zuweisungen vorhanden.",
+    "Complete workflow": "Ablauf abschließen",
+    "Reopen": "Wieder öffnen",
+    "Recent activity": "Letzte Aktivitäten",
+    "Audit history records workflow actions, not private notes.": "Der Prüfverlauf protokolliert Ablaufaktionen, keine privaten Notizen.",
+    "No workflow activity yet.": "Noch keine Ablaufaktivitäten vorhanden."
+  },
+  "fr": {
+    "PEOPLE WORKFLOWS": "PARCOURS PERSONNES",
+    "People Flows": "Parcours de personnes",
+    "Create follow-up workflows, assign them to people, and track each next step.": "Créez des parcours de suivi, attribuez-les aux personnes et suivez chaque étape.",
+    "Workflows": "Parcours",
+    "No workflows yet.": "Aucun parcours pour le moment.",
+    "New workflow": "Nouveau parcours",
+    "Create workflow": "Créer un parcours",
+    "Start with a workflow": "Commencer par un parcours",
+    "Create a workflow to guide follow-up, onboarding, or pastoral next steps.": "Créez un parcours pour organiser le suivi, l’accueil ou les prochaines étapes pastorales.",
+    "Workflow details": "Détails du parcours",
+    "Save workflow": "Enregistrer le parcours",
+    "Steps": "Étapes",
+    "New assignments receive the currently active steps.": "Les nouvelles affectations reçoivent les étapes actuellement actives.",
+    "Add steps to define the workflow.": "Ajoutez des étapes pour définir le parcours.",
+    "Step": "Étape",
+    "Instructions": "Instructions",
+    "Due after days": "Délai (jours)",
+    "Required to complete": "Obligatoire pour terminer",
+    "Save step": "Enregistrer l’étape",
+    "Add a step": "Ajouter une étape",
+    "Add step": "Ajouter une étape",
+    "Assignments": "Affectations",
+    "Assign a workflow to people at this location.": "Attribuez un parcours aux personnes de ce site.",
+    "Overall due date": "Échéance globale",
+    "Assign selected": "Attribuer la sélection",
+    "No assignments yet.": "Aucune affectation pour le moment.",
+    "Complete workflow": "Terminer le parcours",
+    "Reopen": "Rouvrir",
+    "Recent activity": "Activité récente",
+    "Audit history records workflow actions, not private notes.": "L’historique d’audit consigne les actions du parcours, pas les notes privées.",
+    "No workflow activity yet.": "Aucune activité de parcours pour le moment."
+  },
+  "it": {
+    "PEOPLE WORKFLOWS": "FLUSSI PERSONE",
+    "People Flows": "Flussi Persone",
+    "Create follow-up workflows, assign them to people, and track each next step.": "Crea flussi di accompagnamento, assegnali alle persone e segui ogni passaggio.",
+    "Workflows": "Flussi",
+    "No workflows yet.": "Nessun flusso presente.",
+    "New workflow": "Nuovo flusso",
+    "Create workflow": "Crea flusso",
+    "Start with a workflow": "Inizia con un flusso",
+    "Create a workflow to guide follow-up, onboarding, or pastoral next steps.": "Crea un flusso per guidare l’accompagnamento, l’accoglienza o i prossimi passi pastorali.",
+    "Workflow details": "Dettagli del flusso",
+    "Save workflow": "Salva flusso",
+    "Steps": "Passaggi",
+    "New assignments receive the currently active steps.": "Le nuove assegnazioni ricevono i passaggi attualmente attivi.",
+    "Add steps to define the workflow.": "Aggiungi passaggi per definire il flusso.",
+    "Step": "Passaggio",
+    "Instructions": "Istruzioni",
+    "Due after days": "Scadenza dopo (giorni)",
+    "Required to complete": "Obbligatorio per completare",
+    "Save step": "Salva passaggio",
+    "Add a step": "Aggiungi un passaggio",
+    "Add step": "Aggiungi passaggio",
+    "Assignments": "Assegnazioni",
+    "Assign a workflow to people at this location.": "Assegna un flusso alle persone di questa sede.",
+    "Overall due date": "Scadenza complessiva",
+    "Assign selected": "Assegna selezionati",
+    "No assignments yet.": "Nessuna assegnazione presente.",
+    "Complete workflow": "Completa il flusso",
+    "Reopen": "Riapri",
+    "Recent activity": "Attività recente",
+    "Audit history records workflow actions, not private notes.": "La cronologia di audit registra le azioni del flusso, non le note private.",
+    "No workflow activity yet.": "Nessuna attività del flusso presente."
+  }
+};
+
 export function translationsForModule(id: string): Partial<Record<UserLanguage, Record<string, string>>> {
   const specific = local[id] ?? {};
   const extra = extended[id] ?? {};
   const more = extendedMore[id] ?? {};
   const final = extendedFinal[id] ?? {};
-  return Object.fromEntries((Object.keys(shared) as UserLanguage[]).map((language) => [language, { ...shared[language], ...(sharedTerms[language] ?? {}), ...(specific[language] ?? {}), ...(extra[language] ?? {}), ...(more[language] ?? {}), ...(final[language] ?? {}), ...(id === "sync" ? syncPermissionTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationTranslations[language] ?? {} : {}), ...(id === "sync" ? syncStaticAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPeoplePreviewTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsScreenTranslations[language] ?? {} : {}), ...(id === "core-admin" || id === "core-people" || id === "core-events" ? coreNativeConfirmationTranslations[language] ?? {} : {}), ...(id === "chat" ? chatConfirmationTranslations[language] ?? {} : {}), ...(id === "presenter" ? presenterPromptTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPageTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsMigrationTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoImportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoRefreshTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsSafetyTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoConflictReviewTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsDetailTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsReviewUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupConflictErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesErrorTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoContactTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoPeopleProfileTranslations[language] ?? {} : {}), ...(id === "core-admin" ? adminPermissionTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userAdminTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userDataFallbackTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventManagementTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventCheckInTranslations[language] ?? {} : {}), ...(moduleRemainderTranslations[id]?.[language] ?? {}), ...(moduleRemainderAdditions[id]?.[language] ?? {}), ...(moduleRemainderFinal[id]?.[language] ?? {}), ...(coreApiErrors[id]?.[language] ?? {}), ...(coreRouteErrorTranslations[id]?.[language] ?? {}), ...(id === "sync" ? elvantoRouteErrorTranslations[language] : {}), ...(id === "sync" ? elvantoPaginationErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoFinancialTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSyncAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleLabels[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoExportUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSettingsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongLibraryTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsErrorTranslations[language] ?? {} : {}) }])) as Partial<Record<UserLanguage, Record<string, string>>>;
+  return Object.fromEntries((Object.keys(shared) as UserLanguage[]).map((language) => [language, { ...shared[language], ...(sharedTerms[language] ?? {}), ...(specific[language] ?? {}), ...(extra[language] ?? {}), ...(more[language] ?? {}), ...(final[language] ?? {}), ...(id === "sync" ? syncPermissionTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationTranslations[language] ?? {} : {}), ...(id === "sync" ? syncStaticAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPeoplePreviewTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsScreenTranslations[language] ?? {} : {}), ...(id === "core-admin" || id === "core-people" || id === "core-events" ? coreNativeConfirmationTranslations[language] ?? {} : {}), ...(id === "chat" ? chatConfirmationTranslations[language] ?? {} : {}), ...(id === "presenter" ? presenterPromptTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPageTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsMigrationTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoImportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoRefreshTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsSafetyTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoConflictReviewTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsDetailTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsReviewUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupConflictErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesErrorTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoContactTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoPeopleProfileTranslations[language] ?? {} : {}), ...(id === "core-admin" ? adminPermissionTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userAdminTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userDataFallbackTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventManagementTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventCheckInTranslations[language] ?? {} : {}), ...(id === "people-flows" ? peopleFlowsModuleTranslations[language] ?? {} : {}), ...(moduleRemainderTranslations[id]?.[language] ?? {}), ...(moduleRemainderAdditions[id]?.[language] ?? {}), ...(moduleRemainderFinal[id]?.[language] ?? {}), ...(coreApiErrors[id]?.[language] ?? {}), ...(coreRouteErrorTranslations[id]?.[language] ?? {}), ...(id === "sync" ? elvantoRouteErrorTranslations[language] : {}), ...(id === "sync" ? elvantoPaginationErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoFinancialTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSyncAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleLabels[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoExportUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSettingsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongLibraryTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsErrorTranslations[language] ?? {} : {}) }])) as Partial<Record<UserLanguage, Record<string, string>>>;
 }
 
 export function translateModuleMessage(id: string, language: UserLanguage, message: string): string {
