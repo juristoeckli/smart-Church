@@ -1,5 +1,14 @@
 export type ContactStatus = "member" | "visitor";
 
+export interface ContactRelationship {
+  sourceRelationshipId?: string;
+  relatedContactId: string;
+  relatedFirstName: string;
+  relatedLastName: string;
+  relationshipName?: string;
+  degreeOfRelationship?: string;
+}
+
 export interface Contact {
   id: string;
   firstName: string;
@@ -10,6 +19,7 @@ export interface Contact {
   importedFrom?: "churchtools" | "elvanto";
   elvantoProfile?: Record<string, unknown>;
   churchtoolsProfile?: Record<string, unknown>;
+  churchtoolsRelationships?: ContactRelationship[];
 }
 
 export type CreateContact = Omit<Contact, "id">;

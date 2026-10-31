@@ -6,7 +6,7 @@ import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PoolClient } from "pg";
 import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { AuthStatus, AuthenticatedUser, Contact, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
+import type { AuthStatus, AuthenticatedUser, Contact, ContactRelationship, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
@@ -2111,6 +2111,56 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     [selectedDepartmentId],
   );
   const canViewPrivatePeople = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage");
+  const relationshipsByContact = new Map<string, ContactRelationship[]>();
+  if (canViewPrivatePeople) {
+    const relationships = await pool.query<{
+      contact_id: string;
+      related_contact_id: string;
+      related_first_name: string;
+      related_last_name: string;
+      source_relationship_id: string | null;
+      relationship_name: string | null;
+      degree_of_relationship: string | null;
+    }>(
+      `SELECT DISTINCT source_link.local_record_id::text AS contact_id,
+              related_contact.id::text AS related_contact_id,
+              related_contact.first_name AS related_first_name,
+              related_contact.last_name AS related_last_name,
+              NULLIF(relation.value->>'sourceId','') AS source_relationship_id,
+              NULLIF(relation.value->>'relationshipName','') AS relationship_name,
+              NULLIF(relation.value->>'degreeOfRelationship','') AS degree_of_relationship
+         FROM churchtools_migration_links source_link
+         JOIN contacts source_contact ON source_contact.id=source_link.local_record_id AND source_contact.department_id=source_link.department_id
+         CROSS JOIN LATERAL jsonb_array_elements(
+           CASE WHEN jsonb_typeof(source_contact.churchtools_profile->'relationships')='array'
+             THEN source_contact.churchtools_profile->'relationships' ELSE '[]'::jsonb END
+         ) AS relation(value)
+         JOIN churchtools_migration_links related_link
+           ON related_link.department_id=source_link.department_id
+          AND related_link.area='person'
+          AND related_link.source_id=relation.value->>'relativeSourceId'
+         JOIN contacts related_contact
+           ON related_contact.id=related_link.local_record_id
+          AND related_contact.department_id=source_link.department_id
+        WHERE source_link.department_id=$1
+          AND source_link.area='person'
+          AND related_contact.id<>source_contact.id
+        ORDER BY contact_id,related_last_name,related_first_name`,
+      [selectedDepartmentId],
+    );
+    for (const relationship of relationships.rows) {
+      const items = relationshipsByContact.get(relationship.contact_id) ?? [];
+      items.push({
+        ...(relationship.source_relationship_id ? { sourceRelationshipId: relationship.source_relationship_id } : {}),
+        relatedContactId: relationship.related_contact_id,
+        relatedFirstName: relationship.related_first_name,
+        relatedLastName: relationship.related_last_name,
+        ...(relationship.relationship_name ? { relationshipName: relationship.relationship_name } : {}),
+        ...(relationship.degree_of_relationship ? { degreeOfRelationship: relationship.degree_of_relationship } : {}),
+      });
+      relationshipsByContact.set(relationship.contact_id, items);
+    }
+  }
   return result.rows.map((row) => ({
     id: row.id,
     firstName: row.first_name,
@@ -2121,6 +2171,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
     ...(canViewPrivatePeople && row.source_system === "elvanto" && row.elvanto_profile && Object.keys(row.elvanto_profile).length ? { elvantoProfile: row.elvanto_profile as Record<string, unknown> } : {}),
     ...(canViewPrivatePeople && row.churchtools_profile && Object.keys(row.churchtools_profile).length ? { churchtoolsProfile: row.churchtools_profile as Record<string, unknown> } : {}),
+    ...(canViewPrivatePeople && relationshipsByContact.has(row.id) ? { churchtoolsRelationships: relationshipsByContact.get(row.id)! } : {}),
   }));
 });
 
