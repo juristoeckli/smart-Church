@@ -5,6 +5,9 @@ type ModuleDictionaries = Partial<Record<UserLanguage, Record<string, string>>>;
 export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = {
   "core-people": {
     de: {
+      PERSON: "PERSON", STATUS: "STATUS", Actions: "Aktionen", Optional: "Optional", Status: "Status",
+      "Sort people Z to A": "Personen von Z bis A sortieren", "Sort people A to Z": "Personen von A bis Z sortieren", "Sort Z to A": "Von Z bis A sortieren", "Sort A to Z": "Von A bis Z sortieren",
+      "Edit {firstName} {lastName}": "{firstName} {lastName} bearbeiten", "Delete {firstName} {lastName}": "{firstName} {lastName} löschen",
       "Related people": "Verwandte Personen",
       "This CSV has an unfinished quoted field.": "Diese CSV-Datei enthält ein nicht abgeschlossenes Anführungszeichen.",
       "The CSV needs a header and at least one person.": "Die CSV-Datei benötigt eine Kopfzeile und mindestens eine Person.",
@@ -20,6 +23,9 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Imported {count} person.": "{count} Person wurde importiert.",
     },
     fr: {
+      PERSON: "PERSONNE", STATUS: "STATUT", Actions: "Actions", Optional: "Facultatif", Status: "Statut",
+      "Sort people Z to A": "Trier les personnes de Z à A", "Sort people A to Z": "Trier les personnes de A à Z", "Sort Z to A": "Trier de Z à A", "Sort A to Z": "Trier de A à Z",
+      "Edit {firstName} {lastName}": "Modifier {firstName} {lastName}", "Delete {firstName} {lastName}": "Supprimer {firstName} {lastName}",
       "Related people": "Personnes liées",
       "This CSV has an unfinished quoted field.": "Ce fichier CSV contient un champ entre guillemets qui n’est pas terminé.",
       "The CSV needs a header and at least one person.": "Le fichier CSV doit contenir un en-tête et au moins une personne.",
@@ -35,6 +41,9 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Imported {count} person.": "{count} personne a été importée.",
     },
     it: {
+      PERSON: "PERSONA", STATUS: "STATO", Actions: "Azioni", Optional: "Facoltativo", Status: "Stato",
+      "Sort people Z to A": "Ordina le persone da Z ad A", "Sort people A to Z": "Ordina le persone da A a Z", "Sort Z to A": "Ordina da Z ad A", "Sort A to Z": "Ordina da A a Z",
+      "Edit {firstName} {lastName}": "Modifica {firstName} {lastName}", "Delete {firstName} {lastName}": "Elimina {firstName} {lastName}",
       "Related people": "Persone collegate",
       "This CSV has an unfinished quoted field.": "Il file CSV contiene un campo tra virgolette non terminato.",
       "The CSV needs a header and at least one person.": "Il file CSV deve contenere un’intestazione e almeno una persona.",
@@ -52,6 +61,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
   },
   "core-admin": {
     de: {
+      "PREFERENCES & ACCESS": "EINSTELLUNGEN & ZUGRIFF", Server: "Server", Online: "Online", Database: "Datenbank", Mobile: "Mobil", "Release / build": "Release / Build", Build: "Build",
+      "Phone number {number} label": "Bezeichnung für Telefonnummer {number}", "Phone number {number}": "Telefonnummer {number}", "Remove phone number {number}": "Telefonnummer {number} entfernen",
+      "Related user {name}": "Verknüpfter Benutzer {name}", "Relationship type {type}": "Beziehungstyp {type}", "Remove relationship {name}": "Beziehung zu {name} entfernen",
+      "{location} role": "Rolle für {location}", "Person linked to {location}": "Person mit {location} verknüpft", Site: "Standort",
       "LOCATION MANAGEMENT": "STANDORTVERWALTUNG",
       "Add an existing account": "Bestehendes Konto hinzufügen",
       "Add access": "Zugriff hinzufügen",
@@ -87,6 +100,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Could not read that logo image.": "Das Logo konnte nicht gelesen werden.",
     },
     fr: {
+      "PREFERENCES & ACCESS": "PRÉFÉRENCES ET ACCÈS", Server: "Serveur", Online: "En ligne", Database: "Base de données", Mobile: "Mobile", "Release / build": "Version / build", Build: "Build",
+      "Phone number {number} label": "Libellé du numéro de téléphone {number}", "Phone number {number}": "Numéro de téléphone {number}", "Remove phone number {number}": "Supprimer le numéro de téléphone {number}",
+      "Related user {name}": "Utilisateur associé {name}", "Relationship type {type}": "Type de relation {type}", "Remove relationship {name}": "Supprimer la relation avec {name}",
+      "{location} role": "Rôle de {location}", "Person linked to {location}": "Personne associée à {location}", Site: "Site",
       "LOCATION MANAGEMENT": "GESTION DU SITE",
       "Add an existing account": "Ajouter un compte existant",
       "Add access": "Ajouter l’accès",
@@ -122,6 +139,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Could not read that logo image.": "Impossible de lire cette image de logo.",
     },
     it: {
+      "PREFERENCES & ACCESS": "PREFERENZE E ACCESSO", Server: "Server", Online: "Online", Database: "Database", Mobile: "Cellulare", "Release / build": "Versione / build", Build: "Build",
+      "Phone number {number} label": "Etichetta del numero di telefono {number}", "Phone number {number}": "Numero di telefono {number}", "Remove phone number {number}": "Rimuovi il numero di telefono {number}",
+      "Related user {name}": "Utente collegato {name}", "Relationship type {type}": "Tipo di relazione {type}", "Remove relationship {name}": "Rimuovi la relazione con {name}",
+      "{location} role": "Ruolo di {location}", "Person linked to {location}": "Persona collegata a {location}", Site: "Sede",
       "LOCATION MANAGEMENT": "GESTIONE DELLA SEDE",
       "Add an existing account": "Aggiungi un account esistente",
       "Add access": "Aggiungi accesso",
