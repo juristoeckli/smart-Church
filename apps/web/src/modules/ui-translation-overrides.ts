@@ -3,6 +3,11 @@ import type { UserLanguage } from "@smart-church/contracts";
 type ModuleDictionaries = Partial<Record<UserLanguage, Record<string, string>>>;
 
 export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = {
+  "core-people": {
+    de: { "Related people": "Verwandte Personen" },
+    fr: { "Related people": "Personnes liées" },
+    it: { "Related people": "Persone collegate" },
+  },
   "core-admin": {
     de: {
       "LOCATION MANAGEMENT": "STANDORTVERWALTUNG",
