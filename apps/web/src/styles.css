@@ -182,3 +182,18 @@
 @media(max-width:900px){.settings-page .user-access-layout{grid-template-columns:minmax(220px,.65fr) minmax(0,1.4fr);gap:12px}.settings-page .user-access-form{padding:14px}}
 @media(max-width:760px){.settings-page .user-access-layout{grid-template-columns:1fr}.settings-page .user-access-list{position:static;max-height:300px;grid-template-columns:repeat(2,minmax(0,1fr));overflow:auto}.settings-page .user-access-list-header{grid-column:1/-1}.settings-page .user-access-section{grid-template-columns:1fr}.settings-page .user-access-section-heading{grid-column:1}.settings-page .user-access-form>.form-actions{margin:0 -14px -14px;padding:10px 14px}}
 @media(max-width:520px){.settings-page .user-access-list{grid-template-columns:1fr}.settings-page .user-access-list-header{grid-template-columns:1fr}.settings-page .user-access-form{padding:12px}.settings-page .user-access-form>.form-actions{margin:0 -12px -12px;padding:9px 12px}}
+.menu-customize-button{margin-top:5px;border-top:1px solid var(--line);border-radius:0 0 8px 8px;padding-top:5px;height:46px}
+.menu-editor-backdrop{z-index:40}
+.menu-editor-modal{width:min(560px,calc(100vw - 32px));max-height:min(82vh,760px);overflow:auto}
+.menu-editor-groups{display:grid;gap:17px;margin:19px 0}
+.menu-editor-group h3{margin:0 0 7px;padding:0 2px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase}
+.menu-editor-group ul{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:9px;overflow:hidden}
+.menu-editor-group li{min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 8px 4px 12px;border-bottom:1px solid var(--line)}
+.menu-editor-group li:last-child{border-bottom:0}
+.menu-editor-group li label{display:flex;align-items:center;gap:10px;min-width:0;color:var(--ink);font-size:12px;cursor:pointer}
+.menu-editor-group li label input{accent-color:var(--green);width:15px;height:15px}
+.menu-editor-reorder{display:flex;gap:2px}
+.menu-editor-reorder .icon-button{width:30px;height:30px}
+.menu-editor-reorder .icon-button:disabled{opacity:.32;cursor:default}
+.menu-editor-modal .form-actions{justify-content:space-between}
+@media(max-width:560px){.menu-editor-modal{padding:17px}.menu-editor-modal .modal-heading{align-items:flex-start}.menu-editor-modal .form-actions{flex-wrap:wrap}.menu-editor-modal .form-actions .button{flex:1}}
