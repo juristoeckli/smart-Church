@@ -4,6 +4,7 @@ type ModuleErrors = Record<string, string>;
 type ModulesById = Record<string, ModuleErrors>;
 export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>> = {
   de: {
+    "presenter": { "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert." },
     "core-admin": {
       "Enable required module dependencies first: {dependencies}.": "Aktiviere zuerst die erforderlichen Modulabhängigkeiten: {dependencies}.",
       "Required modules cannot be disabled: {modules}.": "Erforderliche Module können nicht deaktiviert werden: {modules}.",
@@ -87,12 +88,14 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The File Storage snapshot is invalid.": "Der File-Storage-Snapshot ist ungültig.",
     },
     "file-storage": {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "Choose a valid file view.": "Wähle eine gültige Dateiansicht.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Eine replizierte Datei entspricht nicht der angegebenen Größe oder überschreitet 25 MiB.",
       "The File Storage snapshot contains an invalid file record.": "Der File-Storage-Snapshot enthält einen ungültigen Dateieintrag.",
       "The File Storage snapshot is invalid.": "Der File-Storage-Snapshot ist ungültig.",
     },
     "module-demo": {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "Enter a note before saving.": "Gib vor dem Speichern eine Notiz ein.",
       "Module Demo is not enabled for this site.": "Das Modul-Demo ist für diesen Standort nicht aktiviert.",
       "The Module Demo snapshot is invalid or exceeds the supported limits.": "Der Modul-Demo-Snapshot ist ungültig oder überschreitet die zulässigen Grenzen.",
@@ -100,6 +103,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The account database is unavailable.": "Die Kontodatenbank ist nicht verfügbar.",
     },
     "people-flows": {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links.": "Ein Elvanto-Schritt wurde geändert oder ist nicht mehr vorhanden. Aktualisiere den importierten Personenablauf, bevor du Verknüpfungen speicherst.",
       "People Flows are unavailable because the database is not ready.": "Personenabläufe sind nicht verfügbar, weil die Datenbank noch nicht bereit ist.",
       "You need private People access to view workflows.": "Du benötigst privaten Personenzugriff, um Abläufe anzuzeigen.",
@@ -121,14 +125,17 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "You need private People access to view workflow export status.": "Du benötigst privaten Personenzugriff, um den Exportstatus der Abläufe anzuzeigen.",
     },
     "community-feed": {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "The Community Feed snapshot is invalid.": "Der Community-Feed-Snapshot ist ungültig.",
     },
     notifications: {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "A notification preference has no matching account on the standby server.": "Für eine Benachrichtigungseinstellung gibt es kein entsprechendes Konto auf dem Standby-Server.",
       "A notification recipient has no matching account on the standby server.": "Für einen Benachrichtigungsempfänger gibt es kein entsprechendes Konto auf dem Standby-Server.",
       "The Notifications snapshot is invalid or exceeds supported limits.": "Der Benachrichtigungs-Snapshot ist ungültig oder überschreitet die zulässigen Grenzen.",
     },
     chat: {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "A Chat conversation owner has no matching account on the standby server.": "Für den Besitzer einer Chat-Unterhaltung gibt es kein entsprechendes Konto auf dem Standby-Server.",
       "A Chat member has no matching account on the standby server.": "Für ein Chat-Mitglied gibt es kein entsprechendes Konto auf dem Standby-Server.",
       "A Chat message author has no matching account on the standby server.": "Für den Verfasser einer Chatnachricht gibt es kein entsprechendes Konto auf dem Standby-Server.",
@@ -136,6 +143,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The Chat snapshot is invalid or uses an unsupported schema.": "Der Chat-Snapshot ist ungültig oder verwendet ein nicht unterstütztes Schema.",
     },
     "video-steffisburg": {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "A preview cannot start from the broadcast's current status: {status}.": "Die Vorschau kann beim aktuellen Übertragungsstatus ({status}) nicht gestartet werden.",
       "Addresses were saved, but the Video worker is unavailable. They will apply when it reconnects.": "Die Adressen wurden gespeichert, aber der Video-Worker ist nicht verfügbar. Sie werden angewendet, sobald er sich wieder verbindet.",
       "Enter a valid IP address for {targetName}.": "Gib eine gültige IP-Adresse für {targetName} ein.",
@@ -184,6 +192,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "YouTube OAuth settings are incomplete. Check the module Client ID and Client Secret, plus its redirect URL.": "Die YouTube-OAuth-Einstellungen sind unvollständig. Prüfe die Client-ID, das Client-Secret und die Weiterleitungs-URL des Moduls.",
     },
     "remote-desktop": {
+      "This module is not enabled for this installation.": "Dieses Modul ist für diese Installation nicht aktiviert.",
       "Server administrator access is required.": "Zugriff als Serveradministrator ist erforderlich.",
       "The account database is unavailable.": "Die Kontodatenbank ist nicht verfügbar.",
       "A destination with this name already exists at this site.": "An diesem Standort gibt es bereits ein Ziel mit diesem Namen.",
@@ -214,6 +223,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
     },
   },
   fr: {
+    "presenter": { "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation." },
     "core-admin": {
       "Enable required module dependencies first: {dependencies}.": "Activez d’abord les dépendances obligatoires des modules : {dependencies}.",
       "Required modules cannot be disabled: {modules}.": "Les modules obligatoires ne peuvent pas être désactivés : {modules}.",
@@ -297,12 +307,14 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The File Storage snapshot is invalid.": "L’instantané File Storage est invalide.",
     },
     "file-storage": {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "Choose a valid file view.": "Choisissez un affichage de fichiers valide.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un fichier répliqué ne correspond pas à la taille déclarée ou dépasse 25 Mio.",
       "The File Storage snapshot contains an invalid file record.": "L’instantané File Storage contient une entrée de fichier invalide.",
       "The File Storage snapshot is invalid.": "L’instantané File Storage est invalide.",
     },
     "module-demo": {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "Enter a note before saving.": "Saisissez une note avant d’enregistrer.",
       "Module Demo is not enabled for this site.": "Le module Demo n’est pas activé pour ce site.",
       "The Module Demo snapshot is invalid or exceeds the supported limits.": "L’instantané du module Demo est invalide ou dépasse les limites prises en charge.",
@@ -310,6 +322,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The account database is unavailable.": "La base de données des comptes est indisponible.",
     },
     "people-flows": {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links.": "Une étape Elvanto a changé ou a disparu. Actualisez le parcours de personnes importé avant d’enregistrer les liens.",
       "People Flows are unavailable because the database is not ready.": "Les parcours de personnes ne sont pas disponibles car la base de données n’est pas prête.",
       "You need private People access to view workflows.": "Vous devez disposer de l’accès privé aux personnes pour consulter les parcours.",
@@ -330,13 +343,18 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "People Flow export is unavailable because the database is not ready.": "L’export des parcours de personnes est indisponible car la base de données n’est pas prête.",
       "You need private People access to view workflow export status.": "Vous devez disposer de l’accès privé aux personnes pour consulter l’état d’export des processus.",
     },
-    "community-feed": { "The Community Feed snapshot is invalid.": "L’instantané du fil communautaire est invalide." },
+    "community-feed": {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
+      "The Community Feed snapshot is invalid.": "L’instantané du fil communautaire est invalide.",
+    },
     notifications: {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "A notification preference has no matching account on the standby server.": "Aucun compte correspondant à une préférence de notification n’existe sur le serveur de secours.",
       "A notification recipient has no matching account on the standby server.": "Aucun compte correspondant à un destinataire de notification n’existe sur le serveur de secours.",
       "The Notifications snapshot is invalid or exceeds supported limits.": "L’instantané des notifications est invalide ou dépasse les limites prises en charge.",
     },
     chat: {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "A Chat conversation owner has no matching account on the standby server.": "Le propriétaire d’une conversation Chat ne possède pas de compte correspondant sur le serveur de secours.",
       "A Chat member has no matching account on the standby server.": "Un membre Chat ne possède pas de compte correspondant sur le serveur de secours.",
       "A Chat message author has no matching account on the standby server.": "L’auteur d’un message Chat ne possède pas de compte correspondant sur le serveur de secours.",
@@ -344,6 +362,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The Chat snapshot is invalid or uses an unsupported schema.": "L’instantané Chat est invalide ou utilise un schéma non pris en charge.",
     },
     "video-steffisburg": {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "A preview cannot start from the broadcast's current status: {status}.": "L’aperçu ne peut pas démarrer avec le statut actuel de la diffusion : {status}.",
       "Addresses were saved, but the Video worker is unavailable. They will apply when it reconnects.": "Les adresses ont été enregistrées, mais le processus Video est indisponible. Elles seront appliquées lors de sa reconnexion.",
       "Enter a valid IP address for {targetName}.": "Saisissez une adresse IP valide pour {targetName}.",
@@ -392,6 +411,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "YouTube OAuth settings are incomplete. Check the module Client ID and Client Secret, plus its redirect URL.": "Les paramètres YouTube OAuth sont incomplets. Vérifiez l’identifiant client, le secret client et l’URL de redirection du module.",
     },
     "remote-desktop": {
+      "This module is not enabled for this installation.": "Ce module n’est pas activé pour cette installation.",
       "Server administrator access is required.": "L’accès administrateur du serveur est requis.",
       "The account database is unavailable.": "La base de données des comptes est indisponible.",
       "A destination with this name already exists at this site.": "Une destination portant ce nom existe déjà sur ce site.",
@@ -422,6 +442,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
     },
   },
   it: {
+    "presenter": { "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione." },
     "core-admin": {
       "Enable required module dependencies first: {dependencies}.": "Abilita prima le dipendenze richieste dei moduli: {dependencies}.",
       "Required modules cannot be disabled: {modules}.": "I moduli obbligatori non possono essere disattivati: {modules}.",
@@ -505,12 +526,14 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The File Storage snapshot is invalid.": "L'istantanea File Storage non è valida.",
     },
     "file-storage": {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "Choose a valid file view.": "Scegli una visualizzazione file valida.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un file replicato non corrisponde alla dimensione dichiarata o supera 25 MiB.",
       "The File Storage snapshot contains an invalid file record.": "L'istantanea File Storage contiene un record file non valido.",
       "The File Storage snapshot is invalid.": "L'istantanea File Storage non è valida.",
     },
     "module-demo": {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "Enter a note before saving.": "Inserisci una nota prima di salvare.",
       "Module Demo is not enabled for this site.": "Il modulo Demo non è attivo per questa sede.",
       "The Module Demo snapshot is invalid or exceeds the supported limits.": "L'istantanea del modulo Demo non è valida o supera i limiti supportati.",
@@ -518,6 +541,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The account database is unavailable.": "Il database degli account non è disponibile.",
     },
     "people-flows": {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links.": "Un passaggio Elvanto è cambiato o non è più disponibile. Aggiorna il flusso Persone importato prima di salvare i collegamenti.",
       "People Flows are unavailable because the database is not ready.": "I flussi Persone non sono disponibili perché il database non è pronto.",
       "You need private People access to view workflows.": "Per visualizzare i flussi serve l’accesso privato alle Persone.",
@@ -538,13 +562,18 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "People Flow export is unavailable because the database is not ready.": "L'esportazione dei flussi Persone non è disponibile perché il database non è pronto.",
       "You need private People access to view workflow export status.": "Per visualizzare lo stato di esportazione dei flussi serve l'accesso privato alle Persone.",
     },
-    "community-feed": { "The Community Feed snapshot is invalid.": "L'istantanea del feed della comunità non è valida." },
+    "community-feed": {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
+      "The Community Feed snapshot is invalid.": "L'istantanea del feed della comunità non è valida.",
+    },
     notifications: {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "A notification preference has no matching account on the standby server.": "Una preferenza di notifica non ha un account corrispondente sul server di standby.",
       "A notification recipient has no matching account on the standby server.": "Un destinatario della notifica non ha un account corrispondente sul server di standby.",
       "The Notifications snapshot is invalid or exceeds supported limits.": "L'istantanea delle notifiche non è valida o supera i limiti supportati.",
     },
     chat: {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "A Chat conversation owner has no matching account on the standby server.": "Il proprietario di una conversazione Chat non ha un account corrispondente sul server di standby.",
       "A Chat member has no matching account on the standby server.": "Un membro Chat non ha un account corrispondente sul server di standby.",
       "A Chat message author has no matching account on the standby server.": "L'autore di un messaggio Chat non ha un account corrispondente sul server di standby.",
@@ -552,6 +581,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The Chat snapshot is invalid or uses an unsupported schema.": "L'istantanea Chat non è valida o usa uno schema non supportato.",
     },
     "video-steffisburg": {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "A preview cannot start from the broadcast's current status: {status}.": "L'anteprima non può iniziare con lo stato attuale della trasmissione: {status}.",
       "Addresses were saved, but the Video worker is unavailable. They will apply when it reconnects.": "Gli indirizzi sono stati salvati, ma il worker Video non è disponibile. Verranno applicati alla riconnessione.",
       "Enter a valid IP address for {targetName}.": "Inserisci un indirizzo IP valido per {targetName}.",
@@ -600,6 +630,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "YouTube OAuth settings are incomplete. Check the module Client ID and Client Secret, plus its redirect URL.": "Le impostazioni OAuth di YouTube sono incomplete. Controlla l'ID client, il secret client e l'URL di reindirizzamento del modulo.",
     },
     "remote-desktop": {
+      "This module is not enabled for this installation.": "Questo modulo non è abilitato per questa installazione.",
       "Server administrator access is required.": "È necessario l'accesso come amministratore del server.",
       "The account database is unavailable.": "Il database degli account non è disponibile.",
       "A destination with this name already exists at this site.": "Esiste già una destinazione con questo nome in questa sede.",

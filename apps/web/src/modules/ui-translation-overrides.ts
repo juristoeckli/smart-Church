@@ -1139,6 +1139,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
   },
   "video-steffisburg": {
     de: {
+      "Video & streaming": "Video & Streaming",
       "Streaming source": "Streaming-Quelle", "Remote location": "Entfernter Standort", Reachable: "Erreichbar",
       "USB over Silex": "USB über Silex", "Silex USB": "Silex-USB",
       "Connecting to the video worker…": "Verbindung zum Video-Worker wird hergestellt …", "Video worker is unavailable": "Video-Worker ist nicht verfügbar", "Control connection available": "Steuerungsverbindung verfügbar",
@@ -1204,6 +1205,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Fix XML syntax before formatting.": "Korrigiere die XML-Syntax, bevor du sie formatierst.",
     },
     fr: {
+      "Video & streaming": "Vidéo et streaming",
       "Streaming source": "Source de streaming", "Remote location": "Site distant", Reachable: "Accessible",
       "USB over Silex": "USB via Silex", "Silex USB": "USB Silex",
       "Connecting to the video worker…": "Connexion au worker vidéo…", "Video worker is unavailable": "Le worker vidéo est indisponible", "Control connection available": "Connexion de contrôle disponible",
@@ -1269,6 +1271,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Fix XML syntax before formatting.": "Corrigez la syntaxe XML avant le formatage.",
     },
     it: {
+      "Video & streaming": "Video e streaming",
       "Streaming source": "Sorgente streaming", "Remote location": "Sede remota", Reachable: "Raggiungibile",
       "USB over Silex": "USB tramite Silex", "Silex USB": "USB Silex",
       "Connecting to the video worker…": "Connessione al worker video…", "Video worker is unavailable": "Il worker video non è disponibile", "Control connection available": "Connessione di controllo disponibile",
