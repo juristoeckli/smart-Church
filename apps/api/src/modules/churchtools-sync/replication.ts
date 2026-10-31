@@ -53,7 +53,7 @@ function canonical(value: unknown): string {
 
 async function discoverTables(client: Pick<PoolClient, "query">): Promise<Table[]> {
   const result = await client.query<Column>(`SELECT table_name,column_name,data_type,ordinal_position FROM information_schema.columns
-    WHERE table_schema='public' AND (table_name='churchtools_sync_settings' OR left(table_name,8)='elvanto_' OR left(table_name,22)='churchtools_migration_')
+    WHERE table_schema='public' AND (table_name='churchtools_sync_settings' OR left(table_name,22)='churchtools_migration_')
     ORDER BY table_name,ordinal_position`);
   const byName = new Map<string, Column[]>();
   for (const column of result.rows) byName.set(column.table_name, [...(byName.get(column.table_name) ?? []), column]);
@@ -95,7 +95,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<Snapsh
 async function inspect(client: PoolClient, departmentId: string) {
   const tables = await discoverTables(client);
   const blockers: string[] = [];
-  if (!tables.some((table) => table.name === "churchtools_sync_settings") || !tables.some((table) => table.name === "elvanto_sync_settings")) blockers.push("ChurchTools and Elvanto settings storage has not been initialized.");
+  if (!tables.some((table) => table.name === "churchtools_sync_settings")) blockers.push("ChurchTools settings storage has not been initialized.");
   const unscoped = tables.filter((table) => !table.columns.some((column) => column.column_name === "department_id"));
   if (unscoped.length) blockers.push("Integration tables are not location-scoped: " + unscoped.map((table) => table.name).join(", ") + ".");
   let records = 0;

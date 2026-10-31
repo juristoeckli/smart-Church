@@ -18,7 +18,7 @@ let activeFederationChannels: FederationChannels | null = null;
 let federationInternalRequestToken = "";
 
 type IdentityPayload = FederationIdentity & { signature?: string };
-type PeerRow = { installation_id: string; display_name: string; base_url: string | null; public_key_pem: string; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; created_at: Date | string; approved_at: Date | string | null; last_seen_at: Date | string | null; last_error: string | null };
+type PeerRow = { installation_id: string; display_name: string; base_url: string | null; public_key_pem: string; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; outbound_enabled?: boolean; inbound_enabled?: boolean; created_at: Date | string; approved_at: Date | string | null; last_seen_at: Date | string | null; last_error: string | null };
 type RemotePeerAddress = { base_url: string | null; installation_id: string; public_key_pem: string };
 type SyncRecord = { scope: "people_names" | "services"; sourceId: string; sourceRevision: string; record: Record<string, unknown> };
 const syncPageSize = 50;
@@ -648,19 +648,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
   const federationChannels = new FederationChannels(app, app.server, pool, () => getIdentity(pool, siteName), federationInternalRequestToken);
   activeFederationChannels = federationChannels;
+  let runtimeStarted = false;
   const unregisterFederationWorker = context.workers.register("federation-channel", () => ({
-    status: federationChannels.connectedPeerCount() > 0 ? "ready" : "degraded",
-    error: federationChannels.connectedPeerCount() > 0 ? null : "Waiting for an authenticated peer WebSocket channel.",
+    status: !runtimeStarted ? "stopped" : federationChannels.connectedPeerCount() > 0 ? "ready" : "degraded",
+    error: !runtimeStarted ? null : federationChannels.connectedPeerCount() > 0 ? null : "Waiting for an authenticated peer WebSocket channel.",
     uptimeSeconds: null,
     memory: null,
   }));
-  app.addHook("onReady", async () => { await federationChannels.start(); });
-  app.addHook("onClose", async () => {
-    federationChannels.close();
-    unregisterFederationWorker();
-    if (activeFederationChannels === federationChannels) activeFederationChannels = null;
-    if (federationInternalRequestToken) federationInternalRequestToken = "";
-  });
   let automaticPushRunning = false;
   let automaticPushTimer: NodeJS.Timeout | null = null;
   let siteChangeListener: PoolClient | null = null;
@@ -668,14 +662,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   let targetedPushTimer: NodeJS.Timeout | null = null;
   let automaticPushError: string | null = null;
   const queuedSitePushes = new Set<string>();
-  context.workers.register("redundancy-push", () => ({
-    status: automaticPushRunning ? "syncing" : automaticPushError ? "degraded" : "ready",
-    error: automaticPushError,
+  const unregisterRedundancyWorker = context.workers.register("redundancy-push", () => ({
+    status: !runtimeStarted ? "stopped" : automaticPushRunning ? "syncing" : automaticPushError ? "degraded" : "ready",
+    error: !runtimeStarted ? null : automaticPushError,
     uptimeSeconds: null,
     memory: null,
   }));
   const runAutomaticPushes = async (onlyDepartmentId?: string) => {
-    if (automaticPushRunning || !context.isDatabaseReady()) return;
+    if (!runtimeStarted || automaticPushRunning || !context.isDatabaseReady()) return;
     automaticPushRunning = true;
     automaticPushError = null;
     try {
@@ -765,6 +759,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   };
 
   function drainSitePushQueue() {
+    if (!runtimeStarted) return;
     targetedPushTimer = null;
     if (automaticPushRunning || !queuedSitePushes.size) return;
     const next = queuedSitePushes.values().next().value as string | undefined;
@@ -774,13 +769,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   function enqueueSitePush(departmentId: string) {
-    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) return;
+    if (!runtimeStarted || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) return;
     queuedSitePushes.add(departmentId);
     if (!automaticPushRunning && !targetedPushTimer) targetedPushTimer = setTimeout(drainSitePushQueue, 250);
   }
 
   async function ensureSiteChangeListener() {
-    if (siteChangeListener) return;
+    if (!runtimeStarted || siteChangeListener) return;
     const client = await pool.connect();
     try {
       await client.query("LISTEN smart_church_site_changed");
@@ -796,7 +791,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } catch (error) { client.release(); throw error; }
   }
 
-  app.addHook("onReady", async () => {
+  async function startRuntime() {
+    if (runtimeStarted || !context.activation.isEnabled()) return;
+    runtimeStarted = true;
+    await federationChannels.start();
     await installSiteChangeTriggers(pool);
     await ensureSiteChangeListener().catch((error) => app.log.warn({ err: error, module: "sync" }, "Site change notifications are unavailable; periodic redundancy sync remains active."));
     const configuredInterval = Number(process.env.SMART_CHURCH_REDUNDANCY_SYNC_INTERVAL_SECONDS ?? 60);
@@ -806,12 +804,30 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     siteChangeReconnectTimer = setInterval(() => { void ensureSiteChangeListener().catch(() => undefined); }, 10_000);
     siteChangeReconnectTimer.unref();
     void runAutomaticPushes();
-  });
-  app.addHook("onClose", async () => {
+  }
+  async function stopRuntime() {
+    if (!runtimeStarted) return;
+    runtimeStarted = false;
+    await federationChannels.stop();
     if (automaticPushTimer) clearInterval(automaticPushTimer);
+    automaticPushTimer = null;
     if (siteChangeReconnectTimer) clearInterval(siteChangeReconnectTimer);
+    siteChangeReconnectTimer = null;
     if (targetedPushTimer) clearTimeout(targetedPushTimer);
+    targetedPushTimer = null;
+    queuedSitePushes.clear();
     if (siteChangeListener) { await siteChangeListener.query("UNLISTEN smart_church_site_changed").catch(() => undefined); siteChangeListener.release(); siteChangeListener = null; }
+  }
+  const removeActivationListener = context.activation.onChange((enabled) => { void (enabled ? startRuntime() : stopRuntime()); });
+  app.addHook("onReady", startRuntime);
+  app.addHook("onClose", async () => {
+    removeActivationListener();
+    await stopRuntime();
+    federationChannels.close();
+    unregisterFederationWorker();
+    unregisterRedundancyWorker();
+    if (activeFederationChannels === federationChannels) activeFederationChannels = null;
+    if (federationInternalRequestToken) federationInternalRequestToken = "";
   });
 
   app.get(`${prefix}/identity`, async (request, reply) => {
@@ -848,31 +864,35 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const baseUrl = advertisedBaseUrl ? normalizeBaseUrl(advertisedBaseUrl) : null;
       const code = checkBodyString(request.body.pairingCode, 128, "pairing code");
       const tokenHash = createHash("sha256").update(code, "utf8").digest("hex");
+      let connectionMode: "both" | "creator_to_joiner" | "joiner_to_creator" = "both";
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         await client.query("DELETE FROM sync_pairing_invitations WHERE expires_at < now() OR used_at IS NOT NULL");
-        const invite = await client.query<{ id: string }>("SELECT id FROM sync_pairing_invitations WHERE token_hash=$1 AND expires_at>now() AND used_at IS NULL FOR UPDATE", [tokenHash]);
+        const invite = await client.query<{ id: string; connection_mode: "both" | "creator_to_joiner" | "joiner_to_creator" }>("SELECT id,connection_mode FROM sync_pairing_invitations WHERE token_hash=$1 AND expires_at>now() AND used_at IS NULL FOR UPDATE", [tokenHash]);
         if (!invite.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The invitation code is invalid, expired, or already used." }); }
+        connectionMode = invite.rows[0].connection_mode;
         const existing = await client.query<{ public_key_pem: string; trust_state: string }>("SELECT public_key_pem,trust_state FROM sync_peers WHERE installation_id=$1 FOR UPDATE", [requester.installationId]);
         if (existing.rowCount && existing.rows[0].public_key_pem !== requester.publicKeyPem) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This installation is already known with a different key. Verify a key rotation before pairing." }); }
         if (existing.rowCount && existing.rows[0].trust_state === "revoked") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This peer was revoked. A Server Administrator must review the existing trust record before pairing it again." }); }
         const acceptedInvite = await client.query("UPDATE sync_pairing_invitations SET used_at=now(),used_by=$2 WHERE id=$1 AND used_at IS NULL", [invite.rows[0].id, requester.installationId]);
         if (!acceptedInvite.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The invitation code was already used." }); }
         await client.query(
-          `INSERT INTO sync_peers(installation_id,display_name,base_url,public_key_pem,fingerprint,trust_state,direction)
-           VALUES($1,$2,$3,$4,$5,'pending','incoming')
+          `INSERT INTO sync_peers(installation_id,display_name,base_url,public_key_pem,fingerprint,trust_state,direction,outbound_enabled,inbound_enabled)
+           VALUES($1,$2,$3,$4,$5,'pending','incoming',$6,$7)
            ON CONFLICT(installation_id) DO UPDATE SET display_name=EXCLUDED.display_name,base_url=EXCLUDED.base_url,
-             fingerprint=EXCLUDED.fingerprint,trust_state='pending',direction='incoming',requested_by=NULL,approved_by=NULL,
+             fingerprint=EXCLUDED.fingerprint,trust_state='pending',direction='incoming',outbound_enabled=EXCLUDED.outbound_enabled,inbound_enabled=EXCLUDED.inbound_enabled,requested_by=NULL,approved_by=NULL,
              created_at=now(),approved_at=NULL,revoked_at=NULL,last_error=NULL`,
-          [requester.installationId, requester.displayName, baseUrl, requester.publicKeyPem, requester.fingerprint],
+          [requester.installationId, requester.displayName, baseUrl, requester.publicKeyPem, requester.fingerprint,
+            invite.rows[0].connection_mode === "both" || invite.rows[0].connection_mode === "creator_to_joiner",
+            invite.rows[0].connection_mode === "both" || invite.rows[0].connection_mode === "joiner_to_creator"],
         );
         await client.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,fingerprint) VALUES($1,$2,'pair_requested',$3)", [randomUUID(), requester.installationId, requester.fingerprint]);
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
       const identity = await getIdentity(pool, siteName);
-      return json(reply, 201, { paired: true, trustState: "pending", installationId: identity.installationId, fingerprint: identity.fingerprint }, identity);
+      return json(reply, 201, { paired: true, trustState: "pending", installationId: identity.installationId, fingerprint: identity.fingerprint, connectionMode }, identity);
     } catch (error) {
       if (error instanceof Error && /valid Smart-Church server URL|server origin/.test(error.message)) return reply.code(400).send({ error: error.message });
       app.log.warn({ module: "sync", error: error instanceof Error ? error.message : "pairing failed" }, "A peer pairing request was rejected.");
@@ -894,12 +914,43 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const identity = await getIdentity(pool, siteName);
     const sender = await verifySignedPeer(request, pool);
     if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
-    const grants = await pool.query<{ id: string; department_name: string; scopes: string[]; delivery_mode: string; revision: string; created_at: Date | string }>(
-      `SELECT grant.id,department.name AS department_name,grant.scopes,grant.delivery_mode,grant.revision::text,grant.created_at
+    const grants = await pool.query<{ id: string; department_name: string; recipient_department_id: string | null; recipient_department_name: string | null; scopes: string[]; delivery_mode: string; revision: string; created_at: Date | string }>(
+      `SELECT grant.id,department.name AS department_name,grant.recipient_department_id,recipient.name AS recipient_department_name,grant.scopes,grant.delivery_mode,grant.revision::text,grant.created_at
          FROM sync_share_grants grant JOIN departments department ON department.id=grant.owner_department_id
+         LEFT JOIN departments recipient ON recipient.id=grant.recipient_department_id
         WHERE grant.recipient_installation_id=$1 AND grant.state='active' ORDER BY department.name,grant.created_at`, [sender.installationId],
     );
-    return json(reply, 200, { grants: grants.rows.map((grant) => ({ id: grant.id, sourceDepartmentName: grant.department_name, scopes: grant.scopes, deliveryMode: grant.delivery_mode, revision: Number(grant.revision), createdAt: grant.created_at })) }, identity, request.headers["x-sc-nonce"] as string);
+    return json(reply, 200, { grants: grants.rows.map((grant) => ({ id: grant.id, sourceDepartmentName: grant.department_name, recipientDepartmentId: grant.recipient_department_id, recipientDepartmentName: grant.recipient_department_name, scopes: grant.scopes, deliveryMode: grant.delivery_mode, revision: Number(grant.revision), createdAt: grant.created_at })) }, identity, request.headers["x-sc-nonce"] as string);
+  });
+
+  app.post<{ Body: { name: string; timeZone: string } }>(`${prefix}/redundancy/replica-sites`, async (request, reply) => {
+    const identity = await getIdentity(pool, siteName);
+    const sender = await verifySignedPeer(request, pool);
+    if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const name = request.body?.name?.trim();
+    const timeZone = request.body?.timeZone?.trim();
+    if (!name || name.length > 200 || !timeZone || timeZone.length > 100) return json(reply, 400, { error: "A valid replica site name and time zone are required." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    try { new Intl.DateTimeFormat("en", { timeZone }); } catch { return json(reply, 400, { error: "The source site has an invalid time zone." }, identity, String(request.headers["x-sc-nonce"] ?? "")); }
+    const duplicate = await pool.query("SELECT 1 FROM departments WHERE installation_id=$1 AND lower(name)=lower($2)", [identity.installationId, name]);
+    if (duplicate.rowCount) return json(reply, 409, { error: `A site named ${name} already exists on this server.` }, identity, String(request.headers["x-sc-nonce"] ?? ""));
+    const id = randomUUID();
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO departments(id,installation_id,name,time_zone,enabled_modules)
+         SELECT $1,installation.id,$3,$4,COALESCE(array_agg(module.module_id ORDER BY module.module_id) FILTER (WHERE module.module_id IS NOT NULL),ARRAY['file-storage','notifications']::TEXT[])
+           FROM installations installation LEFT JOIN installation_modules module
+             ON module.installation_id=installation.id AND module.client_managed=TRUE AND module.enabled=TRUE
+          WHERE installation.id=$2 GROUP BY installation.id`,
+        [id, identity.installationId, name, timeZone],
+      );
+      await client.query("INSERT INTO department_self_signup_settings(department_id) VALUES($1) ON CONFLICT(department_id) DO NOTHING", [id]);
+      await client.query("INSERT INTO sync_site_redundancy(department_id,role,primary_installation_id) VALUES($1,'primary',$2)", [id, identity.installationId]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+    finally { client.release(); }
+    return json(reply, 201, { id, name, timeZone, createdByInstallationId: sender.installationId }, identity, String(request.headers["x-sc-nonce"] ?? ""));
   });
 
   app.get(`${prefix}/redundancy/sites`, async (request, reply) => {
@@ -1426,8 +1477,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     try {
       const identity = await getIdentity(pool, siteName);
       const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
-      const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers ORDER BY CASE trust_state WHEN 'pending' THEN 0 WHEN 'trusted' THEN 1 ELSE 2 END,display_name");
-      const invitations = await pool.query<{ id: string; expires_at: Date | string; created_at: Date | string }>("SELECT id,expires_at,created_at FROM sync_pairing_invitations WHERE used_at IS NULL AND expires_at>now() ORDER BY created_at DESC");
+      const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE trust_state<>'revoked' ORDER BY CASE trust_state WHEN 'pending' THEN 0 WHEN 'trusted' THEN 1 ELSE 2 END,display_name");
+      const invitations = await pool.query<{ id: string; expires_at: Date | string; created_at: Date | string; connection_mode: string }>("SELECT id,expires_at,created_at,connection_mode FROM sync_pairing_invitations WHERE used_at IS NULL AND expires_at>now() ORDER BY created_at DESC");
       return { identity: publicIdentity, peers: peers.rows.map((peer) => ({ ...peer, channels: activeFederationChannels?.status(peer.installation_id) ?? { outbound: false, inbound: false } })), invitations: invitations.rows };
     } catch (error) {
       const reason = error instanceof Error ? error.message.slice(0, 240) : "Unknown error.";
@@ -1560,6 +1611,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not request standby approval from the destination." }); }
   });
 
+  app.post<{ Body: { peerInstallationId: string } }>(`${adminPrefix}/redundancy/create-replica`, async (request, reply) => {
+    const department = await context.resolveDepartmentId(request, reply, true);
+    if (!department || !requireManager(request, reply) || !context.validateMutation(request, reply)) return reply;
+    const peerInstallationId = request.body?.peerInstallationId;
+    if (typeof peerInstallationId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(peerInstallationId)) return reply.code(400).send({ error: "Choose a trusted destination server." });
+    const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [peerInstallationId]);
+    const peer = peerResult.rows[0];
+    if (!peer) return reply.code(400).send({ error: "Choose a paired and trusted destination server." });
+    const source = await pool.query<{ name: string; time_zone: string }>("SELECT department.name,department.time_zone FROM departments department JOIN sync_installation_identity identity ON identity.installation_id=department.installation_id WHERE department.id=$1", [department]);
+    if (!source.rowCount) return reply.code(404).send({ error: "The selected source site is unavailable on this server." });
+    const redundancy = await pool.query<{ role: string; site_epoch: string }>("SELECT role,site_epoch::text FROM sync_site_redundancy WHERE department_id=$1", [department]);
+    if (redundancy.rows[0]?.role !== "primary") return reply.code(409).send({ error: "Only a writable primary site can create a replica." });
+    const destinationName = `${source.rows[0].name}_replica`;
+    try {
+      const identity = await getIdentity(pool, siteName);
+      const created = await signedRemoteRequest<{ id: string; name: string }>(peer, identity, "POST", `${prefix}/redundancy/replica-sites`, JSON.stringify({ name: destinationName, timeZone: source.rows[0].time_zone }));
+      if (!created.id || created.name !== destinationName) return reply.code(502).send({ error: "The destination returned an invalid replica site." });
+      const approval = await signedRemoteRequest<{ requestId: string; state: string }>(peer, identity, "POST", `${prefix}/redundancy/standby-requests`, JSON.stringify({ sourceDepartmentId: department, sourceDepartmentName: source.rows[0].name, targetDepartmentId: created.id, sourceEpoch: Number(redundancy.rows[0].site_epoch) }));
+      return reply.code(201).send({ ...approval, destination: created.name, destinationDepartmentId: created.id });
+    } catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not create the remote replica site or request its approval." }); }
+  });
+
   app.post<{ Body: { peerInstallationId: string; sourceDepartmentId: string; replaceExistingData: boolean } }>(`${adminPrefix}/redundancy/request-pull-standby`, async (request, reply) => {
     const department = await context.resolveDepartmentId(request, reply, true);
     if (!department || !requireManager(request, reply) || !context.validateMutation(request, reply)) return reply;
@@ -1651,7 +1724,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Querystring: { peerInstallationId?: string } }>(`${adminPrefix}/redundancy/peer-sites`, async (request, reply) => {
-    if (!await context.resolveDepartmentId(request, reply, true) || !requireManager(request, reply)) return reply;
+    if (!await context.resolveDepartmentId(request, reply, true)) return reply;
     const peerId = request.query.peerInstallationId ?? "";
     if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(peerId)) return reply.code(400).send({ error: "Choose a trusted server." });
     const peerResult = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [peerId]);
@@ -1755,14 +1828,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { departmentId: department, role: "primary", epoch: newEpoch.toString(), promotedAt: new Date().toISOString() };
   });
 
-  app.post(`${adminPrefix}/invitations`, async (request, reply) => {
+  app.post<{ Body: { connectionMode?: "both" | "creator_to_joiner" | "joiner_to_creator" } }>(`${adminPrefix}/invitations`, async (request, reply) => {
     if (!requireManager(request, reply) || !context.validateMutation(request, reply)) return;
+    const connectionMode = request.body?.connectionMode ?? "both";
+    if (!["both", "creator_to_joiner", "joiner_to_creator"].includes(connectionMode)) return reply.code(400).send({ error: "Choose a valid WebSocket connection direction." });
     const token = randomBytes(32).toString("base64url");
     const tokenHash = createHash("sha256").update(token, "utf8").digest("hex");
     const id = randomUUID();
-    await pool.query("INSERT INTO sync_pairing_invitations(id,token_hash,expires_at,created_by) VALUES($1,$2,now()+interval '30 minutes',$3)", [id, tokenHash, request.authenticatedUser!.id]);
+    await pool.query("INSERT INTO sync_pairing_invitations(id,token_hash,expires_at,created_by,connection_mode) VALUES($1,$2,now()+interval '30 minutes',$3,$4)", [id, tokenHash, request.authenticatedUser!.id, connectionMode]);
     const expires = await pool.query<{ expires_at: Date | string }>("SELECT expires_at FROM sync_pairing_invitations WHERE id=$1", [id]);
-    return reply.code(201).send({ id, pairingCode: token, expiresAt: expires.rows[0].expires_at });
+    return reply.code(201).send({ id, pairingCode: token, expiresAt: expires.rows[0].expires_at, connectionMode });
   });
 
   app.delete<{ Params: { id: string } }>(`${adminPrefix}/invitations/:id`, async (request, reply) => {
@@ -1810,19 +1885,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       };
       const tunneled = await activeFederationChannels.requestBootstrap(baseUrl, local, "POST", `${prefix}/pair`, pairHeaders, pairingBody, 12_000);
       const response = new Response(tunneled.body, { status: tunneled.status, headers: tunneled.headers });
-      const paired = await readRemoteJson<{ paired: boolean; trustState: string; installationId: string; fingerprint: string }>(response, discovered.publicKeyPem);
-      if (!paired.paired || paired.installationId !== discovered.installationId || paired.fingerprint !== discovered.fingerprint || paired.trustState !== "pending") throw new Error("The remote server returned an inconsistent pairing confirmation.");
+      const paired = await readRemoteJson<{ paired: boolean; trustState: string; installationId: string; fingerprint: string; connectionMode: "both" | "creator_to_joiner" | "joiner_to_creator" }>(response, discovered.publicKeyPem);
+      if (!paired.paired || paired.installationId !== discovered.installationId || paired.fingerprint !== discovered.fingerprint || paired.trustState !== "pending" || !["both", "creator_to_joiner", "joiner_to_creator"].includes(paired.connectionMode)) throw new Error("The remote server returned an inconsistent pairing confirmation.");
+      const localOutbound = paired.connectionMode === "both" || paired.connectionMode === "joiner_to_creator";
+      const localInbound = paired.connectionMode === "both" || paired.connectionMode === "creator_to_joiner";
       await pool.query(
-        `INSERT INTO sync_peers(installation_id,display_name,base_url,public_key_pem,fingerprint,trust_state,direction,requested_by)
-         VALUES($1,$2,$3,$4,$5,'pending','outgoing',$6)
-         ON CONFLICT(installation_id) DO UPDATE SET display_name=EXCLUDED.display_name,base_url=EXCLUDED.base_url
+        `INSERT INTO sync_peers(installation_id,display_name,base_url,public_key_pem,fingerprint,trust_state,direction,outbound_enabled,inbound_enabled,requested_by)
+         VALUES($1,$2,$3,$4,$5,'pending','outgoing',$6,$7,$8)
+         ON CONFLICT(installation_id) DO UPDATE SET display_name=EXCLUDED.display_name,base_url=EXCLUDED.base_url,
+           outbound_enabled=EXCLUDED.outbound_enabled,inbound_enabled=EXCLUDED.inbound_enabled
            WHERE sync_peers.public_key_pem=EXCLUDED.public_key_pem AND sync_peers.trust_state='pending'`,
-        [discovered.installationId, discovered.displayName, baseUrl, discovered.publicKeyPem, discovered.fingerprint, request.authenticatedUser!.id],
+        [discovered.installationId, discovered.displayName, baseUrl, discovered.publicKeyPem, discovered.fingerprint, localOutbound, localInbound, request.authenticatedUser!.id],
       );
       const stored = await pool.query("SELECT 1 FROM sync_peers WHERE installation_id=$1 AND trust_state='pending' AND direction='outgoing'", [discovered.installationId]);
       if (!stored.rowCount) return reply.code(409).send({ error: "An existing peer record prevents this pairing. Review its trust state before retrying." });
       await pool.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,actor_user_id,fingerprint) VALUES($1,$2,'pair_requested',$3,$4)", [randomUUID(), discovered.installationId, request.authenticatedUser!.id, discovered.fingerprint]);
-      return reply.code(201).send({ installationId: discovered.installationId, displayName: discovered.displayName, fingerprint: discovered.fingerprint, trustState: "pending" });
+      return reply.code(201).send({ installationId: discovered.installationId, displayName: discovered.displayName, fingerprint: discovered.fingerprint, trustState: "pending", connectionMode: paired.connectionMode });
     } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Pairing failed." }); }
   });
 
@@ -1869,6 +1947,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!requireManager(request, reply) || !context.validateMutation(request, reply)) return;
     const result = await pool.query<{ fingerprint: string }>("UPDATE sync_peers SET trust_state='revoked',revoked_at=now(),last_error=NULL WHERE installation_id=$1 AND trust_state<>'revoked' RETURNING fingerprint", [request.params.installationId]);
     if (!result.rowCount) return reply.code(404).send({ error: "This active peer was not found." });
+    activeFederationChannels?.disconnectPeer(request.params.installationId);
     await pool.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,actor_user_id,fingerprint) VALUES($1,$2,'revoked',$3,$4)", [randomUUID(), request.params.installationId, request.authenticatedUser!.id, result.rows[0].fingerprint]);
     await pool.query("UPDATE sync_share_grants SET state='revoked',revision=revision+1,revoked_at=now(),updated_at=now() WHERE recipient_installation_id=$1 AND state='active'", [request.params.installationId]);
     await pool.query("UPDATE sync_redundancy_pull_authorizations SET state='revoked',reviewed_at=now(),reviewed_by=$2 WHERE target_installation_id=$1 AND state IN ('pending','approved')", [request.params.installationId, request.authenticatedUser!.id]);
@@ -1885,7 +1964,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const department = await context.resolveDepartmentId(request, reply, true);
     if (!department) return reply;
     const grants = await pool.query(
-      `SELECT grant.id,grant.recipient_installation_id AS "recipientInstallationId",peer.display_name AS "peerName",
+      `SELECT grant.id,grant.recipient_installation_id AS "recipientInstallationId",grant.recipient_department_id AS "recipientDepartmentId",peer.display_name AS "peerName",
               grant.scopes,grant.delivery_mode AS "deliveryMode",grant.state,grant.revision::text AS revision,
               grant.created_at AS "createdAt",grant.last_pushed_at AS "lastPushedAt",grant.last_push_error AS "lastPushError"
          FROM sync_share_grants grant JOIN sync_peers peer ON peer.installation_id=grant.recipient_installation_id
@@ -1894,16 +1973,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { shares: grants.rows };
   });
 
-  app.post<{ Body: { peerInstallationId: string; scopes: string[]; deliveryMode: "pull" | "push" } }>(`${adminPrefix}/shares`, async (request, reply) => {
+  app.post<{ Body: { peerInstallationId: string; recipientDepartmentId?: string; scopes: string[]; deliveryMode: "pull" | "push" } }>(`${adminPrefix}/shares`, async (request, reply) => {
     const department = await context.resolveDepartmentId(request, reply, true);
     if (!department || !context.validateMutation(request, reply)) return reply;
-    const { peerInstallationId, scopes, deliveryMode } = request.body;
-    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(peerInstallationId) || !Array.isArray(scopes) || !scopes.length || scopes.some((scope) => !["people_names", "services"].includes(scope)) || new Set(scopes).size !== scopes.length || !["pull", "push"].includes(deliveryMode)) return reply.code(400).send({ error: "Choose a trusted peer, at least one valid data scope, and a sync direction." });
-    const peer = await pool.query<{ base_url: string | null }>("SELECT base_url FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [peerInstallationId]);
+    const { peerInstallationId, recipientDepartmentId, scopes, deliveryMode } = request.body;
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(peerInstallationId) || (recipientDepartmentId !== undefined && (typeof recipientDepartmentId !== "string" || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(recipientDepartmentId))) || !Array.isArray(scopes) || !scopes.length || scopes.some((scope) => !["people_names", "services"].includes(scope)) || new Set(scopes).size !== scopes.length || !["pull", "push"].includes(deliveryMode)) return reply.code(400).send({ error: "Choose a trusted peer, destination site, at least one valid data scope, and a sync direction." });
+    const peer = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted'", [peerInstallationId]);
     if (!peer.rowCount) return reply.code(400).send({ error: "Share data only with a mutually trusted server." });
+    if (recipientDepartmentId) {
+      try {
+        const identity = await getIdentity(pool, siteName);
+        const remoteSites = await signedRemoteRequest<{ installationId: string; sites: Array<{ id: string }> }>(peer.rows[0], identity, "GET", `${prefix}/redundancy/sites`);
+        if (remoteSites.installationId !== peerInstallationId || !remoteSites.sites.some((site) => site.id === recipientDepartmentId)) return reply.code(400).send({ error: "Choose a destination site that belongs to the selected trusted server." });
+      } catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not verify the destination site." }); }
+    }
     const id = randomUUID();
-    await pool.query("INSERT INTO sync_share_grants(id,owner_department_id,recipient_installation_id,scopes,delivery_mode,state,created_by) VALUES($1,$2,$3,$4,$5,'active',$6)", [id, department, peerInstallationId, scopes, deliveryMode, request.authenticatedUser!.id]);
-    return reply.code(201).send({ id, scopes, deliveryMode, state: "active" });
+    await pool.query("INSERT INTO sync_share_grants(id,owner_department_id,recipient_installation_id,recipient_department_id,scopes,delivery_mode,state,created_by) VALUES($1,$2,$3,$4,$5,$6,'active',$7)", [id, department, peerInstallationId, recipientDepartmentId ?? null, scopes, deliveryMode, request.authenticatedUser!.id]);
+    return reply.code(201).send({ id, scopes, deliveryMode, state: "active", recipientDepartmentId: recipientDepartmentId ?? null });
   });
 
   app.delete<{ Params: { id: string } }>(`${adminPrefix}/shares/:id`, async (request, reply) => {
@@ -1922,9 +2008,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const available: Array<Record<string, unknown>> = [];
     for (const peer of peers.rows) {
       try {
-        const result = await signedRemoteRequest<{ grants: Array<{ id: string; sourceDepartmentName: string; scopes: string[]; deliveryMode: string; revision: number; createdAt: string }> }>(peer, identity, "GET", `${prefix}/grants`);
-        for (const grant of result.grants) available.push({ ...grant, sourceInstallationId: peer.installation_id, sourceServerName: peer.display_name, baseUrl: peer.base_url });
-        const activeIds = new Set(result.grants.map((grant) => grant.id));
+        const result = await signedRemoteRequest<{ grants: Array<{ id: string; sourceDepartmentName: string; recipientDepartmentId: string | null; recipientDepartmentName: string | null; scopes: string[]; deliveryMode: string; revision: number; createdAt: string }> }>(peer, identity, "GET", `${prefix}/grants`);
+        for (const grant of result.grants) if (!grant.recipientDepartmentId || grant.recipientDepartmentId === department) available.push({ ...grant, sourceInstallationId: peer.installation_id, sourceServerName: peer.display_name, baseUrl: peer.base_url });
+        const activeIds = new Set(result.grants.filter((grant) => !grant.recipientDepartmentId || grant.recipientDepartmentId === department).map((grant) => grant.id));
         const removed = await pool.query<{ id: string; source_grant_id: string; current_run_id: string | null }>("SELECT id,source_grant_id,current_run_id FROM sync_subscriptions WHERE source_installation_id=$1 AND state='active'", [peer.installation_id]);
         const revoked = removed.rows.filter((subscription) => !activeIds.has(subscription.source_grant_id));
         if (revoked.length) {
@@ -1980,9 +2066,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!peer) return reply.code(400).send({ error: "Choose a mutually trusted source server." });
     try {
       const identity = await getIdentity(pool, siteName);
-      const remote = await signedRemoteRequest<{ grants: Array<{ id: string; scopes: string[]; deliveryMode: string }> }>(peer, identity, "GET", `${prefix}/grants`);
+      const remote = await signedRemoteRequest<{ grants: Array<{ id: string; scopes: string[]; deliveryMode: string; recipientDepartmentId: string | null }> }>(peer, identity, "GET", `${prefix}/grants`);
       const grant = remote.grants.find((item) => item.id === request.body.sourceGrantId);
       if (!grant || !grant.scopes.length) return reply.code(404).send({ error: "This share is no longer available." });
+      if (grant.recipientDepartmentId && grant.recipientDepartmentId !== department) return reply.code(403).send({ error: "This share is addressed to a different site." });
       const id = randomUUID();
       const inserted = await pool.query(
         `INSERT INTO sync_subscriptions(id,source_installation_id,source_grant_id,recipient_department_id,scopes,delivery_mode,state)

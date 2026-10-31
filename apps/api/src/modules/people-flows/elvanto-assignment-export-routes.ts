@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { createElvantoPeopleFlowClient } from "../churchtools-sync/elvanto-people-flow-client.js";
+import { createElvantoPeopleFlowClient } from "./elvanto-client.js";
 
 type JsonObject = Record<string, unknown>;
 type ExportState = "queued" | "already_assigned" | "unmatched" | "ambiguous" | "added" | "stale" | "uncertain";

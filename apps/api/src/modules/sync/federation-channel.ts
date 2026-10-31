@@ -28,6 +28,8 @@ const maxTextMessageBytes = 900 * 1024;
 const maxBinaryMessageBytes = 256 * 1024 * 1024;
 const maxRequestDurationMs = 5 * 60_000;
 const allowedHeaders = new Set(["accept", "content-type", "x-sc-protocol", "x-sc-installation", "x-sc-timestamp", "x-sc-nonce", "x-sc-signature"]);
+const outboundAddressMode = process.env.SMART_CHURCH_SYNC_OUTBOUND_ADDRESS?.trim().toLowerCase() ?? "auto";
+const outboundInitiationEnabled = outboundAddressMode !== "0.0.0.0";
 
 type Peer = { installation_id: string; base_url: string | null; public_key_pem: string };
 type RpcRequest = { type: "request"; id: string; method: string; path: string; headers: Record<string, string>; body: string; responseMode?: "json" | "binary" };
@@ -96,6 +98,7 @@ export class FederationChannels {
   private readonly bootstrapAttempts = new Map<string, { count: number; expiresAt: number }>();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private closed = false;
+  private enabled = false;
   private readonly onUpgrade = (request: IncomingMessage, socket: Socket, head: Buffer) => {
     let url: URL;
     try { url = new URL(request.url ?? "/", "http://localhost"); } catch { return; }
@@ -130,20 +133,50 @@ export class FederationChannels {
     };
   }
 
+  disconnectPeer(installationId: string) {
+    const outgoing = this.outgoing.get(installationId);
+    if (outgoing) {
+      this.outgoing.delete(installationId);
+      outgoing.close(1008, "Peer connection revoked");
+    }
+    const incoming = this.incoming.get(installationId);
+    if (incoming) {
+      if (incoming.heartbeat) clearInterval(incoming.heartbeat);
+      this.incoming.delete(installationId);
+      const reason = Buffer.from("Peer connection revoked");
+      const payload = Buffer.alloc(2 + reason.length);
+      payload.writeUInt16BE(1008, 0);
+      reason.copy(payload, 2);
+      incoming.socket.end(serverFrame(8, payload));
+    }
+    this.outboundErrors.delete(installationId);
+  }
+
   async start() {
+    if (this.closed || this.enabled) return;
+    this.enabled = true;
     await this.connectTrustedPeers();
     this.reconnectTimer = setInterval(() => { void this.connectTrustedPeers().catch(() => undefined); }, 15_000);
     this.reconnectTimer.unref();
   }
 
+  async stop() {
+    this.enabled = false;
+    if (this.reconnectTimer) clearInterval(this.reconnectTimer);
+    this.reconnectTimer = null;
+    for (const socket of this.outgoing.values()) socket.close(1000, "Sync module disabled");
+    const closePayload = Buffer.alloc(2);
+    closePayload.writeUInt16BE(1000);
+    for (const item of this.incoming.values()) { if (item.heartbeat) clearInterval(item.heartbeat); item.socket.end(serverFrame(8, closePayload)); }
+    this.outgoing.clear(); this.incoming.clear(); this.connecting.clear();
+    for (const pending of this.pending.values()) { clearTimeout(pending.timeout); pending.reject(new Error("The Sync module is disabled.")); }
+    this.pending.clear();
+  }
+
   close() {
     this.closed = true;
     this.server.off("upgrade", this.onUpgrade);
-    if (this.reconnectTimer) clearInterval(this.reconnectTimer);
-    for (const socket of this.outgoing.values()) socket.close();
-    for (const item of this.incoming.values()) { if (item.heartbeat) clearInterval(item.heartbeat); item.socket.end(serverFrame(8, Buffer.alloc(0))); }
-    for (const pending of this.pending.values()) { clearTimeout(pending.timeout); pending.reject(new Error("The federation channel is closing.")); }
-    this.outgoing.clear(); this.incoming.clear(); this.pending.clear();
+    void this.stop();
   }
 
   async request(peer: Peer, method: string, target: string, headers: Record<string, string>, body: string, timeoutMs: number) {
@@ -206,8 +239,8 @@ export class FederationChannels {
   private expectBinary(response: RpcResponse | RpcBinaryResponse) { if (response.type !== "binary-response") throw new Error("The peer returned an unexpected text response."); return response; }
 
   private async connectTrustedPeers() {
-    if (this.closed) return;
-    const peers = await this.pool.query<Peer>("SELECT installation_id,base_url,public_key_pem FROM sync_peers WHERE trust_state='trusted' AND base_url IS NOT NULL ORDER BY installation_id");
+    if (this.closed || !this.enabled || !outboundInitiationEnabled) return;
+    const peers = await this.pool.query<Peer>("SELECT installation_id,base_url,public_key_pem FROM sync_peers WHERE trust_state='trusted' AND outbound_enabled=TRUE AND base_url IS NOT NULL ORDER BY installation_id");
     for (const peer of peers.rows) {
       const current = this.outgoing.get(peer.installation_id);
       if (current && current.readyState < WebSocket.CLOSING) continue;
@@ -216,7 +249,9 @@ export class FederationChannels {
   }
 
   private async connect(peer: Peer) {
-    if (!peer.base_url || this.closed) return;
+    if (!outboundInitiationEnabled || !peer.base_url || this.closed || !this.enabled) return;
+    const allowed = await this.pool.query("SELECT 1 FROM sync_peers WHERE installation_id=$1 AND trust_state='trusted' AND outbound_enabled=TRUE", [peer.installation_id]);
+    if (!allowed.rowCount) return;
     const current = this.outgoing.get(peer.installation_id);
     if (current && current.readyState < WebSocket.CLOSING) return this.connecting.get(peer.installation_id);
     const existingAttempt = this.connecting.get(peer.installation_id);
@@ -264,13 +299,14 @@ export class FederationChannels {
   }
 
   private async waitForChannel(peer: Peer, timeoutMs: number) {
-    if (!this.has(peer.installation_id) && peer.base_url) void this.connect(peer).catch(() => undefined);
+    if (outboundInitiationEnabled && !this.has(peer.installation_id) && peer.base_url) void this.connect(peer).catch(() => undefined);
     const deadline = Date.now() + Math.min(timeoutMs, 15_000);
     while (!this.has(peer.installation_id) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
     if (!this.has(peer.installation_id)) throw new Error("No authenticated WebSocket channel is open to this peer.");
   }
 
   private async accept(request: IncomingMessage, socket: Socket, head: Buffer, url: URL) {
+    if (!this.enabled || this.closed) return rejectUpgrade(socket, 404, "The Sync module is disabled.");
     const key = request.headers["sec-websocket-key"];
     const connection = request.headers.connection?.toLowerCase().split(",").map((part) => part.trim()) ?? [];
     if (request.method !== "GET" || request.headers.upgrade?.toLowerCase() !== "websocket" || !connection.includes("upgrade") || request.headers["sec-websocket-version"] !== "13" || typeof key !== "string" || Buffer.from(key, "base64").length !== 16) return rejectUpgrade(socket, 400, "Invalid federation WebSocket handshake.");
@@ -292,10 +328,10 @@ export class FederationChannels {
       try { bootstrapKey = Buffer.from(publicKeyEncoded, "base64url").toString("utf8"); if (fingerprintPublicKey(bootstrapKey).length !== 95) throw new Error("Invalid key"); }
       catch { return rejectUpgrade(socket, 401, "The federation WebSocket bootstrap key is invalid."); }
     }
-    const peer = await this.pool.query<Peer & { trust_state: string }>("SELECT installation_id,base_url,public_key_pem,trust_state FROM sync_peers WHERE installation_id=$1", [installationId]);
+    const peer = await this.pool.query<Peer & { trust_state: string; inbound_enabled: boolean }>("SELECT installation_id,base_url,public_key_pem,trust_state,inbound_enabled FROM sync_peers WHERE installation_id=$1", [installationId]);
     if (bootstrap) {
       if (peer.rows[0]?.trust_state === "revoked" || (peer.rowCount && peer.rows[0].public_key_pem !== bootstrapKey)) return rejectUpgrade(socket, 403, "This bootstrap identity conflicts with the saved peer record.");
-    } else if (!peer.rowCount || peer.rows[0].trust_state !== "trusted") return rejectUpgrade(socket, 403, "This server is not a trusted Sync peer.");
+    } else if (!peer.rowCount || peer.rows[0].trust_state !== "trusted" || !peer.rows[0].inbound_enabled) return rejectUpgrade(socket, 403, "This server is not an enabled inbound Sync peer.");
     const signedTarget = `${path}?${new URLSearchParams({ ...(bootstrap ? { bootstrap: "1" } : {}), installationId, timestamp, nonce, protocol }).toString()}`;
     const handshakePublicKey = bootstrapKey ?? peer.rows[0].public_key_pem;
     if (!verifyBytes(handshakePublicKey, canonicalRequest("GET", signedTarget, timestamp, nonce, ""), signature)) return rejectUpgrade(socket, 401, "The federation WebSocket signature is invalid.");

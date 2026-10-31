@@ -797,7 +797,7 @@ async function get(base: string, token: string, path: string): Promise<JsonObjec
   return await response.json() as JsonObject;
 }
 function rows(payload: JsonObject): JsonObject[] {
-  const options = [payload.data, payload.data?.data, payload.persons, payload.groups, payload.events, payload.appointments, payload.resources, payload.members, payload.data?.persons, payload.data?.groups, payload.data?.events, payload.data?.resources, payload.data?.appointments, payload.data?.members, payload.items];
+  const options = [payload.data, payload.data?.data, payload.data?.items, payload.persons, payload.groups, payload.events, payload.appointments, payload.resources, payload.members, payload.data?.persons, payload.data?.groups, payload.data?.events, payload.data?.resources, payload.data?.appointments, payload.data?.members, payload.items];
   return (options.find(Array.isArray) ?? []).filter((value: unknown) => value && typeof value === "object");
 }
 function sanitizeChurchToolsProfile(value: unknown): unknown {
@@ -969,13 +969,56 @@ function mapEvents(events: JsonObject[], timeZone = "Europe/Zurich") {
     }];
   });
 }
+function churchToolsBookingInstant(value: unknown, timeZone: string, allDay: boolean, end: boolean): string | null {
+  if (typeof value !== "string" || !value) return null;
+  if (allDay) {
+    const date = parseChurchToolsEventDateTime(value, undefined, undefined, timeZone)?.date;
+    if (!date) return null;
+    const localDate = end ? shiftDate(date, 1) : date;
+    return new Date(`${localEventTimeToUtc(localDate, "00:00", timeZone)}Z`).toISOString();
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(value)) {
+    const instant = new Date(value);
+    return Number.isFinite(instant.getTime()) ? instant.toISOString() : null;
+  }
+  const localDateTime = value.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})/);
+  if (!localDateTime) return null;
+  return new Date(`${localEventTimeToUtc(localDateTime[1], localDateTime[2], timeZone)}Z`).toISOString();
+}
+function mapChurchToolsBookingOccurrence(row: JsonObject, timeZone: string): JsonObject | null {
+  const booking = row.booking && typeof row.booking === "object" ? row.booking as JsonObject : row;
+  const base = booking.base && typeof booking.base === "object" ? booking.base as JsonObject : booking;
+  const calculated = booking.calculated && typeof booking.calculated === "object" ? booking.calculated as JsonObject : row.calculated && typeof row.calculated === "object" ? row.calculated as JsonObject : row;
+  const bookingId = firstText(base.id, base.bookingId);
+  const resourceSourceId = firstText(base.resourceId, base.resource?.id);
+  const allDay = base.allDay === true;
+  const startsAt = churchToolsBookingInstant(calculated.startDate ?? base.startDate, timeZone, allDay, false);
+  const endsAt = churchToolsBookingInstant(calculated.endDate ?? base.endDate, timeZone, allDay, true);
+  const sourceStart = calculated.startDate ?? base.startDate;
+  const localStart = parseChurchToolsEventDateTime(sourceStart, undefined, undefined, timeZone);
+  if (!bookingId || !resourceSourceId || !startsAt || !endsAt || !localStart) return null;
+  const statusId = Number(base.statusId);
+  const status = statusId === 1 ? "requested" : statusId === 2 ? "approved" : statusId === 3 ? "declined" : "";
+  if (!status) return null;
+  const anonymized = base.isAnonymized === true;
+  const title = anonymized ? "ChurchTools reservation" : firstText(base.title, base.caption) || "ChurchTools reservation";
+  const subtitle = anonymized ? "" : firstText(base.subtitle, base.location);
+  const sourcePersonId = String(base.onBehalfOfPid ?? base.involvedPersonsDomainObjects?.onBehalfOf?.id ?? "");
+  return {
+    area: "resource_booking", sourceId: `${bookingId}:${localStart.date}`, bookingSourceId: bookingId,
+    resourceSourceId, occurrenceDate: localStart.date, purpose: `${title}${subtitle ? ` — ${subtitle}` : ""}`.slice(0, 240),
+    startsAt, endsAt, status, sourcePersonId: sourcePersonId || null, isAnonymized: anonymized,
+    sourceProfile: sanitizeChurchToolsProfile(row),
+  };
+}
 
-export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerContext) {
+export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerContext, integration: "churchtools" | "elvanto" = "churchtools") {
   const { pool, isDatabaseReady, resolveDepartmentId } = deps;
   const auditDepartments = new WeakMap<FastifyRequest, string>();
-  registerChurchToolsSyncReplication(deps);
+  if (integration === "churchtools") registerChurchToolsSyncReplication(deps);
   app.register(async (routes) => {
-    routes.addHook("onResponse", async (request, reply) => {
+    if (integration === "elvanto") routes.addHook("onResponse", async (request, reply) => {
       if (!pool || !isDatabaseReady()) return;
       const departmentId = auditDepartments.get(request);
       const route = request.routeOptions.url;
@@ -1142,6 +1185,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       } finally { running.delete(departmentId); }
     }
 
+    if (integration === "churchtools") {
     routes.post<{ Body: { startDate: string; endDate: string } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
@@ -1156,6 +1200,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           get(config.instance_url, token, "persons/relationships"),
         ]);
         if (![peopleResult, groupsResult, resourcesResult, eventsResult].every((result) => result.complete)) return reply.code(413).send({ error: "At least one ChurchTools list exceeds the complete preview limit of 20,000 records. Narrow the migration date range and preview again." });
+        const bookingResults = await mapConcurrent(resourcesResult.items, 8, async (resource) => {
+          const resourceSourceId = idOf(resource);
+          if (!resourceSourceId) return { items: [] as JsonObject[], complete: true };
+          const endpoint = `bookings?resource_ids%5B%5D=${encodeURIComponent(resourceSourceId)}&from=${encodeURIComponent(request.body.startDate)}&to=${encodeURIComponent(request.body.endDate)}&include%5B%5D=involvedPersonsDomainObjects`;
+          return listComplete(config.instance_url, token, endpoint);
+        });
+        const bookingCount = bookingResults.reduce((total, result) => total + result.items.length, 0);
+        if (bookingResults.some((result) => !result.complete) || bookingCount > 20000) return reply.code(413).send({ error: "ChurchTools returned more than 20,000 resource booking occurrences in the selected date range. Narrow the migration date range and preview again." });
+        const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
+        const timeZone = departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich";
+        const bookingRecords = bookingResults.flatMap((result) => result.items.map((booking) => mapChurchToolsBookingOccurrence(booking, timeZone)).filter((record): record is JsonObject => record !== null));
         const relationshipRows = rows(relationshipsPayload);
         if (relationshipRows.length > 200000) return reply.code(413).send({ error: "ChurchTools returned more than 200,000 person relationships. No migration preview was saved." });
         const relationshipsByPerson = churchToolsRelationshipsByPerson(relationshipRows);
@@ -1168,8 +1223,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         });
         if (memberResults.some((result) => !result.complete)) return reply.code(413).send({ error: "At least one ChurchTools group has more than 20,000 members. No migration preview was saved." });
         const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result.members]));
-        const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
-        const mappedEvents = mapEvents(eventsResult.items, departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich");
+        const mappedEvents = mapEvents(eventsResult.items, timeZone);
         const resourceRows = resourcesResult.items.map((resource) => {
           const capacityValue = Number(resource.capacity ?? resource.maxPersons ?? resource.max_persons);
           const approvalValue = resource.requiresApproval ?? resource.requires_approval ?? resource.approvalRequired ?? resource.mustBeConfirmed;
@@ -1188,13 +1242,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }),
           ...mappedEvents.map((event) => ({ area: "event", ...event })),
           ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
+          ...bookingRecords,
         ];
-        const [localPeople, localGroups, localEvents, localResources, migrationLinks] = await Promise.all([
+        const bookingRangeStart = `${localEventTimeToUtc(request.body.startDate, "00:00", timeZone).replace(" ", "T")}Z`;
+        const bookingRangeEnd = `${localEventTimeToUtc(shiftDate(request.body.endDate, 1), "00:00", timeZone).replace(" ", "T")}Z`;
+        const [localPeople, localGroups, localEvents, localResources, migrationLinks, localBookings] = await Promise.all([
           pool!.query<{ source_id: string | null; source_system: string | null; email: string | null }>("SELECT source_id,source_system,email FROM contacts WHERE department_id=$1", [dept]),
           pool!.query<{ source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,source_system,name FROM church_groups WHERE department_id=$1", [dept]),
           pool!.query<{ source_id: string | null; source_system: string | null; title: string; event_date: string; start_time: string }>("SELECT source_id,source_system,title,event_date::text,to_char(start_time,'HH24:MI') AS start_time FROM service_events WHERE department_id=$1", [dept]),
-          pool!.query<{ source_id: string | null; source_system: string | null; name: string }>("SELECT source_id,source_system,name FROM bookable_resources WHERE department_id=$1", [dept]),
-          pool!.query<{ area: string; source_id: string }>("SELECT area,source_id FROM churchtools_migration_links WHERE department_id=$1", [dept]),
+          pool!.query<{ id: string; source_id: string | null; source_system: string | null; name: string }>("SELECT id,source_id,source_system,name FROM bookable_resources WHERE department_id=$1", [dept]),
+          pool!.query<{ area: string; source_id: string; local_record_id: string }>("SELECT area,source_id,local_record_id::text FROM churchtools_migration_links WHERE department_id=$1", [dept]),
+          pool!.query<{ resource_id: string; starts_at: Date | string; ends_at: Date | string; source_system: string | null; source_id: string | null }>("SELECT resource_id,starts_at,ends_at,source_system,source_id FROM resource_bookings WHERE department_id=$1 AND status IN ('requested','approved') AND ends_at>$2::timestamptz AND starts_at<$3::timestamptz", [dept, bookingRangeStart, bookingRangeEnd]),
         ]);
         const emailSet = new Set(localPeople.rows.filter((row) => row.email).map((row) => row.email!.toLocaleLowerCase()));
         const linkSet = (area: string, rowsWithSources: Array<{ source_id: string | null; source_system: string | null }>) => new Set([...migrationLinks.rows.filter((link) => link.area === area).map((link) => link.source_id), ...rowsWithSources.filter((row) => row.source_system === "churchtools" && row.source_id).map((row) => row.source_id!)]);
@@ -1205,6 +1263,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const eventNames = new Set(localEvents.rows.map((row) => `${row.event_date}|${row.title.toLocaleLowerCase()}|${row.start_time.slice(0, 5)}`));
         const resourcesBySource = linkSet("resource", localResources.rows);
         const resourcesByName = new Set(localResources.rows.filter((row) => !row.source_system).map((row) => row.name.toLocaleLowerCase()));
+        const resourceIdBySource = new Map(localResources.rows.filter((row) => row.source_system === "churchtools" && row.source_id).map((row) => [row.source_id!, row.id]));
+        for (const link of migrationLinks.rows.filter((item) => item.area === "resource")) resourceIdBySource.set(link.source_id, link.local_record_id);
+        const resourceBookingsBySource = new Set(migrationLinks.rows.filter((link) => link.area === "resource_booking").map((link) => link.source_id));
         let create = 0; let update = 0; let review = 0; let invalid = 0; let unmappedFields = 0;
         for (const record of records) {
           unmappedFields += Array.isArray(record.unmappedFields) ? record.unmappedFields.length : 0;
@@ -1212,7 +1273,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             || (record.area === "person" && ((!record.firstName && !record.lastName) || String(record.firstName ?? "ChurchTools").length > 80 || String(record.lastName ?? `Person ${record.sourceId}`).length > 80 || String(record.email ?? "").length > 254 || String(record.phone ?? "").length > 40))
             || (record.area === "group" && (!record.name || String(record.name).trim().length > 120 || String(record.description ?? "").length > 1000))
             || (record.area === "event" && (!record.title || !record.date || !record.start))
-            || (record.area === "resource" && (!record.name || String(record.name).trim().length > 120))) { record.action = "invalid"; invalid += 1; continue; }
+            || (record.area === "resource" && (!record.name || String(record.name).trim().length > 120))
+            || (record.area === "resource_booking" && (!record.resourceSourceId || !record.startsAt || !record.endsAt || new Date(String(record.endsAt)) <= new Date(String(record.startsAt)) || !["requested", "approved", "declined"].includes(String(record.status))))) { record.action = "invalid"; invalid += 1; continue; }
           if (record.area === "person") {
             if (linkedPeople.has(String(record.sourceId))) { record.action = "update"; update += 1; }
             else if (record.email && emailSet.has(String(record.email).toLocaleLowerCase())) { record.action = "review_email_conflict"; review += 1; }
@@ -1229,6 +1291,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (resourcesBySource.has(String(record.sourceId))) { record.action = "update"; update += 1; }
             else if (resourcesByName.has(String(record.name).toLocaleLowerCase())) { record.action = "review_name_conflict"; review += 1; }
             else { record.action = "create"; create += 1; }
+          } else if (record.area === "resource_booking") {
+            if (resourceBookingsBySource.has(String(record.sourceId))) { record.action = "update"; update += 1; }
+            else {
+              const localResourceId = resourceIdBySource.get(String(record.resourceSourceId));
+              const conflict = localResourceId && localBookings.rows.some((booking) => booking.resource_id === localResourceId
+                && booking.source_id !== String(record.sourceId)
+                && new Date(booking.starts_at).getTime() < new Date(String(record.endsAt)).getTime()
+                && new Date(booking.ends_at).getTime() > new Date(String(record.startsAt)).getTime());
+              if (conflict) { record.action = "review_booking_conflict"; review += 1; }
+              else { record.action = "create"; create += 1; }
+            }
           }
         }
         const encryptedSnapshot = encrypt(JSON.stringify(records));
@@ -1350,6 +1423,22 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 const inserted = await db.query<{ id: string }>("INSERT INTO bookable_resources (id,department_id,name,category,description,location,capacity,requires_approval,active) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 8));
                 if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
               }
+            } else if (record.area === "resource_booking") {
+              const resourceSourceId = String(record.resourceSourceId ?? "");
+              let resource = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN bookable_resources local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='resource' AND link.source_id=$2", [dept, resourceSourceId]);
+              if (!resource.rowCount) resource = await db.query<{ id: string }>("SELECT id::text AS id FROM bookable_resources WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, resourceSourceId]);
+              if (!resource.rowCount) throw new Error("The imported ChurchTools booking refers to a resource that was not imported.");
+              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN resource_bookings local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='resource_booking' AND link.source_id=$2", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id::text AS id FROM resource_bookings WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              const values = [dept, resource.rows[0].id, String(record.purpose), String(record.startsAt), String(record.endsAt), String(record.status), record.sourcePersonId ? String(record.sourcePersonId) : null, sourceId];
+              if (linked.rowCount) {
+                await db.query("UPDATE resource_bookings SET resource_id=$3,requested_by=NULL,purpose=$4,starts_at=$5,ends_at=$6,status=$7,source_system='churchtools',source_id=$8,source_person_id=$9,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, values[1], values[2], values[3], values[4], values[5], values[7], values[6]]);
+                await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource_booking',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+                batchUpdated += 1;
+              } else {
+                const inserted = await db.query<{ id: string }>("INSERT INTO resource_bookings (id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,source_system,source_id,source_person_id) VALUES (gen_random_uuid(),$1,$2,NULL,$3,$4,$5,$6,'churchtools',$7,$8) ON CONFLICT DO NOTHING RETURNING id", [values[0], values[1], values[2], values[3], values[4], values[5], values[7], values[6]]);
+                if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource_booking',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
+              }
             } else batchSkipped += 1;
             page += 1;
             } catch {
@@ -1415,6 +1504,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       } catch (error) { await db.query("ROLLBACK"); throw error; }
       finally { db.release(); }
     });
+    }
+    if (integration === "elvanto") {
     routes.get("/api/modules/sync/elvanto", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       const row = await elvantoSettings(dept);
@@ -3636,16 +3727,48 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       }
       return { disconnected: true };
     });
-    const timer = setInterval(() => {
+    }
+    if (integration === "churchtools") {
+    const startedAt = Date.now();
+    let workerError: string | null = null;
+    let timer: NodeJS.Timeout | null = null;
+    const startWorker = () => {
+      if (timer || !deps.activation.isEnabled()) return;
+      timer = setInterval(() => {
       if (!pool || !isDatabaseReady()) return;
       void pool.query("SELECT department_id FROM churchtools_sync_settings WHERE enabled=true").then(async (result) => {
         for (const row of result.rows) {
           if (!(await deps.isDepartmentWritable(row.department_id))) continue;
-          try { await run(row.department_id); } catch { /* Errors are recorded for the sync status page. */ }
+          try { await run(row.department_id); workerError = null; } catch (error) { workerError = error instanceof Error ? error.message : "ChurchTools worker sync failed."; }
         }
       }).catch(() => {});
-    }, syncIntervalMs);
-    timer.unref();
-    routes.addHook("onClose", async () => clearInterval(timer));
+      }, syncIntervalMs);
+      timer.unref();
+    };
+    const stopWorker = () => { if (timer) clearInterval(timer); timer = null; };
+    startWorker();
+    const unsubscribe = deps.activation.onChange((enabled) => enabled ? startWorker() : stopWorker());
+    routes.addHook("onClose", async () => { unsubscribe(); stopWorker(); });
+    deps.workers.register("scheduler", () => ({ status: !deps.activation.isEnabled() ? "disabled" : timer ? pool && isDatabaseReady() ? "ready" : "waiting for database" : "stopped", error: workerError, uptimeSeconds: timer ? Math.floor((Date.now() - startedAt) / 1000) : null, memory: null }), startWorker);
+    }
+    if (integration === "elvanto") {
+      const startedAt = Date.now();
+      let timer: NodeJS.Timeout | null = null;
+      let workerError: string | null = null;
+      const startWorker = () => {
+        if (timer || !deps.activation.isEnabled()) return;
+        timer = setInterval(() => {
+          if (!pool || !isDatabaseReady()) return;
+          // Import/export jobs are initiated in the Elvanto module and use this provider's independent worker lifecycle.
+          void pool.query("SELECT 1 FROM elvanto_sync_settings LIMIT 1").then(() => { workerError = null; }).catch((error) => { workerError = error instanceof Error ? error.message : "Elvanto worker health check failed."; });
+        }, 60_000);
+        timer.unref();
+      };
+      const stopWorker = () => { if (timer) clearInterval(timer); timer = null; };
+      startWorker();
+      const unsubscribe = deps.activation.onChange((enabled) => enabled ? startWorker() : stopWorker());
+      routes.addHook("onClose", async () => { unsubscribe(); stopWorker(); });
+      deps.workers.register("operations", () => ({ status: !deps.activation.isEnabled() ? "disabled" : timer ? pool && isDatabaseReady() ? "ready" : "waiting for database" : "stopped", error: workerError, uptimeSeconds: timer ? Math.floor((Date.now() - startedAt) / 1000) : null, memory: null }), startWorker);
+    }
   });
 }

@@ -1,0 +1,13 @@
+{
+  "id": "elvanto-sync",
+  "name": "Elvanto Sync",
+  "version": "0.1.0",
+  "serverEntry": "./index.ts",
+  "required": false,
+  "enabledByDefault": false,
+  "clientManaged": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
+}

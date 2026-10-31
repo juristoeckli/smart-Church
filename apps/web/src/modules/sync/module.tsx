@@ -1,11 +1,10 @@
-import { lazy } from "react";
 import { RefreshCw } from "lucide-react";
 import type { ModuleRegistration, ModuleSettingsContext } from "../../module-registry";
 import { translationsForModule } from "../translations";
-import { SyncModule } from "./SyncModule";
+import { FederationModule } from "./FederationModule";
 
-function SyncSettings({ departmentId, csrfToken }: ModuleSettingsContext) {
-  return <SyncModule departmentId={departmentId} csrfToken={csrfToken} settingsPanel />;
+function SyncSettings({ departmentId, csrfToken, departments }: ModuleSettingsContext) {
+  return <FederationModule departmentId={departmentId} csrfToken={csrfToken} departments={departments} settingsPanel />;
 }
 
 const syncExportErrorTranslations: NonNullable<ModuleRegistration["translations"]> = {
@@ -281,12 +280,12 @@ for (const language of ["de", "fr", "it"] as const) {
 
 export const moduleRegistration: ModuleRegistration = {
   id: "sync",
-  name: "Sync",
+  name: "Smart-Church Sync",
   translations,
   icon: RefreshCw,
   adminOnly: true,
-  enabledByDefault: true,
+  enabledByDefault: false,
   hiddenFromNavigation: true,
-  component: lazy(() => import("./SyncModule").then(({ SyncModule }) => ({ default: SyncModule }))),
+  component: FederationModule,
   settings: SyncSettings,
 };

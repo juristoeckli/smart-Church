@@ -192,6 +192,14 @@ production); set the variable to the server's externally reachable HTTPS origin
 when it can accept inbound connections. This setting controls the advertised
 connection address, not a separate transport or request direction.
 
+To prevent this server from initiating persistent WebSocket channels, set
+`SMART_CHURCH_SYNC_OUTBOUND_ADDRESS=0.0.0.0`. It will continue to accept inbound
+channels and send sync requests over them. Keep
+`SMART_CHURCH_SYNC_PEER_BASE_URL` configured with this server's reachable HTTPS
+origin so the peer can initiate the channel. `0.0.0.0` is a disable-outbound
+sentinel here; it is not advertised or used as a bind address. Pairing and
+initial peer discovery still use their short-lived outbound bootstrap request.
+
 For full-site redundancy, either server can initiate setup. If the primary can
 reach the standby, it sends a standby request and the standby's Server
 Administrator approves it; the primary then pushes snapshots. If only the

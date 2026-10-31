@@ -12,7 +12,7 @@ type BookableResourceRow = {
 };
 
 type BookingRow = {
-  id: string; resource_id: string; resource_name: string; requested_by: string; requester_name: string;
+  id: string; resource_id: string; resource_name: string; requested_by: string | null; requester_name: string; source_system?: string | null;
   purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
 };
 
@@ -26,7 +26,7 @@ function mapBookableResource(row: BookableResourceRow): BookableResource {
 }
 
 function mapBooking(row: BookingRow): ResourceBooking {
-  return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, createdAt: new Date(row.created_at).toISOString() };
+  return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, createdAt: new Date(row.created_at).toISOString(), ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
 }
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
@@ -449,9 +449,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query<BookingRow>(
-        `SELECT b.id, b.resource_id, r.name AS resource_name, b.requested_by, u.display_name AS requester_name,
+        `SELECT b.id, b.resource_id, r.name AS resource_name, b.requested_by,
+                COALESCE(u.display_name, 'ChurchTools') AS requester_name, b.source_system,
                 b.purpose, b.starts_at, b.ends_at, b.status, b.created_at
-           FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id JOIN app_users u ON u.id=b.requested_by
+           FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id LEFT JOIN app_users u ON u.id=b.requested_by
           WHERE b.department_id=$1 AND b.ends_at > now() - interval '30 days' AND b.starts_at < now() + interval '6 months'
           ORDER BY b.starts_at, r.name`, [departmentId]);
       return result.rows.map(mapBooking);
@@ -505,9 +506,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const existing = await client.query("SELECT resource_id, requested_by, status FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        const existing = await client.query("SELECT resource_id, requested_by, status, source_system FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
         const booking = existing.rows[0];
         if (!booking) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking not found." }); }
+        if (booking.source_system === "churchtools") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "This booking was imported from ChurchTools and is read-only." }); }
         if (request.body.status === "cancelled") {
           if (!isAdmin && booking.requested_by !== request.authenticatedUser!.id) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You can only cancel your own booking." }); }
           if (booking.status === "cancelled" || booking.status === "declined") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This booking is already closed." }); }

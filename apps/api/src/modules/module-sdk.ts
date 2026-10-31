@@ -344,7 +344,11 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
            SET version=EXCLUDED.version,
                required=EXCLUDED.required,
                client_managed=EXCLUDED.client_managed,
-               enabled=CASE WHEN EXCLUDED.required THEN TRUE ELSE installation_modules.enabled END,
+               enabled=CASE
+                 WHEN EXCLUDED.required THEN TRUE
+                 WHEN EXCLUDED.module_id='sync' AND installation_modules.version='0.1.7' THEN FALSE
+                 ELSE installation_modules.enabled
+               END,
                updated_at=now()`,
         [installationId, module.id, module.manifest.version, Boolean(module.manifest.required || module.manifest.enabledByDefault), Boolean(module.manifest.required), module.manifest.clientManaged ?? true],
       );
@@ -383,7 +387,8 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           try {
             await client.query("BEGIN");
             await client.query("SELECT pg_advisory_xact_lock(hashtext('smart-church-module-migrations'))");
-            const applied = await client.query("SELECT version FROM schema_migrations WHERE version = $1", [version]);
+            const legacyVersion = moduleId === "elvanto-sync" ? `churchtools-sync:${file}` : null;
+            const applied = await client.query("SELECT version FROM schema_migrations WHERE version = $1 OR ($2::text IS NOT NULL AND version = $2)", [version, legacyVersion]);
             if (!applied.rowCount) {
               await client.query(await readFile(join(migrationsRoot, file), "utf8"));
               await client.query("INSERT INTO schema_migrations (version) VALUES ($1)", [version]);
