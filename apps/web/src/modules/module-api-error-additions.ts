@@ -59,6 +59,13 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
     "core-people": {
       "Each imported person needs a first and last name.": "Für jede importierte Person sind Vor- und Nachname erforderlich.",
     },
+    "core-events": {
+      "A checked-in registration cannot be cancelled.": "Eine bereits eingecheckte Anmeldung kann nicht storniert werden.",
+      "Enter your name and email address.": "Gib deinen Namen und deine E-Mail-Adresse ein.",
+      "Only a waitlisted registration can be promoted.": "Nur eine Anmeldung auf der Warteliste kann nachrücken.",
+      "There is no available place for this event.": "Für diese Veranstaltung ist kein Platz verfügbar.",
+      "This registration is already cancelled.": "Diese Anmeldung wurde bereits storniert.",
+    },
     "core-resources": {
       "Choose a future start and an end time after it.": "Wähle einen zukünftigen Beginn und eine spätere Endzeit.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Eine replizierte Datei entspricht nicht der angegebenen Größe oder überschreitet 25 MiB.",
@@ -244,6 +251,13 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The SMTP password was not protected for this standby server.": "Le mot de passe SMTP n’a pas été protégé pour ce serveur de secours.",
     },
     "core-people": { "Each imported person needs a first and last name.": "Chaque personne importée doit avoir un prénom et un nom." },
+    "core-events": {
+      "A checked-in registration cannot be cancelled.": "Une inscription déjà pointée ne peut pas être annulée.",
+      "Enter your name and email address.": "Saisissez votre nom et votre adresse e-mail.",
+      "Only a waitlisted registration can be promoted.": "Seule une inscription sur liste d’attente peut être promue.",
+      "There is no available place for this event.": "Aucune place n’est disponible pour cet événement.",
+      "This registration is already cancelled.": "Cette inscription est déjà annulée.",
+    },
     "core-resources": {
       "Choose a future start and an end time after it.": "Choisissez une heure de début future et une heure de fin postérieure.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un fichier répliqué ne correspond pas à la taille déclarée ou dépasse 25 Mio.",
@@ -427,6 +441,13 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The SMTP password was not protected for this standby server.": "La password SMTP non è stata protetta per questo server di standby.",
     },
     "core-people": { "Each imported person needs a first and last name.": "Ogni persona importata deve avere nome e cognome." },
+    "core-events": {
+      "A checked-in registration cannot be cancelled.": "Una registrazione con check-in già effettuato non può essere annullata.",
+      "Enter your name and email address.": "Inserisci nome e indirizzo e-mail.",
+      "Only a waitlisted registration can be promoted.": "È possibile promuovere solo una registrazione in lista d’attesa.",
+      "There is no available place for this event.": "Non ci sono posti disponibili per questo evento.",
+      "This registration is already cancelled.": "Questa registrazione è già stata annullata.",
+    },
     "core-resources": {
       "Choose a future start and an end time after it.": "Scegli un orario di inizio futuro e un orario di fine successivo.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un file replicato non corrisponde alla dimensione dichiarata o supera 25 MiB.",
