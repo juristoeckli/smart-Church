@@ -60,6 +60,8 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The protected self sign-up queue is invalid or exceeds supported limits.": "Die geschützte Warteschlange für Selbstregistrierungen ist ungültig oder überschreitet die zulässigen Grenzen.",
       "The selected location was not found on this server.": "Der ausgewählte Standort wurde auf diesem Server nicht gefunden.",
       "The settings database is unavailable.": "Die Einstellungsdatenbank ist nicht verfügbar.",
+      "Could not read worker status.": "Der Status des Hintergrundprozesses konnte nicht gelesen werden.",
+      "The worker could not be restarted.": "Der Hintergrundprozess konnte nicht neu gestartet werden.",
       "The SMTP password was not protected for this standby server.": "Das SMTP-Passwort wurde für diesen Standby-Server nicht geschützt.",
     },
     "core-people": {
@@ -266,6 +268,8 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The protected self sign-up queue is invalid or exceeds supported limits.": "La file protégée d’inscription autonome est invalide ou dépasse les limites prises en charge.",
       "The selected location was not found on this server.": "Le site sélectionné est introuvable sur ce serveur.",
       "The settings database is unavailable.": "La base de données des paramètres est indisponible.",
+      "Could not read worker status.": "Impossible de lire l’état du processus d’arrière-plan.",
+      "The worker could not be restarted.": "Impossible de redémarrer le processus d’arrière-plan.",
       "The SMTP password was not protected for this standby server.": "Le mot de passe SMTP n’a pas été protégé pour ce serveur de secours.",
     },
     "core-people": {
@@ -470,6 +474,8 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The protected self sign-up queue is invalid or exceeds supported limits.": "La coda protetta di autoiscrizione non è valida o supera i limiti supportati.",
       "The selected location was not found on this server.": "La sede selezionata non è stata trovata su questo server.",
       "The settings database is unavailable.": "Il database delle impostazioni non è disponibile.",
+      "Could not read worker status.": "Impossibile leggere lo stato del processo in background.",
+      "The worker could not be restarted.": "Impossibile riavviare il processo in background.",
       "The SMTP password was not protected for this standby server.": "La password SMTP non è stata protetta per questo server di standby.",
     },
     "core-people": {
