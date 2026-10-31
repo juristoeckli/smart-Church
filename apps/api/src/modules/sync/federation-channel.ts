@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import type { IncomingMessage, Server } from "node:http";
+import { request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { Pool } from "pg";
@@ -68,6 +70,76 @@ function webSocketFailure(event: Event, host: string) {
   const sanitized = detail.replace(/wss?:\/\/[^\s?]+(?:\?[^\s]*)?/gi, `WebSocket endpoint on ${host}`).slice(0, 180);
   if (sanitized && !/network error or non-101 status code/i.test(sanitized)) return { reason: `Could not establish a WebSocket connection to ${host}: ${sanitized}`, code };
   return { reason: `Could not establish a WebSocket connection to ${host}. The remote endpoint rejected the handshake or the network connection failed. Check that Sync is enabled and the HTTPS proxy forwards WebSocket upgrades.`, code };
+}
+
+async function inspectWebSocketHandshake(endpoint: URL, identity: LocalIdentity, bootstrap: boolean) {
+  const timestamp = String(Date.now());
+  const nonce = randomBytes(24).toString("base64url");
+  const values = { ...(bootstrap ? { bootstrap: "1" } : {}), installationId: identity.installationId, timestamp, nonce, protocol: protocolVersion };
+  const parameters = new URLSearchParams({ ...values, ...(bootstrap ? { publicKey: Buffer.from(identity.publicKeyPem).toString("base64url") } : {}) });
+  const signedTarget = `${path}?${new URLSearchParams(values).toString()}`;
+  parameters.set("signature", signBytes(identity.privateKeyPem, canonicalRequest("GET", signedTarget, timestamp, nonce, "")));
+  const target = new URL(endpoint);
+  target.protocol = target.protocol === "wss:" ? "https:" : target.protocol === "ws:" ? "http:" : target.protocol;
+  target.search = parameters.toString();
+  const request = (target.protocol === "https:" ? httpsRequest : httpRequest)({
+    hostname: target.hostname,
+    port: target.port || undefined,
+    path: `${target.pathname}${target.search}`,
+    method: "GET",
+    headers: {
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-version": "13",
+      "sec-websocket-key": randomBytes(16).toString("base64"),
+    },
+  });
+  return new Promise<{ status: number | null; body: string; code?: string }>((resolve) => {
+    let settled = false;
+    const finish = (value: { status: number | null; body: string; code?: string }) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    request.setTimeout(5000, () => request.destroy(Object.assign(new Error("The diagnostic WebSocket handshake timed out."), { code: "ETIMEDOUT" })));
+    request.on("response", (response) => {
+      const chunks: Buffer[] = [];
+      let remaining = 512;
+      response.on("data", (chunk: Buffer) => {
+        if (remaining <= 0) return;
+        const selected = chunk.subarray(0, remaining);
+        chunks.push(selected);
+        remaining -= selected.length;
+      });
+      response.on("end", () => finish({ status: response.statusCode ?? null, body: Buffer.concat(chunks).toString("utf8") }));
+      response.resume();
+    });
+    request.on("upgrade", (response, socket) => {
+      socket.destroy();
+      finish({ status: response.statusCode ?? 101, body: "" });
+    });
+    request.on("error", (error: NodeJS.ErrnoException) => finish({ status: null, body: error.message.slice(0, 240), code: error.code }));
+    request.end();
+  });
+}
+
+function explainHandshakeFailure(host: string, result: { status: number | null; body: string; code?: string }, fallback: string) {
+  if (result.status === 101) return `The remote server accepted the authenticated WebSocket upgrade, but the WebSocket client then failed. Check for a proxy or network device closing the connection immediately after upgrade.`;
+  if (result.status === 403 && /bootstrap identity conflicts with the saved peer record/i.test(result.body)) return `The remote server has a saved peer record for this installation with a different or revoked key. In Sync settings on ${host}, delete/forget the old server identity for this installation, then retry.`;
+  if (result.status === 403 && /require HTTPS/i.test(result.body)) return `The remote server rejected the WebSocket because its HTTPS proxy did not forward the secure protocol indicator. Check that the proxy sets X-Forwarded-Proto: https.`;
+  if (result.status === 403 && /not an enabled inbound Sync peer/i.test(result.body)) return `The remote server does not have an enabled inbound Sync connection for this installation. Check the trust record and WebSocket direction on the remote server.`;
+  if (result.status === 404 && /Sync module is disabled/i.test(result.body)) return `The remote server rejected the connection because its Sync module is disabled.`;
+  if (result.status === 401 && /signature is invalid/i.test(result.body)) return `The remote server rejected the signed WebSocket identity. Its advertised public key and private signing key may not match; verify the installation identity on both servers.`;
+  if (result.status === 401 && /identity is invalid or stale/i.test(result.body)) return `The remote server rejected the WebSocket identity as invalid or stale. Check both servers' clocks and Sync protocol versions.`;
+  if (result.status === 429) return `The remote server is rate limiting Sync handshake attempts. Wait one minute and retry.`;
+  if (result.status !== null) {
+    const body = result.body.trim().replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/wss?:\/\/[^\s?]+(?:\?[^\s]*)?/gi, "WebSocket endpoint").slice(0, 240);
+    return `The remote server rejected the authenticated WebSocket handshake with HTTP ${result.status}${body ? `: ${body}` : ""}.`;
+  }
+  if (result.code === "ENOTFOUND" || result.code === "EAI_AGAIN") return `DNS lookup for ${host} failed (${result.code}). Check DNS from the local Smart-Church server.`;
+  if (result.code === "ECONNREFUSED") return `Connection to ${host} was refused. Check the remote HTTPS/API listener and firewall.`;
+  if (result.code === "ETIMEDOUT" || result.code === "EHOSTUNREACH" || result.code === "ENETUNREACH") return `The diagnostic connection to ${host} timed out or is unreachable (${result.code}). Check routing and firewall rules.`;
+  return fallback;
 }
 
 function closePeerSocket(socket: Socket | WebSocket, code = 1002, reason = "Invalid message") {
@@ -255,6 +327,7 @@ export class FederationChannels {
         reject(new Error(reason));
       }, Math.min(maxRequestDurationMs, timeoutMs));
       timeout.unref();
+      let diagnosing = false;
       const finish = (error?: Error, value?: RpcResponse) => { clearTimeout(timeout); socket.removeEventListener("message", onMessage); socket.removeEventListener("error", onError); socket.removeEventListener("close", onClose); socket.close(); error ? reject(error) : resolve(value!); };
       const onMessage = (event: MessageEvent) => {
         try {
@@ -265,11 +338,21 @@ export class FederationChannels {
         } catch (error) { finish(error instanceof Error ? error : new Error("The remote server returned an invalid bootstrap response.")); }
       };
       const onError = (event: Event) => {
+        if (diagnosing) return;
+        diagnosing = true;
         const failure = webSocketFailure(event, origin.host);
-        this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", reason: failure.reason, errorCode: failure.code }, "Sync WebSocket bootstrap connection failed.");
-        finish(new Error(failure.reason));
+        void inspectWebSocketHandshake(origin, identity, true).then((handshake) => {
+          const reason = explainHandshakeFailure(origin.host, handshake, failure.reason);
+          const handshakeResponse = handshake.body.replace(/[\u0000-\u001f\u007f]+/g, " ").slice(0, 240);
+          this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", reason, errorCode: handshake.code ?? failure.code, handshakeStatus: handshake.status, handshakeResponse: handshakeResponse || undefined }, "Sync WebSocket bootstrap connection failed.");
+          finish(new Error(reason));
+        }).catch(() => {
+          this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", reason: failure.reason, errorCode: failure.code }, "Sync WebSocket bootstrap connection failed.");
+          finish(new Error(failure.reason));
+        });
       };
       const onClose = (event: CloseEvent) => {
+        if (diagnosing) return;
         const reason = `The remote WebSocket closed before completing bootstrap (code ${event.code}${event.reason ? `: ${event.reason}` : ""}). Check the remote Sync module and server logs.`;
         this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", closeCode: event.code, closeReason: event.reason }, "Sync WebSocket bootstrap closed before a response.");
         finish(new Error(reason));
