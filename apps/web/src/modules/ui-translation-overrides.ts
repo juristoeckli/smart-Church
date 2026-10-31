@@ -974,6 +974,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     de: {
       DATASETS: "DATENSÄTZE", Datasets: "Datensätze", Library: "Bibliothek", Playlists: "Wiedergabelisten",
       Operator: "Bediener", Editor: "Bearbeiter", Main: "Hauptausgabe",
+      Play: "Abspielen",
       "{name} songs": "{name} Lieder", "Delete playlist {name}": "Wiedergabeliste {name} löschen", "{name} items": "Elemente in {name}",
       Media: "Medien", Transparent: "Durchsichtig", "{name}, page {label}": "{name}, Seite {label}", "Seek {label}": "Zu {label} springen",
       Del: "Entf", "Search events…": "Anlässe suchen …", "Search upcoming events": "Bevorstehende Anlässe suchen", "This dataset is empty.": "Dieser Datensatz ist leer.", "No songs match this name.": "Keine Songs mit diesem Namen gefunden.",
@@ -1028,6 +1029,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     fr: {
       DATASETS: "JEUX DE DONNÉES", Datasets: "Jeux de données", Library: "Bibliothèque", Playlists: "Listes de lecture",
       Operator: "Opérateur", Editor: "Éditeur", Main: "Écran principal",
+      Play: "Lire",
       "{name} songs": "Chansons de {name}", "Delete playlist {name}": "Supprimer la liste de lecture {name}", "{name} items": "Éléments de {name}",
       Media: "Médias", Transparent: "Transparent", "{name}, page {label}": "{name}, page {label}", "Seek {label}": "Aller à {label}",
       Del: "Suppr.", "Search events…": "Rechercher des événements…", "Search upcoming events": "Rechercher les événements à venir", "This dataset is empty.": "Cet ensemble de données est vide.", "No songs match this name.": "Aucun chant ne correspond à ce nom.",
@@ -1082,6 +1084,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     it: {
       DATASETS: "SET DI DATI", Datasets: "Set di dati", Library: "Libreria", Playlists: "Playlist",
       Operator: "Operatore", Editor: "Editor", Main: "Schermo principale",
+      Play: "Riproduci",
       "{name} songs": "Brani di {name}", "Delete playlist {name}": "Elimina playlist {name}", "{name} items": "Elementi di {name}",
       Media: "Media", Transparent: "Trasparente", "{name}, page {label}": "{name}, pagina {label}", "Seek {label}": "Vai a {label}",
       Del: "Elim.", "Search events…": "Cerca eventi…", "Search upcoming events": "Cerca eventi imminenti", "This dataset is empty.": "Questo set di dati è vuoto.", "No songs match this name.": "Nessun canto corrisponde a questo nome.",
