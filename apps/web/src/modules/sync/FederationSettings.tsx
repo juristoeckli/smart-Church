@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Check, Copy, Link2, Plus, RefreshCw, ShieldCheck, ShieldOff, Trash2 } from "lucide-react";
+import { Check, Copy, Link2, Plus, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 import { getActiveLanguage } from "../../i18n";
 import { translateModuleText } from "../../module-registry";
 import { translationsForModule } from "../translations";
@@ -7,7 +7,7 @@ import type { DepartmentProfile } from "@smart-church/contracts";
 
 type FederationIdentity = { installationId: string; displayName: string; publicKeyPem: string; fingerprint: string; protocolVersion: string };
 type ConnectionMode = "both" | "creator_to_joiner" | "joiner_to_creator";
-type Peer = { installation_id: string; display_name: string; base_url: string | null; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; outbound_enabled: boolean; inbound_enabled: boolean; created_at: string; approved_at: string | null; last_seen_at: string | null; last_error: string | null; channels?: { inbound: boolean; outbound: boolean; outboundError?: string | null } };
+type Peer = { installation_id: string; display_name: string; base_url: string | null; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; outbound_enabled: boolean; inbound_enabled: boolean; created_at: string; approved_at: string | null; revoked_at: string | null; last_seen_at: string | null; last_error: string | null; channels?: { inbound: boolean; outbound: boolean; outboundError?: string | null } };
 type Invitation = { id: string; expires_at: string; created_at: string; connection_mode: ConnectionMode };
 type PeerSettings = { identity: FederationIdentity; peers: Peer[]; invitations: Invitation[] };
 type Discovery = { baseUrl: string; identity: FederationIdentity; existingTrustState: string | null };
@@ -304,11 +304,14 @@ export function FederationSettings({ csrfToken, departmentId, departments }: { c
     finally { setBusy(""); }
   }
 
-  async function revokePeer(peer: Peer) {
-    if (!window.confirm(tr(`Remove the connection to ${peer.display_name}? Its WebSocket channel will close and all shares with this server will stop.`))) return;
-    setBusy(`revoke:${peer.installation_id}`); setError(""); setFeedback("");
-    try { await request(`/api/modules/sync/federation/peers/${peer.installation_id}`, "DELETE"); setFeedback(`Connection to ${peer.display_name} removed.`); await load(); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : `Could not revoke ${peer.display_name}.`); }
+  async function deletePeer(peer: Peer) {
+    const message = peer.trust_state === "revoked"
+      ? `Forget ${peer.display_name}'s saved server identity key? Its revoked connection is already inactive. This allows a new pairing with this installation ID.`
+      : `Delete the connection to ${peer.display_name} and forget its saved identity key? Its WebSocket channel will close, and all shares and replica authorizations with this server will stop.`;
+    if (!window.confirm(tr(message))) return;
+    setBusy(`delete:${peer.installation_id}`); setError(""); setFeedback("");
+    try { await request(`/api/modules/sync/federation/peers/${peer.installation_id}`, "DELETE"); setFeedback(`Saved identity and connection to ${peer.display_name} deleted.`); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : `Could not delete ${peer.display_name}.`); }
     finally { setBusy(""); }
   }
 
@@ -358,6 +361,9 @@ export function FederationSettings({ csrfToken, departmentId, departments }: { c
     finally { setBusy(""); }
   }
 
+  const activePeers = settings?.peers.filter((peer) => peer.trust_state !== "revoked") ?? [];
+  const revokedPeers = settings?.peers.filter((peer) => peer.trust_state === "revoked") ?? [];
+
   return <section className="directory-card federation-settings-card">
     <div className="directory-heading"><div><h2><ShieldCheck size={18} />Smart-Church connections</h2><p>Connect sites across trusted Smart-Church servers.</p></div><button className="button button-secondary" type="button" onClick={() => void load()} disabled={Boolean(busy)}><RefreshCw size={15} />Refresh</button></div>
     {error && <p className="federation-message federation-error" role="alert">{error}</p>}
@@ -386,14 +392,18 @@ export function FederationSettings({ csrfToken, departmentId, departments }: { c
     </div>
 
     <section className="federation-peer-section federation-connection-section"><div className="federation-panel-heading"><div><h3>Connected Servers</h3><p>Connect sites across trusted Smart-Church servers.</p></div><button type="button" className="button button-secondary" onClick={() => { void load(); void refreshChannelStatus(); }} disabled={Boolean(busy)}><RefreshCw size={14} />Refresh</button></div>
-      {!settings?.peers.length && <p className="sync-help">No servers have been paired yet.</p>}
-      {settings?.peers.map((peer) => <article className={`federation-peer federation-peer-${peer.trust_state}`} key={peer.installation_id}><div className="federation-peer-details"><div className="federation-peer-title"><strong>{peer.display_name}</strong><span className={`federation-state federation-state-${peer.trust_state}`}>{peer.trust_state}</span><span>{peer.direction === "incoming" ? "Incoming request" : "Outgoing request"}</span></div><small>{peer.base_url ?? "No advertised URL · inbound WebSocket only"} · {peer.installation_id}</small><code>{peer.fingerprint}</code>{peer.trust_state === "trusted" && <small>WebSocket channels · Outbound: {peer.channels?.outbound ? "Connected" : "Waiting"} · Inbound: {peer.channels?.inbound ? "Connected" : "Waiting"}</small>}{peer.trust_state === "trusted" && !peer.channels?.outbound && peer.channels?.outboundError && <small className="federation-last-error">Outbound channel: {peer.channels.outboundError}</small>}{peer.last_seen_at && <small>Last checked: {new Date(peer.last_seen_at).toLocaleString()}</small>}{peer.last_error && <small className="federation-last-error">Last check failed: {peer.last_error}</small>}{remoteStates[peer.installation_id] && <small>Remote status: {remoteStates[peer.installation_id]}</small>}</div><div className="federation-peer-actions">
+      {!activePeers.length && <p className="sync-help">No servers have been paired yet.</p>}
+      {activePeers.map((peer) => <article className={`federation-peer federation-peer-${peer.trust_state}`} key={peer.installation_id}><div className="federation-peer-details"><div className="federation-peer-title"><strong>{peer.display_name}</strong><span className={`federation-state federation-state-${peer.trust_state}`}>{peer.trust_state}</span><span>{peer.direction === "incoming" ? "Incoming request" : "Outgoing request"}</span></div><small>{peer.base_url ?? "No advertised URL · inbound WebSocket only"} · {peer.installation_id}</small><code>{peer.fingerprint}</code>{peer.trust_state === "trusted" && <small>WebSocket channels · Outbound: {peer.channels?.outbound ? "Connected" : "Waiting"} · Inbound: {peer.channels?.inbound ? "Connected" : "Waiting"}</small>}{peer.trust_state === "trusted" && !peer.channels?.outbound && peer.channels?.outboundError && <small className="federation-last-error">Outbound channel: {peer.channels.outboundError}</small>}{peer.last_seen_at && <small>Last checked: {new Date(peer.last_seen_at).toLocaleString()}</small>}{peer.last_error && <small className="federation-last-error">Last check failed: {peer.last_error}</small>}{remoteStates[peer.installation_id] && <small>Remote status: {remoteStates[peer.installation_id]}</small>}</div><div className="federation-peer-actions">
         {peer.trust_state !== "revoked" && <button type="button" className="button button-secondary" onClick={() => void checkPeer(peer)} disabled={Boolean(busy) || (peer.trust_state !== "trusted" && !peer.base_url)}><RefreshCw size={14} />{busy === `check:${peer.installation_id}` ? "Checking…" : "Check"}</button>}
         {peer.trust_state === "pending" && peer.direction === "incoming" && <button type="button" className="button button-primary" onClick={() => void approvePeer(peer)} disabled={Boolean(busy)}><ShieldCheck size={14} />{busy === `approve:${peer.installation_id}` ? "Approving…" : "Approve"}</button>}
         {peer.trust_state === "pending" && peer.direction === "outgoing" && <button type="button" className="button button-primary" onClick={() => void approvePeer(peer)} disabled={Boolean(busy) || remoteStates[peer.installation_id] !== "trusted"}><Check size={14} />Approve remote</button>}
-        {peer.trust_state !== "revoked" && <button type="button" className="button button-danger" onClick={() => void revokePeer(peer)} disabled={Boolean(busy)}><ShieldOff size={14} />Revoke</button>}
+        <button type="button" className="button button-danger" onClick={() => void deletePeer(peer)} disabled={Boolean(busy)}><Trash2 size={14} />Delete</button>
       </div></article>)}
     </section>
+
+    {Boolean(revokedPeers.length) && <section className="federation-peer-section federation-connection-section"><div className="federation-panel-heading"><div><h3>Removed server identities</h3><p>Revoked identities stay blocked until you delete their saved keys here.</p></div></div>
+      {revokedPeers.map((peer) => <article className="federation-peer federation-peer-revoked" key={peer.installation_id}><div className="federation-peer-details"><div className="federation-peer-title"><strong>{peer.display_name}</strong><span className="federation-state federation-state-revoked">revoked</span></div><small>{peer.base_url ?? "No advertised URL"} · {peer.installation_id}</small><code>{peer.fingerprint}</code>{peer.revoked_at && <small>Revoked: {new Date(peer.revoked_at).toLocaleString()}</small>}</div><div className="federation-peer-actions"><button type="button" className="button button-danger" onClick={() => void deletePeer(peer)} disabled={Boolean(busy)}><Trash2 size={14} />Forget saved key</button></div></article>)}
+    </section>}
 
     <section className="federation-peer-section federation-data-section"><div className="federation-panel-heading"><div><h3>Shares</h3><p>Share selected site data with another server and location.</p></div><button type="button" className="button button-primary" onClick={() => { setWizard("share"); setWizardSourceId(departmentId); setWizardPeerId(""); setWizardSites([]); setError(""); }} disabled={!settings?.peers.some((peer) => peer.trust_state === "trusted")}><Plus size={14} />Add Share</button></div>
       <div className="federation-sync-table federation-share-table"><div className="federation-sync-heading"><span>Origin Server/Site → Destination Server/Site</span><span>What content gets shared</span><span>Status</span><span>Actions</span></div>

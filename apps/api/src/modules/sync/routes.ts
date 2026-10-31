@@ -18,7 +18,7 @@ let activeFederationChannels: FederationChannels | null = null;
 let federationInternalRequestToken = "";
 
 type IdentityPayload = FederationIdentity & { signature?: string };
-type PeerRow = { installation_id: string; display_name: string; base_url: string | null; public_key_pem: string; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; outbound_enabled?: boolean; inbound_enabled?: boolean; created_at: Date | string; approved_at: Date | string | null; last_seen_at: Date | string | null; last_error: string | null };
+type PeerRow = { installation_id: string; display_name: string; base_url: string | null; public_key_pem: string; fingerprint: string; trust_state: "pending" | "trusted" | "revoked"; direction: "incoming" | "outgoing"; outbound_enabled?: boolean; inbound_enabled?: boolean; created_at: Date | string; approved_at: Date | string | null; revoked_at: Date | string | null; last_seen_at: Date | string | null; last_error: string | null };
 type RemotePeerAddress = { base_url: string | null; installation_id: string; public_key_pem: string };
 type SyncRecord = { scope: "people_names" | "services"; sourceId: string; sourceRevision: string; record: Record<string, unknown> };
 const syncPageSize = 50;
@@ -1477,7 +1477,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     try {
       const identity = await getIdentity(pool, siteName);
       const { privateKeyPem: _private, encryptionPrivateKeyPem: _encryptionPrivate, ...publicIdentity } = identity;
-      const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE trust_state<>'revoked' ORDER BY CASE trust_state WHEN 'pending' THEN 0 WHEN 'trusted' THEN 1 ELSE 2 END,display_name");
+      const peers = await pool.query<PeerRow>("SELECT * FROM sync_peers ORDER BY CASE trust_state WHEN 'pending' THEN 0 WHEN 'trusted' THEN 1 ELSE 2 END,display_name");
       const invitations = await pool.query<{ id: string; expires_at: Date | string; created_at: Date | string; connection_mode: string }>("SELECT id,expires_at,created_at,connection_mode FROM sync_pairing_invitations WHERE used_at IS NULL AND expires_at>now() ORDER BY created_at DESC");
       return { identity: publicIdentity, peers: peers.rows.map((peer) => ({ ...peer, channels: activeFederationChannels?.status(peer.installation_id) ?? { outbound: false, inbound: false } })), invitations: invitations.rows };
     } catch (error) {
@@ -1945,10 +1945,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.delete<{ Params: { installationId: string } }>(`${adminPrefix}/peers/:installationId`, async (request, reply) => {
     if (!requireManager(request, reply) || !context.validateMutation(request, reply)) return;
+    const existing = await pool.query<PeerRow>("SELECT * FROM sync_peers WHERE installation_id=$1", [request.params.installationId]);
+    if (!existing.rowCount) return reply.code(404).send({ error: "This saved server identity was not found." });
     const result = await pool.query<{ fingerprint: string }>("UPDATE sync_peers SET trust_state='revoked',revoked_at=now(),last_error=NULL WHERE installation_id=$1 AND trust_state<>'revoked' RETURNING fingerprint", [request.params.installationId]);
-    if (!result.rowCount) return reply.code(404).send({ error: "This active peer was not found." });
+    if (!result.rowCount && existing.rows[0].trust_state !== "revoked") {
+      return reply.code(409).send({ error: "The saved server identity changed while it was being deleted. Refresh and try again." });
+    }
     activeFederationChannels?.disconnectPeer(request.params.installationId);
-    await pool.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,actor_user_id,fingerprint) VALUES($1,$2,'revoked',$3,$4)", [randomUUID(), request.params.installationId, request.authenticatedUser!.id, result.rows[0].fingerprint]);
+    if (result.rowCount) await pool.query("INSERT INTO sync_peer_audit(id,peer_installation_id,action,actor_user_id,fingerprint) VALUES($1,$2,'revoked',$3,$4)", [randomUUID(), request.params.installationId, request.authenticatedUser!.id, result.rows[0].fingerprint]);
     await pool.query("UPDATE sync_share_grants SET state='revoked',revision=revision+1,revoked_at=now(),updated_at=now() WHERE recipient_installation_id=$1 AND state='active'", [request.params.installationId]);
     await pool.query("UPDATE sync_redundancy_pull_authorizations SET state='revoked',reviewed_at=now(),reviewed_by=$2 WHERE target_installation_id=$1 AND state IN ('pending','approved')", [request.params.installationId, request.authenticatedUser!.id]);
     const subscriptions = await pool.query<{ id: string; current_run_id: string | null }>("SELECT id,current_run_id FROM sync_subscriptions WHERE source_installation_id=$1 AND state='active'", [request.params.installationId]);
@@ -1957,7 +1961,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     await pool.query("DELETE FROM sync_replica_staging WHERE run_id=ANY($1::uuid[])", [subscriptions.rows.map((item) => item.current_run_id).filter(Boolean)]);
     await pool.query("DELETE FROM sync_replica_staging WHERE run_id IN (SELECT snapshot_id FROM sync_replica_push_runs WHERE subscription_id=ANY($1::uuid[]))", [subscriptions.rows.map((item) => item.id)]);
     await pool.query("DELETE FROM sync_replica_push_runs WHERE subscription_id=ANY($1::uuid[])", [subscriptions.rows.map((item) => item.id)]);
-    return { installationId: request.params.installationId, trustState: "revoked" };
+    // Keep the audit fingerprint, but remove the saved public key and identity tombstone.
+    await pool.query("DELETE FROM sync_peers WHERE installation_id=$1", [request.params.installationId]);
+    return { installationId: request.params.installationId, deleted: true };
   });
 
   app.get(`${adminPrefix}/shares`, async (request, reply) => {

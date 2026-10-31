@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, sign, verify } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Pool } from "pg";
@@ -31,6 +31,11 @@ const fingerprintOf = (publicKeyPem: string) => {
 
 let identityPromise: Promise<LocalIdentity> | null = null;
 
+async function ensurePrivateMode(path: string, mode: number) {
+  const current = await stat(path);
+  if ((current.mode & 0o777) !== mode) await chmod(path, mode);
+}
+
 export function resetIdentityCacheForTests() { identityPromise = null; }
 
 export function getIdentity(pool: Pool, displayName: string): Promise<LocalIdentity> {
@@ -44,13 +49,13 @@ async function createIdentity(pool: Pool, displayName: string): Promise<LocalIde
   if (!installationId) throw new Error("The current Smart-Church installation identity is unavailable.");
   const path = keyPath();
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await chmod(dirname(path), 0o700);
+  await ensurePrivateMode(dirname(path), 0o700);
 
   const encryptionPath = encryptionKeyPath();
   let encryptionPrivateKeyPem: string;
   try {
     encryptionPrivateKeyPem = await readFile(encryptionPath, "utf8");
-    await chmod(encryptionPath, 0o600);
+    await ensurePrivateMode(encryptionPath, 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     const pair = generateKeyPairSync("x25519", { publicKeyEncoding: { type: "spki", format: "pem" }, privateKeyEncoding: { type: "pkcs8", format: "pem" } });
@@ -65,7 +70,7 @@ async function createIdentity(pool: Pool, displayName: string): Promise<LocalIde
   let privateKeyPem: string;
   try {
     privateKeyPem = await readFile(path, "utf8");
-    await chmod(path, 0o600);
+    await ensurePrivateMode(path, 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     const savedIdentity = await pool.query("SELECT 1 FROM sync_installation_identity WHERE singleton = TRUE");
