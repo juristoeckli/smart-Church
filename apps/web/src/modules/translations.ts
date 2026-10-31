@@ -2181,12 +2181,54 @@ const peopleFlowsModuleTranslations: ModuleLocales = {
   }
 };
 
+const videoModuleAuditTranslations: ModuleLocales = {
+  "de": {
+    "Set": "Setze",
+    "of": "von",
+    "Nur für Übertragungen zwischen den Pflegeheimen": "Nur für Übertragungen zwischen den Pflegeheimen"
+  },
+  "fr": {
+    "Set": "Définissez",
+    "of": "sur",
+    "Nur für Übertragungen zwischen den Pflegeheimen": "Uniquement pour les diffusions entre les maisons de retraite"
+  },
+  "it": {
+    "Set": "Imposta",
+    "of": "su",
+    "Nur für Übertragungen zwischen den Pflegeheimen": "Solo per le trasmissioni tra le case di cura"
+  }
+};
+
+const remoteDesktopAuditTranslations: ModuleLocales = {
+  "de": {
+    "192.168.1.20 or host.example": "192.168.1.20 oder host.example"
+  },
+  "fr": {
+    "192.168.1.20 or host.example": "192.168.1.20 ou host.example"
+  },
+  "it": {
+    "192.168.1.20 or host.example": "192.168.1.20 o host.example"
+  }
+};
+
+const presenterKeyboardKeyTranslations: ModuleLocales = {
+  "de": {
+    "Del": "Entf"
+  },
+  "fr": {
+    "Del": "Suppr"
+  },
+  "it": {
+    "Del": "Canc"
+  }
+};
+
 export function translationsForModule(id: string): Partial<Record<UserLanguage, Record<string, string>>> {
   const specific = local[id] ?? {};
   const extra = extended[id] ?? {};
   const more = extendedMore[id] ?? {};
   const final = extendedFinal[id] ?? {};
-  return Object.fromEntries((Object.keys(shared) as UserLanguage[]).map((language) => [language, { ...shared[language], ...(sharedTerms[language] ?? {}), ...(specific[language] ?? {}), ...(extra[language] ?? {}), ...(more[language] ?? {}), ...(final[language] ?? {}), ...(id === "sync" ? syncPermissionTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationTranslations[language] ?? {} : {}), ...(id === "sync" ? syncStaticAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPeoplePreviewTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsScreenTranslations[language] ?? {} : {}), ...(id === "core-admin" || id === "core-people" || id === "core-events" ? coreNativeConfirmationTranslations[language] ?? {} : {}), ...(id === "chat" ? chatConfirmationTranslations[language] ?? {} : {}), ...(id === "presenter" ? presenterPromptTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPageTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsMigrationTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoImportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoRefreshTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsSafetyTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoConflictReviewTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsDetailTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsReviewUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupConflictErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesErrorTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoContactTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoPeopleProfileTranslations[language] ?? {} : {}), ...(id === "core-admin" ? adminPermissionTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userAdminTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userDataFallbackTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventManagementTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventCheckInTranslations[language] ?? {} : {}), ...(id === "people-flows" ? peopleFlowsModuleTranslations[language] ?? {} : {}), ...(moduleRemainderTranslations[id]?.[language] ?? {}), ...(moduleRemainderAdditions[id]?.[language] ?? {}), ...(moduleRemainderFinal[id]?.[language] ?? {}), ...(coreApiErrors[id]?.[language] ?? {}), ...(coreRouteErrorTranslations[id]?.[language] ?? {}), ...(id === "sync" ? elvantoRouteErrorTranslations[language] : {}), ...(id === "sync" ? elvantoPaginationErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoFinancialTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSyncAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleLabels[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoExportUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSettingsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongLibraryTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsErrorTranslations[language] ?? {} : {}) }])) as Partial<Record<UserLanguage, Record<string, string>>>;
+  return Object.fromEntries((Object.keys(shared) as UserLanguage[]).map((language) => [language, { ...shared[language], ...(sharedTerms[language] ?? {}), ...(specific[language] ?? {}), ...(extra[language] ?? {}), ...(more[language] ?? {}), ...(final[language] ?? {}), ...(id === "sync" ? syncPermissionTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationTranslations[language] ?? {} : {}), ...(id === "sync" ? syncStaticAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncFederationAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPeoplePreviewTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsScreenTranslations[language] ?? {} : {}), ...(id === "core-admin" || id === "core-people" || id === "core-events" ? coreNativeConfirmationTranslations[language] ?? {} : {}), ...(id === "chat" ? chatConfirmationTranslations[language] ?? {} : {}), ...(id === "presenter" ? presenterPromptTranslations[language] ?? {} : {}), ...(id === "sync" ? syncPageTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? churchToolsMigrationTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoImportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoRefreshTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsSafetyTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoConflictReviewTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongsDetailTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoCalendarUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsReviewUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupConflictErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoServicesErrorTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoContactTranslations[language] ?? {} : {}), ...(id === "core-people" ? elvantoPeopleProfileTranslations[language] ?? {} : {}), ...(id === "core-admin" ? adminPermissionTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userAdminTranslations[language] ?? {} : {}), ...(id === "core-admin" ? coreAdminSettingsTranslations[language] ?? {} : {}), ...(id === "core-admin" ? userDataFallbackTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventManagementTranslations[language] ?? {} : {}), ...(id === "core-events" ? coreEventCheckInTranslations[language] ?? {} : {}), ...(id === "people-flows" ? peopleFlowsModuleTranslations[language] ?? {} : {}), ...(id === "video-steffisburg" ? videoModuleAuditTranslations[language] ?? {} : {}), ...(id === "remote-desktop" ? remoteDesktopAuditTranslations[language] ?? {} : {}), ...(id === "presenter" ? presenterKeyboardKeyTranslations[language] ?? {} : {}), ...(moduleRemainderTranslations[id]?.[language] ?? {}), ...(moduleRemainderAdditions[id]?.[language] ?? {}), ...(moduleRemainderFinal[id]?.[language] ?? {}), ...(coreApiErrors[id]?.[language] ?? {}), ...(coreRouteErrorTranslations[id]?.[language] ?? {}), ...(id === "sync" ? elvantoRouteErrorTranslations[language] : {}), ...(id === "sync" ? elvantoPaginationErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoFinancialTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleErrorTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSyncAuditTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoIncrementalPeopleLabels[language] ?? {} : {}), ...(id === "sync" ? elvantoGroupsExportTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoExportUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSettingsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsUiTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoSongLibraryTranslations[language] ?? {} : {}), ...(id === "sync" ? elvantoPeopleFlowsErrorTranslations[language] ?? {} : {}) }])) as Partial<Record<UserLanguage, Record<string, string>>>;
 }
 
 export function translateModuleMessage(id: string, language: UserLanguage, message: string): string {
