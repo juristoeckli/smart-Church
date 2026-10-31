@@ -3,6 +3,47 @@ import type { UserLanguage } from "@smart-church/contracts";
 type ModuleDictionaries = Partial<Record<UserLanguage, Record<string, string>>>;
 
 export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = {
+  "core-admin": {
+    de: {
+      "LOCATION MANAGEMENT": "STANDORTVERWALTUNG",
+      "Add an existing account": "Bestehendes Konto hinzufügen",
+      "Add access": "Zugriff hinzufügen",
+      "No people have access to this location.": "Niemand hat Zugriff auf diesen Standort.",
+      "New accounts are created by a Server Administrator in User access.": "Neue Konten werden von einem Serveradministrator unter Benutzerzugriff erstellt.",
+      "Location role": "Standortrolle",
+      "Site administrators have all location rights and module rights.": "Standortadministratoren haben alle Rechte für den Standort und die Module.",
+      "Remove location access": "Standortzugriff entfernen",
+      "Removing access preserves the account and all access to other locations. At least one site administrator must remain.": "Beim Entfernen des Zugriffs bleiben das Konto und alle Zugriffe auf andere Standorte erhalten. Mindestens ein Standortadministrator muss verbleiben.",
+      "Select a person": "Person auswählen",
+      "Choose someone with access to manage their role, or add an existing account.": "Wähle eine Person mit Zugriff aus, um ihre Rolle zu verwalten, oder füge ein bestehendes Konto hinzu.",
+    },
+    fr: {
+      "LOCATION MANAGEMENT": "GESTION DU SITE",
+      "Add an existing account": "Ajouter un compte existant",
+      "Add access": "Ajouter l’accès",
+      "No people have access to this location.": "Personne n’a accès à ce site.",
+      "New accounts are created by a Server Administrator in User access.": "Les nouveaux comptes sont créés par un administrateur du serveur dans Accès des utilisateurs.",
+      "Location role": "Rôle sur le site",
+      "Site administrators have all location rights and module rights.": "Les administrateurs du site disposent de tous les droits sur le site et ses modules.",
+      "Remove location access": "Retirer l’accès au site",
+      "Removing access preserves the account and all access to other locations. At least one site administrator must remain.": "Le retrait de l’accès conserve le compte et ses accès aux autres sites. Au moins un administrateur du site doit rester.",
+      "Select a person": "Sélectionner une personne",
+      "Choose someone with access to manage their role, or add an existing account.": "Choisissez une personne ayant accès pour gérer son rôle, ou ajoutez un compte existant.",
+    },
+    it: {
+      "LOCATION MANAGEMENT": "GESTIONE DELLA SEDE",
+      "Add an existing account": "Aggiungi un account esistente",
+      "Add access": "Aggiungi accesso",
+      "No people have access to this location.": "Nessuno ha accesso a questa sede.",
+      "New accounts are created by a Server Administrator in User access.": "I nuovi account vengono creati da un amministratore del server in Accesso utenti.",
+      "Location role": "Ruolo nella sede",
+      "Site administrators have all location rights and module rights.": "Gli amministratori della sede hanno tutti i diritti sulla sede e sui moduli.",
+      "Remove location access": "Rimuovi l’accesso alla sede",
+      "Removing access preserves the account and all access to other locations. At least one site administrator must remain.": "La rimozione dell’accesso mantiene l’account e tutti gli accessi alle altre sedi. Deve rimanere almeno un amministratore della sede.",
+      "Select a person": "Seleziona una persona",
+      "Choose someone with access to manage their role, or add an existing account.": "Scegli una persona con accesso per gestirne il ruolo oppure aggiungi un account esistente.",
+    },
+  },
   chat: {
     de: {
       "Add people": "Personen hinzufügen",
