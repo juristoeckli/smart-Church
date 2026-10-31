@@ -3,6 +3,7 @@ import { Check, X } from "lucide-react";
 import { ModuleTranslationHost, type ModuleRegistration } from "./module-registry";
 import { getActiveLanguage } from "./i18n";
 import { translationsForModule } from "./modules/translations";
+import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overrides";
 
 type SignupRequest = { id: string; email: string; firstName: string; lastName: string; phone: string; street: string; streetNumber: string; postalCode: string; city: string; username: string; status: "pending_admin" | "approved_delivery_failed"; createdAt: string; lastError: string | null };
 type Site = { id: string; name: string; enabledModules?: string[] };
@@ -81,8 +82,8 @@ export function SelfSignupAdmin({ refreshCsrfToken, modules, departmentId, depar
     finally { setBusyId(""); }
   }
 
-  if (loading) return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><p className="server-settings-empty">Loading self sign-up settings…</p></ModuleTranslationHost>;
-  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><section className="self-signup-admin">
+  if (loading) return <ModuleTranslationHost translations={mergeModuleTranslationOverrides("core-admin", translationsForModule("core-admin"))} language={getActiveLanguage()}><p className="server-settings-empty">Loading self sign-up settings…</p></ModuleTranslationHost>;
+  return <ModuleTranslationHost translations={mergeModuleTranslationOverrides("core-admin", translationsForModule("core-admin"))} language={getActiveLanguage()}><section className="self-signup-admin">
     <form className="self-signup-config" onSubmit={(event) => void saveSettings(event)}>
       <div className="server-admin-panel-heading"><h3>Self sign-up · {departmentName}</h3><p>Let people request an account for this site. Their email is verified before requests appear for review.</p></div>
       <label className="global-admin-option"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>{enabled ? "Self sign-up enabled" : "Self sign-up disabled"}</strong><small>Off by default. Email delivery must be configured first.</small></span></label>

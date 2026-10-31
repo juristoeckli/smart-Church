@@ -4,9 +4,51 @@ type ModuleDictionaries = Partial<Record<UserLanguage, Record<string, string>>>;
 
 export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = {
   "core-people": {
-    de: { "Related people": "Verwandte Personen" },
-    fr: { "Related people": "Personnes liées" },
-    it: { "Related people": "Persone collegate" },
+    de: {
+      "Related people": "Verwandte Personen",
+      "This CSV has an unfinished quoted field.": "Diese CSV-Datei enthält ein nicht abgeschlossenes Anführungszeichen.",
+      "The CSV needs a header and at least one person.": "Die CSV-Datei benötigt eine Kopfzeile und mindestens eine Person.",
+      "The CSV needs “firstName” and “lastName” columns.": "Die CSV-Datei benötigt die Spalten „firstName“ und „lastName“.",
+      "Every CSV row needs a first and last name.": "Jede CSV-Zeile benötigt einen Vor- und Nachnamen.",
+      "CSV files must be 2 MiB or smaller.": "CSV-Dateien dürfen höchstens 2 MiB gross sein.",
+      "Import up to 1,000 people at a time.": "Importiere höchstens 1.000 Personen gleichzeitig.",
+      "{name} was added.": "{name} wurde hinzugefügt.",
+      "{name} was saved.": "{name} wurde gespeichert.",
+      "{name} was updated.": "{name} wurde aktualisiert.",
+      "{name} was deleted.": "{name} wurde gelöscht.",
+      "Imported {count} people.": "{count} Personen wurden importiert.",
+      "Imported {count} person.": "{count} Person wurde importiert.",
+    },
+    fr: {
+      "Related people": "Personnes liées",
+      "This CSV has an unfinished quoted field.": "Ce fichier CSV contient un champ entre guillemets qui n’est pas terminé.",
+      "The CSV needs a header and at least one person.": "Le fichier CSV doit contenir un en-tête et au moins une personne.",
+      "The CSV needs “firstName” and “lastName” columns.": "Le fichier CSV doit contenir les colonnes « firstName » et « lastName ».",
+      "Every CSV row needs a first and last name.": "Chaque ligne du fichier CSV doit contenir un prénom et un nom.",
+      "CSV files must be 2 MiB or smaller.": "Les fichiers CSV ne doivent pas dépasser 2 Mio.",
+      "Import up to 1,000 people at a time.": "Importez au maximum 1 000 personnes à la fois.",
+      "{name} was added.": "{name} a été ajouté.",
+      "{name} was saved.": "{name} a été enregistré.",
+      "{name} was updated.": "{name} a été modifié.",
+      "{name} was deleted.": "{name} a été supprimé.",
+      "Imported {count} people.": "{count} personnes ont été importées.",
+      "Imported {count} person.": "{count} personne a été importée.",
+    },
+    it: {
+      "Related people": "Persone collegate",
+      "This CSV has an unfinished quoted field.": "Il file CSV contiene un campo tra virgolette non terminato.",
+      "The CSV needs a header and at least one person.": "Il file CSV deve contenere un’intestazione e almeno una persona.",
+      "The CSV needs “firstName” and “lastName” columns.": "Il file CSV deve contenere le colonne “firstName” e “lastName”.",
+      "Every CSV row needs a first and last name.": "Ogni riga del file CSV deve contenere nome e cognome.",
+      "CSV files must be 2 MiB or smaller.": "I file CSV non devono superare 2 MiB.",
+      "Import up to 1,000 people at a time.": "Importa al massimo 1.000 persone alla volta.",
+      "{name} was added.": "{name} è stato aggiunto.",
+      "{name} was saved.": "{name} è stato salvato.",
+      "{name} was updated.": "{name} è stato aggiornato.",
+      "{name} was deleted.": "{name} è stato eliminato.",
+      "Imported {count} people.": "Importate {count} persone.",
+      "Imported {count} person.": "Importata {count} persona.",
+    },
   },
   "core-admin": {
     de: {
@@ -21,6 +63,24 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Removing access preserves the account and all access to other locations. At least one site administrator must remain.": "Beim Entfernen des Zugriffs bleiben das Konto und alle Zugriffe auf andere Standorte erhalten. Mindestens ein Standortadministrator muss verbleiben.",
       "Select a person": "Person auswählen",
       "Choose someone with access to manage their role, or add an existing account.": "Wähle eine Person mit Zugriff aus, um ihre Rolle zu verwalten, oder füge ein bestehendes Konto hinzu.",
+      "Your sign-in expired. Refresh the page and sign in again.": "Deine Anmeldung ist abgelaufen. Aktualisiere die Seite und melde dich erneut an.",
+      "Site logo saved.": "Standortlogo gespeichert.",
+      "Location settings saved.": "Standorteinstellungen gespeichert.",
+      "Assign this account to at least one site.": "Weise dieses Konto mindestens einem Standort zu.",
+      "Generate a password with at least 12 characters.": "Erstelle ein Passwort mit mindestens 12 Zeichen.",
+      "Generated password copied.": "Generiertes Passwort kopiert.",
+      "Copy is unavailable in this browser. Select and copy the password manually.": "Kopieren ist in diesem Browser nicht verfügbar. Markiere das Passwort und kopiere es manuell.",
+      "Help will be added in a later step.": "Die Hilfe wird später ergänzt.",
+      "You’re all caught up.": "Du bist auf dem neuesten Stand.",
+      "Location access saved.": "Standortzugriff gespeichert.",
+      "Location access added.": "Standortzugriff hinzugefügt.",
+      "Location access removed.": "Standortzugriff entfernt.",
+      "Self sign-up settings saved.": "Einstellungen für die Selbstregistrierung gespeichert.",
+      "Some overview information could not be loaded.": "Einige Informationen der Übersicht konnten nicht geladen werden.",
+      "Could not load overview.": "Die Übersicht konnte nicht geladen werden.",
+      "Choose a PNG, JPEG, or WebP image.": "Wähle ein PNG-, JPEG- oder WebP-Bild aus.",
+      "The logo image must be under 2 MB.": "Das Logo muss kleiner als 2 MB sein.",
+      "Could not read that logo image.": "Das Logo konnte nicht gelesen werden.",
     },
     fr: {
       "LOCATION MANAGEMENT": "GESTION DU SITE",
@@ -34,6 +94,24 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Removing access preserves the account and all access to other locations. At least one site administrator must remain.": "Le retrait de l’accès conserve le compte et ses accès aux autres sites. Au moins un administrateur du site doit rester.",
       "Select a person": "Sélectionner une personne",
       "Choose someone with access to manage their role, or add an existing account.": "Choisissez une personne ayant accès pour gérer son rôle, ou ajoutez un compte existant.",
+      "Your sign-in expired. Refresh the page and sign in again.": "Votre session a expiré. Actualisez la page et reconnectez-vous.",
+      "Site logo saved.": "Logo du site enregistré.",
+      "Location settings saved.": "Paramètres du site enregistrés.",
+      "Assign this account to at least one site.": "Attribuez ce compte à au moins un site.",
+      "Generate a password with at least 12 characters.": "Générez un mot de passe d’au moins 12 caractères.",
+      "Generated password copied.": "Le mot de passe généré a été copié.",
+      "Copy is unavailable in this browser. Select and copy the password manually.": "La copie n’est pas disponible dans ce navigateur. Sélectionnez le mot de passe et copiez-le manuellement.",
+      "Help will be added in a later step.": "L’aide sera ajoutée ultérieurement.",
+      "You’re all caught up.": "Vous êtes à jour.",
+      "Location access saved.": "Accès au site enregistré.",
+      "Location access added.": "Accès au site ajouté.",
+      "Location access removed.": "Accès au site retiré.",
+      "Self sign-up settings saved.": "Paramètres d’inscription libre enregistrés.",
+      "Some overview information could not be loaded.": "Certaines informations de l’aperçu n’ont pas pu être chargées.",
+      "Could not load overview.": "Impossible de charger l’aperçu.",
+      "Choose a PNG, JPEG, or WebP image.": "Choisissez une image PNG, JPEG ou WebP.",
+      "The logo image must be under 2 MB.": "Le logo doit faire moins de 2 Mo.",
+      "Could not read that logo image.": "Impossible de lire cette image de logo.",
     },
     it: {
       "LOCATION MANAGEMENT": "GESTIONE DELLA SEDE",
@@ -47,6 +125,24 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Removing access preserves the account and all access to other locations. At least one site administrator must remain.": "La rimozione dell’accesso mantiene l’account e tutti gli accessi alle altre sedi. Deve rimanere almeno un amministratore della sede.",
       "Select a person": "Seleziona una persona",
       "Choose someone with access to manage their role, or add an existing account.": "Scegli una persona con accesso per gestirne il ruolo oppure aggiungi un account esistente.",
+      "Your sign-in expired. Refresh the page and sign in again.": "La sessione è scaduta. Aggiorna la pagina e accedi di nuovo.",
+      "Site logo saved.": "Logo della sede salvato.",
+      "Location settings saved.": "Impostazioni della sede salvate.",
+      "Assign this account to at least one site.": "Assegna questo account ad almeno una sede.",
+      "Generate a password with at least 12 characters.": "Genera una password di almeno 12 caratteri.",
+      "Generated password copied.": "Password generata copiata.",
+      "Copy is unavailable in this browser. Select and copy the password manually.": "La copia non è disponibile in questo browser. Seleziona e copia manualmente la password.",
+      "Help will be added in a later step.": "La guida sarà aggiunta in un secondo momento.",
+      "You’re all caught up.": "Sei aggiornato.",
+      "Location access saved.": "Accesso alla sede salvato.",
+      "Location access added.": "Accesso alla sede aggiunto.",
+      "Location access removed.": "Accesso alla sede rimosso.",
+      "Self sign-up settings saved.": "Impostazioni di auto-registrazione salvate.",
+      "Some overview information could not be loaded.": "Non è stato possibile caricare alcune informazioni della panoramica.",
+      "Could not load overview.": "Impossibile caricare la panoramica.",
+      "Choose a PNG, JPEG, or WebP image.": "Scegli un’immagine PNG, JPEG o WebP.",
+      "The logo image must be under 2 MB.": "Il logo deve essere inferiore a 2 MB.",
+      "Could not read that logo image.": "Non è stato possibile leggere l’immagine del logo.",
     },
   },
   chat: {
@@ -445,6 +541,14 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Ask a server administrator to add a destination in Settings → Modules → Remote desktop destinations.": "Bitte einen Serveradministrator, unter Einstellungen → Module → Remote-Desktop-Ziele ein Ziel hinzuzufügen.",
       "Choose destination": "Ziel auswählen",
       "View-only session": "Sitzung nur ansehen",
+      "The remote desktop client library did not load.": "Die Bibliothek für den Remote-Desktop-Client wurde nicht geladen.",
+      "Could not load the remote desktop client library.": "Die Bibliothek für den Remote-Desktop-Client konnte nicht geladen werden.",
+      "empty response": "Leere Antwort",
+      "The remote desktop client is unavailable.": "Der Remote-Desktop-Client ist nicht verfügbar.",
+      "Could not check Remote desktop configuration.": "Die Remote-Desktop-Konfiguration konnte nicht geprüft werden.",
+      "Could not update the remote desktop size.": "Die Größe des Remote-Desktops konnte nicht aktualisiert werden.",
+      "The remote desktop connection failed.": "Die Remote-Desktop-Verbindung ist fehlgeschlagen.",
+      "Could not connect to the Remote desktop.": "Verbindung zum Remote Desktop nicht möglich.",
       "Live remote session": "Aktive Remotesitzung",
       "Remote screen": "Remote-Bildschirm",
       Watching: "Sie sehen zu",
@@ -531,6 +635,14 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Ask a server administrator to add a destination in Settings → Modules → Remote desktop destinations.": "Demandez à un administrateur du serveur d’ajouter une destination dans Paramètres → Modules → Destinations de bureau à distance.",
       "Choose destination": "Choisir une destination",
       "View-only session": "Session en lecture seule",
+      "The remote desktop client library did not load.": "La bibliothèque du client de bureau à distance ne s’est pas chargée.",
+      "Could not load the remote desktop client library.": "Impossible de charger la bibliothèque du client de bureau à distance.",
+      "empty response": "Réponse vide",
+      "The remote desktop client is unavailable.": "Le client de bureau à distance n’est pas disponible.",
+      "Could not check Remote desktop configuration.": "Impossible de vérifier la configuration du bureau à distance.",
+      "Could not update the remote desktop size.": "Impossible de modifier la résolution du bureau à distance.",
+      "The remote desktop connection failed.": "La connexion au bureau à distance a échoué.",
+      "Could not connect to the Remote desktop.": "Impossible de se connecter au bureau à distance.",
       "Live remote session": "Session distante active",
       "Remote screen": "Écran distant",
       Watching: "En observation",
@@ -617,6 +729,14 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Ask a server administrator to add a destination in Settings → Modules → Remote desktop destinations.": "Chiedi a un amministratore del server di aggiungere una destinazione in Impostazioni → Moduli → Destinazioni desktop remoto.",
       "Choose destination": "Scegli destinazione",
       "View-only session": "Sessione di sola visualizzazione",
+      "The remote desktop client library did not load.": "La libreria del client desktop remoto non è stata caricata.",
+      "Could not load the remote desktop client library.": "Impossibile caricare la libreria del client desktop remoto.",
+      "empty response": "Risposta vuota",
+      "The remote desktop client is unavailable.": "Il client desktop remoto non è disponibile.",
+      "Could not check Remote desktop configuration.": "Impossibile verificare la configurazione del desktop remoto.",
+      "Could not update the remote desktop size.": "Impossibile aggiornare le dimensioni del desktop remoto.",
+      "The remote desktop connection failed.": "La connessione al desktop remoto non è riuscita.",
+      "Could not connect to the Remote desktop.": "Impossibile connettersi al desktop remoto.",
       "Live remote session": "Sessione remota attiva",
       "Remote screen": "Schermo remoto",
       Watching: "In visualizzazione",
@@ -674,6 +794,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Click a slide to present": "Klicke auf eine Folie, um sie zu präsentieren", "Slide presentation requires Operator rights": "Zum Präsentieren von Folien sind Bedienrechte erforderlich", "Built-in · Read only": "Integriert · Schreibgeschützt", Playlist: "Wiedergabeliste", ITEMS: "ELEMENTE", "DRAG TO ADD": "ZUM HINZUFÜGEN ZIEHEN", "Drag songs or presentations here to add them.": "Ziehe Songs oder Präsentationen hierher, um sie hinzuzufügen.", "Create or select a playlist, then drag songs here.": "Erstelle oder wähle eine Wiedergabeliste und ziehe Songs hierher.", "Importing media…": "Medien werden importiert …", "Import media": "Medien importieren", "Delete media": "Medium löschen", "Pause output media": "Ausgabemedien pausieren", "Play output media": "Ausgabemedien abspielen", "Output is blank": "Die Ausgabe ist leer", "Display not connected": "Kein Bildschirm verbunden", "Display connected": "Bildschirm verbunden", "Output is prepared; the display will update when it connects.": "Die Ausgabe ist vorbereitet und wird auf dem Bildschirm angezeigt, sobald er verbunden ist.", "Connect a browser on the display or projector.": "Öffne einen Browser auf dem Bildschirm oder Projektor.", "Browser output": "Browser-Ausgabe", "Clear output": "Ausgabe leeren",
       "{count} matching upcoming events": "{count} passende bevorstehende Anlässe", "Click a slide to send to {session}": "Klicke auf eine Folie, um sie an {session} zu senden", "{count} ITEMS": "{count} ELEMENTE", "Showing on {session}": "Wird auf {session} angezeigt", "{session} is connected and blank": "{session} ist verbunden und leer", "Output link generated for {session}.": "Ausgabelink für {session} erstellt.", "Imported {name} with {count} songs.": "{count} Songs wurden unter {name} importiert.", "Deleted “{name}”.": "„{name}“ wurde gelöscht.",
       "Delete media “{name}”? This cannot be undone.": "Medium „{name}“ löschen? Dies kann nicht rückgängig gemacht werden.", "Delete library “{name}”? This cannot be undone.": "Bibliothek „{name}“ löschen? Dies kann nicht rückgängig gemacht werden.", "Delete library “{name}” and its {count} presentation? This cannot be undone.": "Bibliothek „{name}“ und ihre {count} Präsentation löschen? Dies kann nicht rückgängig gemacht werden.", "Delete library “{name}” and its {count} presentations? This cannot be undone.": "Bibliothek „{name}“ und ihre {count} Präsentationen löschen? Dies kann nicht rückgängig gemacht werden.", "Delete “{name}”? This cannot be undone.": "„{name}“ löschen? Dies kann nicht rückgängig gemacht werden.", "Delete library “{name}” and all of its songs? This cannot be undone.": "Songbibliothek „{name}“ und alle Songs darin löschen? Dies kann nicht rückgängig gemacht werden.", "Delete playlist “{name}”?": "Wiedergabeliste „{name}“ löschen?",
+      "The server did not return an Output link token.": "Der Server hat kein Token für den Ausgabelink zurückgegeben.", "Session name saved.": "Sitzungsname gespeichert.", "Presenter link copied.": "Presenter-Link kopiert.", "Clipboard access is blocked here. Copy the link from the dialog.": "Der Zugriff auf die Zwischenablage ist hier gesperrt. Kopiere den Link aus dem Dialog.", "Import a .pptx PowerPoint Open XML file.": "Importiere eine PowerPoint-Open-XML-Datei im Format .pptx.", "Choose a PNG picture no larger than 20 MiB.": "Wähle ein PNG-Bild mit höchstens 20 MiB aus.",
     },
     fr: {
       Del: "Suppr.", "Search events…": "Rechercher des événements…", "Search upcoming events": "Rechercher les événements à venir", "This dataset is empty.": "Cet ensemble de données est vide.", "No songs match this name.": "Aucun chant ne correspond à ce nom.",
@@ -683,6 +804,7 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Click a slide to present": "Cliquez sur une diapositive pour la présenter", "Slide presentation requires Operator rights": "La présentation des diapositives nécessite les droits d’opérateur", "Built-in · Read only": "Intégré · Lecture seule", Playlist: "Liste de lecture", ITEMS: "ÉLÉMENTS", "DRAG TO ADD": "FAITES GLISSER POUR AJOUTER", "Drag songs or presentations here to add them.": "Faites glisser des chants ou présentations ici pour les ajouter.", "Create or select a playlist, then drag songs here.": "Créez ou sélectionnez une liste de lecture, puis faites glisser les chants ici.", "Importing media…": "Importation des médias…", "Import media": "Importer des médias", "Delete media": "Supprimer le média", "Pause output media": "Mettre en pause le média de sortie", "Play output media": "Lire le média de sortie", "Output is blank": "La sortie est vide", "Display not connected": "Aucun écran connecté", "Display connected": "Écran connecté", "Output is prepared; the display will update when it connects.": "La sortie est prête ; l’écran sera mis à jour lorsqu’il sera connecté.", "Connect a browser on the display or projector.": "Ouvrez un navigateur sur l’écran ou le projecteur.", "Browser output": "Sortie du navigateur", "Clear output": "Effacer la sortie",
       "{count} matching upcoming events": "{count} événements à venir correspondants", "Click a slide to send to {session}": "Cliquez sur une diapositive pour l’envoyer vers {session}", "{count} ITEMS": "{count} ÉLÉMENTS", "Showing on {session}": "Affiché sur {session}", "{session} is connected and blank": "{session} est connecté et la sortie est vide", "Output link generated for {session}.": "Lien de sortie généré pour {session}.", "Imported {name} with {count} songs.": "{count} chants importés sous {name}.", "Deleted “{name}”.": "« {name} » a été supprimé.",
       "Delete media “{name}”? This cannot be undone.": "Supprimer le média « {name} » ? Cette action est irréversible.", "Delete library “{name}”? This cannot be undone.": "Supprimer la bibliothèque « {name} » ? Cette action est irréversible.", "Delete library “{name}” and its {count} presentation? This cannot be undone.": "Supprimer la bibliothèque « {name} » et sa présentation ({count}) ? Cette action est irréversible.", "Delete library “{name}” and its {count} presentations? This cannot be undone.": "Supprimer la bibliothèque « {name} » et ses présentations ({count}) ? Cette action est irréversible.", "Delete “{name}”? This cannot be undone.": "Supprimer « {name} » ? Cette action est irréversible.", "Delete library “{name}” and all of its songs? This cannot be undone.": "Supprimer la bibliothèque de chants « {name} » et tous ses chants ? Cette action est irréversible.", "Delete playlist “{name}”?": "Supprimer la liste de lecture « {name} » ?",
+      "The server did not return an Output link token.": "Le serveur n’a pas renvoyé de jeton pour le lien de sortie.", "Session name saved.": "Nom de la session enregistré.", "Presenter link copied.": "Lien Presenter copié.", "Clipboard access is blocked here. Copy the link from the dialog.": "L’accès au presse-papiers est bloqué ici. Copiez le lien depuis la boîte de dialogue.", "Import a .pptx PowerPoint Open XML file.": "Importez un fichier PowerPoint Open XML au format .pptx.", "Choose a PNG picture no larger than 20 MiB.": "Choisissez une image PNG de 20 Mio maximum.",
     },
     it: {
       Del: "Elim.", "Search events…": "Cerca eventi…", "Search upcoming events": "Cerca eventi imminenti", "This dataset is empty.": "Questo set di dati è vuoto.", "No songs match this name.": "Nessun canto corrisponde a questo nome.",
@@ -692,15 +814,90 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Click a slide to present": "Fai clic su una diapositiva per presentarla", "Slide presentation requires Operator rights": "Per presentare le diapositive servono i permessi operatore", "Built-in · Read only": "Integrato · Sola lettura", Playlist: "Playlist", ITEMS: "ELEMENTI", "DRAG TO ADD": "TRASCINA PER AGGIUNGERE", "Drag songs or presentations here to add them.": "Trascina qui canti o presentazioni per aggiungerli.", "Create or select a playlist, then drag songs here.": "Crea o seleziona una playlist, quindi trascina qui i canti.", "Importing media…": "Importazione media…", "Import media": "Importa media", "Delete media": "Elimina media", "Pause output media": "Metti in pausa il contenuto in uscita", "Play output media": "Riproduci il contenuto in uscita", "Output is blank": "L’uscita è vuota", "Display not connected": "Nessuno schermo collegato", "Display connected": "Schermo collegato", "Output is prepared; the display will update when it connects.": "L’uscita è pronta; lo schermo si aggiornerà quando si connette.", "Connect a browser on the display or projector.": "Apri un browser sullo schermo o sul proiettore.", "Browser output": "Uscita del browser", "Clear output": "Svuota uscita",
       "{count} matching upcoming events": "{count} eventi imminenti corrispondenti", "Click a slide to send to {session}": "Fai clic su una diapositiva per inviarla a {session}", "{count} ITEMS": "{count} ELEMENTI", "Showing on {session}": "Visualizzato su {session}", "{session} is connected and blank": "{session} è connesso e l’uscita è vuota", "Output link generated for {session}.": "Link di uscita generato per {session}.", "Imported {name} with {count} songs.": "Importati {count} canti in {name}.", "Deleted “{name}”.": "« {name} » è stato eliminato.",
       "Delete media “{name}”? This cannot be undone.": "Eliminare il contenuto multimediale “{name}”? L’azione non può essere annullata.", "Delete library “{name}”? This cannot be undone.": "Eliminare la raccolta “{name}”? L’azione non può essere annullata.", "Delete library “{name}” and its {count} presentation? This cannot be undone.": "Eliminare la raccolta “{name}” e la presentazione associata ({count})? L’azione non può essere annullata.", "Delete library “{name}” and its {count} presentations? This cannot be undone.": "Eliminare la raccolta “{name}” e le presentazioni associate ({count})? L’azione non può essere annullata.", "Delete “{name}”? This cannot be undone.": "Eliminare “{name}”? L’azione non può essere annullata.", "Delete library “{name}” and all of its songs? This cannot be undone.": "Eliminare la raccolta di canti “{name}” e tutti i canti al suo interno? L’azione non può essere annullata.", "Delete playlist “{name}”?": "Eliminare la playlist “{name}”?",
+      "The server did not return an Output link token.": "Il server non ha restituito un token per il link di uscita.", "Session name saved.": "Nome sessione salvato.", "Presenter link copied.": "Link Presenter copiato.", "Clipboard access is blocked here. Copy the link from the dialog.": "L’accesso agli appunti è bloccato. Copia il link dalla finestra di dialogo.", "Import a .pptx PowerPoint Open XML file.": "Importa un file PowerPoint Open XML .pptx.", "Choose a PNG picture no larger than 20 MiB.": "Scegli un’immagine PNG non superiore a 20 MiB.",
     },
   },
   "video-steffisburg": {
-    de: { Primary: "Primär", "Service 1": "Gottesdienst 1", Set: "Festlegen", "Streaming High": "Streaming hoch" },
-    fr: { Primary: "Principal", "Service 1": "Culte 1", Set: "Définir", "Streaming High": "Streaming haute qualité", "Nur für Übertragungen zwischen den Pflegeheimen": "Uniquement pour les retransmissions entre les maisons de retraite" },
-    it: { Primary: "Primario", "Service 1": "Culto 1", Set: "Imposta", "Streaming High": "Streaming alta qualità", "Nur für Übertragungen zwischen den Pflegeheimen": "Solo per le trasmissioni tra le case di riposo" },
+    de: {
+      Primary: "Primär", "Service 1": "Gottesdienst 1", Set: "Festlegen", "Streaming High": "Streaming hoch",
+      "Select an encoder first.": "Wähle zuerst einen Encoder aus.",
+      "Stop the stream before changing encoder settings.": "Stoppe den Stream, bevor du Encodereinstellungen änderst.",
+      "Refresh the routing matrix before changing a route.": "Aktualisiere die Routing-Matrix, bevor du eine Route änderst.",
+      "Choose a streaming XML file first.": "Wähle zuerst eine Streaming-XML-Datei aus.",
+      "XML validated. Review the service, server and quality before applying.": "XML geprüft. Überprüfe vor dem Anwenden Dienst, Server und Qualität.",
+      "The XML must be valid and use a <streaming> root before the visual editor can change it.": "Das XML muss gültig sein und ein <streaming>-Wurzelelement verwenden, bevor der visuelle Editor es ändern kann.",
+      "Visual changes updated the XML. Validate it before applying it to an encoder.": "Die visuellen Änderungen haben das XML aktualisiert. Prüfe es, bevor du es auf einen Encoder anwendest.",
+      "Review the current XML before sending it to an encoder.": "Überprüfe das aktuelle XML, bevor du es an einen Encoder sendest.",
+      "Select a service, streaming server and quality profile first.": "Wähle zuerst einen Dienst, Streaming-Server und ein Qualitätsprofil aus.",
+      "Choose an XML file smaller than 256 KB.": "Wähle eine XML-Datei aus, die kleiner als 256 KB ist.",
+      "Could not read that XML file.": "Die XML-Datei konnte nicht gelesen werden.",
+      "Fix XML syntax before formatting.": "Korrigiere die XML-Syntax, bevor du sie formatierst.",
+    },
+    fr: {
+      Primary: "Principal", "Service 1": "Culte 1", Set: "Définir", "Streaming High": "Streaming haute qualité", "Nur für Übertragungen zwischen den Pflegeheimen": "Uniquement pour les retransmissions entre les maisons de retraite",
+      "Select an encoder first.": "Sélectionnez d’abord un encodeur.",
+      "Stop the stream before changing encoder settings.": "Arrêtez le flux avant de modifier les paramètres de l’encodeur.",
+      "Refresh the routing matrix before changing a route.": "Actualisez la matrice de routage avant de modifier une route.",
+      "Choose a streaming XML file first.": "Choisissez d’abord un fichier XML de diffusion.",
+      "XML validated. Review the service, server and quality before applying.": "XML validé. Vérifiez le service, le serveur et la qualité avant l’application.",
+      "The XML must be valid and use a <streaming> root before the visual editor can change it.": "Le XML doit être valide et utiliser une racine <streaming> avant de pouvoir être modifié dans l’éditeur visuel.",
+      "Visual changes updated the XML. Validate it before applying it to an encoder.": "Les modifications visuelles ont mis à jour le XML. Validez-le avant de l’appliquer à un encodeur.",
+      "Review the current XML before sending it to an encoder.": "Vérifiez le XML actuel avant de l’envoyer à un encodeur.",
+      "Select a service, streaming server and quality profile first.": "Sélectionnez d’abord un service, un serveur de diffusion et un profil de qualité.",
+      "Choose an XML file smaller than 256 KB.": "Choisissez un fichier XML de moins de 256 Ko.",
+      "Could not read that XML file.": "Impossible de lire ce fichier XML.",
+      "Fix XML syntax before formatting.": "Corrigez la syntaxe XML avant le formatage.",
+    },
+    it: {
+      Primary: "Primario", "Service 1": "Culto 1", Set: "Imposta", "Streaming High": "Streaming alta qualità", "Nur für Übertragungen zwischen den Pflegeheimen": "Solo per le trasmissioni tra le case di riposo",
+      "Select an encoder first.": "Seleziona prima un encoder.",
+      "Stop the stream before changing encoder settings.": "Arresta lo streaming prima di modificare le impostazioni dell’encoder.",
+      "Refresh the routing matrix before changing a route.": "Aggiorna la matrice di routing prima di modificare un instradamento.",
+      "Choose a streaming XML file first.": "Seleziona prima un file XML di streaming.",
+      "XML validated. Review the service, server and quality before applying.": "XML convalidato. Controlla servizio, server e qualità prima di applicarlo.",
+      "The XML must be valid and use a <streaming> root before the visual editor can change it.": "L’XML deve essere valido e usare una radice <streaming> prima di poterlo modificare nell’editor visuale.",
+      "Visual changes updated the XML. Validate it before applying it to an encoder.": "Le modifiche visuali hanno aggiornato l’XML. Convalidalo prima di applicarlo a un encoder.",
+      "Review the current XML before sending it to an encoder.": "Controlla l’XML attuale prima di inviarlo a un encoder.",
+      "Select a service, streaming server and quality profile first.": "Seleziona prima un servizio, un server di streaming e un profilo di qualità.",
+      "Choose an XML file smaller than 256 KB.": "Seleziona un file XML inferiore a 256 KB.",
+      "Could not read that XML file.": "Impossibile leggere il file XML.",
+      "Fix XML syntax before formatting.": "Correggi la sintassi XML prima di formattarlo.",
+    },
   },
 
 };
+
+export function translateModuleUiOverrideMessage(id: string, language: UserLanguage, message: string): string {
+  const dictionary = moduleUiTranslationOverrides[id]?.[language];
+  if (!dictionary) return message;
+  const exact = dictionary[message];
+  if (exact) return exact;
+  for (const [template, translated] of Object.entries(dictionary)) {
+    const placeholders = [...template.matchAll(/\{[^{}]+\}/g)];
+    if (!placeholders.length) continue;
+    let pattern = "^";
+    let cursor = 0;
+    for (const placeholder of placeholders) {
+      const index = placeholder.index ?? 0;
+      pattern += template.slice(cursor, index).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(.+?)";
+      cursor = index + placeholder[0].length;
+    }
+    pattern += template.slice(cursor).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$";
+    const match = message.match(new RegExp(pattern));
+    if (!match) continue;
+    let valueIndex = 1;
+    return translated.replace(/\{[^{}]+\}/g, () => match[valueIndex++] ?? "");
+  }
+  return message;
+}
+
+export function translateKnownModuleUiOverrideMessage(language: UserLanguage, message: string): string {
+  for (const id of Object.keys(moduleUiTranslationOverrides)) {
+    const translated = translateModuleUiOverrideMessage(id, language, message);
+    if (translated !== message) return translated;
+  }
+  return message;
+}
 
 export function mergeModuleTranslationOverrides(id: string, base?: ModuleDictionaries): ModuleDictionaries {
   const result: ModuleDictionaries = { ...base };
