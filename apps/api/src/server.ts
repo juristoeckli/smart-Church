@@ -344,8 +344,13 @@ const realtime = new RealtimeHub(
 
 app.addHook("onRequest", async (request, reply) => {
   const federationRequest = request.url.startsWith("/api/modules/sync/federation/v1/");
+  // Federation RPCs dispatched by an already authenticated WebSocket enter
+  // through app.inject(), whose request protocol is HTTP even though the
+  // transport was the HTTPS-protected WebSocket. The Sync module validates
+  // this internal marker's secret token in its preHandler before any route.
+  const internalFederationDispatch = typeof request.headers["x-sc-internal-federation-channel"] === "string";
   const httpFallbackRequest = allowHttpFallback && request.protocol === "http";
-  if (process.env.NODE_ENV === "production" && federationRequest && request.protocol !== "https") {
+  if (process.env.NODE_ENV === "production" && federationRequest && request.protocol !== "https" && !internalFederationDispatch) {
     return reply.code(400).send({ error: "Federation requests require HTTPS." });
   }
   if (process.env.NODE_ENV === "production" && !directHttpMode && !httpFallbackRequest && request.url !== "/api/health" && request.url !== "/api/public/http-access" && request.protocol !== "https") {
