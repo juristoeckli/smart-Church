@@ -15,7 +15,7 @@ function ElvantoModule({ departmentId }: { departmentId: string }) {
 export const moduleRegistration: ModuleRegistration = {
   id: "elvanto-sync",
   name: "Elvanto Sync",
-  translations: translationsForModule("sync"),
+  translations: translationsForModule("sync", "Elvanto Sync"),
   icon: RefreshCw,
   adminOnly: true,
   enabledByDefault: false,

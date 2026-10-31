@@ -11,7 +11,7 @@ function ChurchToolsSettings({ departmentId, csrfToken }: ModuleSettingsContext)
 export const moduleRegistration: ModuleRegistration = {
   id: "churchtools-sync",
   name: "ChurchTools Sync",
-  translations: translationsForModule("sync"),
+  translations: translationsForModule("sync", "ChurchTools Sync"),
   icon: RefreshCw,
   adminOnly: true,
   enabledByDefault: false,

@@ -273,7 +273,7 @@ const songLibraryTranslations: NonNullable<ModuleRegistration["translations"]> =
     "Keep local is available only for a song already linked to Elvanto.": "I valori locali possono essere mantenuti solo per un brano già collegato a Elvanto."
   }
 };
-const translations = translationsForModule("sync");
+const translations = translationsForModule("sync", "Smart-Church Sync");
 for (const language of ["de", "fr", "it"] as const) {
   translations[language] = { ...translations[language], ...syncExportErrorTranslations[language], ...songLibraryTranslations[language] };
 }
