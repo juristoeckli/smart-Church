@@ -19,6 +19,14 @@ function capabilities(context: ModuleContext) {
   };
 }
 
+function videoNavigationItems(context: ModuleContext) {
+  const caps = capabilities(context);
+  return videoTabs.filter((section) => section !== "Names & locks").flatMap((section) => [
+    { id: section, label: section, state: section },
+    ...(section === "Routing" && caps.canAdminRouting ? [{ id: "Names & locks", label: "Names & locks", state: "Names & locks", parentId: "Routing" }] : []),
+  ]);
+}
+
 function VideoWorkspacePage(context: ModuleContext) {
   const tab = videoTabs.includes(context.state as VideoTab) ? context.state as VideoTab : "Overview";
   return <VideoWorkspace departmentId={context.departmentId} csrfToken={context.csrfToken} realtime={context.realtime} capabilities={capabilities(context)} tab={tab} onTabChange={context.onStateChange} />;
@@ -53,5 +61,6 @@ export const moduleRegistration: ModuleRegistration = {
   isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("video-steffisburg") && (canManageSite || (department.videoPermissions ?? []).length > 0),
   component: VideoWorkspacePage,
   navigation: VideoNavigation,
+  navigationItems: videoNavigationItems,
   settings: VideoSettings,
 };

@@ -41,7 +41,7 @@ import { Overview } from "./Overview";
 import { smartChurchBuildInfo } from "./build-info";
 import { Groups } from "./Groups";
 import { BookableResources } from "./BookableResources";
-import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleRegistryReady, moduleTranslation, registeredModules, translateModuleText } from "./module-registry";
+import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleRegistryReady, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
 import { translateKnownModuleMessage, translateModuleMessage, translationsForModule } from "./modules/translations";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
@@ -64,7 +64,7 @@ const navigation = [
 ];
 type MenuSectionPreference = { id: string; name: string; itemIds: string[] };
 type MenuDuplicatePreference = { id: string; targetId: string };
-type MenuItem = { id: string; label: string; targetId?: string; isDuplicate?: boolean };
+type MenuItem = { id: string; label: string; targetId?: string; isDuplicate?: boolean; kind?: "module-sub"; moduleId?: string; state?: string; parentId?: string };
 type MenuPreference = { order: string[]; hidden: string[]; sections: MenuSectionPreference[]; hiddenSections: string[]; duplicates: MenuDuplicatePreference[] };
 const defaultMenuPreference: MenuPreference = { order: [], hidden: [], sections: [], hiddenSections: [], duplicates: [] };
 function loadMenuPreference(userId: string): MenuPreference {
@@ -1065,8 +1065,11 @@ function WorkspaceApp() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = await response.json() as SiteUser | { error?: string };
-      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save user access." : "Could not save user access.");
+      const result = await response.json() as SiteUser | { error?: string; message?: string };
+      if (!response.ok || !("id" in result)) {
+        const failure = result as { error?: string; message?: string };
+        throw new Error(failure.message ?? failure.error ?? "Could not save user access.");
+      }
       setSiteUsers((current) => editingUserId
         ? current.map((user) => user.id === result.id ? result : user)
         : [...current, result].sort((a, b) => a.displayName.localeCompare(b.displayName)));
@@ -1207,18 +1210,20 @@ function WorkspaceApp() {
   const activeLanguage = authUser.languageIsCustom ? authUser.language : browserDefaultLanguage();
   const hasServerPermission = (permission: ServerPermission) => authUser.role === "server_admin" || authUser.serverPermissions.includes(permission);
   const enabledDynamicModules = registeredModules.filter((module) => !module.hiddenFromNavigation && moduleAvailable(module, department, canManageSite));
+  const menuNavigationContext: ModuleContext = { language: activeLanguage, department, departmentId: department.id, csrfToken, realtime: moduleRealtime, canManageSite, state: "", onStateChange: () => {} };
   const coreMenuItems = [
     ...navigation.map((item) => ({ id: `core:${item.label}`, label: navigationLabel(item.label) })),
     { id: "core:Settings", label: translate("nav.settings") },
     { id: "core:Help", label: translate("nav.help") },
   ];
   const moduleMenuItems = enabledDynamicModules.map((module) => ({ id: `module:${module.id}`, label: moduleTranslation(module.translations, activeLanguage, "name", module.name) }));
-  const baseMenuItems = [...coreMenuItems, ...moduleMenuItems];
+  const moduleSubMenuItems: MenuItem[] = enabledDynamicModules.flatMap((module) => (module.navigationItems?.(menuNavigationContext) ?? []).map((entry) => ({ id: `sub:${module.id}:${entry.id}`, label: translateModuleText(entry.label, module.translations, activeLanguage), targetId: `sub:${module.id}:${entry.id}`, kind: "module-sub" as const, moduleId: module.id, state: entry.state, ...(entry.parentId ? { parentId: `sub:${module.id}:${entry.parentId}` } : {}) })));
+  const baseMenuItems: MenuItem[] = [...coreMenuItems, ...moduleMenuItems, ...moduleSubMenuItems];
   const duplicateMenuItems: MenuItem[] = menuPreferences.duplicates.flatMap((duplicate) => {
     const target = baseMenuItems.find((item) => item.id === duplicate.targetId);
     return target ? [{ ...target, id: duplicate.id, targetId: duplicate.targetId, isDuplicate: true }] : [];
   });
-  const orderedMenuItems = (items: Array<{ id: string; label: string }>) => {
+  const orderedMenuItems = <T extends { id: string; label: string }>(items: T[]): T[] => {
     const order = menuPreferences.order;
     return [...items].sort((left, right) => {
       const leftIndex = order.indexOf(left.id);
@@ -1228,12 +1233,15 @@ function WorkspaceApp() {
   };
   const coreMenuItemsWithDuplicates = [...coreMenuItems, ...duplicateMenuItems.filter((item) => (item.targetId ?? item.id).startsWith("core:"))];
   const moduleMenuItemsWithDuplicates = [...moduleMenuItems, ...duplicateMenuItems.filter((item) => (item.targetId ?? item.id).startsWith("module:"))];
+  const moduleSubMenuItemsWithDuplicates = [...moduleSubMenuItems, ...duplicateMenuItems.filter((item) => (item.targetId ?? item.id).startsWith("sub:"))];
   const sortedCoreMenuItems = orderedMenuItems(coreMenuItemsWithDuplicates);
   const sortedModuleMenuItems = orderedMenuItems(moduleMenuItemsWithDuplicates);
-  const allMenuItems: MenuItem[] = [...coreMenuItemsWithDuplicates, ...moduleMenuItemsWithDuplicates];
+  const sortedModuleSubMenuItems = orderedMenuItems(moduleSubMenuItemsWithDuplicates);
+  const allMenuItems: MenuItem[] = [...coreMenuItemsWithDuplicates, ...moduleMenuItemsWithDuplicates, ...moduleSubMenuItemsWithDuplicates];
   const assignedMenuItemIds = new Set(menuPreferences.sections.flatMap((section) => section.itemIds));
   const availableCoreMenuItems = sortedCoreMenuItems.filter((item) => !assignedMenuItemIds.has(item.id));
   const availableModuleMenuItems = sortedModuleMenuItems.filter((item) => !assignedMenuItemIds.has(item.id));
+  const availableModuleSubMenuItems = sortedModuleSubMenuItems.filter((item) => !assignedMenuItemIds.has(item.id));
   const customMenuSections = menuPreferences.sections.map((section) => ({ ...section, items: orderedMenuItems(allMenuItems.filter((item) => section.itemIds.includes(item.id))) }));
   const saveMenuPreferences = (next: MenuPreference) => {
     setMenuPreferences(next);
@@ -1245,7 +1253,8 @@ function WorkspaceApp() {
     if (!sourceId || (sourceId === targetId && !targetSectionId.startsWith("custom:"))) return;
     const sourceItem = allMenuItems.find((item) => item.id === sourceId);
     const sourceTargetId = sourceItem?.targetId ?? sourceId;
-    if ((targetSectionId === "modules" && !sourceTargetId.startsWith("module:")) || (targetSectionId === "core" && sourceTargetId.startsWith("module:"))) return;
+    const isModuleEntry = sourceTargetId.startsWith("module:") || sourceTargetId.startsWith("sub:");
+    if ((targetSectionId === "modules" && !isModuleEntry) || (targetSectionId === "core" && isModuleEntry)) return;
     const availableIds = allMenuItems.map((item) => item.id);
     const order = [...new Set([...menuPreferences.order, ...availableIds])];
     const from = order.indexOf(sourceId);
@@ -1328,16 +1337,28 @@ function WorkspaceApp() {
     const navItem = navigation.find((candidate) => `core:${candidate.label}` === targetId);
     return navItem ? renderNavigationItem({ ...navItem, label: item.label }, item.id) : null;
   };
+  const renderModuleSubItem = (item: MenuItem) => {
+    if (!item.moduleId || !item.state) return null;
+    const active = page === modulePage(item.moduleId) && activeModuleState === item.state;
+    return <button className={`nav-item nav-sub-item ${item.parentId ? "nav-sub-item-child" : ""} ${active ? "nav-item-active" : ""}`} type="button" key={item.id} aria-current={active ? "page" : undefined} onClick={() => { setPage(modulePage(item.moduleId!)); setModuleState({ moduleId: item.moduleId!, departmentId: department.id, value: item.state! }); setMenuOpen(false); }}><span>{item.label}</span>{active && <span className="nav-indicator" />}</button>;
+  };
+  const renderModuleMenuItem = (item: MenuItem) => {
+    const targetId = item.targetId ?? item.id;
+    const moduleId = targetId.startsWith("module:") ? targetId.slice("module:".length) : "";
+    const module = enabledDynamicModules.find((candidate) => candidate.id === moduleId);
+    if (!module) return null;
+    const subitems = availableModuleSubMenuItems.filter((subitem) => subitem.moduleId === module.id && !menuPreferences.hidden.includes(subitem.id) && (!subitem.parentId || (!menuPreferences.hidden.includes(subitem.parentId) && !assignedMenuItemIds.has(subitem.parentId))));
+    return <div key={item.id}>{renderNavigationItem({ label: module.name, icon: module.icon }, item.id)}{page === modulePage(module.id) && (module.navigationItems ? <div className="nav-submenu" aria-label={`${item.label} sections`}>{subitems.map(renderModuleSubItem)}</div> : <ModuleNavigationHost module={module} context={moduleContext} />)}</div>;
+  };
   const renderCustomMenuItem = (item: MenuItem) => {
     const targetId = item.targetId ?? item.id;
+    if (item.kind === "module-sub" || targetId.startsWith("sub:")) return renderModuleSubItem(item);
     if (targetId.startsWith("module:")) {
-      const module = enabledDynamicModules.find((candidate) => `module:${candidate.id}` === targetId);
-      if (!module) return null;
-      return <div key={item.id}>{renderNavigationItem({ label: item.label, icon: module.icon }, item.id)}{page === modulePage(module.id) && <ModuleNavigationHost module={module} context={moduleContext} />}</div>;
+      return renderModuleMenuItem(item);
     }
     return renderStandardMenuItem(item);
   };
-  const renderMenuEditorGroup = (sectionId: string, title: string, items: MenuItem[], onDelete?: () => void) => <section className="menu-editor-group" aria-label={title}><header><h3>{title}</h3><label className="menu-editor-section-visibility"><input type="checkbox" checked={!menuPreferences.hiddenSections.includes(sectionId)} onChange={(event) => toggleMenuSection(sectionId, event.currentTarget.checked)} /><span>{translate("nav.showByDefault")}</span></label>{onDelete && <button className="menu-editor-section-delete" type="button" title={translate("nav.deleteSection")} aria-label={`${translate("nav.deleteSection")}: ${title}`} onClick={onDelete}><Trash2 size={13} /></button>}</header><ul>{items.map((item) => <li key={item.id} className={`${dragOverMenuItemId === item.id ? "menu-editor-drop-target" : ""} ${draggedMenuItemId === item.id ? "menu-editor-dragging" : ""}`} draggable onDragStart={(event) => { if ((event.target as HTMLElement).closest("button,input")) { event.preventDefault(); return; } setDraggedMenuItemId(item.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.id); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDragOverMenuItemId(item.id); }} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", item.id, sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }} onDragEnd={() => { setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}><GripVertical size={15} className="menu-editor-grip" aria-hidden="true" /><label><input type="checkbox" checked={!menuPreferences.hidden.includes(item.id)} onChange={(event) => toggleMenuItem(item.id, event.currentTarget.checked)} /><span>{item.label}</span></label><button className="menu-editor-row-action" type="button" title={translate("nav.duplicateItem")} aria-label={`${translate("nav.duplicateItem")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); duplicateMenuItem(item, sectionId); }}><Copy size={13} /></button>{item.isDuplicate && <button className="menu-editor-row-action menu-editor-delete-duplicate" type="button" title={translate("nav.deleteDuplicate")} aria-label={`${translate("nav.deleteDuplicate")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); deleteDuplicateMenuItem(item.id); }}><Trash2 size={13} /></button>}</li>)}<li className="menu-editor-empty-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", "", sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}>{translate("nav.dropHere")}</li></ul></section>;
+  const renderMenuEditorGroup = (sectionId: string, title: string, items: MenuItem[], onDelete?: () => void) => <section className="menu-editor-group" aria-label={title}><header><h3>{title}</h3><label className="menu-editor-section-visibility"><input type="checkbox" checked={!menuPreferences.hiddenSections.includes(sectionId)} onChange={(event) => toggleMenuSection(sectionId, event.currentTarget.checked)} /><span>{translate("nav.showByDefault")}</span></label>{onDelete && <button className="menu-editor-section-delete" type="button" title={translate("nav.deleteSection")} aria-label={`${translate("nav.deleteSection")}: ${title}`} onClick={onDelete}><Trash2 size={13} /></button>}</header><ul>{items.map((item) => <li key={item.id} className={`${item.kind === "module-sub" ? "menu-editor-subitem" : ""} ${dragOverMenuItemId === item.id ? "menu-editor-drop-target" : ""} ${draggedMenuItemId === item.id ? "menu-editor-dragging" : ""}`} draggable onDragStart={(event) => { if ((event.target as HTMLElement).closest("button,input")) { event.preventDefault(); return; } setDraggedMenuItemId(item.id); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", item.id); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setDragOverMenuItemId(item.id); }} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", item.id, sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }} onDragEnd={() => { setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}><GripVertical size={15} className="menu-editor-grip" aria-hidden="true" /><label><input type="checkbox" checked={!menuPreferences.hidden.includes(item.id)} onChange={(event) => toggleMenuItem(item.id, event.currentTarget.checked)} /><span>{item.label}</span></label><button className="menu-editor-row-action" type="button" title={translate("nav.duplicateItem")} aria-label={`${translate("nav.duplicateItem")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); duplicateMenuItem(item, sectionId); }}><Copy size={13} /></button>{item.isDuplicate && <button className="menu-editor-row-action menu-editor-delete-duplicate" type="button" title={translate("nav.deleteDuplicate")} aria-label={`${translate("nav.deleteDuplicate")}: ${item.label}`} onClick={(event) => { event.stopPropagation(); deleteDuplicateMenuItem(item.id); }}><Trash2 size={13} /></button>}</li>)}<li className="menu-editor-empty-drop" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); reorderMenuItems(event.dataTransfer.getData("text/plain") || draggedMenuItemId || "", "", sectionId); setDraggedMenuItemId(null); setDragOverMenuItemId(null); }}>{translate("nav.dropHere")}</li></ul></section>;
   const editingUser = siteUsers.find((user) => user.id === editingUserId) ?? null;
   setUserDateTimeFormat(authUser.dateTimeFormat ?? defaultDateTimeFormat);
   setActiveLanguage(activeLanguage);
@@ -1360,7 +1381,7 @@ function WorkspaceApp() {
           </section>}
           {(isMenuEditorOpen || (enabledDynamicModules.length > 0 && !menuPreferences.hiddenSections.includes("modules"))) && <section className={`nav-category ${isMenuEditorOpen ? "nav-category-editing" : ""}`}>
             {!isMenuEditorOpen && <button className="nav-label nav-section-label nav-module-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections.modules} onClick={() => setCollapsedNavSections((current) => ({ ...current, modules: !current.modules }))}><span>{translate("nav.modules")}</span><ChevronDown size={13} aria-hidden="true" /></button>}
-            {isMenuEditorOpen ? renderMenuEditorGroup("modules", translate("nav.modules"), availableModuleMenuItems) : !collapsedNavSections.modules && <div className="nav-category-items">{availableModuleMenuItems.filter((item) => !menuPreferences.hidden.includes(item.id)).map(renderCustomMenuItem)}</div>}
+            {isMenuEditorOpen ? renderMenuEditorGroup("modules", translate("nav.modules"), orderedMenuItems([...availableModuleMenuItems, ...availableModuleSubMenuItems])) : !collapsedNavSections.modules && <div className="nav-category-items">{availableModuleMenuItems.filter((item) => !menuPreferences.hidden.includes(item.id)).map(renderModuleMenuItem)}</div>}
           </section>}
           {customMenuSections.map((section) => (isMenuEditorOpen || !menuPreferences.hiddenSections.includes(section.id)) && <section className={`nav-category ${isMenuEditorOpen ? "nav-category-editing" : ""}`} key={section.id}>
             {isMenuEditorOpen ? renderMenuEditorGroup(section.id, section.name, section.items, () => deleteMenuSection(section.id)) : <><button className="nav-label nav-section-label nav-category-toggle" type="button" aria-expanded={!collapsedNavSections[section.id]} onClick={() => setCollapsedNavSections((current) => ({ ...current, [section.id]: !current[section.id] }))}><span>{section.name}</span><ChevronDown size={13} aria-hidden="true" /></button>{!collapsedNavSections[section.id] && <div className="nav-category-items">{section.items.filter((item) => !menuPreferences.hidden.includes(item.id)).map(renderCustomMenuItem)}</div>}</>}

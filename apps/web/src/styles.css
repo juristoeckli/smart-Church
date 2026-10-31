@@ -212,6 +212,7 @@
 .menu-editor-row-action{width:24px;height:24px;flex:0 0 auto;display:grid;place-items:center;border:0;border-radius:5px;background:transparent;color:#89958c;cursor:pointer}
 .menu-editor-row-action:hover{background:#eaf3ec;color:#286c4b}
 .menu-editor-row-action.menu-editor-delete-duplicate:hover{background:#f8e9e9;color:#a34242}
+.menu-editor-group li.menu-editor-subitem{padding-left:21px}
 .menu-editor-group li.menu-editor-empty-drop{min-height:33px;justify-content:center;border:1px dashed var(--line);color:var(--muted);font-size:9px;cursor:default}
 .menu-editor-group li.menu-editor-empty-drop:hover{background:var(--bg)}
 .menu-section-create{display:flex;align-items:center;gap:5px;padding:4px 5px}

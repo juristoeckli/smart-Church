@@ -36,5 +36,6 @@ export const moduleRegistration: ModuleRegistration = {
   isAvailable: ({ department, canManageSite }) => (department.enabledModules ?? []).includes("eventdesk") && (canManageSite || (department.modulePermissions?.eventdesk ?? []).length > 0),
   component: EventDesk,
   navigation: EventDeskNavigation,
+  navigationItems: () => sections.map((section) => ({ id: section, label: section, state: section })),
   pageClassName: "page-wrap-eventdesk",
 };

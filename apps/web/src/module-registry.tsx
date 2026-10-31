@@ -38,6 +38,13 @@ export interface ModuleAccessContext {
   canManageSite: boolean;
 }
 
+export interface ModuleNavigationItem {
+  id: string;
+  label: string;
+  state: string;
+  parentId?: string;
+}
+
 export interface ModuleRegistration {
   id: string;
   name: string;
@@ -54,6 +61,7 @@ export interface ModuleRegistration {
   component: ComponentType<ModuleContext>;
   settings?: ComponentType<ModuleSettingsContext>;
   navigation?: ComponentType<{ context: ModuleContext }>;
+  navigationItems?: (context: ModuleContext) => ModuleNavigationItem[];
   pageClassName?: string;
 }
 
