@@ -5,6 +5,7 @@ import { formatUserDate } from "./date-format";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
 import { ModuleTranslationHost, translateModuleText } from "./module-registry";
 import { translationsForModule } from "./modules/translations";
+import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overrides";
 import { WorshipPlanning } from "./WorshipPlanning";
 
 type EventFilter = "upcoming" | "all" | "past";
@@ -17,6 +18,8 @@ const eventKinds: { value: ServiceEventKind; label: TranslationKey }[] = [
   { value: "community", label: "events.kind.community" },
   { value: "other", label: "events.kind.other" },
 ];
+
+const eventTranslations = mergeModuleTranslationOverrides("core-events", translationsForModule("core-events"));
 
 function departmentDateString(timeZone: string, date = new Date()) {
   const parts = new Intl.DateTimeFormat("en-CA", {
@@ -504,7 +507,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   }
 
   return (
-    <ModuleTranslationHost translations={translationsForModule("core-events")} language={getActiveLanguage()}>
+    <ModuleTranslationHost translations={eventTranslations} language={getActiveLanguage()}>
     <>
       <div className={`demo-notice ${loadError ? "demo-notice-error" : ""}`}>
         <span className="demo-dot" />
