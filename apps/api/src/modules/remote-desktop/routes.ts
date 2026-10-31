@@ -3,6 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { isIP } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
+import { followRuntimeLogFile } from "../../runtime-diagnostics.js";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerRemoteDesktopReplication } from "./replication.js";
 
@@ -98,6 +99,8 @@ function encryptedAuthData(settings: ReturnType<typeof gatewaySettings>, destina
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, getDefaultDepartmentId, resolveDepartmentId, validateMutation, realtime } = dependencies;
   registerRemoteDesktopReplication(dependencies);
+  const stopFollowingGuacdLogs = followRuntimeLogFile("guacd", process.env.SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_PATH);
+  app.addHook("onClose", stopFollowingGuacdLogs);
   let cachedClientLibrary: string | null = null;
 
   async function requireSystemLaptopAccess(request: FastifyRequest, reply: FastifyReply, allowQueryLocation = false) {

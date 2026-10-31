@@ -1,10 +1,30 @@
 services:
+  remote-desktop-guacd-log-init:
+    image: ${SYSTEM_LAPTOP_GUACD_IMAGE:-guacamole/guacd:1.6.0}
+    profiles: [system-laptop]
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown 1000:1000 /var/log/smart-church/remote-desktop && chmod 0750 /var/log/smart-church/remote-desktop"]
+    restart: "no"
+    volumes:
+      - smart-church-remote-desktop-logs:/var/log/smart-church/remote-desktop
+
   system-laptop-guacd:
     image: ${SYSTEM_LAPTOP_GUACD_IMAGE:-guacamole/guacd:1.6.0}
     profiles: [system-laptop]
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/smart-church/guacd-log-entrypoint.sh"]
+    environment:
+      LOG_LEVEL: ${SYSTEM_LAPTOP_GUACD_LOG_LEVEL:-info}
+    depends_on:
+      remote-desktop-guacd-log-init:
+        condition: service_completed_successfully
     networks:
       - smart-church-private
+    volumes:
+      - smart-church-remote-desktop-logs:/var/log/smart-church/remote-desktop
+      - ./apps/api/src/modules/remote-desktop/guacd-log-entrypoint.sh:/opt/smart-church/guacd-log-entrypoint.sh:ro
+
   system-laptop-guacamole:
     image: guacamole/guacamole:1.6.0
     profiles: [system-laptop]
@@ -18,3 +38,12 @@ services:
     restart: unless-stopped
     networks:
       - smart-church-private
+
+  api:
+    environment:
+      SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_PATH: /var/lib/smart-church/remote-desktop-logs/guacd.log
+    volumes:
+      - smart-church-remote-desktop-logs:/var/lib/smart-church/remote-desktop-logs:ro
+
+volumes:
+  smart-church-remote-desktop-logs:

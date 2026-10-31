@@ -55,6 +55,7 @@ sync_deployment_files() {
     apps/api/src/modules/video-steffisburg/.env.example
     apps/api/src/modules/video-steffisburg/README.md
     apps/api/src/modules/remote-desktop/compose.yaml
+    apps/api/src/modules/remote-desktop/guacd-log-entrypoint.sh
     apps/api/src/modules/remote-desktop/guacd-wave2.patch
     apps/api/src/modules/remote-desktop/build-guacd.sh
   )

@@ -1,3 +1,5 @@
+import { open } from "node:fs/promises";
+
 export type RuntimeLogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
 export type RuntimeLogEntry = { timestamp: string; level: RuntimeLogLevel; source: string; message: string };
 export type ManagedWorkerDiagnostics = {
@@ -57,4 +59,71 @@ export function recordRuntimeLog(source: string, level: RuntimeLogLevel, message
 
 export function recentRuntimeLogs(limit = 500) {
   return entries.slice(-Math.max(1, Math.min(maxEntries, limit))).reverse();
+}
+
+export function followRuntimeLogFile(source: string, filePath: string | undefined, pollIntervalMs = 1000) {
+  const path = filePath?.trim();
+  if (!path) return () => {};
+
+  let offset = 0;
+  let fileIdentity = "";
+  let partialLine = "";
+  let stopped = false;
+  let polling = false;
+
+  const poll = async () => {
+    if (stopped || polling) return;
+    polling = true;
+    let file: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      file = await open(path, "r");
+      const metadata = await file.stat();
+      const nextIdentity = `${metadata.dev}:${metadata.ino}`;
+      if (metadata.size < offset || (fileIdentity && fileIdentity !== nextIdentity)) {
+        offset = 0;
+        partialLine = "";
+      }
+      fileIdentity = nextIdentity;
+
+      const maxReadBytes = 128 * 1024;
+      if (metadata.size - offset > maxReadBytes) {
+        offset = metadata.size - maxReadBytes;
+        partialLine = "";
+      }
+      const length = metadata.size - offset;
+      if (length <= 0) return;
+
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await file.read(buffer, 0, length, offset);
+      offset += bytesRead;
+      const lines = `${partialLine}${buffer.toString("utf8", 0, bytesRead)}`.split(/\r?\n/);
+      partialLine = lines.pop() ?? "";
+      if (partialLine.length > 2048) partialLine = partialLine.slice(-2048);
+
+      for (const rawLine of lines.slice(-250)) {
+        const line = rawLine.replace(/^\s*guacd(?:\[\d+\])?:\s*/i, "").trim();
+        if (!line) continue;
+        const match = line.match(/^(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL):\s*(.*)$/i);
+        const levelName = match?.[1]?.toLowerCase() ?? "info";
+        const level: RuntimeLogLevel = levelName === "warning" ? "warn" : levelName as RuntimeLogLevel;
+        const message = (match?.[2] ?? line)
+          .replace(/\b(password|secret|token|authorization|cookie|api[_-]?key|username|user)\s*[:=]\s*[^\s,;]+/gi, "$1=[redacted]")
+          .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]");
+        recordRuntimeLog(source, level, message);
+      }
+    } catch {
+      // The optional log volume may be absent until the remote desktop stack starts.
+    } finally {
+      await file?.close().catch(() => {});
+      polling = false;
+    }
+  };
+
+  void poll();
+  const timer = setInterval(() => { void poll(); }, Math.max(250, pollIntervalMs));
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }

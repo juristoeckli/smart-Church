@@ -35,6 +35,8 @@ Remote desktop embeds Apache Guacamole's JavaScript client inside the Smart-Chur
 
 Each selected destination must be reachable from `guacd` on its configured protocol and port. The browser loads Guacamole's JavaScript and opens its WebSocket through the authenticated same-origin Remote desktop API routes. Only the API server needs network access to the private Guacamole URL. Do not expose Guacamole's port, destination credentials, or the JSON secret to browsers. The Guacamole WebSocket URL carries a short-lived bearer token and proxy ticket as required by its client protocol; configure the web server not to log query strings for this route.
 
+When the deployment overlay is enabled, `guacd` writes its output to the shared remote-desktop log volume while continuing to write to Docker's normal container log. The API tails that file into the existing runtime diagnostics buffer as source `guacd`; `GET /api/admin/diagnostics` then includes those entries for authorized server diagnostics readers. Set `SYSTEM_LAPTOP_GUACD_LOG_LEVEL=debug` in `.env` only when more detailed connection traces are needed; the default is `info`.
+
 ## Shared control and display size
 
 One site administrator can control the desktop at a time. The API grants a short pending lease while the controller connects, then holds the lease until that WebSocket closes. Other members of the same location join the active Guacamole connection in read-only mode; they cannot send keyboard or mouse input. A viewer cannot create the session, and a viewer from another location cannot join it.
