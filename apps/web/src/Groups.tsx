@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Check, ContactRound, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import { Check, ContactRound, Download, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { ChurchGroup, Contact } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
-import { translate } from "./i18n";
+import { getActiveLanguage, translate } from "./i18n";
+import { translateModuleMessage } from "./modules/translations";
 
 type GroupMeeting = { id: string; date: string; title: string; attendeeCount: number; presentCount: number };
 type AttendanceEntry = { contactId: string; firstName: string; lastName: string; status: "present" | "absent" | "excused" };
 type GroupJoinRequest = { id: string; groupId: string; firstName: string; lastName: string; email: string; status: "pending"; createdAt: string };
+
+function csvCell(value: string) {
+  return `"${value.replace(/"/g, '""')}"`;
+}
 
 export function Groups({ departmentId, contacts, canManage }: { departmentId: string; contacts: Contact[]; canManage: boolean }) {
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
@@ -225,6 +230,24 @@ export function Groups({ departmentId, contacts, canManage }: { departmentId: st
     finally { setAttendanceSaving(false); }
   }
 
+  function downloadGroupAttendance() {
+    const meeting = meetings.find((item) => item.id === activeMeetingId);
+    if (!selected || !meeting || attendance.length === 0) return;
+    const rows = [
+      [translate("groups.name"), translate("groups.meeting"), translate("groups.meetingDate"), translate("events.firstName"), translate("events.lastName"), translate("groups.attendance")],
+      ...attendance.map((entry) => [selected.name, meeting.title, formatUserDate(meeting.date), entry.firstName, entry.lastName, translate(`groups.${entry.status}` as "groups.present" | "groups.absent" | "groups.excused")]),
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `group-attendance-${meeting.date}.csv`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
   async function deleteGroup(group: ChurchGroup) {
     if (!window.confirm(translate("groups.deleteConfirm").replace("{name}", group.name))) return;
     try {
@@ -237,7 +260,7 @@ export function Groups({ departmentId, contacts, canManage }: { departmentId: st
   }
 
   return <>
-    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || feedback || translate("groups.notice").replace("{place}", translate(departmentId ? "groups.yourChurch" : "groups.thisSite"))}{error && <button className="event-retry" type="button" onClick={() => void loadGroups()}>{translate("groups.tryAgain")}</button>}</div>
+    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error ? translateModuleMessage("core-groups", getActiveLanguage(), error) : feedback || translate("groups.notice").replace("{place}", translate(departmentId ? "groups.yourChurch" : "groups.thisSite"))}{error && <button className="event-retry" type="button" onClick={() => void loadGroups()}>{translate("groups.tryAgain")}</button>}</div>
     <section className="page-heading"><div><div className="eyebrow">{translate("groups.eyebrow")}</div><h1>{translate("groups.title")}</h1><p className="page-subtitle">{translate("groups.subtitle")}</p></div>{canManage && <button className="button button-primary" type="button" onClick={() => { setSelectedId(""); setName(""); setDescription(""); setEditing(false); }}><Plus size={17} />{" "}{translate("groups.new")}</button>}</section>
     <section className="community-groups-layout">
       <section className="directory-card community-group-list"><div className="directory-heading"><div><h2>{translate("groups.listTitle")}</h2><p>{(groups.length === 1 ? translate("groups.countOne") : translate("groups.count")).replace("{count}", String(groups.length))}</p></div></div>
@@ -267,8 +290,8 @@ export function Groups({ departmentId, contacts, canManage }: { departmentId: st
           {!selected.importedFrom && <section className="group-attendance-section" aria-labelledby="group-attendance-title">
             <div className="community-members-heading"><div><h3 id="group-attendance-title">{translate("groups.attendance")}</h3><p>{translate("groups.attendanceHelp")}</p></div></div>
             {canManage && <form className="group-meeting-form" onSubmit={(event) => void createMeeting(event)}><label>{translate("groups.meetingDate")}<input type="date" required value={meetingDate} onChange={(event) => setMeetingDate(event.target.value)} /></label><label>{translate("groups.meetingName")} <span className="optional-label">{translate("groups.optional")}</span><input maxLength={160} value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} placeholder={translate("groups.meetingNameExample")} /></label><button className="button button-primary" type="submit" disabled={saving || memberListChanged}><Plus size={15} />{translate("groups.createMeeting")}</button>{memberListChanged && <small className="group-meeting-help">{translate("groups.saveRosterFirst")}</small>}</form>}
-            {meetings.length > 0 && <label className="group-meeting-picker">{translate("groups.meeting")}<select value={activeMeetingId} onChange={(event) => setActiveMeetingId(event.target.value)}><option value="">{translate("groups.chooseMeeting")}</option>{meetings.map((meeting) => <option key={meeting.id} value={meeting.id}>{formatUserDate(meeting.date)} {meeting.title ? `· ${meeting.title}` : ""} · {meeting.presentCount}/{meeting.attendeeCount} present</option>)}</select></label>}
-            {activeMeetingId && <><div className="group-attendance-heading"><strong>{translate("groups.presentCount").replace("{count}", String(attendance.length))}</strong>{canManage && <button className="button button-primary" type="button" onClick={() => void saveAttendance()} disabled={attendanceSaving || attendanceLoading}><Check size={14} />{attendanceSaving ? translate("settings.personal.saving") : translate("groups.saveAttendance")}</button>}</div>{attendanceLoading ? <p className="community-empty">{translate("groups.loading")}</p> : attendance.length ? <div className="group-attendance-list">{attendance.map((entry) => <label className="community-member-row" key={entry.contactId}><span className="community-member-avatar">{entry.firstName[0]}{entry.lastName[0]}</span><span><strong>{entry.firstName} {entry.lastName}</strong></span><select aria-label={translate("groups.attendanceFor").replace("{name}", `${entry.firstName} ${entry.lastName}`)} disabled={!canManage} value={entry.status} onChange={(event) => setAttendance((current) => current.map((person) => person.contactId === entry.contactId ? { ...person, status: event.target.value as AttendanceEntry["status"] } : person))}><option value="present">{translate("groups.present")}</option><option value="absent">{translate("groups.absent")}</option><option value="excused">{translate("groups.excused")}</option></select></label>)}</div> : <p className="community-empty">{translate("groups.noRoster")}</p>}</>}
+            {meetings.length > 0 && <label className="group-meeting-picker">{translate("groups.meeting")}<select value={activeMeetingId} onChange={(event) => setActiveMeetingId(event.target.value)}><option value="">{translate("groups.chooseMeeting")}</option>{meetings.map((meeting) => <option key={meeting.id} value={meeting.id}>{formatUserDate(meeting.date)} {meeting.title ? `· ${meeting.title}` : ""} · {translate("groups.meetingAttendanceSummary").replace("{present}", String(meeting.presentCount)).replace("{total}", String(meeting.attendeeCount))}</option>)}</select></label>}
+            {activeMeetingId && <><div className="group-attendance-heading"><strong>{translate("groups.presentCount").replace("{count}", String(attendance.length))}</strong><div className="community-inline-actions">{canManage && attendance.length > 0 && <button className="button button-secondary" type="button" onClick={downloadGroupAttendance}><Download size={14} />{translate("events.exportAttendance")}</button>}{canManage && <button className="button button-primary" type="button" onClick={() => void saveAttendance()} disabled={attendanceSaving || attendanceLoading}><Check size={14} />{attendanceSaving ? translate("settings.personal.saving") : translate("groups.saveAttendance")}</button>}</div></div>{attendanceLoading ? <p className="community-empty">{translate("groups.loading")}</p> : attendance.length ? <div className="group-attendance-list">{attendance.map((entry) => <label className="community-member-row" key={entry.contactId}><span className="community-member-avatar">{entry.firstName[0]}{entry.lastName[0]}</span><span><strong>{entry.firstName} {entry.lastName}</strong></span><select aria-label={translate("groups.attendanceFor").replace("{name}", `${entry.firstName} ${entry.lastName}`)} disabled={!canManage} value={entry.status} onChange={(event) => setAttendance((current) => current.map((person) => person.contactId === entry.contactId ? { ...person, status: event.target.value as AttendanceEntry["status"] } : person))}><option value="present">{translate("groups.present")}</option><option value="absent">{translate("groups.absent")}</option><option value="excused">{translate("groups.excused")}</option></select></label>)}</div> : <p className="community-empty">{translate("groups.noRoster")}</p>}</>}
             {!meetings.length && !canManage && <p className="community-empty">{translate("groups.noMeetings")}</p>}
           </section>}
         </> : canManage ? <form className="community-new-group" onSubmit={saveGroup}><span className="community-group-icon"><ContactRound size={20} /></span><h2>{translate("groups.createStart")}</h2><p>{translate("groups.createStartHelp")}</p><label>{translate("groups.name")}<input autoFocus required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder={translate("groups.groupNameExample")} /></label><label>{translate("groups.description")} <span className="optional-label">{translate("groups.optional")}</span><textarea rows={3} maxLength={1000} value={description} onChange={(event) => setDescription(event.target.value)} placeholder={translate("groups.whoBelongs")} /></label><button className="button button-primary" type="submit" disabled={saving || !name.trim()}><Plus size={16} />{translate("groups.create")}</button></form> : <p className="community-empty">{translate("groups.selectHint")}</p>}

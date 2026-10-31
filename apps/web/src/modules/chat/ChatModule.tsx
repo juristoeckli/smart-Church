@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { CircleAlert, MessageCircle, Pencil, Plus, Search, Send, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { formatUserDate } from "../../date-format";
+import { translateChatUi } from "./chat-translations";
 import "./chat.css";
 
 type PresenceStatus = "offline" | "online" | "away";
@@ -39,9 +40,9 @@ function readChatSuffix(userId: string, conversationId: string) {
   catch { return ""; }
 }
 
-function presenceDot(status: PresenceStatus) {
+function presenceDot(status: PresenceStatus, t: (value: string) => string) {
   if (status === "offline") return null;
-  return <i className={`chat-online-dot${status === "away" ? " chat-online-dot-away" : ""}`} title={status === "away" ? "Online; page unfocused and notifications disabled" : "Online"} aria-label={status === "away" ? "Online, page unfocused and notifications disabled" : "Online"} />;
+  return <i className={`chat-online-dot${status === "away" ? " chat-online-dot-away" : ""}`} title={t(status === "away" ? "Online; page unfocused and notifications disabled" : "Online")} aria-label={t(status === "away" ? "Online, page unfocused and notifications disabled" : "Online")} />;
 }
 
 function getPresenceSessionId() {
@@ -53,14 +54,14 @@ function getPresenceSessionId() {
   return id;
 }
 
-function conversationTitle(conversation: Conversation, currentUserId: string) {
+function conversationTitle(conversation: Conversation, currentUserId: string, t: (value: string) => string) {
   const others = conversation.participants.filter((person) => person.id !== currentUserId).map((person) => person.displayName);
-  if (conversation.kind === "group") return (conversation.name ?? others.join(", ")) || "Group chat";
+  if (conversation.kind === "group") return (conversation.name ?? others.join(", ")) || t("Group chat");
   const suffix = conversation.titleSuffix?.trim();
-  return `${others[0] ?? "Direct message"}${suffix ? ` · ${suffix}` : ""}`;
+  return `${others[0] ?? t("Direct message")}${suffix ? ` · ${suffix}` : ""}`;
 }
 
-export function ChatModule({ department, departmentId, csrfToken, systemNotificationsEnabled = false, realtime, requestedChatConversationId, onChatConversationOpened, onActiveChatChange, refreshCsrfToken }: ModuleContext) {
+export function ChatModule({ department, departmentId, csrfToken, language, systemNotificationsEnabled = false, realtime, requestedChatConversationId, onChatConversationOpened, onActiveChatChange, refreshCsrfToken }: ModuleContext) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
@@ -85,6 +86,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
   const [savingConversation, setSavingConversation] = useState(false);
   const legacySuffixSyncs = useRef(new Set<string>());
   const [presenceSessionId] = useState(getPresenceSessionId);
+  const t = useCallback((value: string) => translateChatUi(value, language), [language]);
 
   const activeConversation = useMemo(() => conversations.find((conversation) => conversation.id === activeId) ?? null, [conversations, activeId]);
   const isTyping = composerFocused && draft.trim().length > 0;
@@ -111,9 +113,9 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
       setActiveId((current) => current || conversationResult.conversations[0]?.id || "");
       setError("");
     } catch (reason) {
-      if (!quiet) setError(reason instanceof Error ? reason.message : "Could not load chat.");
+      if (!quiet) setError(t(reason instanceof Error ? reason.message : "Could not load chat."));
     } finally { setLoading(false); }
-  }, [departmentId]);
+  }, [departmentId, t]);
 
   useEffect(() => {
     if (!currentUserId) return;
@@ -188,7 +190,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
           setConversations((current) => current.map((conversation) => conversation.id === activeId ? { ...conversation, unreadCount: 0 } : conversation));
         }
       } catch (reason) {
-        if (!quiet && !cancelled) setError(reason instanceof Error ? reason.message : "Could not load messages.");
+        if (!quiet && !cancelled) setError(t(reason instanceof Error ? reason.message : "Could not load messages."));
       } finally { if (!cancelled) setMessagesLoading(false); }
     }
     void loadMessages(false);
@@ -206,7 +208,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
       document.removeEventListener("visibilitychange", refreshVisibleChat);
       window.removeEventListener("focus", refreshVisibleChat);
     };
-  }, [activeId, departmentId, realtime]);
+  }, [activeId, departmentId, realtime, t]);
 
   useEffect(() => {
     if (!activeId) { setTypingUsers([]); return; }
@@ -251,7 +253,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
         result = await response.json() as { error?: string; id?: string };
       }
     }
-    if (!response.ok) throw new Error(result.error ?? "The request failed.");
+    if (!response.ok) throw new Error(t(result.error ?? "The request failed."));
     return result;
   }
 
@@ -271,7 +273,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
       const result = await response.json() as { messages: ChatMessage[] };
       if (response.ok) setMessages(result.messages);
       await loadOverview(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send the message."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not send the message.")); }
     finally { setSending(false); }
   }
 
@@ -281,7 +283,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
     try {
       await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/messages/${encodeURIComponent(message.id)}`, "DELETE");
       setMessages((current) => current.filter((item) => item.id !== message.id));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not delete the message."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not delete the message.")); }
   }
 
   async function createConversation(event: FormEvent<HTMLFormElement>) {
@@ -293,12 +295,12 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
       await loadOverview(true);
       setActiveId(result.id ?? "");
       setComposing(false); setManagingConversation(false); setSelectedIds([]); setSearch(""); setGroupName("");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not start the conversation."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not start the conversation.")); }
   }
 
   async function deleteConversation(conversation: Conversation) {
-    const title = conversationTitle(conversation, currentUserId);
-    if (!window.confirm(`Delete “${title}” and all its messages for everyone in this chat?`)) return;
+    const title = conversationTitle(conversation, currentUserId, t);
+    if (!window.confirm(t(`Delete “${title}” and all its messages for everyone in this chat?`))) return;
     setError("");
     try {
       await mutate(`/api/modules/chat/conversations/${encodeURIComponent(conversation.id)}`, "DELETE");
@@ -309,7 +311,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
         setMessages([]);
         setManagingConversation(false);
       }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not delete the chat."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not delete the chat.")); }
   }
 
   function toggleContact(id: string) {
@@ -339,7 +341,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
       }
       await loadOverview(true);
       setManagingConversation(false);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this chat."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not update this chat.")); }
     finally { setSavingConversation(false); }
   }
 
@@ -356,18 +358,18 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
       await loadOverview(true);
     } catch (reason) {
       await loadOverview(true);
-      setError(reason instanceof Error ? reason.message : "Could not add group members.");
+      setError(t(reason instanceof Error ? reason.message : "Could not add group members."));
     } finally { setSavingConversation(false); }
   }
 
   async function removeGroupMember(person: Participant) {
     if (!activeConversation || activeConversation.kind !== "group") return;
-    if (!window.confirm(`Remove ${person.displayName} from this group chat?`)) return;
+    if (!window.confirm(t(`Remove ${person.displayName} from this group chat?`))) return;
     setError("");
     try {
       await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members/${encodeURIComponent(person.id)}`, "DELETE");
       await loadOverview(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not remove this group member."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not remove this group member.")); }
   }
 
   async function changeGroupMemberRole(person: Participant) {
@@ -377,7 +379,7 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
     try {
       await mutate(`/api/modules/chat/conversations/${encodeURIComponent(activeConversation.id)}/members/${encodeURIComponent(person.id)}`, "PATCH", { role });
       await loadOverview(true);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this group member."); }
+    } catch (reason) { setError(t(reason instanceof Error ? reason.message : "Could not update this group member.")); }
   }
 
   const filteredContacts = contacts.filter((contact) => contact.displayName.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
@@ -386,111 +388,111 @@ export function ChatModule({ department, departmentId, csrfToken, systemNotifica
   const isGroupCreator = activeConversation?.kind === "group" && activeConversation.createdBy === currentUserId;
 
   return <>
-    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || `Chat for ${department.location} · ${conversations.length} ${conversations.length === 1 ? "conversation" : "conversations"}`}</div>
+    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error ? t(error) : t("Chat for {location} · {count} conversations").replace("{location}", department.location).replace("{count}", String(conversations.length))}</div>
     <section className="page-heading chat-page-heading">
-      <div><div className="eyebrow">YOUR COMMUNITY</div><h1>Chat</h1><p className="page-subtitle">Private conversations for {department.location}.</p></div>
+      <div><div className="eyebrow">{t("Your Community")}</div><h1>{t("Chat")}</h1><p className="page-subtitle">{t("Private conversations for {location}.").replace("{location}", department.location)}</p></div>
     </section>
 
     {error && <p className="chat-feedback" role="alert"><CircleAlert size={14} />{error}</p>}
-    <section className="directory-card chat-layout" aria-label="Chat">
+    <section className="directory-card chat-layout" aria-label={t("Chat")}>
       <aside className="chat-sidebar">
-        <div className="chat-sidebar-heading"><div><h2>Messages</h2><p>Direct messages and group chats.</p></div><button className="button button-primary chat-new-button" type="button" onClick={() => { setComposing(true); setActiveId(""); setManagingConversation(false); setSelectedIds([]); setGroupName(""); }}><Plus size={14} />New chat</button></div>
-        {loading ? <p className="chat-empty" role="status">Loading conversations…</p> : conversations.length === 0 && !composing ? <div className="chat-sidebar-empty"><MessageCircle size={18} /><span>Your conversations will appear here.</span></div> : <div className="chat-conversation-list">
+        <div className="chat-sidebar-heading"><div><h2>{t("Messages")}</h2><p>{t("Direct messages and group chats.")}</p></div><button className="button button-primary chat-new-button" type="button" onClick={() => { setComposing(true); setActiveId(""); setManagingConversation(false); setSelectedIds([]); setGroupName(""); }}><Plus size={14} />{t("New chat")}</button></div>
+        {loading ? <p className="chat-empty" role="status">{t("Loading conversations…")}</p> : conversations.length === 0 && !composing ? <div className="chat-sidebar-empty"><MessageCircle size={18} /><span>{t("Your conversations will appear here.")}</span></div> : <div className="chat-conversation-list">
           {conversations.map((conversation) => {
-            const title = conversationTitle(conversation, currentUserId);
+            const title = conversationTitle(conversation, currentUserId, t);
             const others = conversation.participants.filter((person) => person.id !== currentUserId);
             const groupPresence = others.some((person) => presenceStatus(person) === "online") ? "online" : others.some((person) => presenceStatus(person) === "away") ? "away" : "offline";
             return <div className="chat-conversation-row" key={conversation.id}>
               <button className={`chat-conversation${conversation.id === activeId && !composing ? " chat-conversation-active" : ""}`} type="button" onClick={() => { setActiveId(conversation.id); setComposing(false); setManagingConversation(false); }}>
                 <span className={`chat-avatar${conversation.kind === "group" ? " chat-avatar-group" : ""}`}>{conversation.kind === "group" ? <Users size={16} /> : title.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
-                <span className="chat-conversation-copy"><span className="chat-conversation-title">{presenceDot(groupPresence)}{title}</span><span className="chat-conversation-preview">{conversation.lastMessage ?? (conversation.kind === "group" ? `${conversation.participants.length} participants` : "Start a conversation")}</span></span>
-                {conversation.unreadCount > 0 && <span className="chat-unread-count" aria-label={`${conversation.unreadCount} unread ${conversation.unreadCount === 1 ? "message" : "messages"}`}>{conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}</span>}
+                <span className="chat-conversation-copy"><span className="chat-conversation-title">{presenceDot(groupPresence, t)}{title}</span><span className="chat-conversation-preview">{conversation.lastMessage ?? (conversation.kind === "group" ? t("{count} participants").replace("{count}", String(conversation.participants.length)) : t("Start a conversation"))}</span></span>
+                {conversation.unreadCount > 0 && <span className="chat-unread-count" aria-label={t(conversation.unreadCount === 1 ? "{count} unread message" : "{count} unread messages").replace("{count}", String(conversation.unreadCount))}>{conversation.unreadCount > 99 ? "99+" : conversation.unreadCount}</span>}
               </button>
-              <button className="chat-conversation-delete" type="button" aria-label={`Delete chat with ${title}`} title="Delete chat for everyone" onClick={() => void deleteConversation(conversation)}><Trash2 size={14} /></button>
+              <button className="chat-conversation-delete" type="button" aria-label={t("Delete chat with {title}").replace("{title}", title)} title={t("Delete chat for everyone")} onClick={() => void deleteConversation(conversation)}><Trash2 size={14} /></button>
             </div>;
           })}
         </div>}
-        <div className="chat-online-note" aria-label="Presence key"><span>No dot: offline</span><span>{presenceDot("online")} Online</span><span>{presenceDot("away")} Unfocused, no notifications</span></div>
+        <div className="chat-online-note" aria-label={t("Presence key")}><span>{t("No dot: offline")}</span><span>{presenceDot("online", t)} {t("Online")}</span><span>{presenceDot("away", t)} {t("Unfocused, no notifications")}</span></div>
       </aside>
 
       <div className="chat-main">
         {composing ? <section className="chat-new-panel">
-          <div className="chat-thread-heading"><div><h2>New chat</h2><p>Choose one person for a direct message or multiple people for a group.</p></div><button className="chat-close-button" type="button" onClick={() => { setComposing(false); setSelectedIds([]); setGroupName(""); }} aria-label="Close new conversation"><X size={17} /></button></div>
+          <div className="chat-thread-heading"><div><h2>{t("New chat")}</h2><p>{t("Choose one person for a direct message or multiple people for a group.")}</p></div><button className="chat-close-button" type="button" onClick={() => { setComposing(false); setSelectedIds([]); setGroupName(""); }} aria-label={t("Close new conversation")}><X size={17} /></button></div>
           <form className="chat-create-form" onSubmit={createConversation}>
-            <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a person" aria-label="Find a person" /></label>
-            {selectedIds.length > 1 && <label className="chat-group-name">Group name <span className="optional-label">Optional</span><input value={groupName} onChange={(event) => setGroupName(event.target.value)} maxLength={80} placeholder="e.g. Sunday volunteers" /></label>}
+            <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("Find a person")} aria-label={t("Find a person")} /></label>
+            {selectedIds.length > 1 && <label className="chat-group-name">{t("Group name")} <span className="optional-label">{t("Optional")}</span><input value={groupName} onChange={(event) => setGroupName(event.target.value)} maxLength={80} placeholder={t("e.g. Sunday volunteers")} /></label>}
             <div className="chat-contact-list">
-              {filteredContacts.length === 0 ? <p className="chat-empty">No matching people.</p> : filteredContacts.map((contact) => <label className="chat-contact-option" key={contact.id}>
+              {filteredContacts.length === 0 ? <p className="chat-empty">{t("No matching people.")}</p> : filteredContacts.map((contact) => <label className="chat-contact-option" key={contact.id}>
                 <input type="checkbox" checked={selectedIds.includes(contact.id)} onChange={() => toggleContact(contact.id)} />
                 <span className="chat-contact-avatar">{contact.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
-                <span>{contact.displayName}{contact.isAdmin && <small>Server Administrator</small>}</span>
-                <small>{presenceStatus(contact) === "offline" ? "Offline" : <>{presenceDot(presenceStatus(contact))}{presenceStatus(contact) === "away" ? "Away" : "Online"}</>}</small>
+                <span>{contact.displayName}{contact.isAdmin && <small>{t("Server Administrator")}</small>}</span>
+                <small>{presenceStatus(contact) === "offline" ? t("Offline") : <>{presenceDot(presenceStatus(contact), t)}{presenceStatus(contact) === "away" ? t("Away") : t("Online")}</>}</small>
               </label>)}
             </div>
-            <div className="chat-create-footer"><span>{selectedIds.length ? `${selectedIds.length} ${selectedIds.length === 1 ? "person" : "people"} selected` : "Select one or more people"}</span><button className="button button-primary" type="submit" disabled={!selectedIds.length}><MessageCircle size={14} />{selectedIds.length > 1 ? "Create group" : "Start chat"}</button></div>
+            <div className="chat-create-footer"><span>{selectedIds.length ? t("{count} selected").replace("{count}", String(selectedIds.length)) : t("Select one or more people")}</span><button className="button button-primary" type="submit" disabled={!selectedIds.length}><MessageCircle size={14} />{selectedIds.length > 1 ? t("Create group") : t("Start chat")}</button></div>
           </form>
         </section> : activeConversation ? <>
           <div className="chat-thread-heading">
-            <span className="chat-avatar">{conversationTitle(activeConversation, currentUserId).split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
-            <div className="chat-thread-title"><h2>{conversationTitle(activeConversation, currentUserId)}</h2><p>{activeConversation.kind === "group" ? `${activeConversation.participants.length} participants · Group chat` : (() => { const other = activeConversation.participants.find((person) => person.id !== currentUserId); const status = other ? presenceStatus(other) : "offline"; return status === "offline" ? "Direct message" : status === "away" ? "Away" : "Online"; })()}</p></div>
-            {(activeConversation.kind === "direct" || canManageActiveGroup) && <button className="chat-close-button" type="button" onClick={() => managingConversation ? setManagingConversation(false) : beginManagingConversation(activeConversation)} aria-label={managingConversation ? "Close chat settings" : "Edit chat settings"} title={managingConversation ? "Close chat settings" : "Edit chat settings"}><Pencil size={15} /></button>}
+            <span className="chat-avatar">{conversationTitle(activeConversation, currentUserId, t).split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
+            <div className="chat-thread-title"><h2>{conversationTitle(activeConversation, currentUserId, t)}</h2><p>{activeConversation.kind === "group" ? `${t("{count} participants").replace("{count}", String(activeConversation.participants.length))} · ${t("Group chat")}` : (() => { const other = activeConversation.participants.find((person) => person.id !== currentUserId); const status = other ? presenceStatus(other) : "offline"; return status === "offline" ? t("Direct message") : status === "away" ? t("Away") : t("Online"); })()}</p></div>
+            {(activeConversation.kind === "direct" || canManageActiveGroup) && <button className="chat-close-button" type="button" onClick={() => managingConversation ? setManagingConversation(false) : beginManagingConversation(activeConversation)} aria-label={t(managingConversation ? "Close chat settings" : "Edit chat settings")} title={t(managingConversation ? "Close chat settings" : "Edit chat settings")}><Pencil size={15} /></button>}
           </div>
           {managingConversation ? <section className="chat-management-panel">
             {activeConversation.kind === "direct" ? <>
-              <div><h3>Shared chat name</h3><p>Both participants will see this suffix after the other person’s name.</p></div>
+              <div><h3>{t("Shared chat name")}</h3><p>{t("Both participants will see this suffix after the other person’s name.")}</p></div>
               <form className="chat-management-form" onSubmit={saveConversationEdits}>
-                <label>Shared suffix <span className="optional-label">Optional</span><input value={conversationEditSuffix} onChange={(event) => setConversationEditSuffix(event.target.value)} maxLength={60} placeholder="e.g. Choir" /></label>
-                <p className="chat-name-preview">Preview: {activeConversation.participants.find((person) => person.id !== currentUserId)?.displayName ?? "Direct message"}{conversationEditSuffix.trim() ? ` · ${conversationEditSuffix.trim()}` : ""}</p>
-                <div className="chat-management-actions"><button className="button button-secondary" type="button" onClick={() => setManagingConversation(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={savingConversation}>{savingConversation ? "Saving…" : "Save name"}</button></div>
+                <label>{t("Shared suffix")} <span className="optional-label">{t("Optional")}</span><input value={conversationEditSuffix} onChange={(event) => setConversationEditSuffix(event.target.value)} maxLength={60} placeholder={t("e.g. Choir")} /></label>
+                <p className="chat-name-preview">{t("Preview:")} {activeConversation.participants.find((person) => person.id !== currentUserId)?.displayName ?? t("Direct message")}{conversationEditSuffix.trim() ? ` · ${conversationEditSuffix.trim()}` : ""}</p>
+                <div className="chat-management-actions"><button className="button button-secondary" type="button" onClick={() => setManagingConversation(false)}>{t("Cancel")}</button><button className="button button-primary" type="submit" disabled={savingConversation}>{savingConversation ? t("Saving…") : t("Save name")}</button></div>
               </form>
             </> : <>
-              <div><h3>Group chat settings</h3><p>Admins can rename the group and manage its members. Only the creator can change admin roles.</p></div>
+              <div><h3>{t("Group chat settings")}</h3><p>{t("Admins can rename the group and manage its members. Only the creator can change admin roles.")}</p></div>
               <form className="chat-management-form" onSubmit={saveConversationEdits}>
-                <label>Group name <span className="optional-label">Optional</span><input value={conversationEditName} onChange={(event) => setConversationEditName(event.target.value)} maxLength={80} placeholder="e.g. Sunday volunteers" /></label>
-                <div className="chat-management-actions"><button className="button button-secondary" type="button" onClick={() => setManagingConversation(false)}>Close</button><button className="button button-primary" type="submit" disabled={savingConversation}>{savingConversation ? "Saving…" : "Save name"}</button></div>
+                <label>{t("Group name")} <span className="optional-label">{t("Optional")}</span><input value={conversationEditName} onChange={(event) => setConversationEditName(event.target.value)} maxLength={80} placeholder={t("e.g. Sunday volunteers")} /></label>
+                <div className="chat-management-actions"><button className="button button-secondary" type="button" onClick={() => setManagingConversation(false)}>{t("Close")}</button><button className="button button-primary" type="submit" disabled={savingConversation}>{savingConversation ? t("Saving…") : t("Save name")}</button></div>
               </form>
-              <div className="chat-managed-members"><h4>Members ({activeConversation.participants.length})</h4>
+              <div className="chat-managed-members"><h4>{t("Members ({count})").replace("{count}", String(activeConversation.participants.length))}</h4>
                 {activeConversation.participants.map((person) => <div className="chat-managed-member" key={person.id}>
-                  <span className="chat-managed-member-name">{person.displayName}{person.id === currentUserId && <small>You</small>}</span>
-                  <span className="chat-managed-member-role">{person.id === activeConversation.createdBy ? "Creator · Admin" : person.role === "admin" ? "Admin" : "Member"}</span>
-                  {isGroupCreator && person.id !== activeConversation.createdBy && <button className="chat-member-action" type="button" onClick={() => void changeGroupMemberRole(person)} title={person.role === "admin" ? "Remove admin role" : "Make admin"}><Shield size={14} />{person.role === "admin" ? "Demote" : "Make admin"}</button>}
-                  {canManageActiveGroup && person.id !== activeConversation.createdBy && (isGroupCreator || person.role !== "admin") && <button className="chat-member-action chat-member-remove" type="button" onClick={() => void removeGroupMember(person)} title="Remove from group"><Trash2 size={14} />Remove</button>}
+                  <span className="chat-managed-member-name">{person.displayName}{person.id === currentUserId && <small>{t("You")}</small>}</span>
+                  <span className="chat-managed-member-role">{person.id === activeConversation.createdBy ? t("Creator · Admin") : person.role === "admin" ? t("Admin") : t("Member")}</span>
+                  {isGroupCreator && person.id !== activeConversation.createdBy && <button className="chat-member-action" type="button" onClick={() => void changeGroupMemberRole(person)} title={t(person.role === "admin" ? "Remove admin role" : "Make admin")}><Shield size={14} />{person.role === "admin" ? t("Demote") : t("Make admin")}</button>}
+                  {canManageActiveGroup && person.id !== activeConversation.createdBy && (isGroupCreator || person.role !== "admin") && <button className="chat-member-action chat-member-remove" type="button" onClick={() => void removeGroupMember(person)} title={t("Remove from group")}><Trash2 size={14} />{t("Remove")}</button>}
                 </div>)}
               </div>
               <form className="chat-management-form chat-add-members" onSubmit={addGroupMembers}>
-                <h4><UserPlus size={15} />Add people</h4>
-                <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a person" aria-label="Find a person to add" /></label>
+                <h4><UserPlus size={15} />{t("Add people")}</h4>
+                <label className="chat-contact-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder={t("Find a person")} aria-label={t("Find a person to add")} /></label>
                 <div className="chat-contact-list">
-                  {filteredContacts.filter((contact) => !activeConversation.participants.some((person) => person.id === contact.id)).length === 0 ? <p className="chat-empty">No more matching people.</p> : filteredContacts.filter((contact) => !activeConversation.participants.some((person) => person.id === contact.id)).map((contact) => <label className="chat-contact-option" key={contact.id}>
+                  {filteredContacts.filter((contact) => !activeConversation.participants.some((person) => person.id === contact.id)).length === 0 ? <p className="chat-empty">{t("No more matching people.")}</p> : filteredContacts.filter((contact) => !activeConversation.participants.some((person) => person.id === contact.id)).map((contact) => <label className="chat-contact-option" key={contact.id}>
                     <input type="checkbox" checked={selectedMemberIds.includes(contact.id)} onChange={() => setSelectedMemberIds((current) => current.includes(contact.id) ? current.filter((id) => id !== contact.id) : [...current, contact.id])} />
                     <span className="chat-contact-avatar">{contact.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span><span>{contact.displayName}</span>
                   </label>)}
                 </div>
-                <div className="chat-management-actions"><span>{selectedMemberIds.length ? `${selectedMemberIds.length} selected` : "Select people to add"}</span><button className="button button-primary" type="submit" disabled={!selectedMemberIds.length || savingConversation}>{savingConversation ? "Adding…" : "Add to group"}</button></div>
+                <div className="chat-management-actions"><span>{selectedMemberIds.length ? t("{count} selected").replace("{count}", String(selectedMemberIds.length)) : t("Select people to add")}</span><button className="button button-primary" type="submit" disabled={!selectedMemberIds.length || savingConversation}>{savingConversation ? t("Adding…") : t("Add to group")}</button></div>
               </form>
             </>}
           </section> : <>
-          {typingUsers.length > 0 && <p className="chat-typing-indicator" role="status">{typingUsers[0]} is typing…</p>}
+          {typingUsers.length > 0 && <p className="chat-typing-indicator" role="status">{typingUsers[0]} {t("is typing…")}</p>}
           <div className="chat-message-list">
-            {messagesLoading ? <p className="chat-empty" role="status">Loading messages…</p> : messages.length === 0 ? <div className="chat-empty-state"><span><MessageCircle size={20} /></span><strong>Start the conversation</strong><p>Send a private message to {conversationTitle(activeConversation, currentUserId)}.</p></div> : messages.map((message) => {
+            {messagesLoading ? <p className="chat-empty" role="status">{t("Loading messages…")}</p> : messages.length === 0 ? <div className="chat-empty-state"><span><MessageCircle size={20} /></span><strong>{t("Start the conversation")}</strong><p>{t("Send a private message to {name}.").replace("{name}", conversationTitle(activeConversation, currentUserId, t))}</p></div> : messages.map((message) => {
               const own = message.userId === currentUserId;
               return <article className={`chat-message${own ? " chat-message-own" : ""}`} key={message.id}>
-                <div className="chat-message-meta"><strong>{own ? "You" : message.author}</strong><time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time></div>
+                <div className="chat-message-meta"><strong>{own ? t("You") : message.author}</strong><time dateTime={message.createdAt}>{timeLabel(message.createdAt)}</time></div>
                 <p>{message.body}</p>
-                {own && message.seenBy.length > 0 && <small className="chat-seen-receipt">Seen by {message.seenBy.join(", ")}</small>}
-                {(own || canModerate) && <button type="button" className="chat-delete" onClick={() => void remove(message)} aria-label={`Delete message from ${message.author}`} title={canModerate && !own ? "Moderate message" : "Delete your message"}><Trash2 size={13} /></button>}
+                {own && message.seenBy.length > 0 && <small className="chat-seen-receipt">{t("Seen by")} {message.seenBy.join(", ")}</small>}
+                {(own || canModerate) && <button type="button" className="chat-delete" onClick={() => void remove(message)} aria-label={t("Delete message from {author}").replace("{author}", message.author)} title={t(canModerate && !own ? "Moderate message" : "Delete your message")}><Trash2 size={13} /></button>}
               </article>;
             })}
           </div>
           <form className="chat-compose" onSubmit={send}>
-            <label className="chat-compose-label" htmlFor="chat-message">Message</label>
-            <textarea id="chat-message" value={draft} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.altKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} maxLength={2000} rows={2} placeholder="Write a message… (Enter to send, Alt+Enter for a new line)" aria-describedby="chat-character-count" />
-            <div className="chat-compose-footer"><span id="chat-character-count">{draft.length}/2000</span><button className="button button-primary" type="submit" disabled={sending || !draft.trim()}><Send size={14} />{sending ? "Sending…" : "Send"}</button></div>
+            <label className="chat-compose-label" htmlFor="chat-message">{t("Message")}</label>
+            <textarea id="chat-message" value={draft} onFocus={() => setComposerFocused(true)} onBlur={() => setComposerFocused(false)} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.altKey && !event.nativeEvent.isComposing) { event.preventDefault(); void sendMessage(); } }} maxLength={2000} rows={2} placeholder={t("Write a message… (Enter to send, Alt+Enter for a new line)")} aria-describedby="chat-character-count" />
+            <div className="chat-compose-footer"><span id="chat-character-count">{draft.length}/2000</span><button className="button button-primary" type="submit" disabled={sending || !draft.trim()}><Send size={14} />{sending ? t("Sending…") : t("Send")}</button></div>
           </form>
           </>}
-        </> : <div className="chat-select-empty"><span><MessageCircle size={23} /></span><strong>Select a conversation</strong><p>Choose a conversation or start a new chat with one or more people.</p><button className="button button-primary" type="button" onClick={() => { setComposing(true); setManagingConversation(false); setSelectedIds([]); }}><Plus size={14} />New chat</button></div>}
+        </> : <div className="chat-select-empty"><span><MessageCircle size={23} /></span><strong>{t("Select a conversation")}</strong><p>{t("Select a conversation or start a new chat with one or more people.")}</p><button className="button button-primary" type="button" onClick={() => { setComposing(true); setManagingConversation(false); setSelectedIds([]); }}><Plus size={14} />{t("New chat")}</button></div>}
       </div>
     </section>
-      <footer className="page-footer"><span>Conversations are private to their participants in {department.location}.</span><span>Direct chat suffixes sync between both participants; group settings are managed by admins.</span></footer>
+      <footer className="page-footer"><span>{t("Conversations are private to their participants in {location}.").replace("{location}", department.location)}</span><span>{t("Direct chat suffixes sync between both participants; group settings are managed by admins.")}</span></footer>
   </>;
 }

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { Activity, RefreshCw, RotateCw, Server, Terminal } from "lucide-react";
 import { formatUserDate } from "./date-format";
+import { ModuleTranslationHost } from "./module-registry";
+import { getActiveLanguage } from "./i18n";
+import { translateModuleMessage, translationsForModule } from "./modules/translations";
 import "./runtime-diagnostics.css";
 
-type Memory = { rssBytes: number; heapUsedBytes: number; heapTotalBytes: number };
+type Memory = { rssBytes: number; heapUsedBytes: number; heapTotalBytes: number; externalBytes?: number; arrayBuffersBytes?: number };
 type WorkerDiagnostic = {
   id: string;
   name: string;
@@ -18,9 +21,9 @@ type RuntimeDiagnostics = {
   capturedAt: string;
   runtime: {
     uptimeSeconds: number;
-    memory: Memory & { externalBytes: number };
-    containerMemory: { usageBytes: number; limitBytes: number | null } | null;
-    systemMemory: { totalBytes: number; availableBytes: number; usedBytes: number };
+    memory: Memory & { externalBytes: number; arrayBuffersBytes: number };
+    containerMemory: { usageBytes: number; limitBytes: number | null; workingSetBytes?: number | null; peakBytes?: number | null } | null;
+    systemMemory: { totalBytes: number; availableBytes: number; usedBytes: number; freeBytes?: number; cacheBytes?: number };
     cpuPercent: number | null;
     applicationDisk: { path: string; totalBytes: number; usedBytes: number; availableBytes: number } | null;
   };
@@ -38,6 +41,11 @@ function formatDiskBytes(bytes: number | null | undefined) {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return "—";
   const gibibytes = bytes / (1024 ** 3);
   return `${gibibytes >= 10 ? gibibytes.toFixed(0) : gibibytes.toFixed(1)} GiB`;
+}
+
+function formatPercent(used: number | null | undefined, total: number | null | undefined) {
+  if (typeof used !== "number" || typeof total !== "number" || total <= 0) return "—";
+  return `${Math.min(100, Math.max(0, used / total * 100)).toFixed(1)}%`;
 }
 
 function formatUptime(seconds: number | null | undefined) {
@@ -75,7 +83,9 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
 
   async function restartWorker(worker: WorkerDiagnostic) {
     if (!worker.restartable || restartingWorkerId) return;
-    if (!window.confirm(`Restart ${worker.name}? Active operations may be interrupted.`)) return;
+    const language = getActiveLanguage();
+    const prompt = translationsForModule("core-admin")[language]?.["Restart {worker}? Active operations may be interrupted."]?.replace("{worker}", worker.name) ?? `Restart ${worker.name}? Active operations may be interrupted.`;
+    if (!window.confirm(prompt)) return;
     setRestartingWorkerId(worker.id);
     setError("");
     try {
@@ -97,7 +107,12 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
     return () => window.clearInterval(timer);
   }, [refresh]);
 
-  return <section className="runtime-diagnostics" aria-labelledby="runtime-diagnostics-title">
+  const containerMemory = diagnostics?.runtime.containerMemory;
+  const containerAvailableBytes = containerMemory?.limitBytes === null || containerMemory?.limitBytes === undefined
+    ? null
+    : Math.max(0, containerMemory.limitBytes - containerMemory.usageBytes);
+
+  return <ModuleTranslationHost translations={translationsForModule("core-admin")} language={getActiveLanguage()}><section className="runtime-diagnostics" aria-labelledby="runtime-diagnostics-title">
     <header className="runtime-diagnostics-header">
       <div><span className="runtime-diagnostics-icon"><Activity size={17} /></span><div><h3 id="runtime-diagnostics-title">Runtime diagnostics</h3><p>Process and managed worker usage, uptime, and recent logs.</p></div></div>
       <button className="button button-secondary runtime-refresh" type="button" onClick={() => void refresh()} disabled={loading} aria-label="Refresh diagnostics"><RefreshCw size={14} />Refresh</button>
@@ -107,7 +122,22 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
       <div className="runtime-diagnostics-grid">
         <article className="runtime-diagnostic-card">
           <div className="runtime-diagnostic-title"><Server size={16} /><h4>API container</h4></div>
-          <dl><div><dt>System RAM used / total</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.usedBytes)} / {formatBytes(diagnostics.runtime.systemMemory.totalBytes)}</dd></div><div><dt>System RAM available</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.availableBytes)}</dd></div><div><dt>Container memory</dt><dd>{diagnostics.runtime.containerMemory ? `${formatBytes(diagnostics.runtime.containerMemory.usageBytes)}${diagnostics.runtime.containerMemory.limitBytes ? ` / ${formatBytes(diagnostics.runtime.containerMemory.limitBytes)}` : ""}` : "Unavailable"}</dd></div><div><dt>System CPU</dt><dd>{diagnostics.runtime.cpuPercent === null ? "Sampling…" : `${diagnostics.runtime.cpuPercent}%`}</dd></div><div><dt>API process RSS</dt><dd>{formatBytes(diagnostics.runtime.memory.rssBytes)}</dd></div><div><dt>Heap used / total</dt><dd>{formatBytes(diagnostics.runtime.memory.heapUsedBytes)} / {formatBytes(diagnostics.runtime.memory.heapTotalBytes)}</dd></div><div><dt>Uptime</dt><dd>{formatUptime(diagnostics.runtime.uptimeSeconds)}</dd></div></dl>
+          <dl>
+            <div><dt>System RAM used / total</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.usedBytes)} / {formatBytes(diagnostics.runtime.systemMemory.totalBytes)} · {formatPercent(diagnostics.runtime.systemMemory.usedBytes, diagnostics.runtime.systemMemory.totalBytes)}</dd></div>
+            <div><dt>Available to system</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.availableBytes)}</dd></div>
+            <div><dt>Free RAM</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.freeBytes)}</dd></div>
+            <div><dt>Buffers + reclaimable cache</dt><dd>{formatBytes(diagnostics.runtime.systemMemory.cacheBytes)}</dd></div>
+            <div><dt>Container usage / limit</dt><dd>{containerMemory ? `${formatBytes(containerMemory.usageBytes)} / ${containerMemory.limitBytes ? formatBytes(containerMemory.limitBytes) : "No limit"}${containerMemory.limitBytes ? ` · ${formatPercent(containerMemory.usageBytes, containerMemory.limitBytes)}` : ""}` : "Unavailable"}</dd></div>
+            <div><dt>Container working set</dt><dd>{formatBytes(containerMemory?.workingSetBytes)}</dd></div>
+            <div><dt>Container headroom</dt><dd>{containerAvailableBytes === null ? "No limit / unavailable" : formatBytes(containerAvailableBytes)}</dd></div>
+            <div><dt>Container peak</dt><dd>{formatBytes(containerMemory?.peakBytes)}</dd></div>
+            <div><dt>System CPU</dt><dd>{diagnostics.runtime.cpuPercent === null ? "Sampling…" : `${diagnostics.runtime.cpuPercent}%`}</dd></div>
+            <div><dt>API process RSS</dt><dd>{formatBytes(diagnostics.runtime.memory.rssBytes)}</dd></div>
+            <div><dt>V8 heap used / committed</dt><dd>{formatBytes(diagnostics.runtime.memory.heapUsedBytes)} / {formatBytes(diagnostics.runtime.memory.heapTotalBytes)} · {formatPercent(diagnostics.runtime.memory.heapUsedBytes, diagnostics.runtime.memory.heapTotalBytes)}</dd></div>
+            <div><dt>External memory</dt><dd>{formatBytes(diagnostics.runtime.memory.externalBytes)}</dd></div>
+            <div><dt>Array buffers</dt><dd>{formatBytes(diagnostics.runtime.memory.arrayBuffersBytes)}</dd></div>
+            <div><dt>Uptime</dt><dd>{formatUptime(diagnostics.runtime.uptimeSeconds)}</dd></div>
+          </dl>
         </article>
         <article className="runtime-diagnostic-card">
           <div className="runtime-diagnostic-title"><Server size={16} /><h4>Application disk</h4></div>
@@ -118,7 +148,7 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
           const pending = worker.status === "starting" || worker.status === "backoff";
           return <article className="runtime-diagnostic-card" key={worker.id}>
             <div className="runtime-diagnostic-title"><span className={`runtime-status-dot ${ready ? "runtime-status-ok" : pending ? "runtime-status-pending" : "runtime-status-down"}`} /><h4>{worker.name}</h4><b className={`runtime-worker-state ${ready ? "runtime-text-ok" : pending ? "runtime-text-pending" : "runtime-text-down"}`}>{worker.status}</b>{canRestartWorkers && worker.restartable && <button className="button button-secondary runtime-worker-restart" type="button" onClick={() => void restartWorker(worker)} disabled={Boolean(restartingWorkerId) || worker.status === "stopped" || worker.status === "unconfigured"} aria-label={`Restart ${worker.name}`} title={`Restart ${worker.name}`}>{restartingWorkerId === worker.id ? <RefreshCw className="runtime-restart-spin" size={13} /> : <RotateCw size={13} />}{restartingWorkerId === worker.id ? "Restarting…" : "Restart"}</button>}</div>
-            {worker.error && <p className="runtime-worker-error">{worker.error}</p>}
+            {worker.error && <p className="runtime-worker-error">{translateModuleMessage("core-admin", getActiveLanguage(), worker.error)}</p>}
             <dl><div><dt>Worker memory</dt><dd>{formatBytes(worker.memory?.rssBytes)}</dd></div><div><dt>Heap used / total</dt><dd>{formatBytes(worker.memory?.heapUsedBytes)} / {formatBytes(worker.memory?.heapTotalBytes)}</dd></div><div><dt>Uptime</dt><dd>{formatUptime(worker.uptimeSeconds)}</dd></div>{worker.processes?.map((process) => <div key={process.name}><dt>{process.name} memory / uptime</dt><dd>{formatBytes(process.rssBytes)} / {formatUptime(process.uptimeSeconds)}</dd></div>)}</dl>
           </article>;
         })}
@@ -129,5 +159,5 @@ export function RuntimeDiagnosticsPanel({ departmentId, csrfToken, canRestartWor
         <p className="runtime-log-note">Recent in-memory API and worker logs only; full container logs remain available through Docker.</p>
       </section>
     </>}
-  </section>;
+  </section></ModuleTranslationHost>;
 }

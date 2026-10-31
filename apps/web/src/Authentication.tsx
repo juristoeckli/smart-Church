@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { ArrowRight, Church, LockKeyhole } from "lucide-react";
-import type { AuthenticatedUser } from "@smart-church/contracts";
+import type { AuthenticatedUser, UserLanguage } from "@smart-church/contracts";
 import { AuthLanguageSelect, useAuthLanguage } from "./auth-language";
 
 const smartChurchLogoUrl = "/smart-church-mark.svg";
@@ -40,7 +40,14 @@ function AuthDove({ className }: { className: string }) {
   </svg>;
 }
 
-function AuthBackdrop() {
+function AuthBackdrop({ language }: { language: UserLanguage }) {
+  const words: Record<UserLanguage, [string, string, string]> = {
+    en: ["Faith", "Hope", "Love"],
+    de: ["Glaube", "Hoffnung", "Liebe"],
+    fr: ["Foi", "Espérance", "Amour"],
+    it: ["Fede", "Speranza", "Amore"],
+  };
+  const [faith, hope, love] = words[language];
   return <>
     <svg className="auth-cross" viewBox="0 0 240 400" aria-hidden="true">
       <path d="M89 10h17l5 27 5-27h11l7 20 4-20h13v94h85l-7 7 7 3v41l-40 5 40 5v11h-85v214h-13l-4-20-7 20h-11l-5-27-5 27H89V176H4v-11l40-5-40-5v-41l12-3-7-7h80V10z" fill="currentColor" />
@@ -50,12 +57,12 @@ function AuthBackdrop() {
     </svg>
     <AuthDove className="auth-dove auth-dove-main" />
     <AuthDove className="auth-dove auth-dove-follower" />
-    <span className="auth-word auth-word-faith" aria-hidden="true">Faith</span>
-    <span className="auth-word auth-word-hope" aria-hidden="true">Hope</span>
-    <span className="auth-word auth-word-love" aria-hidden="true">Love</span>
-    <span className="auth-word auth-word-faith auth-word-duplicate" aria-hidden="true">Faith</span>
-    <span className="auth-word auth-word-hope auth-word-duplicate" aria-hidden="true">Hope</span>
-    <span className="auth-word auth-word-love auth-word-duplicate" aria-hidden="true">Love</span>
+    <span className="auth-word auth-word-faith" aria-hidden="true">{faith}</span>
+    <span className="auth-word auth-word-hope" aria-hidden="true">{hope}</span>
+    <span className="auth-word auth-word-love" aria-hidden="true">{love}</span>
+    <span className="auth-word auth-word-faith auth-word-duplicate" aria-hidden="true">{faith}</span>
+    <span className="auth-word auth-word-hope auth-word-duplicate" aria-hidden="true">{hope}</span>
+    <span className="auth-word auth-word-love auth-word-duplicate" aria-hidden="true">{love}</span>
     <img className="auth-book" src="/auth-cartoon-bible-flat.png" alt="" aria-hidden="true" />
     <img className="auth-book auth-book-secondary" src="/auth-cartoon-bible-flat.png" alt="" aria-hidden="true" />
   </>;
@@ -75,31 +82,39 @@ export function PasswordChangeRequired({ onChanged }: { onChanged: (user: Authen
     if (password !== confirmation) { setError(t("passwordMismatch")); return; }
     setError("");
     setIsSubmitting(true);
+    let localizedFailure: string | undefined;
     try {
       const response = await fetch("/api/auth/change-password", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
       const result = await response.json() as { user?: AuthenticatedUser; error?: string };
-      if (!response.ok || !result.user) throw new Error(result.error ?? t("signInError"));
+      if (!response.ok || !result.user) {
+        localizedFailure = result.error?.toLowerCase().includes("account database is unavailable")
+          ? t("accountUnavailable")
+          : t("signInError");
+        throw new Error(localizedFailure);
+      }
       onChanged(result.user);
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : t("signInError"));
+    } catch {
+      setError(localizedFailure ?? t("signInError"));
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  return <main className="auth-page"><AuthBackdrop /><section className="auth-card" aria-labelledby="password-change-title"><div className="auth-language-row"><AuthLanguageSelect language={language} onChange={selectLanguage} label={t("language")} /></div><a className="auth-brand" href="#home" aria-label={t("brandHome")}><img src={smartChurchLogoUrl} alt="" /><span className="auth-brand-name"><span>smart</span>-Church</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">{t("accountSecurity")}</span><h1 id="password-change-title">{t("choosePassword")}</h1><p>{t("choosePasswordHelp")}</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>{t("newPassword")}<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">{t("passwordMin")}</p><label>{t("confirmPassword")}<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? t("updating") : t("setPassword")}<ArrowRight size={16} /></button></form><p className="auth-footer">{t("accountStored")}</p></section></main>;
+  return <main className="auth-page"><AuthBackdrop language={language} /><section className="auth-card" aria-labelledby="password-change-title"><div className="auth-language-row"><AuthLanguageSelect language={language} onChange={selectLanguage} label={t("language")} /></div><a className="auth-brand" href="#home" aria-label={t("brandHome")}><img src={smartChurchLogoUrl} alt="" /><span className="auth-brand-name"><span>smart</span>-Church</span></a><div className="auth-icon"><LockKeyhole size={20} /></div><div className="auth-heading"><span className="eyebrow">{t("accountSecurity")}</span><h1 id="password-change-title">{t("choosePassword")}</h1><p>{t("choosePasswordHelp")}</p></div>{error && <div className="auth-message auth-message-error" role="alert">{error}</div>}<form className="auth-form" onSubmit={submit}><label>{t("newPassword")}<input name="password" type="password" required minLength={12} maxLength={128} autoComplete="new-password" autoFocus /></label><p className="auth-hint">{t("passwordMin")}</p><label>{t("confirmPassword")}<input name="confirmation" type="password" required minLength={12} maxLength={128} autoComplete="new-password" /></label><button className="button button-primary" type="submit" disabled={isSubmitting}>{isSubmitting ? t("updating") : t("setPassword")}<ArrowRight size={16} /></button></form><p className="auth-footer">{t("accountStored")}</p></section></main>;
 }
 
 export function Authentication({
   setupRequired,
   setupLocation,
   selfSignupEnabled,
+  selfSignupSites = [],
   unavailableMessage,
   onAuthenticated,
 }: {
   setupRequired: boolean;
   setupLocation?: string;
   selfSignupEnabled?: boolean;
+  selfSignupSites?: Array<{ id: string; name: string }>;
   unavailableMessage: string;
   onAuthenticated: (user: AuthenticatedUser) => void;
 }) {
@@ -111,10 +126,12 @@ export function Authentication({
 
   async function requestSignup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const email = String(new FormData(event.currentTarget).get("signupEmail")).trim();
+    const form = new FormData(event.currentTarget);
+    const email = String(form.get("signupEmail")).trim();
+    const departmentId = String(form.get("signupSite") ?? "");
     setIsSubmitting(true); setError(""); setSignupFeedback("");
     try {
-      const response = await fetch("/api/public/self-signup/request", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email, language }) });
+      const response = await fetch("/api/public/self-signup/request", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ email, language, departmentId }) });
       const result = await response.json() as { message?: string; error?: string };
       if (!response.ok) throw new Error(t("signupError"));
       setSignupFeedback(t("signupFallback"));
@@ -142,6 +159,7 @@ export function Authentication({
 
     setError("");
     setIsSubmitting(true);
+    let localizedFailure: string | undefined;
     try {
       const response = await fetch(setupRequired ? "/api/auth/setup" : "/api/auth/login", {
         method: "POST",
@@ -153,11 +171,12 @@ export function Authentication({
         const message = response.status === 400 && result.error === "Bad Request"
           ? authValidationMessage(result.message, t)
           : authApiMessage(result.error ?? result.message, t);
+        localizedFailure = message;
         throw new Error(message);
       }
       onAuthenticated(result.user);
     } catch {
-      setError(t("signInError"));
+      setError(localizedFailure ?? t("signInError"));
     } finally {
       setIsSubmitting(false);
     }
@@ -165,7 +184,7 @@ export function Authentication({
 
   return (
     <main className="auth-page">
-      <AuthBackdrop />
+      <AuthBackdrop language={language} />
       <section className="auth-card" aria-labelledby="auth-title">
         <div className="auth-language-row"><AuthLanguageSelect language={language} onChange={selectLanguage} label={t("language")} /></div>
         <a className="auth-brand" href="#home" aria-label={t("brandHome")}>
@@ -182,6 +201,7 @@ export function Authentication({
         {error && <div className="auth-message auth-message-error" role="alert">{error}</div>}
 
         {showSignup ? <form className="auth-form" onSubmit={(event) => void requestSignup(event)}>
+          <label>{t("site")}<select name="signupSite" required defaultValue=""><option value="" disabled>{t("chooseSite")}</option>{selfSignupSites.map((site) => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
           <label>{t("email")}<input name="signupEmail" type="email" required autoComplete="email" maxLength={254} placeholder="you@example.com" autoFocus /></label>
           {signupFeedback && <p className="auth-hint" role="status">{signupFeedback}</p>}
           <button className="button button-primary auth-submit" type="submit" disabled={isSubmitting || Boolean(unavailableMessage) || selfSignupEnabled === false}>{isSubmitting ? t("sending") : t("sendSignupLink")}<ArrowRight size={16} /></button>

@@ -7,6 +7,7 @@ import { startEventDeskReminderWorker } from "./reminders.js";
 import { startEventDeskInspectionWorker } from "./inspections.js";
 import { registerEventDeskSupplyRoutes } from "./supply.js";
 import { registerEventDeskDataRoutes } from "./data.js";
+import { registerEventDeskReplication } from "./replication.js";
 
 type JobStatus = "lead" | "quoted" | "confirmed" | "in_progress" | "completed" | "cancelled";
 type BookingStatus = "reserved" | "checked_out" | "returned" | "cancelled";
@@ -93,8 +94,9 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
-  startEventDeskReminderWorker(app, pool);
-  startEventDeskInspectionWorker(app, pool);
+  registerEventDeskReplication(context);
+  startEventDeskReminderWorker(app, pool, context.isDepartmentWritable);
+  startEventDeskInspectionWorker(app, pool, context.isDepartmentWritable);
   registerEventDeskSupplyRoutes(app, context);
   registerEventDeskDataRoutes(app, context);
   const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";
@@ -1812,6 +1814,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHERE l.token_hash=$1 AND l.revoked_at IS NULL FOR UPDATE OF l,c`, [hash]);
         if (!invite.rowCount || invite.rows[0].responded_at || new Date(invite.rows[0].expires_at) < new Date() || invite.rows[0].status !== "invited" || ["cancelled", "completed"].includes(invite.rows[0].job_status) || !invite.rows[0].freelancer_active || !invite.rows[0].still_available) { await client.query("ROLLBACK"); return reply.type("text/html; charset=utf-8").code(410).send("<!doctype html><meta charset=utf-8><h1>This response link is expired or no longer current.</h1><p>Contact the EventDesk manager if you still need to respond.</p>"); }
         departmentId = invite.rows[0].department_id; crewId = invite.rows[0].crew_id; previousStatus = invite.rows[0].status;
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.type("text/html; charset=utf-8").code(423).send("<!doctype html><meta charset=utf-8><h1>This location is read-only during redundancy standby.</h1>");
+        }
         const used = await client.query("UPDATE eventdesk_crew_response_links SET responded_at=now(),response=$2 WHERE id=$1 AND responded_at IS NULL AND revoked_at IS NULL RETURNING id", [invite.rows[0].id, request.body.response]);
         if (!used.rowCount) { await client.query("ROLLBACK"); return reply.type("text/html; charset=utf-8").code(410).send("<!doctype html><meta charset=utf-8><h1>This link has already been used.</h1>"); }
         await client.query("UPDATE eventdesk_job_crew SET status=$3,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='invited'", [crewId, departmentId, request.body.response]);

@@ -12,7 +12,7 @@ Remote desktop embeds Apache Guacamole's JavaScript client inside the Smart-Chur
 
    The build script tags it `smart-church/guacd:1.6.0-wave2`. To select it manually, set `SYSTEM_LAPTOP_GUACD_IMAGE=smart-church/guacd:1.6.0-wave2` in `.env`. Otherwise leave the setting unset to use `guacamole/guacd:1.6.0`.
 
-   Generate a 128-bit secret and use the same 32-character hexadecimal value for `SYSTEM_LAPTOP_JSON_SECRET_KEY` in `.env`:
+   Generate a 128-bit secret for this server's `SYSTEM_LAPTOP_JSON_SECRET_KEY` in `.env`. Keep it stable so this server can decrypt its saved destination passwords. A standby can use its own key; site replication re-encrypts destination passwords for that server after the signed peer key exchange:
 
    ```powershell
    node -e "console.log(require('node:crypto').randomBytes(16).toString('hex'))"

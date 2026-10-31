@@ -20,6 +20,9 @@ function encryptionKey() {
   if (!keySource) throw new Error("Set SMART_CHURCH_EMAIL_ENCRYPTION_KEY or DATABASE_URL before configuring SMTP credentials.");
   return createHash("sha256").update(`smart-church/email-worker/v1:${keySource}`).digest();
 }
+export function emailEncryptionKeyFingerprint() {
+  return createHash("sha256").update(encryptionKey()).digest("hex");
+}
 function encrypt(value: string) {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(), iv);
@@ -33,6 +36,9 @@ function decrypt(value: string) {
   decipher.setAuthTag(Buffer.from(tag, "base64url"));
   return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
 }
+
+export function encryptEmailSecret(value: string) { return encrypt(value); }
+export function decryptEmailSecret(value: string) { return decrypt(value); }
 
 function validEmail(value: string) {
   return value.length <= 254 && /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value);
@@ -162,8 +168,15 @@ async function deliver(host: string, port: number, security: SmtpSecurity, oppor
 }
 
 export function createEmailConnector(pool: Pool | null, isDatabaseReady: () => boolean): EmailConnector {
-  async function settings(): Promise<DbSettings | null> {
+  async function settings(departmentId?: string): Promise<DbSettings | null> {
     if (!pool || !isDatabaseReady()) return null;
+    if (departmentId) {
+      const scoped = await pool.query<DbSettings>(
+        `SELECT mode,enabled,from_name,from_email,smtp_host,smtp_port,smtp_security,smtp_username,encrypted_smtp_password
+           FROM email_worker_department_settings WHERE department_id=$1`, [departmentId],
+      );
+      if (scoped.rows[0]) return scoped.rows[0];
+    }
     const result = await pool.query<DbSettings>(
       `SELECT mode,enabled,from_name,from_email,smtp_host,smtp_port,smtp_security,smtp_username,encrypted_smtp_password
          FROM installation_email_settings settings JOIN installations installation ON installation.id=settings.installation_id
@@ -172,9 +185,9 @@ export function createEmailConnector(pool: Pool | null, isDatabaseReady: () => b
     return result.rows[0] ?? null;
   }
   return {
-    isConfigured: async () => { const current = await settings(); return current ? ready(current) : false; },
-    send: async (message) => {
-      const current = await settings();
+    isConfigured: async (departmentId) => { const current = await settings(departmentId); return current ? ready(current) : false; },
+    send: async (message, departmentId) => {
+      const current = await settings(departmentId);
       if (!current || !ready(current)) throw new Error("Email delivery is not configured by the server administrator.");
       if (!pool || !isDatabaseReady()) throw new Error("User email addresses are unavailable because the database is offline.");
       const recipientEmail = "recipientUserId" in message
@@ -234,5 +247,29 @@ export async function saveEmailSettings(pool: Pool, installationId: string, draf
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
      ON CONFLICT (installation_id) DO UPDATE SET mode=EXCLUDED.mode,enabled=EXCLUDED.enabled,from_name=EXCLUDED.from_name,from_email=EXCLUDED.from_email,smtp_host=EXCLUDED.smtp_host,smtp_port=EXCLUDED.smtp_port,smtp_security=EXCLUDED.smtp_security,smtp_username=EXCLUDED.smtp_username,encrypted_smtp_password=EXCLUDED.encrypted_smtp_password,updated_at=now()`,
     [installationId,draft.mode,draft.enabled,draft.fromName.trim(),draft.fromEmail.trim(),draft.smtpHost.trim(),draft.smtpPort,draft.smtpSecurity,draft.smtpUsername.trim(),encryptedPassword],
+  );
+}
+
+export async function readDepartmentEmailSettings(pool: Pool, departmentId: string): Promise<StoredSettings> {
+  const result = await pool.query<DbSettings>("SELECT * FROM email_worker_department_settings WHERE department_id=$1", [departmentId]);
+  const row = result.rows[0];
+  if (row) return {
+    mode: row.mode, enabled: row.enabled, fromName: row.from_name, fromEmail: row.from_email,
+    smtpHost: row.smtp_host, smtpPort: row.smtp_port, smtpSecurity: row.smtp_security,
+    smtpUsername: row.smtp_username, encryptedSmtpPassword: row.encrypted_smtp_password,
+    passwordConfigured: Boolean(row.encrypted_smtp_password),
+  };
+  const installation = await pool.query<{ id: string }>("SELECT installation_id AS id FROM departments WHERE id=$1", [departmentId]);
+  return installation.rows[0] ? readEmailSettings(pool, installation.rows[0].id) : readEmailSettings(pool, "");
+}
+
+export async function saveDepartmentEmailSettings(pool: Pool, departmentId: string, draft: EmailSettingsDraft) {
+  const old = await readDepartmentEmailSettings(pool, departmentId);
+  const encryptedPassword = draft.clearPassword ? null : draft.smtpPassword ? encrypt(draft.smtpPassword) : old.encryptedSmtpPassword;
+  await pool.query(
+    `INSERT INTO email_worker_department_settings (department_id,mode,enabled,from_name,from_email,smtp_host,smtp_port,smtp_security,smtp_username,encrypted_smtp_password,updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+     ON CONFLICT (department_id) DO UPDATE SET mode=EXCLUDED.mode,enabled=EXCLUDED.enabled,from_name=EXCLUDED.from_name,from_email=EXCLUDED.from_email,smtp_host=EXCLUDED.smtp_host,smtp_port=EXCLUDED.smtp_port,smtp_security=EXCLUDED.smtp_security,smtp_username=EXCLUDED.smtp_username,encrypted_smtp_password=EXCLUDED.encrypted_smtp_password,updated_at=now()`,
+    [departmentId,draft.mode,draft.enabled,draft.fromName.trim(),draft.fromEmail.trim(),draft.smtpHost.trim(),draft.smtpPort,draft.smtpSecurity,draft.smtpUsername.trim(),encryptedPassword],
   );
 }

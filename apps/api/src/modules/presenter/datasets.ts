@@ -1,9 +1,9 @@
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createGzip, gunzipSync } from "node:zlib";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { dirname, resolve, basename } from "node:path";
+import { dirname, resolve, basename, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type DatasetSlide = { type: "text"; text: string; label?: string; section?: string; layout?: "lower-third" } | { type: "image"; asset: string; label: string; section?: string } | { type: "html"; asset: string; label: string; section?: string };
@@ -15,13 +15,46 @@ const format = "smart-church-dataset";
 const maxPackageBytes = 256 * 1024 * 1024;
 const idPattern = /^[a-z0-9][a-z0-9-]{1,63}$/;
 const builtInIds = new Set(["aktuell", "singt-notation", "singt-text", "singt-lower-third"]);
+const locationDatasetInitializations = new Map<string, Promise<string>>();
 
-export function datasetDirectory() {
+function legacyDatasetDirectory() {
   return resolve(process.env.PRESENTER_DATASETS_DIR ?? resolve(dirname(fileURLToPath(import.meta.url)), "../../../data/presenter-datasets"));
 }
 
-async function ensureAktuellDataset() {
-  const directory = resolve(datasetDirectory(), "aktuell");
+export function datasetDirectory(departmentId: string) {
+  if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId)) throw new Error("Invalid Presenter location.");
+  return resolve(legacyDatasetDirectory(), "locations", departmentId);
+}
+
+async function ensureLocationDatasetDirectory(departmentId: string) {
+  const existing = locationDatasetInitializations.get(departmentId);
+  if (existing) return existing;
+  const initialization = (async () => {
+    const root = datasetDirectory(departmentId);
+    await mkdir(root, { recursive: true });
+    const marker = resolve(root, ".location-datasets-ready");
+    try { await readFile(marker); }
+    catch (error) {
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") throw error;
+      const legacyRoot = legacyDatasetDirectory();
+      await mkdir(legacyRoot, { recursive: true });
+      for (const entry of await readdir(legacyRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !idPattern.test(entry.name)) continue;
+        await cp(resolve(legacyRoot, entry.name), resolve(root, entry.name), { recursive: true, force: true, errorOnExist: false });
+      }
+      await writeFile(marker, "1\n", { flag: "wx" }).catch((writeError) => {
+        if (!writeError || typeof writeError !== "object" || !("code" in writeError) || writeError.code !== "EEXIST") throw writeError;
+      });
+    }
+    return root;
+  })();
+  locationDatasetInitializations.set(departmentId, initialization);
+  try { return await initialization; }
+  catch (error) { locationDatasetInitializations.delete(departmentId); throw error; }
+}
+
+async function ensureAktuellDataset(root: string) {
+  const directory = resolve(root, "aktuell");
   await mkdir(directory, { recursive: true });
   const manifestPath = resolve(directory, "manifest.json");
   try {
@@ -70,10 +103,10 @@ function parseManifest(buffer: Buffer) {
   return value;
 }
 
-export async function listDatasets(): Promise<DatasetSummary[]> {
-  const root = datasetDirectory();
+export async function listDatasets(departmentId: string): Promise<DatasetSummary[]> {
+  const root = await ensureLocationDatasetDirectory(departmentId);
   await mkdir(root, { recursive: true });
-  await ensureAktuellDataset();
+  await ensureAktuellDataset(root);
   const folders = await readdir(root, { withFileTypes: true });
   const results: DatasetSummary[] = [];
   for (const folder of folders) {
@@ -87,21 +120,22 @@ export async function listDatasets(): Promise<DatasetSummary[]> {
   return results.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export async function readDataset(id: string): Promise<PresenterDataset | null> {
+export async function readDataset(id: string, departmentId: string): Promise<PresenterDataset | null> {
   if (!idPattern.test(id)) return null;
   try {
-    if (id === "aktuell") await ensureAktuellDataset();
-    const manifest = parseManifest(await readFile(resolve(datasetDirectory(), id, "manifest.json")));
+    const root = await ensureLocationDatasetDirectory(departmentId);
+    if (id === "aktuell") await ensureAktuellDataset(root);
+    const manifest = parseManifest(await readFile(resolve(root, id, "manifest.json")));
     return manifest.id === id ? manifest : null;
   } catch { return null; }
 }
 
-export async function deleteDataset(id: string) {
+export async function deleteDataset(id: string, departmentId: string) {
   if (!idPattern.test(id)) return { deleted: false as const, reason: "not-found" as const };
   if (builtInIds.has(id)) return { deleted: false as const, reason: "built-in" as const };
-  const root = datasetDirectory();
+  const root = await ensureLocationDatasetDirectory(departmentId);
   const target = resolve(root, id);
-  const manifest = await readDataset(id);
+  const manifest = await readDataset(id, departmentId);
   if (!manifest) return { deleted: false as const, reason: "not-found" as const };
   await rm(target, { recursive: true, force: false });
   return { deleted: true as const };
@@ -117,7 +151,7 @@ function tarHeader(path: string, size: number) {
   Buffer.from(octal(0, 8)).copy(header, 108);
   Buffer.from(octal(0, 8)).copy(header, 116);
   Buffer.from(octal(size, 12)).copy(header, 124);
-  Buffer.from(octal(Math.floor(Date.now() / 1000), 12)).copy(header, 136);
+  Buffer.from(octal(0, 12)).copy(header, 136);
   header.fill(0x20, 148, 156);
   header[156] = 0x30;
   Buffer.from("ustar\0").copy(header, 257);
@@ -148,10 +182,11 @@ async function* tarEntries(manifest: PresenterDataset, root: string) {
   yield Buffer.alloc(1024);
 }
 
-export async function datasetArchive(id: string) {
-  const manifest = await readDataset(id);
+export async function datasetArchive(id: string, departmentId: string) {
+  const root = await ensureLocationDatasetDirectory(departmentId);
+  const manifest = await readDataset(id, departmentId);
   if (!manifest) return null;
-  const stream = Readable.from(tarEntries(manifest, resolve(datasetDirectory(), id))).pipe(createGzip({ level: 6 }));
+  const stream = Readable.from(tarEntries(manifest, resolve(root, id))).pipe(createGzip({ level: 6 }));
   return { filename: `${id}.scdataset.tar.gz`, stream };
 }
 
@@ -201,9 +236,9 @@ export function unpackDatasetArchive(gzipped: Buffer) {
   return { manifest, files };
 }
 
-export async function installDatasetArchive(gzipped: Buffer) {
+export async function installDatasetArchive(gzipped: Buffer, departmentId: string) {
   const { manifest, files } = unpackDatasetArchive(gzipped);
-  const root = datasetDirectory();
+  const root = await ensureLocationDatasetDirectory(departmentId);
   await mkdir(root, { recursive: true });
   const target = resolve(root, manifest.id);
   const temp = resolve(root, `.${manifest.id}-${process.pid}-${Date.now()}.tmp`);
@@ -212,7 +247,7 @@ export async function installDatasetArchive(gzipped: Buffer) {
     for (const [path, content] of files) {
       await writeFile(resolve(temp, path), content, { flag: "wx" });
     }
-    const existing = await readDataset(manifest.id);
+    const existing = await readDataset(manifest.id, departmentId);
     if (existing && builtInIds.has(manifest.id)) throw new Error("Built-in Singt datasets are read-only and cannot be replaced.");
     if (existing) throw new Error("A dataset with this ID is already installed. Import it into a server where it is not installed yet.");
     await rename(temp, target);
@@ -223,7 +258,86 @@ export async function installDatasetArchive(gzipped: Buffer) {
   }
 }
 
-export async function installPresentationDataset(filename: string, importedSlides: { label: string; html: string }[]) {
+export async function replaceDatasetArchives(archives: Array<{ id: string; archive: Buffer }>, departmentId: string) {
+  const root = await ensureLocationDatasetDirectory(departmentId);
+  await mkdir(root, { recursive: true });
+  const current = await listDatasets(departmentId);
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  const incoming = new Map<string, { files: Map<string, Buffer>; builtIn: boolean }>();
+  for (const item of archives) {
+    if (!idPattern.test(item.id) || incoming.has(item.id)) throw new Error("Presenter dataset inventory is invalid or contains duplicate IDs.");
+    const unpacked = unpackDatasetArchive(item.archive);
+    if (unpacked.manifest.id !== item.id) throw new Error("A Presenter dataset archive ID does not match its manifest.");
+    const existing = currentById.get(item.id);
+    const builtIn = existing?.builtIn ?? false;
+    if (builtIn) {
+      const existingArchive = await datasetArchive(item.id, departmentId);
+      if (!existingArchive) throw new Error(`Built-in Presenter dataset ${item.id} is missing on the standby.`);
+      const chunks: Buffer[] = [];
+      for await (const chunk of existingArchive.stream) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      if (!Buffer.concat(chunks).equals(item.archive)) throw new Error(`Built-in Presenter dataset ${item.id} differs between servers.`);
+    }
+    incoming.set(item.id, { files: unpacked.files, builtIn });
+  }
+  const customIds = current.filter((item) => !item.builtIn).map((item) => item.id);
+  const staged = new Map<string, string>();
+  try {
+    for (const [id, item] of incoming) {
+      if (item.builtIn) continue;
+      const stage = resolve(root, `.replica-${id}-${randomUUID()}`);
+      await mkdir(stage, { recursive: true });
+      for (const [relative, content] of item.files) {
+        const target = resolve(stage, relative);
+        if (!target.startsWith(`${stage}${sep}`)) throw new Error("A Presenter dataset contains an unsafe file path.");
+        await mkdir(dirname(target), { recursive: true });
+        await writeFile(target, content, { flag: "wx" });
+      }
+      staged.set(id, stage);
+    }
+  } catch (error) {
+    await Promise.all([...staged.values()].map((path) => rm(path, { recursive: true, force: true })));
+    throw error;
+  }
+  const backups = new Map<string, string>();
+  const replaced = new Set<string>();
+  const backupPath = (id: string) => resolve(root, `.replica-backup-${id}-${randomUUID()}`);
+  const rollback = async () => {
+    for (const id of [...replaced].reverse()) await rm(resolve(root, id), { recursive: true, force: true });
+    for (const [id, backup] of backups) await rename(backup, resolve(root, id)).catch(() => undefined);
+    await Promise.all([...staged.values()].map((path) => rm(path, { recursive: true, force: true })));
+  };
+  try {
+    for (const id of customIds) {
+      if (incoming.has(id)) continue;
+      const backup = backupPath(id);
+      await rename(resolve(root, id), backup);
+      backups.set(id, backup);
+      replaced.add(id);
+    }
+    for (const [id, stage] of staged) {
+      const target = resolve(root, id);
+      if (currentById.has(id)) {
+        const backup = backupPath(id);
+        await rename(target, backup);
+        backups.set(id, backup);
+      }
+      await rename(stage, target);
+      replaced.add(id);
+    }
+  } catch (error) {
+    await rollback();
+    throw error;
+  }
+  return {
+    rollback,
+    commit: async () => {
+      await Promise.all([...backups.values()].map((path) => rm(path, { recursive: true, force: true })));
+      await Promise.all([...staged.values()].map((path) => rm(path, { recursive: true, force: true })));
+    },
+  };
+}
+
+export async function installPresentationDataset(filename: string, importedSlides: { label: string; html: string }[], departmentId: string) {
   if (!importedSlides.length || importedSlides.length > 200) throw new Error("The presentation must contain between 1 and 200 slides.");
   const totalHtmlBytes = importedSlides.reduce((sum, slide) => sum + Buffer.byteLength(slide.html, "utf8"), 0);
   const oversizedSlide = importedSlides.findIndex((slide) => Buffer.byteLength(slide.html, "utf8") > 30 * 1024 * 1024);
@@ -246,7 +360,7 @@ export async function installPresentationDataset(filename: string, importedSlide
   };
   if (!validateDataset(manifest)) throw new Error("The imported presentation exceeds Presenter slide limits.");
 
-  const root = datasetDirectory();
+  const root = await ensureLocationDatasetDirectory(departmentId);
   await mkdir(root, { recursive: true });
   const target = resolve(root, id);
   const temp = resolve(root, `.${id}-${process.pid}-${Date.now()}.tmp`);
@@ -262,7 +376,7 @@ export async function installPresentationDataset(filename: string, importedSlide
   }
 }
 
-export async function installLibraryPicture(filename: string, image: Buffer) {
+export async function installLibraryPicture(filename: string, image: Buffer, departmentId: string) {
   if (!image.length || image.length > 20 * 1024 * 1024 || !image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
     throw new Error("Upload a valid PNG picture no larger than 20 MiB.");
   }
@@ -277,7 +391,7 @@ export async function installLibraryPicture(filename: string, image: Buffer) {
     description: "Imported PNG picture.",
     songs: [{ number: 1, sourceNumber: 1, name, slides: [{ type: "image", asset: "pages/page-1.png", label: name }] }],
   };
-  const root = datasetDirectory();
+  const root = await ensureLocationDatasetDirectory(departmentId);
   await mkdir(root, { recursive: true });
   const target = resolve(root, id);
   const temp = resolve(root, `.${id}-${process.pid}-${Date.now()}.tmp`);
@@ -293,16 +407,16 @@ export async function installLibraryPicture(filename: string, image: Buffer) {
   }
 }
 
-export async function readDatasetAsset(id: string, asset: string) {
+export async function readDatasetAsset(id: string, asset: string, departmentId: string) {
   if (!safeAsset(asset)) return null;
-  const manifest = await readDataset(id);
+  const manifest = await readDataset(id, departmentId);
   if (!manifest || !manifest.songs.some((song) => song.slides.some((slide) => slide.type === "image" && slide.asset === asset))) return null;
-  try { return await readFile(resolve(datasetDirectory(), id, asset)); } catch { return null; }
+  try { return await readFile(resolve(datasetDirectory(departmentId), id, asset)); } catch { return null; }
 }
 
-export async function readDatasetHtmlAsset(id: string, asset: string) {
+export async function readDatasetHtmlAsset(id: string, asset: string, departmentId: string) {
   if (!safeHtmlAsset(asset)) return null;
-  const manifest = await readDataset(id);
+  const manifest = await readDataset(id, departmentId);
   if (!manifest || !manifest.songs.some((song) => song.slides.some((slide) => slide.type === "html" && slide.asset === asset))) return null;
-  try { return await readFile(resolve(datasetDirectory(), id, asset)); } catch { return null; }
+  try { return await readFile(resolve(datasetDirectory(departmentId), id, asset)); } catch { return null; }
 }

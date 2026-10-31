@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerRemoteDesktopReplication } from "./replication.js";
 
 type LaptopRole = "controller" | "viewer";
 type ProxyRole = LaptopRole | "takeover";
@@ -96,6 +97,7 @@ function encryptedAuthData(settings: ReturnType<typeof gatewaySettings>, destina
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, getDefaultDepartmentId, resolveDepartmentId, validateMutation, realtime } = dependencies;
+  registerRemoteDesktopReplication(dependencies);
   let cachedClientLibrary: string | null = null;
 
   async function requireSystemLaptopAccess(request: FastifyRequest, reply: FastifyReply, allowQueryLocation = false) {

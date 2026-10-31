@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, Building2, CalendarDays, ContactRound, UsersRound } from "lucide-react";
 import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
-import { translate } from "./i18n";
+import { getActiveLanguage, translate } from "./i18n";
+import { translateModuleUiOverrideMessage } from "./modules/ui-translation-overrides";
 
 type OverviewPage = "People" | "Services & events" | "Groups" | "Resources";
 
@@ -47,7 +48,7 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
   ];
 
   return <>
-    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error || translate("overview.churchAt").replace("{location}", departmentLocation)}</div>
+    <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error ? translateModuleUiOverrideMessage("core-admin", getActiveLanguage(), error) : translate("overview.churchAt").replace("{location}", departmentLocation)}</div>
     <section className="page-heading"><div><div className="eyebrow">{translate("overview.eyebrow")}</div><h1>{translate("overview.title")}</h1><p className="page-subtitle">{translate("overview.subtitle")}</p></div></section>
     <section className="stat-grid community-overview-stats" aria-label={translate("overview.sectionLabel")}>
       {stats.map(({ label, value, detail, icon: Icon, page }) => <button className="stat-card community-stat-card" type="button" key={label} onClick={() => onNavigate(page)}><div className="stat-icon stat-icon-green"><Icon size={19} /></div><div className="stat-content"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div><ArrowRight className="community-stat-arrow" size={15} /></button>)}

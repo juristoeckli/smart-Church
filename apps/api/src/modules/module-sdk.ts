@@ -1,7 +1,27 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import type { LocationPermission } from "@smart-church/contracts";
 import type { ManagedWorkerDiagnostics } from "../runtime-diagnostics.js";
+
+export type ModuleReplicationAdapter = {
+  moduleId: string;
+  moduleName: string;
+  schemaVersion: string;
+  getSchemaVersion?: (departmentId: string) => Promise<string>;
+  isEnabled: () => boolean;
+  inspect: (departmentId: string) => Promise<{ ready: boolean; blockers: string[]; recordCount: number }>;
+  exportSnapshot: (client: PoolClient, departmentId: string) => Promise<unknown>;
+  prepareSnapshotForPeer?: (snapshot: unknown, sealForPeer: (plaintext: string) => string) => Promise<unknown>;
+  restoreSnapshotFromPeer?: (snapshot: unknown, openForLocal: (envelope: string) => string) => Promise<unknown>;
+  restoreSnapshot: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<{ recordCount: number }>;
+  verifySnapshot: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationRestoreContext) => Promise<{ ready: boolean; blockers: string[] }>;
+};
+
+export type ReplicationRestoreContext = {
+  userIdMap: Map<string, string>;
+  onCommit: (callback: () => Promise<void>) => void;
+  onRollback: (callback: () => Promise<void>) => void;
+};
 
 export interface ModuleServerContext {
   activation: {
@@ -17,6 +37,8 @@ export interface ModuleServerContext {
   };
   pool: Pool | null;
   isDatabaseReady: () => boolean;
+  isDepartmentWritable: (departmentId: string) => Promise<boolean>;
+  lockDepartmentForWrite: (client: PoolClient, departmentId: string) => Promise<boolean>;
   getDefaultDepartmentId: () => string;
   resolveDepartmentId: (request: FastifyRequest, reply: FastifyReply, requireSiteAdmin?: boolean, allowQueryLocation?: boolean, requiredPermission?: LocationPermission) => Promise<string | null>;
   validateMutation: (request: FastifyRequest, reply: FastifyReply) => boolean;
@@ -25,6 +47,10 @@ export interface ModuleServerContext {
     request: (operation: string, data: Record<string, unknown>, departmentId: string, actor: string, timeout: number) => Promise<unknown>;
   } | null;
   email: EmailConnector;
+  replication: {
+    register: (adapter: Omit<ModuleReplicationAdapter, "moduleId" | "moduleName" | "isEnabled">) => () => void;
+    list: () => ModuleReplicationAdapter[];
+  };
 }
 
 type EmailContent = {
@@ -40,11 +66,11 @@ export type EmailMessage = EmailContent & (
 );
 
 export interface EmailConnector {
-  isConfigured: () => Promise<boolean>;
-  send: (message: EmailMessage) => Promise<{ messageId: string }>;
+  isConfigured: (departmentId?: string) => Promise<boolean>;
+  send: (message: EmailMessage, departmentId?: string) => Promise<{ messageId: string }>;
 }
 
-export interface ModuleLoaderContext extends Omit<ModuleServerContext, "workers" | "activation"> {
+export interface ModuleLoaderContext extends Omit<ModuleServerContext, "workers" | "activation" | "replication"> {
   workers: {
     register: (id: string, name: string, getDiagnostics: () => ManagedWorkerDiagnostics, restart?: () => void | Promise<void>) => () => void;
   };
@@ -70,6 +96,78 @@ const requiredServerModuleIds = new Set<string>();
 const requiredModuleDependencies = new Map<string, string[]>();
 const moduleActivation = new Map<string, boolean>();
 const activationListeners = new Map<string, Set<(enabled: boolean) => void>>();
+const replicationAdapters = new Map<string, ModuleReplicationAdapter>();
+
+export function getModuleReplicationAdapters() {
+  return [...replicationAdapters.values()];
+}
+
+export function registerPlatformReplicationAdapter(adapter: Omit<ModuleReplicationAdapter, "moduleName" | "isEnabled">) {
+  if (replicationAdapters.has(adapter.moduleId)) throw new Error(`Replication adapter ${adapter.moduleId} is already registered.`);
+  const registeredAdapter: ModuleReplicationAdapter = { ...adapter, moduleName: "Core site data", isEnabled: () => true };
+  replicationAdapters.set(adapter.moduleId, registeredAdapter);
+  return () => { if (replicationAdapters.get(adapter.moduleId) === registeredAdapter) replicationAdapters.delete(adapter.moduleId); };
+}
+
+export async function installSiteWriteFenceTriggers(pool: Pool) {
+  const result = await pool.query<{ installed: boolean }>("SELECT to_regprocedure('public.enforce_site_write_fence()') IS NOT NULL AS installed");
+  if (!result.rows[0]?.installed) return;
+  await pool.query(`DO $fence$
+  DECLARE table_record RECORD;
+  BEGIN
+    FOR table_record IN
+      SELECT DISTINCT site_column.table_name
+        FROM information_schema.columns site_column
+       WHERE site_column.table_schema='public' AND site_column.table_name NOT LIKE 'sync_%' AND site_column.column_name='department_id'
+         AND EXISTS (SELECT 1 FROM information_schema.tables table_info
+                      WHERE table_info.table_schema=site_column.table_schema
+                        AND table_info.table_name=site_column.table_name
+                        AND table_info.table_type='BASE TABLE')
+       ORDER BY site_column.table_name
+    LOOP
+      EXECUTE format('DROP TRIGGER IF EXISTS smart_church_site_write_fence ON public.%I', table_record.table_name);
+      EXECUTE format('CREATE TRIGGER smart_church_site_write_fence BEFORE INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.enforce_site_write_fence()', table_record.table_name);
+    END LOOP;
+  END
+  $fence$`);
+  const relatedFence = await pool.query<{ installed: boolean }>("SELECT to_regprocedure('public.enforce_related_site_write_fence()') IS NOT NULL AS installed");
+  if (!relatedFence.rows[0]?.installed) return;
+  await pool.query(`DO $related_fence$
+  DECLARE
+    relation_record RECORD;
+    trigger_name TEXT;
+  BEGIN
+    FOR relation_record IN
+      SELECT constraint_row.conname AS constraint_name,
+             child.relname AS child_table,
+             child_column.attname AS child_column,
+             parent.relname AS parent_table,
+             parent_column.attname AS parent_column
+        FROM pg_constraint constraint_row
+        JOIN pg_class child ON child.oid=constraint_row.conrelid
+        JOIN pg_namespace child_ns ON child_ns.oid=child.relnamespace
+        JOIN pg_class parent ON parent.oid=constraint_row.confrelid
+        JOIN pg_namespace parent_ns ON parent_ns.oid=parent.relnamespace
+        JOIN pg_attribute child_column ON child_column.attrelid=child.oid AND child_column.attnum=constraint_row.conkey[1]
+        JOIN pg_attribute parent_column ON parent_column.attrelid=parent.oid AND parent_column.attnum=constraint_row.confkey[1]
+       WHERE constraint_row.contype='f'
+         AND cardinality(constraint_row.conkey)=1
+         AND cardinality(constraint_row.confkey)=1
+         AND child_ns.nspname='public'
+         AND parent_ns.nspname='public'
+         AND child_column.atttypid='uuid'::regtype
+         AND parent_column.atttypid='uuid'::regtype
+         AND child.relname NOT LIKE 'sync_%'
+         AND EXISTS (SELECT 1 FROM pg_attribute column_row WHERE column_row.attrelid=parent.oid AND column_row.attname='department_id' AND NOT column_row.attisdropped)
+    LOOP
+      trigger_name := left('smart_church_related_write_fence_' || md5(relation_record.constraint_name), 63);
+      EXECUTE format('DROP TRIGGER IF EXISTS %I ON public.%I', trigger_name, relation_record.child_table);
+      EXECUTE format('CREATE TRIGGER %I BEFORE INSERT OR UPDATE OR DELETE ON public.%I FOR EACH ROW EXECUTE FUNCTION public.enforce_related_site_write_fence(%L,%L,%L)',
+        trigger_name, relation_record.child_table, relation_record.child_column, relation_record.parent_table, relation_record.parent_column);
+    END LOOP;
+  END
+  $related_fence$`);
+}
 
 export function getRequiredServerModuleIds() {
   return [...requiredServerModuleIds];
@@ -246,7 +344,11 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
            SET version=EXCLUDED.version,
                required=EXCLUDED.required,
                client_managed=EXCLUDED.client_managed,
-               enabled=CASE WHEN EXCLUDED.required THEN TRUE ELSE installation_modules.enabled END,
+               enabled=CASE
+                 WHEN EXCLUDED.required THEN TRUE
+                 WHEN EXCLUDED.module_id='sync' AND installation_modules.version='0.1.7' THEN FALSE
+                 ELSE installation_modules.enabled
+               END,
                updated_at=now()`,
         [installationId, module.id, module.manifest.version, Boolean(module.manifest.required || module.manifest.enabledByDefault), Boolean(module.manifest.required), module.manifest.clientManaged ?? true],
       );
@@ -285,7 +387,8 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           try {
             await client.query("BEGIN");
             await client.query("SELECT pg_advisory_xact_lock(hashtext('smart-church-module-migrations'))");
-            const applied = await client.query("SELECT version FROM schema_migrations WHERE version = $1", [version]);
+            const legacyVersion = moduleId === "elvanto-sync" ? `churchtools-sync:${file}` : null;
+            const applied = await client.query("SELECT version FROM schema_migrations WHERE version = $1 OR ($2::text IS NOT NULL AND version = $2)", [version, legacyVersion]);
             if (!applied.rowCount) {
               await client.query(await readFile(join(migrationsRoot, file), "utf8"));
               await client.query("INSERT INTO schema_migrations (version) VALUES ($1)", [version]);
@@ -296,6 +399,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
             throw error;
           } finally { client.release(); }
         }
+        await installSiteWriteFenceTriggers(context.pool);
       }
       const loaded = await import(pathToFileURL(entry).href) as { registerModuleRoutes?: (app: FastifyInstance, context: ModuleServerContext) => void };
       if (typeof loaded.registerModuleRoutes !== "function") throw new Error("The server entry must export registerModuleRoutes(app, context).");
@@ -317,6 +421,20 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
         workers: {
           register: (name, getDiagnostics, restart) => context.workers.register(`${manifest.id}:${name}`, `${manifest.name ?? manifest.id} · ${name}`, getDiagnostics, restart),
         },
+        replication: {
+          register: (adapter) => {
+            if (replicationAdapters.has(moduleId)) throw new Error(`Module ${moduleId} already registered its replication adapter.`);
+            const registeredAdapter: ModuleReplicationAdapter = {
+              ...adapter,
+              moduleId,
+              moduleName: manifest.name ?? moduleId,
+              isEnabled: () => manifest.required || manifest.clientManaged === false || isServerModuleEnabled(moduleId),
+            };
+            replicationAdapters.set(moduleId, registeredAdapter);
+            return () => { if (replicationAdapters.get(moduleId) === registeredAdapter) replicationAdapters.delete(moduleId); };
+          },
+          list: getModuleReplicationAdapters,
+        },
       };
       app.register(async (scope) => {
         const unavailableRequired = (manifest.dependencies?.required ?? []).filter((dependency) => !registered.has(dependency));
@@ -337,6 +455,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           registered.add(moduleId);
           scope.log.info({ module: manifest.id }, "Optional server module registered.");
         } catch (error) {
+          replicationAdapters.delete(moduleId);
           scope.log.error({ err: error, module: moduleId }, "Optional module setup failed; the rest of Smart-Church will continue.");
         }
       });

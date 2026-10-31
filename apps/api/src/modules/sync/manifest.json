@@ -1,0 +1,13 @@
+{
+  "id": "sync",
+  "name": "Smart-Church Sync",
+  "version": "0.1.8",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": false,
+  "clientManaged": true,
+  "dependencies": {
+    "required": [],
+    "optional": []
+  }
+}

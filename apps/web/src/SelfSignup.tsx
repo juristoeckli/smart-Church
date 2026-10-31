@@ -6,8 +6,10 @@ const logoUrl = "/smart-church-mark.svg";
 
 export function SelfSignupPage({ confirmation }: { confirmation: boolean }) {
   const token = new URLSearchParams(window.location.search).get("token") ?? "";
+  const queryDepartmentId = new URLSearchParams(window.location.search).get("departmentId") ?? "";
   const { language, selectLanguage, t } = useAuthLanguage();
   const [email, setEmail] = useState("");
+  const [departmentId, setDepartmentId] = useState(queryDepartmentId);
   const [loading, setLoading] = useState(!confirmation);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -18,9 +20,10 @@ export function SelfSignupPage({ confirmation }: { confirmation: boolean }) {
     if (!token) { setError(t("invalidLink")); setLoading(false); return; }
     let active = true;
     void fetch(`/api/public/self-signup/form/${encodeURIComponent(token)}`, { cache: "no-store" }).then(async (response) => {
-      const result = await response.json() as { email?: string; language?: "en" | "de" | "fr" | "it"; error?: string };
+      const result = await response.json() as { email?: string; departmentId?: string; language?: "en" | "de" | "fr" | "it"; error?: string };
       if (!response.ok || !result.email) throw new Error(t("expiredLink"));
       if (active) setEmail(result.email);
+      if (active && result.departmentId) setDepartmentId(result.departmentId);
       if (active && result.language) selectLanguage(result.language);
     }).catch(() => { if (active) setError(t("expiredLink")); })
       .finally(() => { if (active) setLoading(false); });
@@ -33,7 +36,7 @@ export function SelfSignupPage({ confirmation }: { confirmation: boolean }) {
     setSaving(true); setError("");
     try {
       const response = await fetch("/api/public/self-signup/profile", {
-        method: "POST", headers: { "content-type": "application/json" },
+        method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId },
         body: JSON.stringify({ token, language, firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), phone: String(values.get("phone")).trim(), street: String(values.get("street")).trim(), streetNumber: String(values.get("streetNumber")).trim(), postalCode: String(values.get("postalCode")).trim(), city: String(values.get("city")).trim() }),
       });
       const result = await response.json() as { message?: string; error?: string };
@@ -46,10 +49,10 @@ export function SelfSignupPage({ confirmation }: { confirmation: boolean }) {
   async function confirmEmail() {
     setSaving(true); setError("");
     try {
-      const response = await fetch("/api/public/self-signup/confirm", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ token }) });
-      const result = await response.json() as { message?: string; error?: string };
-      if (!response.ok) throw new Error(t("confirmError"));
-      setMessage(result.message ?? t("confirmSuccess"));
+      const response = await fetch("/api/public/self-signup/confirm", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ token }) });
+      const result = await response.json() as { confirmed?: boolean };
+      if (!response.ok || !result.confirmed) throw new Error(t("confirmError"));
+      setMessage(t("confirmSuccess"));
     } catch { setError(t("confirmError")); }
     finally { setSaving(false); }
   }

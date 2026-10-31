@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { CalendarDays, Check, Clock3, MapPin } from "lucide-react";
 import type { PublicRegistrationEvent } from "@smart-church/contracts";
-import { publicLanguage, publicText } from "./public-translations";
+import { publicErrorText, publicLanguage, publicText } from "./public-translations";
 
 export function PublicEventRegistration({ token }: { token: string }) {
   const language = publicLanguage();
@@ -17,10 +17,10 @@ export function PublicEventRegistration({ token }: { token: string }) {
     fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`)
       .then(async (response) => {
         const result = await response.json() as PublicRegistrationEvent | { error?: string };
-        if (!response.ok || !("title" in result)) throw new Error("error" in result ? result.error ?? "This registration link is unavailable." : "This registration link is unavailable.");
+        if (!response.ok || !("title" in result)) throw new Error(publicErrorText(language, "error" in result ? result.error ?? "This registration link is unavailable." : "This registration link is unavailable."));
         if (active) setEvent(result);
       })
-      .catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load this event."); })
+      .catch((reason) => { if (active) setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not load this event.")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [token, language]);
@@ -37,9 +37,9 @@ export function PublicEventRegistration({ token }: { token: string }) {
         body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim() }),
       });
       const result = await response.json() as { status?: "registered" | "waitlisted"; error?: string };
-      if (!response.ok || !result.status) throw new Error(result.error ?? "Could not submit your registration.");
+      if (!response.ok || !result.status) throw new Error(publicErrorText(language, result.error ?? "Could not submit your registration."));
       setSubmitted(result.status);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not submit your registration."); }
+    } catch (reason) { setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not submit your registration.")); }
     finally { setSending(false); }
   }
 
@@ -48,7 +48,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
     <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
     {loading ? <p className="public-registration-message">{publicText(language, "eventLoading")}</p> : error && !event ? <><h1>{publicText(language, "eventUnavailable")}</h1><p className="public-registration-message">{error}</p></> : event && <>
       <h1>{event.title}</h1>
-      <div className="public-registration-details"><span><CalendarDays size={17} />{date}</span><span><Clock3 size={17} />{event.startTime}{event.endTime ? ` – ${event.endTime}` : ""}</span><span><MapPin size={17} />{event.location}</span></div>
+      <div className="public-registration-details"><span><CalendarDays size={17} />{date}</span><span><Clock3 size={17} />{event.isAllDay ? publicText(language, "allDay") : `${event.startTime}${event.endTime ? ` – ${event.endTime}` : ""}`}</span><span><MapPin size={17} />{event.location}</span></div>
       {event.description && <p className="public-registration-description">{event.description}</p>}
       {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "registered" ? "registered" : "waitlisted")}</h2><p>{publicText(language, submitted === "registered" ? "registeredHelp" : "waitlistedHelp")}</p></div></div>
         : !event.registrationOpen ? <p className="public-registration-message">{publicText(language, "registrationClosed")}</p>
