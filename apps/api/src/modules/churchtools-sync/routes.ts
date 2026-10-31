@@ -146,6 +146,11 @@ function elvantoCollection(payload: JsonObject, key: string, singular: string) {
   if (Array.isArray(items)) return items.filter((item): item is JsonObject => Boolean(item) && typeof item === "object");
   return items && typeof items === "object" ? [items as JsonObject] : [];
 }
+function elvantoPageMatchesTotal(page: number, pageSize: number, batchCount: number, total: number | null) {
+  if (total === null) return true;
+  const expectedCount = Math.max(0, Math.min(pageSize, total - (page - 1) * pageSize));
+  return batchCount === expectedCount;
+}
 function elvantoGroupPeople(group: JsonObject) {
   const people = group.people;
   if (!people || typeof people !== "object") return [] as JsonObject[];
@@ -559,7 +564,11 @@ async function fetchElvantoPagedRows(apiKey: string, endpoint: string, container
     rows.push(...batch);
     const reported = Number((payload[container] as JsonObject | undefined)?.total);
     if (Number.isFinite(reported) && reported >= 0) reportedTotal = reported;
-    if (batch.length < 1000 || reportedTotal !== null && page * 1000 >= reportedTotal) { complete = true; break; }
+    if (!elvantoPageMatchesTotal(page, 1000, batch.length, reportedTotal)) break;
+    if (reportedTotal !== null) {
+      if (rows.length >= reportedTotal) { complete = true; break; }
+      if (!batch.length) break;
+    } else if (batch.length < 1000) { complete = true; break; }
   }
   return { rows, reportedTotal, complete };
 }
@@ -627,7 +636,10 @@ async function fetchElvantoFinancialTransactions(apiKey: string, startDate: stri
     transactions.push(...batch); pagesFetched += 1;
     const reported = Number((payload.transactions as JsonObject | undefined)?.total);
     if (Number.isFinite(reported) && reported >= 0) reportedTotal = reported;
-    if (batch.length < 1000 || reportedTotal !== null && page * 1000 >= reportedTotal) { complete = true; break; }
+    if (!elvantoPageMatchesTotal(page, 1000, batch.length, reportedTotal)) break;
+    if (reportedTotal !== null) {
+      if (page * 1000 >= reportedTotal) { complete = true; break; }
+    } else if (batch.length < 1000) { complete = true; break; }
   }
   if (firstPage === 1 && transactions.length > 200000) throw new Error("Elvanto returned more than 200,000 financial transactions in this date range.");
   const ids = transactions.map(idOf);
@@ -1543,8 +1555,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const container = payload.people as JsonObject | undefined;
         const reportedTotal = Number(container?.total);
         if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
-        if (total !== null && people.length >= total) { complete = true; break; }
-        if (batch.length < pageSize) { complete = true; break; }
+        if (!elvantoPageMatchesTotal(page, pageSize, batch.length, total)) return reply.code(502).send({ error: "Elvanto returned a People page that does not match its reported total. No preview was saved." });
+        if (total !== null) {
+          if (people.length >= total) { complete = true; break; }
+          if (!batch.length) break;
+        } else if (batch.length < pageSize) { complete = true; break; }
       }
       const existing = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; email: string | null; first_name: string; last_name: string }>(
         "SELECT id,source_system,source_id,elvanto_source_id,email,first_name,last_name FROM contacts WHERE department_id=$1",
@@ -1624,7 +1639,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           remotePeople.push(...batch);
           const total = Number((payload.people as JsonObject | undefined)?.total);
           if (Number.isFinite(total) && total >= 0) reportedTotal = total;
-          if (reportedTotal !== null && remotePeople.length >= reportedTotal || batch.length < pageSize) { complete = true; break; }
+          if (!elvantoPageMatchesTotal(page, pageSize, batch.length, reportedTotal)) return reply.code(502).send({ error: "Elvanto returned a People page that does not match its reported total. No incremental preview was saved." });
+          if (reportedTotal !== null) {
+            if (remotePeople.length >= reportedTotal) { complete = true; break; }
+            if (!batch.length) break;
+          } else if (batch.length < pageSize) { complete = true; break; }
         }
         if (!complete || remotePeople.length > 200000) return reply.code(409).send({ error: "The incremental People result is incomplete or exceeds 200,000 records. No preview was saved." });
         const local = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; first_name: string; last_name: string; email: string | null; phone: string | null; status: string; elvanto_profile: JsonObject | null }>(
@@ -2002,6 +2021,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const people = elvantoCollection(payload, "people", "person");
           const reportedTotal = Number((payload.people as JsonObject | undefined)?.total);
           if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
+          if (!elvantoPageMatchesTotal(page, 1000, people.length, total)) return reply.code(502).send({ error: "Elvanto returned a People page that does not match its reported total. Import progress was not advanced." });
           const contacts = await pool!.query<{ id: string; source_system: string | null; source_id: string | null; elvanto_source_id: string | null; email: string | null }>(
             "SELECT id,source_system,source_id,elvanto_source_id,email FROM contacts WHERE department_id=$1",
             [dept],
@@ -2040,7 +2060,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             pageCreated += 1;
           }
           const nextPage = page + 1;
-          complete = people.length === 0 || (total !== null ? nextPage > Math.max(1, Math.ceil(total / 1000)) : people.length < 1000);
+          const processedCount = created + updated + skipped + pageCreated + pageUpdated + pageSkipped;
+          if (!people.length && total !== null && processedCount < total) {
+            return reply.code(502).send({ error: "Elvanto returned an incomplete People page. Import progress was not advanced." });
+          }
+          complete = total !== null ? processedCount >= total : people.length < 1000;
           const db = await pool!.connect();
           try {
             await db.query("BEGIN");
@@ -2101,8 +2125,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           remoteGroups.push(...batch);
           const reported = Number((payload.groups as JsonObject | undefined)?.total);
           if (Number.isFinite(reported) && reported >= 0) reportedTotal = reported;
+          if (!elvantoPageMatchesTotal(page, 1000, batch.length, reportedTotal)) return reply.code(502).send({ error: "Elvanto returned a Groups page that does not match its reported total. No export preview was saved." });
           if (reportedTotal !== null) {
             if (remoteGroups.length >= reportedTotal) { complete = true; break; }
+            if (!batch.length) break;
           } else if (batch.length < 1000) { complete = true; break; }
         }
         if (!complete || remoteGroups.length > 200000) return reply.code(409).send({ error: "Could not read the complete Elvanto Groups list. No export preview was saved." });
@@ -2257,7 +2283,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         groups.push(...batch);
         const reported = Number((payload.groups as JsonObject | undefined)?.total);
         if (Number.isFinite(reported) && reported >= 0) total = reported;
+        if (!elvantoPageMatchesTotal(page, 1000, batch.length, total)) return reply.code(502).send({ error: "Elvanto returned a Groups page that does not match its reported total. No import preview was saved." });
         if (total !== null && groups.length >= total) { complete = true; break; }
+        if (total !== null && !batch.length) break;
         if (total === null && batch.length < 1000) { complete = true; break; }
       }
       const [existingGroups, linkedPeople] = await Promise.all([
@@ -2403,6 +2431,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const groups = elvantoCollection(payload, "groups", "group");
           const reported = Number((payload.groups as JsonObject | undefined)?.total);
           if (Number.isFinite(reported) && reported >= 0) total = reported;
+          if (!elvantoPageMatchesTotal(page, 1000, groups.length, total)) return reply.code(502).send({ error: "Elvanto returned a Groups page that does not match its reported total. Import progress was not advanced." });
           const contacts = await pool!.query<{ id: string; source_id: string | null; elvanto_source_id: string | null; source_system: string | null }>("SELECT id,source_id,elvanto_source_id,source_system FROM contacts WHERE department_id=$1 AND ((source_system='elvanto' AND source_id IS NOT NULL) OR (source_system IS NULL AND elvanto_source_id IS NOT NULL))", [dept]);
           const contactIdBySource = new Map(contacts.rows.map((contact) => [contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id, contact.id] as const).filter((entry): entry is [string, string] => Boolean(entry[0])));
           const personSourceByContact = new Map(contacts.rows.map((contact) => [contact.id, contact.source_system === "elvanto" ? contact.source_id : contact.elvanto_source_id] as const).filter((entry): entry is [string, string] => Boolean(entry[1])));
@@ -2488,7 +2517,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             }
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped;
             page += 1;
-            complete = groups.length === 0 || (total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : groups.length < 1000);
+            complete = total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : groups.length < 1000;
             await db.query("UPDATE elvanto_sync_settings SET groups_import_page=$2,groups_import_total=$3,groups_import_created_count=$4,groups_import_updated_count=$5,groups_import_skipped_count=$6,groups_import_complete=$7,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, total, created, updated, skipped, complete]);
             await db.query("COMMIT");
           } catch (error) { await db.query("ROLLBACK"); throw error; }
@@ -2522,7 +2551,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const batch = elvantoCollection(payload, "services", "service"); services.push(...batch);
         const reported = Number((payload.services as JsonObject | undefined)?.total);
         if (Number.isFinite(reported) && reported >= 0) total = reported;
+        if (!elvantoPageMatchesTotal(page, 1000, batch.length, total)) return reply.code(502).send({ error: "Elvanto returned a Services page that does not match its reported total. No preview was saved." });
         if (total !== null && services.length >= total) { complete = true; break; }
+        if (total !== null && !batch.length) break;
         if (total === null && batch.length < 1000) { complete = true; break; }
       }
       const [local, contacts] = await Promise.all([
@@ -2648,6 +2679,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const payload = await elvantoRequest(apiKey, "services/getAll", { page, page_size: 1000, all: "yes", fields: ["series_name", "service_times", "plans", "volunteers", "songs", "notes"] });
           const services = elvantoCollection(payload, "services", "service");
           const reported = Number((payload.services as JsonObject | undefined)?.total); if (Number.isFinite(reported) && reported >= 0) total = reported;
+          if (!elvantoPageMatchesTotal(page, 1000, services.length, total)) return reply.code(502).send({ error: "Elvanto returned a Services page that does not match its reported total. Import progress was not advanced." });
           const [contacts, existing] = await Promise.all([
             pool!.query<{ id: string; source_id: string }>("SELECT id,source_id FROM contacts WHERE department_id=$1 AND source_system='elvanto' AND source_id IS NOT NULL", [dept]),
             pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null; positions: JsonObject[]; time_plan: JsonObject[] }>("SELECT id,source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room,positions,time_plan FROM service_events WHERE department_id=$1", [dept]),
@@ -2702,7 +2734,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
             }
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped; page += 1;
-            complete = services.length === 0 || (total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : services.length < 1000);
+            complete = total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : services.length < 1000;
             await db.query("UPDATE elvanto_sync_settings SET services_import_page=$2,services_import_total=$3,services_import_created_count=$4,services_import_updated_count=$5,services_import_skipped_count=$6,services_import_complete=$7,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, total, created, updated, skipped, complete]);
             await db.query("INSERT INTO elvanto_sync_audit (department_id,area,action,outcome,details) VALUES ($1,'services','import','success',$2::jsonb)", [dept, JSON.stringify({ page: page - 1, nextPage: page, created: pageCreated, updated: pageUpdated, skipped: pageSkipped, complete })]);
             await db.query("COMMIT");
@@ -3138,7 +3170,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           const payload = await elvantoRequest(apiKey, "calendar/events/getAll", { page, page_size: 1000, start: shiftDate(minDate, -1), end: shiftDate(maxDate, 1) });
           const items = elvantoCollection(payload, "events", "event"); remoteEvents.push(...items);
           const meta = payload.events as JsonObject | undefined; const total = Number(meta?.total); if (Number.isFinite(total) && total >= 0) reportedTotal = total;
-          if (items.length === 0 || (reportedTotal !== null ? remoteEvents.length >= reportedTotal : items.length < 1000)) { readComplete = true; break; }
+          if (!elvantoPageMatchesTotal(page, 1000, items.length, reportedTotal)) return reply.code(502).send({ error: "Elvanto returned a Calendar page that does not match its reported total. No export preview was saved." });
+          if (reportedTotal !== null) {
+            if (remoteEvents.length >= reportedTotal) { readComplete = true; break; }
+            if (!items.length) break;
+          } else if (items.length < 1000) { readComplete = true; break; }
         }
         if (!readComplete) return reply.code(502).send({ error: "Could not read the complete Elvanto Calendar list. No export preview was saved." });
         const byRemoteId = new Map(remoteEvents.map((event) => [idOf(event), event]).filter(([id]) => Boolean(id)) as Array<[string, JsonObject]>);
@@ -3254,7 +3290,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const payload = await elvantoRequest(apiKey, "calendar/events/getAll", { page, page_size: 1000, start: startDate, end: endDate, fields: ["locations"] });
         const batch = elvantoCollection(payload, "events", "event"); events.push(...batch);
         const reported = Number((payload.events as JsonObject | undefined)?.total); if (Number.isFinite(reported) && reported >= 0) total = reported;
-        if (batch.length < 1000 || total !== null && page * 1000 >= total) { complete = true; break; }
+        if (!elvantoPageMatchesTotal(page, 1000, batch.length, total)) return reply.code(502).send({ error: "Elvanto returned a Calendar page that does not match its reported total. No import preview was saved." });
+        if (total !== null) {
+          if (events.length >= total) { complete = true; break; }
+          if (!batch.length) break;
+        } else if (batch.length < 1000) { complete = true; break; }
       }
       const local = await pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null }>("SELECT id,source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room FROM service_events WHERE department_id=$1", [dept]);
       const mapped = events.map(mapElvantoCalendarEvent).filter((event): event is NonNullable<typeof event> => Boolean(event));
@@ -3365,6 +3405,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         for (let batchIndex = 0; batchIndex < 5 && !complete; batchIndex += 1) {
           const payload = await elvantoRequest(apiKey, "calendar/events/getAll", { page, page_size: 1000, start: startDate, end: endDate, fields: ["locations"] });
           const events = elvantoCollection(payload, "events", "event"); const reported = Number((payload.events as JsonObject | undefined)?.total); if (Number.isFinite(reported) && reported >= 0) total = reported;
+          if (!elvantoPageMatchesTotal(page, 1000, events.length, total)) return reply.code(502).send({ error: "Elvanto returned a Calendar page that does not match its reported total. Import progress was not advanced." });
           const local = await pool!.query<{ id: string; source_id: string | null; source_system: string | null; title: string; event_date: string; is_all_day: boolean; start_time: string | null; end_time: string | null; location: string | null; description: string | null; room: string | null }>("SELECT id,source_id,source_system,title,event_date::text,is_all_day,start_time::text,end_time::text,location,description,room FROM service_events WHERE department_id=$1", [dept]);
           const bySource = new Map(local.rows.filter((event) => event.source_system === "elvanto" && event.source_id).map((event) => [event.source_id!, event]));
           const pageEvents = events.map(mapElvantoCalendarEvent).filter((event): event is NonNullable<typeof event> => Boolean(event));
@@ -3428,7 +3469,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
             }
             created += pageCreated; updated += pageUpdated; skipped += pageSkipped; page += 1;
-            complete = events.length === 0 || (total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : events.length < 1000);
+            complete = total !== null ? page > Math.max(1, Math.ceil(total / 1000)) : events.length < 1000;
             await db.query("UPDATE elvanto_sync_settings SET calendar_import_page=$2,calendar_import_total=$3,calendar_import_created_count=$4,calendar_import_updated_count=$5,calendar_import_skipped_count=$6,calendar_import_complete=$7,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, total, created, updated, skipped, complete]);
             await db.query("INSERT INTO elvanto_sync_audit (department_id,area,action,outcome,details) VALUES ($1,'calendar','import','success',$2::jsonb)", [dept, JSON.stringify({ page: page - 1, nextPage: page, created: pageCreated, updated: pageUpdated, skipped: pageSkipped, complete })]);
             await db.query("COMMIT");
