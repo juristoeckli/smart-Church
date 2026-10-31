@@ -43,6 +43,9 @@ services:
     environment:
       SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_PATH: /var/lib/smart-church/remote-desktop-logs/guacd.log
       SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_LEVEL_PATH: /var/lib/smart-church/remote-desktop-logs/log-level
+    depends_on:
+      remote-desktop-guacd-log-init:
+        condition: service_completed_successfully
     volumes:
       - smart-church-remote-desktop-logs:/var/lib/smart-church/remote-desktop-logs
 
