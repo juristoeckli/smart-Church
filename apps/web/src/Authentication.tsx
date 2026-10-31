@@ -75,13 +75,19 @@ export function PasswordChangeRequired({ onChanged }: { onChanged: (user: Authen
     if (password !== confirmation) { setError(t("passwordMismatch")); return; }
     setError("");
     setIsSubmitting(true);
+    let localizedFailure: string | undefined;
     try {
       const response = await fetch("/api/auth/change-password", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ password }) });
       const result = await response.json() as { user?: AuthenticatedUser; error?: string };
-      if (!response.ok || !result.user) throw new Error(result.error ?? t("signInError"));
+      if (!response.ok || !result.user) {
+        localizedFailure = result.error?.toLowerCase().includes("account database is unavailable")
+          ? t("accountUnavailable")
+          : t("signInError");
+        throw new Error(localizedFailure);
+      }
       onChanged(result.user);
-    } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : t("signInError"));
+    } catch {
+      setError(localizedFailure ?? t("signInError"));
     } finally {
       setIsSubmitting(false);
     }
