@@ -61,9 +61,13 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
     },
     "core-people": {
       "Each imported person needs a first and last name.": "Für jede importierte Person sind Vor- und Nachname erforderlich.",
+      "This person is managed by Elvanto. Edit them there and sync again.": "Diese Person wird von Elvanto verwaltet. Bearbeite sie dort und synchronisiere erneut.",
+      "This person is managed by Elvanto. Remove them there and sync again.": "Diese Person wird von Elvanto verwaltet. Entferne sie dort und synchronisiere erneut.",
     },
     "core-events": {
       "A checked-in registration cannot be cancelled.": "Eine bereits eingecheckte Anmeldung kann nicht storniert werden.",
+      "This service is managed by Elvanto. Edit it there and sync again.": "Dieser Gottesdienst wird von Elvanto verwaltet. Bearbeite ihn dort und synchronisiere erneut.",
+      "This service is managed by Elvanto. Remove it there and sync again.": "Dieser Gottesdienst wird von Elvanto verwaltet. Entferne ihn dort und synchronisiere erneut.",
       "Enter your name and email address.": "Gib deinen Namen und deine E-Mail-Adresse ein.",
       "Only a waitlisted registration can be promoted.": "Nur eine Anmeldung auf der Warteliste kann nachrücken.",
       "There is no available place for this event.": "Für diese Veranstaltung ist kein Platz verfügbar.",
@@ -258,9 +262,15 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The settings database is unavailable.": "La base de données des paramètres est indisponible.",
       "The SMTP password was not protected for this standby server.": "Le mot de passe SMTP n’a pas été protégé pour ce serveur de secours.",
     },
-    "core-people": { "Each imported person needs a first and last name.": "Chaque personne importée doit avoir un prénom et un nom." },
+    "core-people": {
+      "Each imported person needs a first and last name.": "Chaque personne importée doit avoir un prénom et un nom.",
+      "This person is managed by Elvanto. Edit them there and sync again.": "Cette personne est gérée par Elvanto. Modifiez-la dans Elvanto, puis relancez la synchronisation.",
+      "This person is managed by Elvanto. Remove them there and sync again.": "Cette personne est gérée par Elvanto. Supprimez-la dans Elvanto, puis relancez la synchronisation.",
+    },
     "core-events": {
       "A checked-in registration cannot be cancelled.": "Une inscription déjà pointée ne peut pas être annulée.",
+      "This service is managed by Elvanto. Edit it there and sync again.": "Ce culte est géré par Elvanto. Modifiez-le dans Elvanto, puis relancez la synchronisation.",
+      "This service is managed by Elvanto. Remove it there and sync again.": "Ce culte est géré par Elvanto. Supprimez-le dans Elvanto, puis relancez la synchronisation.",
       "Enter your name and email address.": "Saisissez votre nom et votre adresse e-mail.",
       "Only a waitlisted registration can be promoted.": "Seule une inscription sur liste d’attente peut être promue.",
       "There is no available place for this event.": "Aucune place n’est disponible pour cet événement.",
@@ -453,9 +463,15 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The settings database is unavailable.": "Il database delle impostazioni non è disponibile.",
       "The SMTP password was not protected for this standby server.": "La password SMTP non è stata protetta per questo server di standby.",
     },
-    "core-people": { "Each imported person needs a first and last name.": "Ogni persona importata deve avere nome e cognome." },
+    "core-people": {
+      "Each imported person needs a first and last name.": "Ogni persona importata deve avere nome e cognome.",
+      "This person is managed by Elvanto. Edit them there and sync again.": "Questa persona è gestita da Elvanto. Modificala in Elvanto e sincronizza di nuovo.",
+      "This person is managed by Elvanto. Remove them there and sync again.": "Questa persona è gestita da Elvanto. Rimuovila in Elvanto e sincronizza di nuovo.",
+    },
     "core-events": {
       "A checked-in registration cannot be cancelled.": "Una registrazione con check-in già effettuato non può essere annullata.",
+      "This service is managed by Elvanto. Edit it there and sync again.": "Questo servizio è gestito da Elvanto. Modificalo in Elvanto e sincronizza di nuovo.",
+      "This service is managed by Elvanto. Remove it there and sync again.": "Questo servizio è gestito da Elvanto. Rimuovilo in Elvanto e sincronizza di nuovo.",
       "Enter your name and email address.": "Inserisci nome e indirizzo e-mail.",
       "Only a waitlisted registration can be promoted.": "È possibile promuovere solo una registrazione in lista d’attesa.",
       "There is no available place for this event.": "Non ci sono posti disponibili per questo evento.",
