@@ -915,10 +915,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const sender = await verifySignedPeer(request, pool);
     if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
     const grants = await pool.query<{ id: string; department_name: string; recipient_department_id: string | null; recipient_department_name: string | null; scopes: string[]; delivery_mode: string; revision: string; created_at: Date | string }>(
-      `SELECT grant.id,department.name AS department_name,grant.recipient_department_id,recipient.name AS recipient_department_name,grant.scopes,grant.delivery_mode,grant.revision::text,grant.created_at
-         FROM sync_share_grants grant JOIN departments department ON department.id=grant.owner_department_id
-         LEFT JOIN departments recipient ON recipient.id=grant.recipient_department_id
-        WHERE grant.recipient_installation_id=$1 AND grant.state='active' ORDER BY department.name,grant.created_at`, [sender.installationId],
+      `SELECT share_grant.id,department.name AS department_name,share_grant.recipient_department_id,recipient.name AS recipient_department_name,share_grant.scopes,share_grant.delivery_mode,share_grant.revision::text,share_grant.created_at
+         FROM sync_share_grants share_grant JOIN departments department ON department.id=share_grant.owner_department_id
+         LEFT JOIN departments recipient ON recipient.id=share_grant.recipient_department_id
+        WHERE share_grant.recipient_installation_id=$1 AND share_grant.state='active' ORDER BY department.name,share_grant.created_at`, [sender.installationId],
     );
     return json(reply, 200, { grants: grants.rows.map((grant) => ({ id: grant.id, sourceDepartmentName: grant.department_name, recipientDepartmentId: grant.recipient_department_id, recipientDepartmentName: grant.recipient_department_name, scopes: grant.scopes, deliveryMode: grant.delivery_mode, revision: Number(grant.revision), createdAt: grant.created_at })) }, identity, request.headers["x-sc-nonce"] as string);
   });
@@ -1364,8 +1364,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > maxSnapshotRecords) return json(reply, 400, { error: "The snapshot cursor is invalid." }, identity, request.headers["x-sc-nonce"] as string);
     const result = await pool.query<{ grant_id: string; recipient_installation_id: string; grant_revision: string; records: SyncRecord[]; record_count: number; expires_at: Date | string; state: string; target_installation_id: string }>(
       `SELECT snapshot.grant_id,snapshot.recipient_installation_id,snapshot.grant_revision::text,snapshot.records,snapshot.record_count,snapshot.expires_at,
-              grant.state,grant.recipient_installation_id AS target_installation_id
-         FROM sync_export_snapshots snapshot JOIN sync_share_grants grant ON grant.id=snapshot.grant_id
+              share_grant.state,share_grant.recipient_installation_id AS target_installation_id
+         FROM sync_export_snapshots snapshot JOIN sync_share_grants share_grant ON share_grant.id=snapshot.grant_id
         WHERE snapshot.id=$1`, [request.params.snapshotId],
     );
     const snapshot = result.rows[0];
@@ -2008,11 +2008,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const department = await context.resolveDepartmentId(request, reply, true);
     if (!department) return reply;
     const grants = await pool.query(
-      `SELECT grant.id,grant.recipient_installation_id AS "recipientInstallationId",grant.recipient_department_id AS "recipientDepartmentId",peer.display_name AS "peerName",
-              grant.scopes,grant.delivery_mode AS "deliveryMode",grant.state,grant.revision::text AS revision,
-              grant.created_at AS "createdAt",grant.last_pushed_at AS "lastPushedAt",grant.last_push_error AS "lastPushError"
-         FROM sync_share_grants grant JOIN sync_peers peer ON peer.installation_id=grant.recipient_installation_id
-        WHERE grant.owner_department_id=$1 ORDER BY grant.created_at DESC`, [department],
+      `SELECT share_grant.id,share_grant.recipient_installation_id AS "recipientInstallationId",share_grant.recipient_department_id AS "recipientDepartmentId",peer.display_name AS "peerName",
+              share_grant.scopes,share_grant.delivery_mode AS "deliveryMode",share_grant.state,share_grant.revision::text AS revision,
+              share_grant.created_at AS "createdAt",share_grant.last_pushed_at AS "lastPushedAt",share_grant.last_push_error AS "lastPushError"
+         FROM sync_share_grants share_grant JOIN sync_peers peer ON peer.installation_id=share_grant.recipient_installation_id
+        WHERE share_grant.owner_department_id=$1 ORDER BY share_grant.created_at DESC`, [department],
     );
     return { shares: grants.rows };
   });
@@ -2195,9 +2195,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const department = await context.resolveDepartmentId(request, reply, true);
     if (!department || !context.validateMutation(request, reply)) return reply;
     const grantResult = await pool.query<{ recipient_installation_id: string; owner_department_id: string; scopes: string[]; revision: string; state: string; delivery_mode: string; base_url: string | null; public_key_pem: string }>(
-      `SELECT grant.recipient_installation_id,grant.owner_department_id,grant.scopes,grant.revision::text,grant.state,grant.delivery_mode,peer.base_url,peer.public_key_pem
-         FROM sync_share_grants grant JOIN sync_peers peer ON peer.installation_id=grant.recipient_installation_id
-        WHERE grant.id=$1 AND grant.owner_department_id=$2 AND peer.trust_state='trusted'`, [request.params.id, department],
+      `SELECT share_grant.recipient_installation_id,share_grant.owner_department_id,share_grant.scopes,share_grant.revision::text,share_grant.state,share_grant.delivery_mode,peer.base_url,peer.public_key_pem
+         FROM sync_share_grants share_grant JOIN sync_peers peer ON peer.installation_id=share_grant.recipient_installation_id
+        WHERE share_grant.id=$1 AND share_grant.owner_department_id=$2 AND peer.trust_state='trusted'`, [request.params.id, department],
     );
     const grant = grantResult.rows[0];
     if (!grant || grant.state !== "active") return reply.code(404).send({ error: "This active share was not found." });
@@ -2212,8 +2212,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const subscription of remote.subscriptions) {
         for (let offset = 0; offset < records.length || offset === 0; offset += syncPageSize) {
           const stillActive = await pool.query(
-            `SELECT 1 FROM sync_share_grants grant JOIN sync_peers peer ON peer.installation_id=grant.recipient_installation_id AND peer.trust_state='trusted'
-              WHERE grant.id=$1 AND grant.owner_department_id=$2 AND grant.state='active' AND grant.revision=$3`,
+            `SELECT 1 FROM sync_share_grants share_grant JOIN sync_peers peer ON peer.installation_id=share_grant.recipient_installation_id AND peer.trust_state='trusted'
+              WHERE share_grant.id=$1 AND share_grant.owner_department_id=$2 AND share_grant.state='active' AND share_grant.revision=$3`,
             [request.params.id, department, grant.revision],
           );
           if (!stillActive.rowCount) throw new Error("This share was revoked or changed while the push was running.");

@@ -68,9 +68,14 @@ export function FederationSettings({ csrfToken, departmentId, departments }: { c
       ]);
       const readinessResponse = await fetch("/api/modules/sync/federation/redundancy/readiness", { headers: { "x-department-id": departmentId }, cache: "no-store" });
       if (readinessResponse.ok) setRedundancyReadiness(await readinessResponse.json() as RedundancyReadiness);
-      const [shareData, subscriptionData] = await Promise.all([shareResponse.json() as Promise<{ shares?: Share[] }>, subscriptionResponse.json() as Promise<{ subscriptions?: Subscription[] }>]);
-      if (shareResponse.ok) setShares(shareData.shares ?? []);
-      if (subscriptionResponse.ok) setSubscriptions(subscriptionData.subscriptions ?? []);
+      const [shareData, subscriptionData] = await Promise.all([
+        shareResponse.json() as Promise<{ shares?: Share[]; error?: string }>,
+        subscriptionResponse.json() as Promise<{ subscriptions?: Subscription[]; error?: string }>,
+      ]);
+      if (!shareResponse.ok) throw new Error(shareData.error ?? "Could not load outgoing shares.");
+      if (!subscriptionResponse.ok) throw new Error(subscriptionData.error ?? "Could not load incoming shares.");
+      setShares(shareData.shares ?? []);
+      setSubscriptions(subscriptionData.subscriptions ?? []);
       setError("");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load server Sync settings."); }
   }, [departmentId]);
