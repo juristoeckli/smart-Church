@@ -85,6 +85,9 @@ function decryptElvantoFinancial(value: string): JsonObject {
   decipher.setAuthTag(Buffer.from(tag, "base64url"));
   return JSON.parse(Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8")) as JsonObject;
 }
+function elvantoFinancialFingerprint(value: JsonObject) {
+  return createHash("sha256").update(JSON.stringify(canonicalJson(value))).digest("hex");
+}
 function normalizeElvantoDirections(value: unknown): ElvantoDirections {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Choose a sync direction for each Elvanto data area.");
   const input = value as Record<string, unknown>;
@@ -1428,13 +1431,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (request.body.startDate > request.body.endDate) return reply.code(400).send({ error: "The financial start date must be on or before the end date." });
       let apiKey: string;
       try { apiKey = decryptElvantoKey(row.encrypted_api_key); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Reconnect Elvanto." }); }
-      const lock = await pool!.query(`UPDATE elvanto_sync_settings SET financial_importing=TRUE,financial_import_started_at=now(),financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,updated_at=now()
+      const lock = await pool!.query(`UPDATE elvanto_sync_settings SET financial_importing=TRUE,financial_import_started_at=now(),financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,financial_preview_fingerprints='{}'::jsonb,updated_at=now()
         WHERE department_id=$1 AND updated_at=$2 AND people_importing=FALSE AND groups_importing=FALSE AND services_importing=FALSE AND calendar_importing=FALSE AND people_flows_importing=FALSE AND (songs_importing=FALSE OR songs_import_started_at < now()-interval '15 minutes') AND (financial_importing=FALSE OR financial_import_started_at < now()-interval '15 minutes') AND (people_exporting=FALSE OR people_export_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, row.updated_at]);
       if (!lock.rowCount) return reply.code(409).send({ error: "Another Elvanto import is running for this location." });
       try {
         const snapshot = await fetchElvantoFinancialTransactions(apiKey, request.body.startDate, request.body.endDate);
         const ids = [...new Set(snapshot.ids)];
         const complete = snapshot.complete && ids.length === snapshot.transactions.length && (snapshot.reportedTotal === null || snapshot.reportedTotal === snapshot.transactions.length);
+        const fingerprints = complete ? Object.fromEntries(snapshot.transactions.map((transaction) => [idOf(transaction), elvantoFinancialFingerprint(transaction)])) : {};
         let createCount = 0; let updateCount = 0; let unchangedCount = 0;
         const sample: Array<{ date: string; total: string; action: string }> = [];
         for (let offset = 0; offset < snapshot.transactions.length; offset += 1000) {
@@ -1451,12 +1455,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (sample.length < 50) sample.push({ date: firstText(item.transaction_date), total: firstText(item.transaction_total), action });
           }
         }
-        const saved = await pool!.query(`UPDATE elvanto_sync_settings SET financial_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,financial_preview_complete=$2,financial_preview_count=$3,financial_preview_ids=$4::jsonb,financial_preview_start_date=$5::date,financial_preview_end_date=$6::date,financial_import_page=1,financial_import_total=NULL,financial_import_created_count=0,financial_import_updated_count=0,financial_import_skipped_count=0,financial_import_complete=FALSE,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now() WHERE department_id=$1 AND financial_importing=TRUE RETURNING department_id`, [dept, complete, ids.length, JSON.stringify(ids), request.body.startDate, request.body.endDate]);
+        const saved = await pool!.query(`UPDATE elvanto_sync_settings SET financial_preview_at=CASE WHEN $2 THEN now() ELSE NULL END,financial_preview_complete=$2,financial_preview_count=$3,financial_preview_ids=$4::jsonb,financial_preview_fingerprints=$5::jsonb,financial_preview_start_date=$6::date,financial_preview_end_date=$7::date,financial_import_page=1,financial_import_total=NULL,financial_import_created_count=0,financial_import_updated_count=0,financial_import_skipped_count=0,financial_import_complete=FALSE,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now() WHERE department_id=$1 AND financial_importing=TRUE RETURNING department_id`, [dept, complete, ids.length, JSON.stringify(ids), JSON.stringify(fingerprints), request.body.startDate, request.body.endDate]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Elvanto settings changed during the financial preview. Run a new preview." });
         await recordElvantoAudit(pool!, dept, "financial", "preview", complete ? "complete" : "incomplete", { scanned: ids.length, create: createCount, update: updateCount, unchanged: unchangedCount });
         return { transactionCount: ids.length, reportedTotal: snapshot.reportedTotal, complete, createCount, updateCount, unchangedCount, sample };
       } catch (error) {
-        await pool!.query("UPDATE elvanto_sync_settings SET financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
+        await pool!.query("UPDATE elvanto_sync_settings SET financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,financial_preview_fingerprints='{}'::jsonb,financial_importing=FALSE,financial_import_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {});
         return reply.code(400).send({ error: error instanceof Error ? error.message : "Financial preview failed." });
       }
     });
@@ -1467,7 +1471,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (!row) return reply.code(404).send({ error: "Connect Elvanto before importing financial records." });
       if (!row.financial_enabled) return reply.code(403).send({ error: "Explicit financial data access is not enabled for this location." });
       if (row.directions.financial === "off" || row.directions.financial === "smart_church_to_elvanto") return reply.code(400).send({ error: "Set the financial direction to Elvanto → Smart Church or bidirectional before importing." });
-      const state = await pool!.query<{ page: number; preview_at: string | null; ids: string[]; complete: boolean; start_date: string | null; end_date: string | null; created: number; updated: number; skipped: number }>("SELECT financial_import_page AS page,financial_preview_at AS preview_at,financial_preview_ids AS ids,financial_preview_complete AS complete,financial_preview_start_date::text AS start_date,financial_preview_end_date::text AS end_date,financial_import_created_count AS created,financial_import_updated_count AS updated,financial_import_skipped_count AS skipped FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
+      const state = await pool!.query<{ page: number; preview_at: string | null; ids: string[]; fingerprints: Record<string, string>; complete: boolean; start_date: string | null; end_date: string | null; created: number; updated: number; skipped: number }>("SELECT financial_import_page AS page,financial_preview_at AS preview_at,financial_preview_ids AS ids,financial_preview_fingerprints AS fingerprints,financial_preview_complete AS complete,financial_preview_start_date::text AS start_date,financial_preview_end_date::text AS end_date,financial_import_created_count AS created,financial_import_updated_count AS updated,financial_import_skipped_count AS skipped FROM elvanto_sync_settings WHERE department_id=$1", [dept]);
       const savedState = state.rows[0];
       const previewTime = savedState?.preview_at ? new Date(savedState.preview_at).getTime() : 0;
       if (!savedState?.complete || !previewTime || Date.now() - previewTime > 60 * 60 * 1000 || !savedState.start_date || !savedState.end_date) return reply.code(409).send({ error: "Run a complete financial preview first. Previews expire after one hour and after connection settings change." });
@@ -1479,12 +1483,21 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (!lock.rowCount) return reply.code(409).send({ error: "The preview expired, settings changed, or another import is running. Run a new complete financial preview first." });
         reserved = true;
         const previewIds = Array.isArray(savedState.ids) ? savedState.ids : [];
+        const previewFingerprints = savedState.fingerprints && typeof savedState.fingerprints === "object" ? savedState.fingerprints : {};
         const restart = Boolean(request.body?.restart); let page = restart ? 1 : savedState.page;
         const snapshot = await fetchElvantoFinancialTransactions(apiKey, savedState.start_date, savedState.end_date, page, 5);
         const idOffset = (page - 1) * 1000;
         const expectedBatchSize = Math.min(5000, previewIds.length - idOffset);
-        if (snapshot.ids.length !== expectedBatchSize || snapshot.ids.some((id, index) => id !== previewIds[idOffset + index])) { await pool!.query("UPDATE elvanto_sync_settings SET financial_preview_at=NULL,financial_preview_complete=FALSE WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "Elvanto financial transactions changed after preview. Run a fresh financial preview." }); }
+        if (snapshot.ids.length !== expectedBatchSize || snapshot.ids.some((id, index) => id !== previewIds[idOffset + index])) { await pool!.query("UPDATE elvanto_sync_settings SET financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,financial_preview_fingerprints='{}'::jsonb WHERE department_id=$1", [dept]); return reply.code(409).send({ error: "Elvanto financial transactions changed after preview. Run a fresh financial preview." }); }
+        if (snapshot.transactions.some((transaction) => {
+          const sourceId = idOf(transaction);
+          return !sourceId || previewFingerprints[sourceId] !== elvantoFinancialFingerprint(transaction);
+        })) {
+          await pool!.query("UPDATE elvanto_sync_settings SET financial_preview_at=NULL,financial_preview_complete=FALSE,financial_preview_ids='[]'::jsonb,financial_preview_fingerprints='{}'::jsonb WHERE department_id=$1", [dept]);
+          return reply.code(409).send({ error: "Elvanto financial transaction details changed after preview. Run a fresh financial preview before importing." });
+        }
         let created = restart ? 0 : savedState.created; let updated = restart ? 0 : savedState.updated; let skipped = restart ? 0 : savedState.skipped;
+        const createdBeforeBatch = created; const updatedBeforeBatch = updated; const skippedBeforeBatch = skipped;
         if (restart) await pool!.query("UPDATE elvanto_sync_settings SET financial_import_page=1,financial_import_complete=FALSE,financial_import_created_count=0,financial_import_updated_count=0,financial_import_skipped_count=0 WHERE department_id=$1", [dept]);
         const batch = snapshot.transactions;
         const db = await pool!.connect();
@@ -1500,6 +1513,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }
           page += snapshot.pagesFetched; const complete = (page - 1) * 1000 >= previewIds.length || previewIds.length === 0;
           await db.query("UPDATE elvanto_sync_settings SET financial_import_page=$2,financial_import_total=$3,financial_import_created_count=$4,financial_import_updated_count=$5,financial_import_skipped_count=$6,financial_import_complete=$7,financial_import_start_date=$8::date,financial_import_end_date=$9::date,last_sync_at=CASE WHEN $7 THEN now() ELSE last_sync_at END,last_sync_error=NULL,updated_at=now() WHERE department_id=$1", [dept, page, previewIds.length, created, updated, skipped, complete, savedState.start_date, savedState.end_date]);
+          await db.query("INSERT INTO elvanto_sync_audit(department_id,area,action,outcome,details) VALUES($1,'financial','import',$2,$3::jsonb)", [dept, complete ? "complete" : "success", JSON.stringify({ processed: batch.length, created: created - createdBeforeBatch, updated: updated - updatedBeforeBatch, skipped: skipped - skippedBeforeBatch, complete })]);
           await db.query("COMMIT");
           return { financialImport: { page, total: previewIds.length, created, updated, skipped, complete } };
         } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
@@ -3542,7 +3556,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           people_flows_import_complete=CASE WHEN $5 THEN FALSE ELSE elvanto_sync_settings.people_flows_import_complete END,
           songs_import_page=CASE WHEN $5 THEN 1 ELSE elvanto_sync_settings.songs_import_page END,songs_import_total=CASE WHEN $5 THEN NULL ELSE elvanto_sync_settings.songs_import_total END,songs_import_created_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.songs_import_created_count END,songs_import_updated_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.songs_import_updated_count END,songs_import_skipped_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.songs_import_skipped_count END,songs_import_complete=CASE WHEN $5 THEN FALSE ELSE elvanto_sync_settings.songs_import_complete END,
           financial_import_page=CASE WHEN $5 THEN 1 ELSE elvanto_sync_settings.financial_import_page END,financial_import_total=CASE WHEN $5 THEN NULL ELSE elvanto_sync_settings.financial_import_total END,financial_import_created_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.financial_import_created_count END,financial_import_updated_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.financial_import_updated_count END,financial_import_skipped_count=CASE WHEN $5 THEN 0 ELSE elvanto_sync_settings.financial_import_skipped_count END,financial_import_complete=CASE WHEN $5 THEN FALSE ELSE elvanto_sync_settings.financial_import_complete END,
-          songs_preview_at=NULL,songs_preview_ids='[]'::jsonb,songs_preview_fingerprint=NULL,songs_preview_complete=FALSE,songs_preview_count=0,financial_preview_at=NULL,financial_preview_ids='[]'::jsonb,financial_preview_complete=FALSE,financial_preview_count=0,
+          songs_preview_at=NULL,songs_preview_ids='[]'::jsonb,songs_preview_fingerprint=NULL,songs_preview_complete=FALSE,songs_preview_count=0,financial_preview_at=NULL,financial_preview_ids='[]'::jsonb,financial_preview_fingerprints='{}'::jsonb,financial_preview_complete=FALSE,financial_preview_count=0,
           services_preview_at=NULL,services_preview_scanned_count=0,services_preview_total=NULL,services_preview_complete=FALSE,
           calendar_preview_at=NULL,calendar_preview_scanned_count=0,calendar_preview_total=NULL,calendar_preview_complete=FALSE,calendar_preview_start_date=NULL,calendar_preview_end_date=NULL,
           people_flows_preview_at=NULL,people_flows_preview_ids='[]'::jsonb,people_flows_preview_fingerprints='{}'::jsonb,people_flows_preview_complete=FALSE,people_flows_preview_count=0,
