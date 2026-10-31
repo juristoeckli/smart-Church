@@ -204,6 +204,12 @@
 .menu-customize-button{margin-top:5px;border-top:1px solid var(--line);border-radius:0 0 8px 8px;padding-top:5px;height:46px}
 .menu-customize-active{background:#edf5ef;color:#286c4b;font-weight:700}
 .menu-editor-group>header{display:flex;align-items:center;gap:5px;padding:4px 5px 4px 0}
+.menu-editor-tree-toggle{width:20px;height:24px;flex:0 0 auto;display:grid;place-items:center;padding:0;border:0;border-radius:5px;background:transparent;color:var(--muted);cursor:pointer}
+.menu-editor-tree-toggle:hover{background:#eaf3ec;color:#286c4b}
+.menu-editor-tree-toggle svg{transition:transform .15s ease}
+.menu-editor-tree-toggle.is-collapsed svg{transform:rotate(-90deg)}
+.menu-editor-section-toggle{margin-left:-3px}
+.menu-editor-tree-spacer{width:20px;height:24px;flex:0 0 auto}
 .menu-editor-group>header h3{flex:1;min-width:0;padding:5px 7px}
 .menu-editor-section-visibility{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:8px;white-space:nowrap;cursor:pointer}
 .menu-editor-section-visibility input{width:13px;height:13px;margin:0;accent-color:var(--green)}

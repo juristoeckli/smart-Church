@@ -268,7 +268,8 @@ export interface UserMenuPreferences {
   hidden: string[];
   sections: Array<{ id: string; name: string; itemIds: string[] }>;
   hiddenSections: string[];
-  duplicates: Array<{ id: string; targetId: string }>;
+  duplicates: Array<{ id: string; targetId: string; parentId?: string | null }>;
+  startPageId?: string | null;
 }
 
 export type DateTimeFormat = "DD.MM.YYYY HH:MM" | "DD/MM/YYYY HH:MM" | "MM/DD/YYYY h:mm AM/PM" | "YYYY-MM-DD HH:MM";
