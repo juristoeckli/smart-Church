@@ -111,18 +111,18 @@ export function FileStorageModule({ departmentId, csrfToken, canManage, language
     try {
       const response = await fetch(`/api/files/${resource.id}`, { method: "DELETE", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken } });
       const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Could not move the file to trash.");
+      if (!response.ok) throw new Error(t(result.error ?? "Could not move the file to trash."));
       setResources((current) => current.filter((item) => item.id !== resource.id));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not move the file to trash."); }
+    } catch (reason) { setError(reason instanceof Error ? t(reason.message) : t("Could not move the file to trash.")); }
   }
 
   async function restoreResource(resource: StoredFile) {
     try {
       const response = await fetch(`/api/files/${resource.id}/restore`, { method: "POST", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken } });
       const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Could not restore the file.");
+      if (!response.ok) throw new Error(t(result.error ?? "Could not restore the file."));
       setResources((current) => current.filter((item) => item.id !== resource.id));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not restore the file."); }
+    } catch (reason) { setError(reason instanceof Error ? t(reason.message) : t("Could not restore the file.")); }
   }
 
   async function permanentlyDeleteResource(resource: StoredFile) {
@@ -130,9 +130,9 @@ export function FileStorageModule({ departmentId, csrfToken, canManage, language
     try {
       const response = await fetch(`/api/files/${resource.id}/permanent`, { method: "DELETE", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken } });
       const result = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Could not permanently delete the file.");
+      if (!response.ok) throw new Error(t(result.error ?? "Could not permanently delete the file."));
       setResources((current) => current.filter((item) => item.id !== resource.id));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not permanently delete the file."); }
+    } catch (reason) { setError(reason instanceof Error ? t(reason.message) : t("Could not permanently delete the file.")); }
   }
 
   return <>
