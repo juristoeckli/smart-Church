@@ -7,6 +7,8 @@ import { translateModuleMessage } from "./modules/translations";
 type AuthSession = {
   id: string;
   userAgent: string;
+  ipAddress: string | null;
+  dnsName: string | null;
   createdAt: string;
   lastSeenAt: string;
   expiresAt: string;
@@ -67,6 +69,8 @@ export function UserSessions({ onSignedOut }: { onSignedOut: () => void | Promis
       {loading ? <p className="community-empty">{translate("sessions.loading")}</p> : sessions.length ? sessions.map((session) => <article className="auth-session-card" key={session.id}>
         <div className="auth-session-details">
           <strong>{session.userAgent || translate("sessions.unknownDevice")}{session.current && <span className="auth-session-current">{translate("sessions.current")}</span>}</strong>
+          <small>{translate("sessions.ipAddress")}: {session.ipAddress || translate("sessions.notRecorded")}</small>
+          <small>{translate("sessions.dnsName")}: {session.dnsName || translate("sessions.notAvailable")}</small>
           <small>{translate("sessions.lastActive")}: {formatUserDate(session.lastSeenAt, true)}</small>
           <small>{translate("sessions.created")}: {formatUserDate(session.createdAt, true)}</small>
           <small>{translate("sessions.expires")}: {formatUserDate(session.expiresAt, true)}</small>

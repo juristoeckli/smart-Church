@@ -1,6 +1,7 @@
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
 import { readFile, stat, statfs } from "node:fs/promises";
+import { reverse } from "node:dns/promises";
 import { cpus, freemem, totalmem } from "node:os";
 import { extname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -284,13 +285,29 @@ function requireServerPermission(request: FastifyRequest, reply: FastifyReply, p
 
 async function createSession(userId: string, request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, secure: boolean) {
   const token = randomBytes(32).toString("base64url");
+  const sessionId = randomUUID();
   const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"].slice(0, 512) : "Unknown browser";
+  const clientIp = typeof request.ip === "string" && request.ip.length <= 64 ? request.ip : null;
   await pool!.query(
-    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, user_agent, last_seen_at)
-     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5, now())`,
-    [randomUUID(), userId, hashToken(token), sessionLifetimeSeconds, userAgent],
+    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, user_agent, last_seen_at, client_ip)
+     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5, now(), $6)`,
+    [sessionId, userId, hashToken(token), sessionLifetimeSeconds, userAgent, clientIp],
   );
+  if (clientIp) refreshSessionDnsName(sessionId, clientIp);
   setSessionCookie(reply, token, secure, sessionCookieNameFor(request));
+}
+
+const pendingSessionDnsLookups = new Set<string>();
+function refreshSessionDnsName(sessionId: string, clientIp: string) {
+  if (pendingSessionDnsLookups.has(sessionId)) return;
+  pendingSessionDnsLookups.add(sessionId);
+  void reverse(clientIp)
+    .then(async (hostnames) => {
+      const hostname = hostnames.find((value) => value.trim().length > 0)?.trim().replace(/\.$/, "").slice(0, 253);
+      if (hostname) await pool?.query("UPDATE auth_sessions SET dns_name = $2 WHERE id = $1 AND client_ip = $3 AND dns_name IS NULL", [sessionId, hostname, clientIp]);
+    })
+    .catch(() => undefined)
+    .finally(() => pendingSessionDnsLookups.delete(sessionId));
 }
 
 function moduleCsrfToken(sessionToken: string) {
@@ -1308,16 +1325,24 @@ app.get("/api/auth/sessions", async (request, reply) => {
   const token = cookieValue(request.headers.cookie, sessionCookieNameFor(request));
   const user = await currentUser(token);
   if (!user || !token) return reply.code(401).send({ error: "Sign in to continue." });
+  const currentHash = hashToken(token);
+  const clientIp = typeof request.ip === "string" && request.ip.length <= 64 ? request.ip : null;
+  if (clientIp) await pool.query("UPDATE auth_sessions SET client_ip = $2 WHERE token_hash = $1", [currentHash, clientIp]);
   const result = await pool.query(
-    `SELECT id, user_agent, created_at, last_seen_at, expires_at, token_hash
+    `SELECT id, user_agent, created_at, last_seen_at, expires_at, token_hash, client_ip, dns_name
        FROM auth_sessions WHERE user_id = $1 AND expires_at > now()
        ORDER BY last_seen_at DESC LIMIT 100`,
     [user.id],
   );
-  const currentHash = hashToken(token);
+  if (clientIp) {
+    const currentSession = result.rows.find((row) => row.token_hash === currentHash);
+    if (currentSession && !currentSession.dns_name) refreshSessionDnsName(currentSession.id, clientIp);
+  }
   return { sessions: result.rows.map((row) => ({
     id: row.id,
     userAgent: row.user_agent,
+    ipAddress: row.client_ip,
+    dnsName: row.dns_name,
     createdAt: row.created_at,
     lastSeenAt: row.last_seen_at,
     expiresAt: row.expires_at,
