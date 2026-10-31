@@ -10,7 +10,7 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import type { AuthStatus, AuthenticatedUser, Contact, ContactRelationship, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
-import { getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
+import { getRegisteredServerModuleIds, getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
@@ -166,15 +166,17 @@ function newApiKey() {
   return `sc_${randomBytes(32).toString("base64url")}`;
 }
 
-async function currentApiKeyUser(token: string | undefined): Promise<AuthenticatedUser | null> {
+async function currentApiKeyUser(token: string | undefined, requestPath: string): Promise<AuthenticatedUser | null> {
   if (!pool || !token || !/^sc_[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
   const result = await pool.query(
     `SELECT id, email, username, display_name, role, server_permissions, must_change_password,
-            date_time_format, language, language_is_custom, is_service_user, is_enabled
+            date_time_format, language, language_is_custom, is_service_user, is_enabled,
+            EXISTS(SELECT 1 FROM signage_displays WHERE service_user_id=app_users.id) AS signage_display_account
        FROM app_users WHERE api_key_hash = $1`,
     [hashToken(token)],
   );
   const row = result.rows[0];
+  if (row?.signage_display_account && !/^\/api\/signage\/device\//.test(requestPath)) return null;
   if (!row || !row.is_enabled || (!row.is_service_user && row.role !== "server_admin" && !(row.server_permissions ?? []).includes("server_api"))) return null;
   if (row.must_change_password && !row.is_service_user) return null;
   return {
@@ -190,6 +192,19 @@ async function currentApiKeyUser(token: string | undefined): Promise<Authenticat
     serverPermissions: serverPermissionsForUser(row.role, row.server_permissions),
     isServiceUser: row.is_service_user,
   };
+}
+
+async function authenticateModuleRequest(request: FastifyRequest, reply: FastifyReply) {
+  if (request.authenticatedUser) return true;
+  const authorization = request.headers.authorization;
+  const token = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  const user = token?.startsWith("sc_")
+    ? await currentApiKeyUser(token, request.url)
+    : await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) { reply.code(401).send({ error: "Sign in to continue." }); return false; }
+  if (user.mustChangePassword && !user.isServiceUser) { reply.code(403).send({ error: "Change your password before continuing." }); return false; }
+  request.authenticatedUser = user;
+  return true;
 }
 
 function setupCodeMatches(candidate: string) {
@@ -445,7 +460,7 @@ app.addHook("preHandler", async (request, reply) => {
     const replicatedAccountWrite = path === "/api/auth/change-password" || path === "/api/auth/preferences";
     const redundancyControl = path.startsWith("/api/modules/sync/federation/redundancy/");
     const externalWebhook = path === "/api/webhooks/resend";
-    const publicSelfSignup = path.startsWith("/api/public/self-signup/");
+    const publicSelfSignup = path.startsWith("/api/public/self-signup/") || path === "/api/public/signage/pair";
     if ((!localServerSettings || replicatedAccountWrite) && !redundancyControl && !externalWebhook && !publicSelfSignup && !path.startsWith("/api/modules/sync/federation/")) {
       const requestedDepartment = request.headers["x-department-id"];
       const queryDepartment = new URL(request.url, "http://localhost").searchParams.get("departmentId");
@@ -456,12 +471,12 @@ app.addHook("preHandler", async (request, reply) => {
     }
   }
   if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
-  if (request.url.startsWith("/api/modules/presenter/public/")) return;
+  if (request.url.startsWith("/api/modules/presenter/public/") || request.url === "/api/public/signage/pair") return;
   if (!databaseReady) return;
   const authorization = request.headers.authorization;
   const bearerToken = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
   const user = bearerToken?.startsWith("sc_")
-    ? await currentApiKeyUser(bearerToken)
+    ? await currentApiKeyUser(bearerToken, request.url)
     : await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   request.authenticatedUser = user;
@@ -2092,6 +2107,13 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
   return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
+app.get("/api/installation/modules", async (request, reply) => {
+  if (!databaseReady || !pool || !installationId) return reply.code(503).send({ error: "The installation catalog is unavailable." });
+  if (!requireServerPermission(request, reply, "server_manage")) return reply;
+  const modules = await pool.query("SELECT module_id AS id,version,enabled,required FROM installation_modules WHERE installation_id=$1 AND client_managed=TRUE ORDER BY module_id", [installationId]);
+  return { modules: modules.rows.filter(module => getRegisteredServerModuleIds().includes(module.id)) };
+});
+
 app.put<{ Body: { moduleIds: string[] } }>("/api/installation/modules", {
   schema: {
     body: {
@@ -2111,11 +2133,11 @@ app.put<{ Body: { moduleIds: string[] } }>("/api/installation/modules", {
       "SELECT module_id,required,client_managed,enabled FROM installation_modules WHERE installation_id=$1",
       [installationId],
     );
-    const clientCatalog = new Map(catalogResult.rows.filter((module) => module.client_managed).map((module) => [module.module_id, module]));
+    const clientCatalog = new Map(catalogResult.rows.filter((module) => module.client_managed && getRegisteredServerModuleIds().includes(module.module_id)).map((module) => [module.module_id, module]));
     const unknown = request.body.moduleIds.filter((id) => !clientCatalog.has(id));
     if (unknown.length) {
       await client.query("ROLLBACK");
-      return reply.code(400).send({ error: `These modules are not installed for the client: ${unknown.join(", ")}.` });
+      return reply.code(400).send({ error: `The running API has not registered these client modules: ${unknown.join(", ")}. Update or restart the API with those modules installed, then try again.` });
     }
     const requiredIds = new Set([
       ...getRequiredServerModuleIds().filter((id) => clientCatalog.has(id)),
@@ -3194,6 +3216,7 @@ try {
     getDefaultDepartmentId: () => departmentId,
     resolveDepartmentId: activeDepartmentId,
     validateMutation: validModuleMutation,
+    authenticate: authenticateModuleRequest,
     getVideoWorker: () => videoWorker,
     email: emailConnector,
   });

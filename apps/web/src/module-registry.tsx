@@ -97,7 +97,7 @@ export function translateModuleText(value: string, translations: ModuleRegistrat
 
 function translateModuleNode(node: ReactNode, translations: ModuleRegistration["translations"], language: UserLanguage): ReactNode {
   if (typeof node === "string") return translateModuleText(node, translations, language);
-  if (Array.isArray(node)) return node.map((child) => translateModuleNode(child, translations, language));
+  if (Array.isArray(node)) return Children.map(node, (child) => translateModuleNode(child, translations, language));
   if (!isValidElement<{ children?: ReactNode }>(node)) return node;
   const props = node.props as Record<string, unknown>;
   if (props["data-no-translate"] === true) return node;

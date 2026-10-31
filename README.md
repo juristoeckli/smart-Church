@@ -13,6 +13,24 @@ A modular application for Churches, with one shared web/desktop interface, optio
 - [Core and module API reference](docs/API_REFERENCE.md)
 - [Implementation issues](https://github.com/juristoeckli/smart-Church/issues)
 
+## Public signage
+
+Enable **Public signage** in module management after deploying the API and web build together. The API supplies the installed module catalog; unavailable server components cannot be activated. Database migrations run at API startup. Back up PostgreSQL before upgrading, including the new signage tables and media stored in PostgreSQL.
+
+Use **People & access → Public signage** to assign **Signage Operator** (shows, media, publishing, schedules, and display status) or **Signage Admin** (also display creation, settings, pairing, and removal). Site administrators inherit both. Existing `manage` grants migrate to `admin`. The separate `display` grant is for dedicated service accounts, which are restricted to their assigned player endpoints.
+
+The workflow is **Media → Shows → Save draft → Publish → Displays → Default show → Pair**. A new display receives its own service account automatically. Open `/signage-display.html` on the screen and enter the single-use pairing code; it expires after 15 minutes. Pairing replaces the account's prior API key. Deleting a display revokes its key. Existing shows remain drafts until published; existing screens can be paired again through their display page.
+
+Schedules override the default show and return to it at the end. Conflicting schedules are rejected, including simultaneous edits. Dates use the site's timezone. Nonexistent daylight-saving times are rejected; repeated times use the first occurrence. Draft edits do not change published playback, and stale editors must reload before saving or publishing another editor's changes. Unsaved drafts are retained in the browser session.
+
+Use HTTPS for production kiosks: it enables service-worker recovery and SHA-256 download verification. Allow uploads up to 100 MiB and download timeouts of at least 120 seconds in the reverse proxy. Configure trusted proxy addresses correctly for reported display IPs. Uploads require authentication and CSRF checks before body buffering, and at most two are processed concurrently per API process. The media library limit is 2 GiB or 500 files per site; each display caches up to 512 MiB of media across its seven-day plan. Supported files are PNG, JPEG, WebP, MP4, and WebM; video codec support depends on the browser. Verify videos in the media preview on the target browser.
+
+The player downloads and verifies content before changing its saved plan, retains the previous complete plan when storage or downloads fail, and reports storage, network, decoding, and playback errors. It can restart offline using its saved shell and content. Use a dedicated kiosk browser profile without an administrator session, keep its site storage intact, and maintain the device clock. A cached plan expires after seven days without a successful update; the screen then waits for a new plan rather than playing stale schedules. Revocation takes effect when the screen next contacts the API.
+
+Operational checks: confirm **Connected**, **100% downloads**, the expected player version, and no playback error on the display page; then disconnect the test screen from the network and verify playback and restart recovery. Include PostgreSQL backup/restore in deployment acceptance. Browser playback and dated schedules are supported; native Windows packaging, recurring schedules, and automatic cross-server signage replication are outside this release.
+
+For repeatable validation, set `SIGNAGE_TEST_DATABASE_URL` to a fresh, disposable PostgreSQL database named `signage_validation`, then run `pnpm --filter @smart-church/api test:signage`. The test refuses a pre-existing application schema. Run `node --import tsx scripts/test-signage-server.mjs` from `apps/api` afterward for actual API authentication and module-catalog checks. `scripts/serve-signage-validation.mjs` starts a localhost test server for browser checks with fictional `signage_admin` and `signage_operator` accounts (password `SignageValidation2026!`); it accepts only the disposable database name. Never point these scripts at an operational database.
+
 ## Technology baseline
 
 TypeScript • Node.js LTS / Fastify • React • Electron • PostgreSQL • SQLite for local offline data • Capacitor for Android later.

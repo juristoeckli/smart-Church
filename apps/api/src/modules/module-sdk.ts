@@ -24,6 +24,7 @@ export type ReplicationRestoreContext = {
 };
 
 export interface ModuleServerContext {
+  authenticate?: (request: FastifyRequest, reply: FastifyReply) => Promise<boolean>;
   activation: {
     isEnabled: () => boolean;
     onChange: (listener: (enabled: boolean) => void) => () => void;
@@ -93,6 +94,8 @@ export interface ServerModuleManifest {
 
 type DiscoveredModule = { id: string; root: string; manifest: ServerModuleManifest; entry: string };
 const requiredServerModuleIds = new Set<string>();
+const registeredServerModuleIds = new Set<string>();
+export function getRegisteredServerModuleIds() { return [...registeredServerModuleIds]; }
 const requiredModuleDependencies = new Map<string, string[]>();
 const moduleActivation = new Map<string, boolean>();
 const activationListeners = new Map<string, Set<(enabled: boolean) => void>>();
@@ -453,6 +456,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
         try {
           registerModuleRoutes(isolateOptionalModule(scope, manifest.id), moduleContext);
           registered.add(moduleId);
+          registeredServerModuleIds.add(moduleId);
           scope.log.info({ module: manifest.id }, "Optional server module registered.");
         } catch (error) {
           replicationAdapters.delete(moduleId);
