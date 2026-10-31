@@ -819,6 +819,7 @@ function churchToolsRelationshipsByPerson(relationships: JsonObject[]) {
       relationshipTypeId: relationship.relationshipTypeId ?? null,
       relationshipName: firstText(relationship.relationshipName, relationship.relationshipType?.name),
       degreeOfRelationship: firstText(relationship.degreeOfRelationship),
+      sourceRecord: sanitizeChurchToolsProfile(relationship),
     };
     result.set(personAId, [...(result.get(personAId) ?? []), { ...common, relativeSourceId: personBId }]);
     result.set(personBId, [...(result.get(personBId) ?? []), { ...common, relativeSourceId: personAId }]);
@@ -1179,7 +1180,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const sourceId = idOf(person);
             const sourceProfile = sanitizeChurchToolsProfile(person) as JsonObject;
             const relationships = relationshipsByPerson.get(sourceId) ?? [];
-            return { area: "person", sourceId, firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: { ...sourceProfile, relationships }, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) };
+            return { area: "person", sourceId, firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: { ...sourceProfile, relationships }, relationshipsCount: relationships.length, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) };
           }),
           ...groupsResult.items.map((group) => {
             const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
@@ -1233,7 +1234,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const encryptedSnapshot = encrypt(JSON.stringify(records));
         await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
           VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now()`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
-        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
     });
