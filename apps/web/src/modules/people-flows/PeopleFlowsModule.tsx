@@ -47,6 +47,15 @@ function assignedPeopleSummary(language: ModuleContext["language"], count: numbe
 
 
 function statusLabel(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
+function skippedSuffix(language: ModuleContext["language"]) {
+  const labels: Record<ModuleContext["language"], string> = {
+    en: " · Skipped",
+    de: " · Übersprungen",
+    fr: " · Ignorée",
+    it: " · Saltato",
+  };
+  return labels[language];
+}
 function auditLabel(action: string) {
   const labels: Record<string, string> = {
     flow_created: "flow created", flow_updated: "flow updated", flow_archived: "flow archived", flow_activated: "flow activated",
@@ -254,7 +263,7 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
                 {assignment.status === "active" ? <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "completed")} disabled={busy}>Complete workflow</button> : <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "active")} disabled={busy}>Reopen</button>}
                 {assignment.status === "active" && <button className="button button-secondary" type="button" onClick={() => void setAssignmentStatus(assignment, "cancelled")} disabled={busy}>Cancel</button>}
               </div>
-              <div className="people-flows-progress">{assignment.steps.map((step) => <div className="people-flows-progress-step" key={step.stepId}><label><input type="checkbox" checked={step.status === "completed"} disabled={busy || assignment.status !== "active"} onChange={(event) => void setStepStatus(assignment, step, event.target.checked ? "completed" : "pending")} /><span><strong>{step.title}</strong><small>{!step.active ? "Archived step" : step.required ? "Required" : "Optional"} · {step.dueOn ? dueLabel(language, step.dueOn) : "No due date"}{step.status === "skipped" ? " · Skipped" : ""}</small></span></label></div>)}</div>
+              <div className="people-flows-progress">{assignment.steps.map((step) => <div className="people-flows-progress-step" key={step.stepId}><label><input type="checkbox" checked={step.status === "completed"} disabled={busy || assignment.status !== "active"} onChange={(event) => void setStepStatus(assignment, step, event.target.checked ? "completed" : "pending")} /><span><strong>{step.title}</strong><small>{!step.active ? "Archived step" : step.required ? "Required" : "Optional"} · {step.dueOn ? dueLabel(language, step.dueOn) : "No due date"}{step.status === "skipped" ? skippedSuffix(language) : ""}</small></span></label></div>)}</div>
             </article>)}</div>}
           </section>
 
