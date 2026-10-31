@@ -5,6 +5,9 @@ type ModulesById = Record<string, ModuleErrors>;
 export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>> = {
   de: {
     "core-admin": {
+      "Enable required module dependencies first: {dependencies}.": "Aktiviere zuerst die erforderlichen Modulabhängigkeiten: {dependencies}.",
+      "Required modules cannot be disabled: {modules}.": "Erforderliche Module können nicht deaktiviert werden: {modules}.",
+      "These modules are not installed for the client: {modules}.": "Diese Module sind für den Client nicht installiert: {modules}.",
       "Server management access is required.": "Zugriff für die Serververwaltung ist erforderlich.",
       "Choose a valid site.": "Wähle einen gültigen Standort aus.",
       "The selected site was not found.": "Der ausgewählte Standort wurde nicht gefunden.",
@@ -199,6 +202,9 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
   },
   fr: {
     "core-admin": {
+      "Enable required module dependencies first: {dependencies}.": "Activez d’abord les dépendances obligatoires des modules : {dependencies}.",
+      "Required modules cannot be disabled: {modules}.": "Les modules obligatoires ne peuvent pas être désactivés : {modules}.",
+      "These modules are not installed for the client: {modules}.": "Ces modules ne sont pas installés pour le client : {modules}.",
       "Server management access is required.": "L’accès à la gestion du serveur est requis.",
       "Choose a valid site.": "Choisissez un site valide.",
       "The selected site was not found.": "Le site sélectionné est introuvable.",
@@ -389,6 +395,9 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
   },
   it: {
     "core-admin": {
+      "Enable required module dependencies first: {dependencies}.": "Abilita prima le dipendenze richieste dei moduli: {dependencies}.",
+      "Required modules cannot be disabled: {modules}.": "I moduli obbligatori non possono essere disattivati: {modules}.",
+      "These modules are not installed for the client: {modules}.": "Questi moduli non sono installati per il client: {modules}.",
       "Server management access is required.": "È necessario l’accesso alla gestione del server.",
       "Choose a valid site.": "Scegli una sede valida.",
       "The selected site was not found.": "La sede selezionata non è stata trovata.",
