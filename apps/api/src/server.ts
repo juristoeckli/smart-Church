@@ -152,13 +152,13 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
         WHERE token_hash = $1 AND expires_at > now()
         RETURNING user_id
      )
-     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.date_time_format, u.language, u.language_is_custom
+     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.can_change_password, u.date_time_format, u.language, u.language_is_custom
        FROM active_session s JOIN app_users u ON u.id = s.user_id
       WHERE u.is_service_user = false AND u.is_enabled = true`,
     [hashToken(token)],
   );
   const row = result.rows[0];
-  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
+  return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
 }
 
 function newApiKey() {
@@ -1128,7 +1128,7 @@ app.post<{ Body: CreateAdminAccount }>("/api/auth/setup", {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
         displayName: { type: "string", minLength: 1, maxLength: 100 },
-        password: { type: "string", minLength: 12, maxLength: 128 },
+        password: { type: "string", minLength: 1, maxLength: 128 },
       },
     },
   },
@@ -1218,7 +1218,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, date_time_format, language, language_is_custom, is_service_user, is_enabled FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, can_change_password, date_time_format, language, language_is_custom, is_service_user, is_enabled FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
@@ -1240,7 +1240,7 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(401).send({ error: "Username, email, or password is incorrect." });
   }
   for (const key of buckets) failedLogins.delete(key);
-  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
+  const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
   await createSession(user.id, request, reply, request.protocol === "https");
   return { user };
 });
@@ -1255,13 +1255,15 @@ app.post("/api/auth/logout", async (request, reply) => {
 
 app.post<{ Body: { password: string } }>("/api/auth/change-password", {
   schema: {
-    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 12, maxLength: 128 } } },
+    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 1, maxLength: 128 } } },
   },
 }, async (request, reply): Promise<{ user: AuthenticatedUser } | { error: string }> => {
   reply.header("Cache-Control", "no-store");
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!user.canChangePassword) return reply.code(403).send({ error: "Password changes are disabled for this account." });
+  if (request.body.password.length < 12) return reply.code(400).send({ error: "Choose a password with at least 12 characters." });
   const result = await pool.query(
     "UPDATE app_users SET password_hash = $2, must_change_password = false WHERE id = $1 RETURNING id, email, username, display_name, role, server_permissions, date_time_format, language, language_is_custom",
     [user.id, hashPassword(request.body.password)],
@@ -1477,7 +1479,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
             u.street, u.street_number, u.postal_code, u.city, u.role AS account_role, u.server_permissions, u.is_service_user,
             u.service_user_owner_id, owner.display_name AS service_user_owner_name,
             u.api_key_hash IS NOT NULL AS api_key_enabled,
-            u.admin_note, u.is_enabled,
+            u.admin_note, u.is_enabled, u.can_change_password,
             memberships.memberships,
             phones.phone_numbers, relations.relationships
        FROM app_users u
@@ -1499,7 +1501,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
       ORDER BY u.display_name, u.email`,
     [request.authenticatedUser?.role],
   );
-  return result.rows.map((row) => ({ id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.is_service_user ? [] : row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, serviceUserOwnerName: row.service_user_owner_name ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.is_service_user ? [] : row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, serviceUserOwnerName: row.service_user_owner_name ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships: row.memberships }));
 });
 
 app.post<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/users/:id/api-key", {
@@ -1625,7 +1627,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     body: {
       type: "object",
       additionalProperties: false,
-      required: ["password", "accountRole", "memberships"],
+      required: ["accountRole", "memberships"],
       properties: {
         email: { type: "string", minLength: 3, maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
         username: { type: "string", minLength: 3, maxLength: 32, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
@@ -1639,13 +1641,14 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         city: { type: "string", maxLength: 100 },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
-        password: { type: "string", minLength: 12, maxLength: 128 },
+        password: { type: "string", minLength: 1, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
         serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage", "server_api"] } },
         isServiceUser: { type: "boolean" },
         serviceUserOwnerId: { type: "string", format: "uuid" },
         adminNote: { type: "string", maxLength: 2000 },
         isEnabled: { type: "boolean" },
+        canChangePassword: { type: "boolean" },
         memberships: {
           type: "array", maxItems: 100,
           items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
@@ -1673,9 +1676,12 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const serviceUserOwnerId = isServiceUser ? request.body.serviceUserOwnerId ?? request.authenticatedUser!.id : null;
   const adminNote = request.body.adminNote?.trim() || null;
   const isEnabled = request.body.isEnabled ?? true;
+  const canChangePassword = !isServiceUser && (request.body.canChangePassword ?? true);
   const serverPermissions = accountRole === "user" ? request.body.serverPermissions ?? [] : [];
   const memberships = request.body.memberships;
   if (!displayName || (!isServiceUser && (!firstName || !lastName))) return reply.code(400).send({ error: isServiceUser ? "Enter the service user's name." : "Enter the user's first and last name." });
+  if (!isServiceUser && !request.body.password) return reply.code(400).send({ error: "Enter an initial password." });
+  if (!isServiceUser && canChangePassword && request.body.password!.length < 12) return reply.code(400).send({ error: "Choose a password with at least 12 characters." });
   if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
   if (accountRole === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can grant Server Administrator access." });
@@ -1686,7 +1692,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   if (serverPermissions.length && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
   }
-  if (accountRole === "user" && memberships.length === 0) {
+  if (accountRole === "user" && !isServiceUser && memberships.length === 0) {
     return reply.code(400).send({ error: "Assign a local user to at least one site." });
   }
   if (new Set(memberships.map((membership) => membership.departmentId)).size !== memberships.length) {
@@ -1702,10 +1708,10 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       if (!owner.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an existing non-service user as the owner." }); }
     }
     const user = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, first_name, last_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password, server_permissions, is_service_user, service_user_owner_id, admin_note, is_enabled)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, true, $14, $15, $16, $17, $18)
-       RETURNING id, email, username, display_name, first_name, last_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city, server_permissions, is_service_user, service_user_owner_id, admin_note, is_enabled`,
-      [id, email, username, displayName, isServiceUser ? null : firstName, isServiceUser ? null : lastName, hashPassword(isServiceUser ? randomBytes(48).toString("base64url") : request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city, serverPermissions, isServiceUser, serviceUserOwnerId, adminNote, isEnabled],
+      `INSERT INTO app_users (id, email, username, display_name, first_name, last_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password, server_permissions, is_service_user, service_user_owner_id, admin_note, is_enabled, can_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::date, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       RETURNING id, email, username, display_name, first_name, last_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city, server_permissions, is_service_user, service_user_owner_id, admin_note, is_enabled, can_change_password`,
+      [id, email, username, displayName, isServiceUser ? null : firstName, isServiceUser ? null : lastName, hashPassword(isServiceUser ? randomBytes(48).toString("base64url") : request.body.password!), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city, canChangePassword, serverPermissions, isServiceUser, serviceUserOwnerId, adminNote, isEnabled, canChangePassword],
     );
     for (const membership of memberships) {
       if (membership.contactId) {
@@ -1730,7 +1736,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     }
     await client.query("COMMIT");
     const row = user.rows[0];
-    return reply.code(201).send({ id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: isServiceUser ? [] : await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: false, serviceUserOwnerId: row.service_user_owner_id, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, memberships });
+    return reply.code(201).send({ id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: isServiceUser ? [] : await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: false, serviceUserOwnerId: row.service_user_owner_id, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1741,7 +1747,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "firstName" | "lastName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"]; serverPermissions?: CreateSiteUser["serverPermissions"]; isServiceUser?: boolean; serviceUserOwnerId?: string; adminNote?: string; isEnabled?: boolean } }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "firstName" | "lastName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"]; serverPermissions?: CreateSiteUser["serverPermissions"]; isServiceUser?: boolean; serviceUserOwnerId?: string; adminNote?: string; isEnabled?: boolean; canChangePassword?: boolean } }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -1763,6 +1769,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         serviceUserOwnerId: { type: "string", format: "uuid" },
         adminNote: { type: "string", maxLength: 2000 },
         isEnabled: { type: "boolean" },
+        canChangePassword: { type: "boolean" },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
         memberships: {
@@ -1805,7 +1812,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
-    const current = await client.query("SELECT role, is_service_user, server_permissions, service_user_owner_id, is_enabled, email, username, display_name, first_name, last_name FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const current = await client.query("SELECT role, is_service_user, server_permissions, service_user_owner_id, is_enabled, can_change_password, email, username, display_name, first_name, last_name FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!current.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
@@ -1821,6 +1828,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       return reply.code(400).send({ error: "You cannot disable your own account." });
     }
     const isServiceUser = accountRole === "server_admin" ? false : request.body.isServiceUser ?? current.rows[0].is_service_user;
+    const canChangePassword = isServiceUser ? false : request.body.canChangePassword ?? current.rows[0].can_change_password;
     const legacyNameParts = (request.body.displayName?.trim() || current.rows[0].display_name).split(/\s+/);
     const firstName = isServiceUser ? null : request.body.firstName?.trim() || current.rows[0].first_name || legacyNameParts[0] || null;
     const lastName = isServiceUser ? null : request.body.lastName?.trim() || current.rows[0].last_name || legacyNameParts.slice(1).join(" ") || null;
@@ -1881,12 +1889,14 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
               service_user_owner_id = CASE WHEN $11 THEN $14::UUID ELSE service_user_owner_id END,
               admin_note = CASE WHEN $15 THEN $16::TEXT ELSE admin_note END,
               is_enabled = CASE WHEN $17 THEN $18 ELSE is_enabled END,
-              api_key_hash = CASE WHEN ($17 AND NOT $18) OR ($11 AND ($13 IS DISTINCT FROM is_service_user OR $14::UUID IS DISTINCT FROM service_user_owner_id OR (NOT $13 AND (role = 'server_admin' OR 'server_api' = ANY(server_permissions)) AND NOT ($10 = 'server_admin' OR 'server_api' = ANY(CASE WHEN $11 THEN $12::TEXT[] ELSE server_permissions END)))) THEN NULL ELSE api_key_hash END
+              can_change_password = $21,
+              must_change_password = CASE WHEN $21 THEN must_change_password ELSE false END,
+              api_key_hash = CASE WHEN ($17 AND NOT $18) OR ($11 AND ($13 IS DISTINCT FROM is_service_user OR $14::UUID IS DISTINCT FROM service_user_owner_id OR (NOT $13 AND (role = 'server_admin' OR 'server_api' = ANY(server_permissions)) AND NOT ($10 = 'server_admin' OR 'server_api' = ANY($12::TEXT[]))))) THEN NULL ELSE api_key_hash END
         WHERE id = $1
          RETURNING id, email, username, display_name, first_name, last_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
                   street, street_number, postal_code, city, role, server_permissions, is_service_user, service_user_owner_id,
-                   api_key_hash IS NOT NULL AS api_key_enabled, admin_note, is_enabled`,
-      [request.params.id, email, username, displayName, birthdayToIso(isServiceUser ? undefined : birthday), isServiceUser ? null : street, isServiceUser ? null : streetNumber, isServiceUser ? null : postalCode, isServiceUser ? null : city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : [], isServiceUser, serviceUserOwnerId, request.body.adminNote !== undefined, request.body.adminNote?.trim() || null, request.body.isEnabled !== undefined, isEnabled, firstName, lastName],
+                   api_key_hash IS NOT NULL AS api_key_enabled, admin_note, is_enabled, can_change_password`,
+      [request.params.id, email, username, displayName, birthdayToIso(isServiceUser ? undefined : birthday), isServiceUser ? null : street, isServiceUser ? null : streetNumber, isServiceUser ? null : postalCode, isServiceUser ? null : city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : [], isServiceUser, serviceUserOwnerId, request.body.adminNote !== undefined, request.body.adminNote?.trim() || null, request.body.isEnabled !== undefined, isEnabled, firstName, lastName, canChangePassword],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -1921,7 +1931,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     if (updated.rows[0].is_service_user || !updated.rows[0].is_enabled) await client.query("DELETE FROM auth_sessions WHERE user_id=$1", [request.params.id]);
     await client.query("COMMIT");
     const row = updated.rows[0];
-    return { id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: row.is_service_user ? [] : await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, memberships };
+    return { id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: row.is_service_user ? [] : await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1981,7 +1991,7 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
 app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?: boolean } }>("/api/users/:id/reset-password", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 12, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
+    body: { type: "object", additionalProperties: false, required: ["password"], properties: { password: { type: "string", minLength: 1, maxLength: 128 }, mustChangePassword: { type: "boolean" } } },
   },
 }, async (request, reply): Promise<{ id: string; mustChangePassword: boolean } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
@@ -1990,7 +2000,7 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const target = await client.query("SELECT id,role,is_service_user FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const target = await client.query("SELECT id,role,is_service_user,can_change_password FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
@@ -2003,10 +2013,16 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?
       await client.query("ROLLBACK");
       return reply.code(403).send({ error: "Only a Server Administrator can reset an installation administrator password." });
     }
-    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = true WHERE id = $1", [request.params.id, hashPassword(request.body.password)]);
+    const canChangePassword = target.rows[0].can_change_password;
+    if (canChangePassword && request.body.password.length < 12) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: "Choose a password with at least 12 characters." });
+    }
+    const mustChangePassword = canChangePassword && (request.body.mustChangePassword ?? true);
+    await client.query("UPDATE app_users SET password_hash = $2, must_change_password = $3 WHERE id = $1", [request.params.id, hashPassword(request.body.password), mustChangePassword]);
     await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [request.params.id]);
     await client.query("COMMIT");
-    return { id: request.params.id, mustChangePassword: true };
+    return { id: request.params.id, mustChangePassword };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;

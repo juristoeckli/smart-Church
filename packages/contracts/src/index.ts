@@ -254,6 +254,7 @@ export interface AuthenticatedUser {
   displayName: string;
   role: "server_admin" | "user";
   mustChangePassword: boolean;
+  canChangePassword?: boolean;
   dateTimeFormat: DateTimeFormat;
   language: UserLanguage;
   languageIsCustom: boolean;
@@ -286,6 +287,7 @@ export interface SiteUser {
   serviceUserOwnerName?: string;
   adminNote?: string;
   isEnabled: boolean;
+  canChangePassword: boolean;
   memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 
@@ -302,13 +304,14 @@ export interface CreateSiteUser {
   city?: string;
   phoneNumbers?: UserPhoneNumber[];
   relationships?: UserRelationshipInput[];
-  password: string;
+  password?: string;
   accountRole: "server_admin" | "user";
   serverPermissions?: ServerPermission[];
   isServiceUser?: boolean;
   serviceUserOwnerId?: string;
   adminNote?: string;
   isEnabled?: boolean;
+  canChangePassword?: boolean;
   memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 

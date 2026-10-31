@@ -179,6 +179,10 @@
 .settings-page .user-access-sites .user-membership-fieldset{padding:0;border:0;background:transparent}
 .settings-page .user-access-form>.global-admin-option{margin:0}
 .settings-page .user-access-form>.form-actions{position:sticky;bottom:0;z-index:3;justify-content:flex-end;margin:0 -18px -18px;padding:12px 18px;border-top:1px solid var(--line);border-radius:0 0 13px 13px;background:color-mix(in srgb,var(--panel) 94%,transparent);backdrop-filter:blur(8px)}
+.settings-page .account-type-toggle{display:inline-flex;align-self:start;gap:3px;padding:4px;border:1px solid var(--line);border-radius:10px;background:var(--bg)}
+.settings-page .account-type-option{min-height:34px;padding:0 12px;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:11px;font-weight:650;cursor:pointer}
+.settings-page .account-type-option:hover{color:var(--ink)}
+.settings-page .account-type-option-active{background:var(--purple,#7952a0);color:#fff;box-shadow:0 1px 3px #0002}
 @media(max-width:900px){.settings-page .user-access-layout{grid-template-columns:minmax(220px,.65fr) minmax(0,1.4fr);gap:12px}.settings-page .user-access-form{padding:14px}}
 @media(max-width:760px){.settings-page .user-access-layout{grid-template-columns:1fr}.settings-page .user-access-list{position:static;max-height:300px;grid-template-columns:repeat(2,minmax(0,1fr));overflow:auto}.settings-page .user-access-list-header{grid-column:1/-1}.settings-page .user-access-section{grid-template-columns:1fr}.settings-page .user-access-section-heading{grid-column:1}.settings-page .user-access-form>.form-actions{margin:0 -14px -14px;padding:10px 14px}}
 @media(max-width:520px){.settings-page .user-access-list{grid-template-columns:1fr}.settings-page .user-access-list-header{grid-template-columns:1fr}.settings-page .user-access-form{padding:12px}.settings-page .user-access-form>.form-actions{margin:0 -12px -12px;padding:9px 12px}}
