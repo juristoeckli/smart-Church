@@ -25,6 +25,26 @@ function assignmentSummary(language: ModuleContext["language"], created: number,
   return label[language](created, skipped);
 }
 
+function workflowSummary(language: ModuleContext["language"], steps: number, activeAssignments: number) {
+  const label: Record<ModuleContext["language"], (steps: number, activeAssignments: number) => string> = {
+    en: (steps, activeAssignments) => `${steps} steps · ${activeAssignments} active assignments`,
+    de: (steps, activeAssignments) => `${steps} Schritte · ${activeAssignments} aktive Zuweisungen`,
+    fr: (steps, activeAssignments) => `${steps} étapes · ${activeAssignments} affectations actives`,
+    it: (steps, activeAssignments) => `${steps} passaggi · ${activeAssignments} assegnazioni attive`,
+  };
+  return label[language](steps, activeAssignments);
+}
+
+function assignedPeopleSummary(language: ModuleContext["language"], count: number) {
+  const label: Record<ModuleContext["language"], (count: number) => string> = {
+    en: (count) => `${count} people currently assigned`,
+    de: (count) => `${count} Personen derzeit zugewiesen`,
+    fr: (count) => `${count} personnes actuellement affectées`,
+    it: (count) => `${count} persone attualmente assegnate`,
+  };
+  return label[language](count);
+}
+
 
 function statusLabel(value: string) { return value.charAt(0).toUpperCase() + value.slice(1); }
 function auditLabel(action: string) {
@@ -186,7 +206,7 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
       <aside className="people-flows-list">
         <h2>Workflows</h2>
         {flows.length === 0 ? <p className="people-flows-empty">No workflows yet.</p> : flows.map((flow) => <button key={flow.id} className={`people-flows-list-item ${selectedFlowId === flow.id ? "is-selected" : ""}`} type="button" onClick={() => { setSelectedFlowId(flow.id); void loadFlowData(flow.id).catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load workflow.")); }}>
-          <strong>{flow.name}</strong><span>{flow.stepCount} steps · {flow.activeEnrollmentCount} active</span><small>{flow.status === "archived" ? "Archived" : "Active"}</small>
+          <strong>{flow.name}</strong><span>{workflowSummary(language, flow.stepCount, flow.activeEnrollmentCount)}</span><small>{flow.status === "archived" ? "Archived" : "Active"}</small>
         </button>)}
         <form className="people-flows-form" onSubmit={(event) => void createFlow(event)}>
           <h3>New workflow</h3>
@@ -199,7 +219,7 @@ export function PeopleFlowsModule({ departmentId, csrfToken, language }: ModuleC
       <div className="people-flows-content">
         {!selectedFlow ? <div className="people-flows-empty-state"><Users size={28} /><h2>Start with a workflow</h2><p>Create a workflow to guide follow-up, onboarding, or pastoral next steps.</p></div> : <>
           <form className="people-flows-form people-flows-edit" onSubmit={(event) => void saveFlow(event)}>
-            <div className="people-flows-section-heading"><div><h2>Workflow details</h2><p>{selectedFlow.activeEnrollmentCount} people currently assigned</p></div><button className="button button-secondary" type="button" onClick={() => void setFlowStatus(selectedFlow.status === "active" ? "archived" : "active")} disabled={busy}><Archive size={15} />{selectedFlow.status === "active" ? "Archive" : "Reactivate"}</button></div>
+            <div className="people-flows-section-heading"><div><h2>Workflow details</h2><p>{assignedPeopleSummary(language, selectedFlow.activeEnrollmentCount)}</p></div><button className="button button-secondary" type="button" onClick={() => void setFlowStatus(selectedFlow.status === "active" ? "archived" : "active")} disabled={busy}><Archive size={15} />{selectedFlow.status === "active" ? "Archive" : "Reactivate"}</button></div>
             <label>Name<input value={editName} onChange={(event) => setEditName(event.target.value)} maxLength={120} required /></label>
             <label>Description<textarea value={editDescription} onChange={(event) => setEditDescription(event.target.value)} maxLength={2000} rows={3} /></label>
             <button className="button button-primary" type="submit" disabled={busy}><Check size={15} />Save workflow</button>
