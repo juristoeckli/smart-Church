@@ -13,6 +13,7 @@ const eventEnglish = {
   "events.editSong": "Edit song", "events.editTemplate": "Edit template", "events.remove": "Remove",
   "events.checkedInCount": "{count} checked in", "events.firstTimeCount": "{count} first-time visitors", "events.followUpsNeededCount": "{count} follow-ups needed",
   "sessions.title": "Signed-in devices", "sessions.description": "Review devices signed in to your account. Revoke sessions you no longer use.", "sessions.refresh": "Refresh", "sessions.loading": "Loading sign-in sessions…", "sessions.none": "No active sign-in sessions were found.", "sessions.current": "This device", "sessions.unknownDevice": "Unknown browser or device", "sessions.lastActive": "Last active", "sessions.created": "Signed in", "sessions.expires": "Expires", "sessions.revoke": "Revoke session", "sessions.signOutHere": "Sign out this device", "sessions.revoking": "Revoking…", "sessions.confirmRevoke": "Revoke the sign-in session for {device}?",
+  "events.attendanceReport": "Attendance", "events.attendanceReportSummary": "{gatherings} gatherings · {visits} total visits", "events.exportAttendance": "Export CSV", "events.attendanceReportEmpty": "No attendance has been recorded for these gatherings.", "events.adults": "Adults", "events.children": "Children", "events.total": "Total", "events.recordedAt": "Recorded at",
 } as const;
 
 const eventGerman: Record<keyof typeof eventEnglish, string> = {
@@ -28,6 +29,7 @@ const eventGerman: Record<keyof typeof eventEnglish, string> = {
   "events.editSong": "Lied bearbeiten", "events.editTemplate": "Vorlage bearbeiten", "events.remove": "Entfernen",
   "events.checkedInCount": "{count} eingecheckt", "events.firstTimeCount": "{count} Erstbesucher", "events.followUpsNeededCount": "{count} offene Nachfassaktionen",
   "sessions.title": "Angemeldete Geräte", "sessions.description": "Prüfe, welche Geräte bei deinem Konto angemeldet sind. Melde Geräte ab, die du nicht mehr verwendest.", "sessions.refresh": "Aktualisieren", "sessions.loading": "Anmeldungen werden geladen…", "sessions.none": "Keine aktiven Anmeldungen gefunden.", "sessions.current": "Dieses Gerät", "sessions.unknownDevice": "Unbekannter Browser oder unbekanntes Gerät", "sessions.lastActive": "Zuletzt aktiv", "sessions.created": "Angemeldet", "sessions.expires": "Läuft ab", "sessions.revoke": "Abmelden", "sessions.signOutHere": "Dieses Gerät abmelden", "sessions.revoking": "Wird abgemeldet…", "sessions.confirmRevoke": "Anmeldung für {device} widerrufen?",
+  "events.attendanceReport": "Teilnahme", "events.attendanceReportSummary": "{gatherings} Anlässe · {visits} Besuche insgesamt", "events.exportAttendance": "CSV exportieren", "events.attendanceReportEmpty": "Für diese Anlässe wurde keine Teilnahme erfasst.", "events.adults": "Erwachsene", "events.children": "Kinder", "events.total": "Gesamt", "events.recordedAt": "Erfasst am",
 };
 
 const eventFrench: Record<keyof typeof eventEnglish, string> = {
@@ -43,6 +45,7 @@ const eventFrench: Record<keyof typeof eventEnglish, string> = {
   "events.editSong": "Modifier le chant", "events.editTemplate": "Modifier le modèle", "events.remove": "Retirer",
   "events.checkedInCount": "{count} personnes enregistrées", "events.firstTimeCount": "{count} nouveaux visiteurs", "events.followUpsNeededCount": "{count} suivis nécessaires",
   "sessions.title": "Appareils connectés", "sessions.description": "Consultez les appareils connectés à votre compte et révoquez ceux que vous n’utilisez plus.", "sessions.refresh": "Actualiser", "sessions.loading": "Chargement des sessions…", "sessions.none": "Aucune session active trouvée.", "sessions.current": "Cet appareil", "sessions.unknownDevice": "Navigateur ou appareil inconnu", "sessions.lastActive": "Dernière activité", "sessions.created": "Connexion", "sessions.expires": "Expiration", "sessions.revoke": "Révoquer la session", "sessions.signOutHere": "Déconnecter cet appareil", "sessions.revoking": "Révocation…", "sessions.confirmRevoke": "Révoquer la session de {device} ?",
+  "events.attendanceReport": "Présences", "events.attendanceReportSummary": "{gatherings} rencontres · {visits} visites au total", "events.exportAttendance": "Exporter en CSV", "events.attendanceReportEmpty": "Aucune présence n’a été enregistrée pour ces rencontres.", "events.adults": "Adultes", "events.children": "Enfants", "events.total": "Total", "events.recordedAt": "Enregistré le",
 };
 
 const eventItalian: Record<keyof typeof eventEnglish, string> = {
@@ -58,6 +61,7 @@ const eventItalian: Record<keyof typeof eventEnglish, string> = {
   "events.editSong": "Modifica canto", "events.editTemplate": "Modifica modello", "events.remove": "Rimuovi",
   "events.checkedInCount": "{count} registrati", "events.firstTimeCount": "{count} nuovi visitatori", "events.followUpsNeededCount": "{count} ricontatti necessari",
   "sessions.title": "Dispositivi connessi", "sessions.description": "Controlla i dispositivi connessi al tuo account e revoca quelli che non usi più.", "sessions.refresh": "Aggiorna", "sessions.loading": "Caricamento delle sessioni…", "sessions.none": "Non sono state trovate sessioni attive.", "sessions.current": "Questo dispositivo", "sessions.unknownDevice": "Browser o dispositivo sconosciuto", "sessions.lastActive": "Ultima attività", "sessions.created": "Accesso", "sessions.expires": "Scadenza", "sessions.revoke": "Revoca sessione", "sessions.signOutHere": "Esci da questo dispositivo", "sessions.revoking": "Revoca in corso…", "sessions.confirmRevoke": "Revocare la sessione di {device}?",
+  "events.attendanceReport": "Presenze", "events.attendanceReportSummary": "{gatherings} incontri · {visits} presenze totali", "events.exportAttendance": "Esporta CSV", "events.attendanceReportEmpty": "Non sono state registrate presenze per questi incontri.", "events.adults": "Adulti", "events.children": "Bambini", "events.total": "Totale", "events.recordedAt": "Registrato il",
 };
 
 const english = {

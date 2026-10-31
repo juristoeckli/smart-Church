@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check, ClipboardList, Clock3, Link2, MapPin, Music2, Pencil, Plus, Repeat2, Search, Trash2, UserCheck, Users, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check, ClipboardList, Clock3, Download, Link2, MapPin, Music2, Pencil, Plus, Repeat2, Search, Trash2, UserCheck, Users, X } from "lucide-react";
 import type { BookableResource, Contact, CreateServiceEvent, EventRegistration, ServiceEvent, ServiceEventCheckIn, ServiceEventKind, ServicePlanItem, ServicePlanTemplate, ServicePosition, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
@@ -8,7 +8,7 @@ import { translationsForModule } from "./modules/translations";
 import { WorshipPlanning } from "./WorshipPlanning";
 
 type EventFilter = "upcoming" | "all" | "past";
-type ScheduleView = "list" | "month";
+type ScheduleView = "list" | "month" | "attendance";
 
 const eventKinds: { value: ServiceEventKind; label: TranslationKey }[] = [
   { value: "service", label: "events.kind.service" },
@@ -59,6 +59,10 @@ function preservePositionResponses(event: ServiceEvent, previous?: ServiceEvent)
       };
     }),
   };
+}
+
+function csvCell(value: string | number) {
+  return `"${String(value).replace(/"/g, '""')}"`;
 }
 
 function eventPayload(form: HTMLFormElement): CreateServiceEvent {
@@ -174,6 +178,8 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     });
     return filter === "past" ? filtered.reverse() : filtered;
   }, [events, filter, query, today]);
+  const attendanceEvents = useMemo(() => filteredEvents.filter((event) => event.attendanceRecordedAt), [filteredEvents]);
+  const attendanceTotal = attendanceEvents.reduce((total, event) => total + (event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0), 0);
   const calendarDays = useMemo(() => {
     const [year, month] = calendarMonth.split("-").map(Number);
     const firstDay = new Date(Date.UTC(year, month - 1, 1));
@@ -334,6 +340,22 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     finally { setAttendanceSaving(false); }
   }
 
+  function downloadAttendanceReport() {
+    const rows = [
+      [translate("events.date"), translate("events.gathering"), translate("events.type"), translate("events.adults"), translate("events.children"), translate("events.total"), translate("events.recordedAt")],
+      ...attendanceEvents.map((event) => [event.eventDate, event.title, eventKindLabel(event.kind), String(event.attendanceAdults ?? 0), String(event.attendanceChildren ?? 0), String((event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0)), event.attendanceRecordedAt ? formatUserDate(event.attendanceRecordedAt, true) : ""]),
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "church-attendance.csv";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
   async function openCheckIns(event: ServiceEvent) {
     setCheckInEvent(event);
     setCheckInQuery("");
@@ -484,10 +506,17 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           <div className="schedule-view-toggle" role="group" aria-label={translate("events.scheduleView")}>
             <button className={scheduleView === "list" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "list"} onClick={() => setScheduleView("list")}>{translate("events.listView")}</button>
             <button className={scheduleView === "month" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "month"} onClick={() => setScheduleView("month")}>{translate("events.monthView")}</button>
+            <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => { setFilter("all"); setScheduleView("attendance"); }}>{translate("events.attendanceReport")}</button>
           </div>
         </div>
 
-        {scheduleView === "month" ? <div className="schedule-calendar" aria-label={translate("events.calendarLabel")}>
+        {scheduleView === "attendance" ? <div className="attendance-report">
+          <div className="attendance-report-heading"><p>{translate("events.attendanceReportSummary").replace("{gatherings}", String(attendanceEvents.length)).replace("{visits}", String(attendanceTotal))}</p><button className="button button-secondary" type="button" onClick={downloadAttendanceReport} disabled={attendanceEvents.length === 0}><Download size={15} />{translate("events.exportAttendance")}</button></div>
+          <div className="table-scroll"><table className="people-table event-table attendance-report-table"><thead><tr><th>{translate("events.date")}</th><th>{translate("events.gathering")}</th><th>{translate("events.type")}</th><th>{translate("events.adults")}</th><th>{translate("events.children")}</th><th>{translate("events.total")}</th><th>{translate("events.recordedAt")}</th></tr></thead><tbody>
+            {attendanceEvents.map((event) => <tr key={event.id}><td>{formatEventDate(event.eventDate)}</td><td>{event.title}</td><td>{eventKindLabel(event.kind)}</td><td>{event.attendanceAdults ?? 0}</td><td>{event.attendanceChildren ?? 0}</td><td>{(event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0)}</td><td>{event.attendanceRecordedAt ? formatUserDate(event.attendanceRecordedAt, true) : "—"}</td></tr>)}
+            {attendanceEvents.length === 0 && <tr><td colSpan={7} className="empty-state">{isLoading ? translate("events.loading") : translate("events.attendanceReportEmpty")}</td></tr>}
+          </tbody></table></div>
+        </div> : scheduleView === "month" ? <div className="schedule-calendar" aria-label={translate("events.calendarLabel")}>
           <div className="schedule-calendar-toolbar"><div><strong>{new Intl.DateTimeFormat(document.documentElement.lang || "en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${calendarMonth}-01T12:00:00Z`))}</strong><span>{translate("events.gatheringCount").replace("{count}", String(filteredEvents.filter((event) => event.eventDate.startsWith(calendarMonth)).length))}</span></div><div><button className="community-row-action" type="button" aria-label={translate("events.previousMonth")} onClick={() => moveCalendarMonth(-1)}><ArrowLeft size={16} /></button><button className="button button-secondary" type="button" onClick={() => { setCalendarMonth(today.slice(0, 7)); setFocusedEventId(""); }}>{translate("events.today")}</button><button className="community-row-action" type="button" aria-label={translate("events.nextMonth")} onClick={() => moveCalendarMonth(1)}><ArrowRight size={16} /></button></div></div>
           <div className="schedule-calendar-grid" role="grid" aria-label={translate("events.calendarDates")}><div className="schedule-calendar-weekdays" role="row">{["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-01-07"].map((date) => { const day = new Intl.DateTimeFormat(document.documentElement.lang || "en", { weekday: "short", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`)); return <span role="columnheader" key={date}>{day}</span>; })}</div><div className="schedule-calendar-days">{calendarDays.map((day) => {
             const dayEvents = filteredEvents.filter((event) => event.eventDate === day.date);
@@ -502,7 +531,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           })}
           {filteredEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? translate("events.loading") : loadError ? translate("events.scheduleLoadFailed") : query ? translate("events.noSearchMatch") : filter === "past" ? translate("events.noPast") : translate("events.noSchedule")}</td></tr>}
         </tbody></table></div>}
-        <footer className="table-footer"><span>{translate("events.showing").replace("{shown}", String(filteredEvents.length)).replace("{total}", String(events.length))}</span><span className="event-footer-note">{translate("events.timeZone").replace("{timeZone}", departmentTimeZone)}</span></footer>
+        {scheduleView !== "attendance" && <footer className="table-footer"><span>{translate("events.showing").replace("{shown}", String(filteredEvents.length)).replace("{total}", String(events.length))}</span><span className="event-footer-note">{translate("events.timeZone").replace("{timeZone}", departmentTimeZone)}</span></footer>}
       </section>
 
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>
