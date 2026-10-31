@@ -98,6 +98,13 @@ try {
  await must('DELETE',`/api/signage/media/${mediaId}`,undefined,409);
  await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:42,playerVersion:'0.2.0',downloadProgress:100,currentShowId:show.id},200,userA);
  assert.equal((await must('GET','/api/signage/displays')).find(d=>d.id===a.id).playerVersion,'0.2.0');
+ await must('POST',`/api/signage/displays/${a.id}/reload`,undefined,200,outsiderId);
+ await must('POST',`/api/signage/displays/${a.id}/reload`,undefined,403,userA);
+ await must('POST',`/api/signage/displays/${a.id}/reload`,undefined,200);
+ const heartbeat=await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:43,clockOffsetMs:60000,clockRoundTripMs:42},200,userA);
+ assert.equal(heartbeat.reloadVersion,2);assert.ok(Number.isFinite(Date.parse(heartbeat.serverTime)));
+ const timing=(await must('GET','/api/signage/displays')).find(d=>d.id===a.id);
+ assert.equal(timing.clockOffsetMs,60000);assert.equal(timing.clockRoundTripMs,42);
  await must('DELETE',`/api/signage/schedules/${schedule.id}`,undefined,204);
  await must('DELETE',`/api/signage/shows/${show.id}`,undefined,204);
  plan=await must('GET',`/api/signage/device/${a.id}/plan`,undefined,200,userA);assert.equal(plan.defaultShowId,null);assert.equal(plan.shows.length,0);

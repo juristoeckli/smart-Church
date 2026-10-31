@@ -65,6 +65,11 @@ export function registerSignageSystem(routes: FastifyInstance, context: ModuleSe
   const result=await pool!.query('UPDATE signage_displays SET name=$3,default_show_id=$4 WHERE id=$1 AND department_id=$2 RETURNING id',[request.params.id,site,request.body.name.trim(),request.body.defaultShowId]);return result.rowCount?result.rows[0]:reply.code(404).send({error:'Display not found.'});
  });
  registerSignagePairing(routes,context,admin);
+ routes.post<{Params:{id:string}}>('/api/signage/displays/:id/reload',{schema:{params:idParams}},async(request,reply)=>{
+  if(!validateMutation(request,reply))return reply;const site=await manager(request,reply);if(!site)return reply;
+  const result=await pool!.query('UPDATE signage_displays SET reload_version=reload_version+1 WHERE id=$1 AND department_id=$2 RETURNING id',[request.params.id,site]);
+  return result.rowCount?{ok:true}:reply.code(404).send({error:'Display not found.'});
+ });
  async function plan(site:string,id:string){
   const client=await pool!.connect();try{await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
   const shows=(await client.query(`SELECT id,published_title AS title,published_slides AS slides,revision FROM signage_shows WHERE department_id=$1 AND published_at IS NOT NULL AND (id=(SELECT default_show_id FROM signage_displays WHERE id=$2 AND department_id=$1) OR id IN(SELECT show_id FROM signage_schedules WHERE display_id=$2 AND department_id=$1 AND ends_at>now() AND starts_at<now()+interval '7 days'))`,[site,id])).rows;

@@ -1,12 +1,45 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.4";
+  const VERSION = "0.3.5";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
   const setup = document.getElementById("setup");
   const pairError = document.getElementById("pair-error");
   const pairButton = document.getElementById("pair-button");
+  const fullscreenButton = document.getElementById("fullscreen");
+  let connectionOnline = false;
+  function fullscreenActive() {
+    return document.fullscreenElement === document.documentElement || document.webkitFullscreenElement === document.documentElement;
+  }
+  function updateConnectionChrome() {
+    document.body.classList.toggle("display-connected", connectionOnline);
+    fullscreenButton.hidden = connectionOnline || fullscreenActive();
+  }
+  function requestFullscreen() {
+    if (fullscreenActive()) return true;
+    const root = document.documentElement;
+    const request = root.requestFullscreen || root.webkitRequestFullscreen;
+    if (typeof request !== "function") {
+      fullscreenButton.textContent = "Fullscreen unavailable";
+      fullscreenButton.disabled = true;
+      updateConnectionChrome();
+      return false;
+    }
+    try {
+      const result = request.call(root);
+      if (result && typeof result.catch === "function") result.catch(updateConnectionChrome);
+      return true;
+    } catch (ignored) { updateConnectionChrome(); return false; }
+  }
+  function setConnectionOnline(online) {
+    connectionOnline = online;
+    updateConnectionChrome();
+    if (online && !fullscreenActive()) requestFullscreen();
+  }
+  document.addEventListener("fullscreenchange", updateConnectionChrome);
+  document.addEventListener("webkitfullscreenchange", updateConnectionChrome);
+  fullscreenButton.onclick = () => requestFullscreen();
   const pendingKey="smart-church-signage-pending"; let pairingPending=null,pairingBusy=false,pairingTimer;
   const boot = performance.now();
   const memory = new Map();
@@ -15,6 +48,13 @@
   let progress = 0, networkError = "", storageError = "", playbackError = "";
   let currentKey = "", currentShow = null, slideIndex = 0, slideTimer, mediaUrl = "";
   let databasePromise;
+  let clockRoundTrip = null, lastContact = 0;
+  let clockAnchor = null, clockTick = 0;
+  function correctedNow() { return clockAnchor === null ? Date.now() + offset : clockAnchor + performance.now() - clockTick; }
+  function connectionState(connected) {
+    setConnectionOnline(connected);
+    if (connected) lastContact = performance.now();
+  }
   // TV browsers can run async functions but lack newer DOM and Blob methods.
   function replaceScreen(...children) {
     while (screen.firstChild) screen.removeChild(screen.firstChild);
@@ -95,10 +135,11 @@
   async function disconnect(reason = "") {
     const previous = credentials;
     credentials = null; plan = null;
+    connectionState(false);
     controllers.forEach(controller => controller.abort());
     stopPlayback(); memory.clear();
     try { localStorage.removeItem(CONNECTION_KEY); } catch (ignored) {}
-    setup.hidden = false; pairError.textContent = reason;
+    setConnectionOnline(false); setup.hidden = false; pairError.textContent = reason;
     text("Display disconnected"); status.textContent = "Pair this screen to continue";
     if (previous) await prune(previous.displayId);
     void beginPairing();
@@ -189,8 +230,10 @@
     const connection = credentials;
     syncing = true;
     try {
+      const sentAt = Date.now(), sentTick = performance.now();
       const next = await (await api("/plan", {}, connection)).json();
-      const nextOffset = Date.parse(next.serverTime) - Date.now();
+      const elapsed = performance.now() - sentTick;
+      const nextOffset = clockRoundTrip === null ? Date.parse(next.serverTime) - (sentAt + elapsed / 2) : offset;
       if (!validPlan(next)) throw new Error("The playback plan is invalid. Retrying automatically.");
       if (credentials !== connection) return;
       const assets = next.media || [];
@@ -223,6 +266,9 @@
       if (persisted) persisted = await cache("set", connection.displayId + ":plan:", record) !== undefined;
       if (credentials !== connection) return;
       plan = next; offset = nextOffset; progress = 100; networkError = "";
+      if (clockAnchor === null) { clockAnchor = Date.now() + offset; clockTick = performance.now(); }
+      connectionState(true);
+      setConnectionOnline(true);
       status.textContent = storageError ? "Connected · offline storage unavailable" : "Connected";
       await selectPlayback();
       const keep = new Set([connection.displayId + ":plan:", ...assets.map(asset => connection.displayId + ":media:" + asset.id)]);
@@ -231,20 +277,28 @@
     } catch (error) {
       if (credentials !== connection) return;
       networkError = error.message;
+      connectionState(false);
+      setConnectionOnline(false);
       status.textContent = plan ? "Offline · playing downloaded content" : "Waiting for connection";
     } finally { syncing = false; }
   }
   async function selectPlayback() {
     if (!credentials || !plan) return;
-    const now = Date.now() + offset;
+    const now = correctedNow();
     if (now >= Date.parse(plan.validUntil)) {
       stopPlayback(); text("Waiting for an updated schedule"); return;
     }
     const schedule = plan.schedules.find(item => Date.parse(item.startsAt) <= now && Date.parse(item.endsAt) > now);
     const show = plan.shows.find(item => item.id === (schedule ? schedule.showId : plan.defaultShowId));
-    const key = show ? show.id + ":" + show.revision : "blank";
+    const durations = show ? show.slides.map(slide => (slide.duration || 12) * 1000) : [];
+    const total = durations.reduce((sum, duration) => sum + duration, 0);
+    let phase = total ? ((now - (schedule ? Date.parse(schedule.startsAt) : 0)) % total + total) % total : 0;
+    let nextIndex = 0;
+    while (nextIndex < durations.length - 1 && phase >= durations[nextIndex]) phase -= durations[nextIndex++];
+    const key = show ? show.id + ":" + show.revision + ":" + nextIndex : "blank";
     if (key === currentKey) return;
     stopPlayback(); currentKey = key; currentShow = show || null;
+    slideIndex = nextIndex;
     if (show) await renderSlide(); else text("", "");
   }
   async function renderSlide() {
@@ -275,21 +329,47 @@
       playbackError = "";
     } catch (error) { playbackError = error.message; text("Content is downloading", "Playback will resume automatically."); }
     slideTimer = setTimeout(() => {
-      if (currentShow === show) { slideIndex = (slideIndex + 1) % show.slides.length; void renderSlide(); }
-    }, (slide.duration || 12) * 1000);
+      if (currentShow === show) void selectPlayback();
+    }, 250);
   }
   let reporting = false;
   async function heartbeat() {
     if (!credentials || reporting) return;
     reporting = true;
     try {
-      await api("/heartbeat", { method: "POST", body: JSON.stringify({
+      const sentAt = Date.now(), sentTick = performance.now();
+      const result = await (await api("/heartbeat", { method: "POST", body: JSON.stringify({
         installationType: /Electron/i.test(navigator.userAgent) ? "Windows app" : matchMedia("(display-mode: standalone)").matches ? "Installed browser" : "Browser",
         uptimeSeconds: Math.floor((performance.now() - boot) / 1000), playerVersion: VERSION,
         currentShowId: (currentShow && currentShow.id) || "", playbackError: [playbackError, storageError, networkError].filter(Boolean).join(" · ").slice(0, 1000),
         downloadProgress: progress,
-      }) });
-    } catch (ignored) {} finally { reporting = false; }
+        ...(clockRoundTrip === null ? {} : {clockOffsetMs:correctedNow()-Date.now(),clockRoundTripMs:clockRoundTrip}),
+      }) })).json();
+      const roundTrip = performance.now() - sentTick;
+      const serverTime = Date.parse(result.serverTime);
+      if (Number.isFinite(serverTime)) {
+        offset = serverTime - (sentAt + roundTrip / 2); clockRoundTrip = roundTrip;
+        clockAnchor = serverTime + roundTrip / 2; clockTick = performance.now();
+      }
+      connectionState(true);
+      const reloadKey = CONNECTION_KEY + "-reload-" + credentials.displayId;
+      if (Number.isInteger(result.reloadVersion) && result.reloadVersion > 0) {
+        let previous = 0;
+        try { previous = Number(localStorage.getItem(reloadKey) || 0); } catch (ignored) {}
+        const url = new URL(location.href);
+        if (url.searchParams.get("reloadDisplay") === credentials.displayId) previous = Math.max(previous, Number(url.searchParams.get("reloadVersion") || 0));
+        if (result.reloadVersion > previous) {
+          try { localStorage.setItem(reloadKey, String(result.reloadVersion)); } catch (ignored) {
+            // Retain the acknowledgment in this tab's URL when TV storage is blocked.
+            url.searchParams.set("reloadDisplay", credentials.displayId);
+            url.searchParams.set("reloadVersion", String(result.reloadVersion));
+            try { history.replaceState(null, "", url.href); } catch (ignoredHistory) { return; }
+          }
+          location.reload(); return;
+        }
+      }
+      void selectPlayback();
+    } catch (ignored) { connectionState(false); } finally { reporting = false; }
   }
   function showPairing() {
     setup.hidden=false;
@@ -328,7 +408,7 @@
         const connection={displayId:result.displayId,departmentId:result.departmentId,apiKey:pairingPending.apiKey};
         try { localStorage.setItem(CONNECTION_KEY,JSON.stringify(connection));localStorage.removeItem(pendingKey); }
         catch (ignored) { storageError="This browser cannot save its connection. Enable site storage. Pair again after restarting."; }
-        credentials=connection;pairingPending=null;plan=null;currentKey="";setup.hidden=true;pairError.textContent="";
+        credentials=connection;pairingPending=null;plan=null;currentKey="";setup.hidden=true;pairError.textContent="";setConnectionOnline(true);
         if((navigator.storage && navigator.storage.persist))void navigator.storage.persist().catch(()=>{});
         await synchronize();void heartbeat();return;
       }
@@ -336,10 +416,11 @@
     }catch(error){pairError.textContent=error.message;}
     finally{pairingBusy=false;if(!credentials)pairingTimer=setTimeout(()=>pairingPending?pollPairing():beginPairing(),3000);}
   }
-  pairButton.onclick=()=>{if(pairingBusy)return;pairingPending=null;try{localStorage.removeItem(pendingKey);}catch (ignored) {}void beginPairing();};
+  pairButton.onclick=()=>{if(pairingBusy)return;requestFullscreen();pairingPending=null;try{localStorage.removeItem(pendingKey);}catch (ignored) {}void beginPairing();};
   async function start() {
     text("Connecting…");
     if (!credentials) {void beginPairing();return;}
+    setConnectionOnline(true);
     setup.hidden = true;
     const saved = await cache("get", credentials.displayId + ":plan:");
     if (saved && validPlan(saved.plan) && Number.isFinite(saved.offset)) {
@@ -354,5 +435,6 @@
   void start();
   setInterval(() => void synchronize(), 30000);
   setInterval(() => void heartbeat(), 30000);
-  setInterval(() => {void selectPlayback();if(!credentials)showPairing();}, 1000);
+  setInterval(() => {void selectPlayback();if(!credentials)showPairing();}, 250);
+  setInterval(() => { if (lastContact && performance.now() - lastContact > 90000) connectionState(false); }, 5000);
 })();

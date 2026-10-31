@@ -23,28 +23,32 @@ function element(tag = '') {
     removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
     appendChild(child) { this.children.push(child); }};
 }
-async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false} = {}) {
+async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false, timing = false, reloadVersion = 0} = {}) {
   const nodes = new Map(), calls = [], timers = [];
+  const intervals = [], reports = [], saved = new Map(); let reloads = 0;
   const connection = {displayId: 'display', departmentId: 'department', apiKey: 'sc_' + 'k'.repeat(43)};
   const pending = {code: 'ABCD-EFGH', pairingToken: 't'.repeat(43), apiKey: connection.apiKey, expiresAt: new Date(Date.now()+900000).toISOString()};
   const plan = {serverTime: new Date().toISOString(), validUntil: new Date(Date.now()+86400000).toISOString(),
     defaultShowId: 'show', schedules: [], media: [{id: 'image', size: bytes.length, sha256}],
     shows: [{id: 'show', revision: 1, slides: [{kind: 'image', mediaId: 'image'}]}]};
+  if(timing) {plan.serverTime=new Date(1060000).toISOString();plan.validUntil=new Date(2060000).toISOString();plan.media=[];plan.shows[0].slides=[{heading:'Early',duration:12},{heading:'Late',duration:12}];}
   const context = {performance, Map, Set, Blob: LegacyBlob, FileReader: LegacyFileReader,
-    crypto: webcrypto, AbortController, Response, URL: {createObjectURL: () => 'blob:test', revokeObjectURL() {}},
-    document: {getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener() {}},
-    localStorage: {getItem: key => paired && key.endsWith('connection') ? JSON.stringify(connection) : null,
-      setItem() { if (blockedStorage) throw Error('storage blocked'); }, removeItem() {}},
+    crypto: webcrypto, AbortController, Response, URL: class extends URL {static createObjectURL(){return 'blob:test';} static revokeObjectURL(){}},
+    document: {body:{classList:{toggle(){}}},documentElement:element(),getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener() {}},
+    localStorage: {getItem: key => saved.get(key) || (paired && key.endsWith('connection') ? JSON.stringify(connection) : null),
+      setItem(key,value) { if (blockedStorage) throw Error('storage blocked'); saved.set(key,value); }, removeItem(key) {saved.delete(key);}},
     navigator: {userAgent: 'SMART-TV Tizen 6.0 Chrome/76'},
     indexedDB: {open() { throw Error('offline storage unavailable'); }},
-    location: {pathname: '/signage-display.html'}, history: {replaceState(_a, _b, path) { context.location.pathname = path; }},
-    setTimeout(fn, delay) { if (delay === 3000) timers.push(fn); return 1; }, clearTimeout() {}, setInterval() {},
+    location: {href:'https://test/signage-display.html',pathname: '/signage-display.html',reload(){reloads++;}}, history: {replaceState(_a, _b, path) { context.location.pathname = path; }},
+    setTimeout(fn, delay) { if (delay === 3000) timers.push(fn); return 1; }, clearTimeout() {}, setInterval(fn,delay) {intervals.push({fn,delay});},
     requestAnimationFrame() {}, addEventListener() {}, matchMedia: () => ({matches: false}),
-    fetch: async path => {
+    fetch: async (path,options) => {
       calls.push(path);
+      if(path.endsWith('/heartbeat')) {reports.push(JSON.parse(options.body));return Response.json({serverTime:timing?new Date(1060000).toISOString():new Date().toISOString(),reloadVersion});}
       if (path.endsWith('/media/image')) return {status: 200, statusText: 'OK', headers: {}, arrayBuffer: async () => bytes.buffer};
       return Response.json(path.endsWith('/start') ? pending : path.endsWith('/status') ? {status: 'connected', ...connection} : path.endsWith('/plan') ? plan : {});
     }};
+  if(timing) context.Date=class extends Date { static now(){return 1000000;} };
   // Response.blob also returns the older Blob shape.
   context.Response = class extends Response { async blob() { return new LegacyBlob([await this.arrayBuffer()]); } };
   if (legacyTransport) {
@@ -66,7 +70,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
           assert.equal(this.headers['x-department-id'], connection.departmentId);
         }
         if (this.url.endsWith('/status')) assert.equal(JSON.parse(body).pairingToken, pending.pairingToken);
-        const response = await fetch(this.url);
+        const response = await fetch(this.url,{body});
         this.status = response.status;
         this.statusText = response.statusText;
         this.response = await response.arrayBuffer();
@@ -78,7 +82,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
   vm.runInNewContext(source, context);
   const settle = async () => { for (let i=0; i<30; i++) await new Promise(resolve => setImmediate(resolve)); };
   await settle();
-  return {context, nodes, calls, timers, settle};
+  return {context, nodes, calls, timers, settle, intervals, reports, reloads:()=>reloads};
 }
 const connected = await boot({paired: true});
 assert.equal(connected.nodes.get('screen').children[0].tag, 'img');
@@ -99,4 +103,12 @@ assert.ok(chrome63.calls.some(path => path.endsWith('/heartbeat')));
 const timedOut = await boot({legacyTransport: true, timeout: true});
 assert.match(timedOut.nodes.get('pair-error').textContent, /timed out/);
 assert.ok(timedOut.timers.length, 'pairing retries after an XHR timeout');
+const timed=await boot({paired:true,timing:true,reloadVersion:1});
+assert.equal(timed.nodes.get('screen').children[0].textContent,'Early','slide uses corrected server time');
+assert.equal(timed.reloads(),1);
+timed.intervals.find(item=>item.delay===30000&&item.fn.toString().includes('heartbeat')).fn();await timed.settle();
+assert.equal(timed.reloads(),1,'reload command is remembered before reloading');
+assert.ok(Math.abs(timed.reports.at(-1).clockOffsetMs-60000)<1000);
+assert.ok(timed.reports.at(-1).clockRoundTripMs>=0);
+assert.equal(timed.nodes.get('fullscreen').hidden,true,'controls hidden while connected');
 console.log('PASS: TV pairing, playback, heartbeat, legacy DOM/Blob, unavailable storage');

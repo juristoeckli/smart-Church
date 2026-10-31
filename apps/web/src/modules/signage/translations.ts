@@ -1,5 +1,9 @@
 import type {UserLanguage} from '@smart-church/contracts';
 const phrases: Array<[string,string,string,string]> = [
+ ['Reload display','Bildschirm neu laden','Recharger l’écran','Ricarica schermo'],
+ ['Reload requested. The display will reload within 30 seconds when connected.','Neuladen angefordert. Der verbundene Bildschirm lädt innerhalb von 30 Sekunden neu.','Rechargement demandé. L’écran connecté se rechargera sous 30 secondes.','Ricaricamento richiesto. Lo schermo connesso si ricaricherà entro 30 secondi.'],
+ ['Clock offset','Zeitabweichung','Décalage horaire','Scostamento orario'],
+ ['Clock round trip','Zeitabgleich-Laufzeit','Aller-retour de synchronisation','Tempo di sincronizzazione'],
  ['Display player URL','Bildschirm-URL','URL du lecteur','URL del lettore'],
  ['Open this address on the TV to get a connection code.','Öffne diese Adresse auf dem Fernseher, um einen Verbindungscode zu erhalten.','Ouvrez cette adresse sur le téléviseur pour obtenir un code de connexion.','Apri questo indirizzo sul televisore per ottenere un codice di connessione.'],
  ['Replace screen','Bildschirm ersetzen','Remplacer l’écran','Sostituisci schermo'],
