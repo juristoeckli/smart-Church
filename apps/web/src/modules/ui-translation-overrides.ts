@@ -630,6 +630,8 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Remote text copied to your clipboard.": "Remote-Text wurde in die Zwischenablage kopiert.",
       "Allow clipboard access in your browser, then try again.": "Erlaube den Zwischenablagezugriff im Browser und versuche es erneut.",
       "Clipboard reading is not available in this browser.": "Dieser Browser unterstützt das Lesen der Zwischenablage nicht.",
+      "This browser does not allow clipboard reading here.": "Dieser Browser erlaubt hier keinen Zugriff auf die Zwischenablage.",
+      "Allow clipboard access in your browser to use automatic sync.": "Erlaube den Zwischenablagezugriff im Browser, um die automatische Synchronisierung zu nutzen.",
       "Your clipboard was sent to the remote computer.": "Der Inhalt deiner Zwischenablage wurde an den Remote-Computer gesendet.",
     },
     fr: {
@@ -724,6 +726,8 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Remote text copied to your clipboard.": "Le texte distant a été copié dans votre presse-papiers.",
       "Allow clipboard access in your browser, then try again.": "Autorisez l’accès au presse-papiers dans votre navigateur, puis réessayez.",
       "Clipboard reading is not available in this browser.": "La lecture du presse-papiers n’est pas disponible dans ce navigateur.",
+      "This browser does not allow clipboard reading here.": "Ce navigateur n’autorise pas la lecture du presse-papiers ici.",
+      "Allow clipboard access in your browser to use automatic sync.": "Autorisez l’accès au presse-papiers dans votre navigateur pour utiliser la synchronisation automatique.",
       "Your clipboard was sent to the remote computer.": "Le contenu de votre presse-papiers a été envoyé à l’ordinateur distant.",
     },
     it: {
@@ -818,6 +822,8 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
       "Remote text copied to your clipboard.": "Il testo remoto è stato copiato negli appunti.",
       "Allow clipboard access in your browser, then try again.": "Consenti l’accesso agli appunti nel browser e riprova.",
       "Clipboard reading is not available in this browser.": "La lettura degli appunti non è disponibile in questo browser.",
+      "This browser does not allow clipboard reading here.": "Questo browser non consente di leggere gli appunti qui.",
+      "Allow clipboard access in your browser to use automatic sync.": "Consenti l’accesso agli appunti nel browser per usare la sincronizzazione automatica.",
       "Your clipboard was sent to the remote computer.": "Il contenuto degli appunti è stato inviato al computer remoto.",
     },
   },
