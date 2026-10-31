@@ -37,6 +37,39 @@ type RpcResponse = { type: "response"; id: string; status: number; headers: Reco
 type RpcBinaryResponse = { type: "binary-response"; id: string; status: number; headers: Record<string, string>; bytes: Buffer };
 type Pending = { peerInstallationId: string; resolve: (value: RpcResponse | RpcBinaryResponse) => void; reject: (error: Error) => void; timeout: NodeJS.Timeout };
 
+function webSocketFailure(event: Event, host: string) {
+  const errorEvent = event as Event & { error?: unknown; message?: unknown };
+  const messages: string[] = [];
+  const codes: string[] = [];
+  let current: unknown = errorEvent.error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if (typeof current !== "object") break;
+    const item = current as { message?: unknown; code?: unknown; cause?: unknown };
+    if (typeof item.message === "string" && item.message) messages.push(item.message);
+    if (typeof item.code === "string" && item.code) codes.push(item.code);
+    current = item.cause;
+  }
+  if (typeof errorEvent.message === "string" && errorEvent.message) messages.push(errorEvent.message);
+  const code = codes[0];
+  if (codes.some((value) => value === "ENOTFOUND" || value === "EAI_AGAIN")) return { reason: `DNS lookup for ${host} failed (${code}). Check the server URL and DNS from the server running Smart-Church.`, code };
+  if (codes.includes("ECONNREFUSED")) return { reason: `Connection to ${host} was refused. Check that the server is running and its HTTPS/API port is reachable.`, code };
+  if (codes.some((value) => value === "ETIMEDOUT" || value === "EHOSTUNREACH" || value === "ENETUNREACH")) return { reason: `The network connection to ${host} timed out or is unreachable (${code}). Check routing, firewall rules, and the HTTPS/API port.`, code };
+  if (codes.some((value) => value.startsWith("CERT_") || value.startsWith("ERR_TLS_") || value === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || value === "DEPTH_ZERO_SELF_SIGNED_CERT")) return { reason: `TLS certificate validation failed for ${host} (${code}). Use a trusted certificate whose name matches the server URL.`, code };
+  const detail = messages.join("; ");
+  const status = detail.match(/(?:status(?: code)?|HTTP)\s*[:=]?\s*(\d{3})/i)?.[1];
+  if (status) {
+    const hint = status === "401" || status === "403"
+      ? "Check the saved peer identity, HTTPS termination, and proxy forwarding of WebSocket upgrade headers."
+      : status === "404"
+        ? "Check that the Sync module is enabled and the proxy forwards the federation WebSocket path."
+        : "Check the remote server logs and reverse-proxy configuration.";
+    return { reason: `${host} rejected the WebSocket handshake with HTTP ${status}. ${hint}`, code: `HTTP_${status}` };
+  }
+  const sanitized = detail.replace(/wss?:\/\/[^\s?]+(?:\?[^\s]*)?/gi, `WebSocket endpoint on ${host}`).slice(0, 180);
+  if (sanitized && !/network error or non-101 status code/i.test(sanitized)) return { reason: `Could not establish a WebSocket connection to ${host}: ${sanitized}`, code };
+  return { reason: `Could not establish a WebSocket connection to ${host}. The remote endpoint rejected the handshake or the network connection failed. Check that Sync is enabled and the HTTPS proxy forwards WebSocket upgrades.`, code };
+}
+
 function closePeerSocket(socket: Socket | WebSocket, code = 1002, reason = "Invalid message") {
   if (socket instanceof WebSocket) socket.close(code, reason);
   else socket.destroy();
@@ -95,6 +128,7 @@ export class FederationChannels {
   private readonly bootstrapSockets = new WeakMap<Socket, { publicKeyPem: string }>();
   private readonly pending = new Map<string, Pending>();
   private readonly outboundErrors = new Map<string, string>();
+  private readonly loggedOutboundErrors = new Map<string, string>();
   private readonly bootstrapAttempts = new Map<string, { count: number; expiresAt: number }>();
   private reconnectTimer: NodeJS.Timeout | null = null;
   private closed = false;
@@ -214,7 +248,12 @@ export class FederationChannels {
     const payload = JSON.stringify(request);
     if (Buffer.byteLength(payload) > maxTextMessageBytes) throw new Error("The federation WebSocket request exceeds its message limit.");
     const response = await new Promise<RpcResponse>((resolve, reject) => {
-      const timeout = setTimeout(() => { socket.close(); reject(new Error("The federation WebSocket bootstrap request timed out.")); }, Math.min(maxRequestDurationMs, timeoutMs));
+      const timeout = setTimeout(() => {
+        const reason = `The federation WebSocket bootstrap to ${origin.host} timed out. Check network reachability, firewall rules, and WebSocket forwarding on the HTTPS/API port.`;
+        this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", errorCode: "ETIMEDOUT", reason }, "Sync WebSocket bootstrap timed out.");
+        socket.close();
+        reject(new Error(reason));
+      }, Math.min(maxRequestDurationMs, timeoutMs));
       timeout.unref();
       const finish = (error?: Error, value?: RpcResponse) => { clearTimeout(timeout); socket.removeEventListener("message", onMessage); socket.removeEventListener("error", onError); socket.removeEventListener("close", onClose); socket.close(); error ? reject(error) : resolve(value!); };
       const onMessage = (event: MessageEvent) => {
@@ -225,8 +264,16 @@ export class FederationChannels {
           finish(undefined, result);
         } catch (error) { finish(error instanceof Error ? error : new Error("The remote server returned an invalid bootstrap response.")); }
       };
-      const onError = () => finish(new Error(`Could not connect to ${origin.host} over WebSocket.`));
-      const onClose = () => finish(new Error("The remote WebSocket closed before completing bootstrap."));
+      const onError = (event: Event) => {
+        const failure = webSocketFailure(event, origin.host);
+        this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", reason: failure.reason, errorCode: failure.code }, "Sync WebSocket bootstrap connection failed.");
+        finish(new Error(failure.reason));
+      };
+      const onClose = (event: CloseEvent) => {
+        const reason = `The remote WebSocket closed before completing bootstrap (code ${event.code}${event.reason ? `: ${event.reason}` : ""}). Check the remote Sync module and server logs.`;
+        this.app.log.warn({ module: "sync", remoteHost: origin.host, phase: "bootstrap", closeCode: event.code, closeReason: event.reason }, "Sync WebSocket bootstrap closed before a response.");
+        finish(new Error(reason));
+      };
       socket.addEventListener("message", onMessage, { once: true });
       socket.addEventListener("error", onError, { once: true });
       socket.addEventListener("close", onClose, { once: true });
@@ -244,7 +291,10 @@ export class FederationChannels {
     for (const peer of peers.rows) {
       const current = this.outgoing.get(peer.installation_id);
       if (current && current.readyState < WebSocket.CLOSING) continue;
-      void this.connect(peer).catch(() => undefined);
+      void this.connect(peer).catch((error) => {
+        const reason = error instanceof Error ? error.message : "The outbound WebSocket connection failed before opening.";
+        this.logOutboundFailure(peer.installation_id, peer.base_url, reason, error);
+      });
     }
   }
 
@@ -274,24 +324,29 @@ export class FederationChannels {
     socket.addEventListener("message", (event) => this.receivePeerMessage(peer.installation_id, socket, event.data));
     socket.addEventListener("close", (event) => {
       if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
-      if (event.code !== 1000 && !this.outboundErrors.has(peer.installation_id)) this.outboundErrors.set(peer.installation_id, `The remote WebSocket closed the channel (code ${event.code}${event.reason ? `: ${event.reason}` : ""}).`);
+      if (event.code !== 1000 && !this.outboundErrors.has(peer.installation_id)) {
+        const reason = `The remote WebSocket closed the channel (code ${event.code}${event.reason ? `: ${event.reason}` : ""}). Check the remote Sync module and server logs.`;
+        this.outboundErrors.set(peer.installation_id, reason);
+        this.logOutboundFailure(peer.installation_id, origin.host, reason);
+      }
       this.failPeerRequests(peer.installation_id);
     });
     socket.addEventListener("error", (event) => {
       if (this.outgoing.get(peer.installation_id) === socket) this.outgoing.delete(peer.installation_id);
-      const eventMessage = (event as Event & { message?: unknown }).message;
-      const detail = typeof eventMessage === "string" && eventMessage ? `: ${eventMessage.slice(0, 160)}` : "";
-      this.outboundErrors.set(peer.installation_id, `Could not connect to ${origin.host} over WebSocket${detail}.`);
+      const failure = webSocketFailure(event, origin.host);
+      this.outboundErrors.set(peer.installation_id, failure.reason);
+      this.logOutboundFailure(peer.installation_id, origin.host, failure.reason, (event as Event & { error?: unknown }).error, failure.code);
     });
     const attempt = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        const reason = `The federation WebSocket connection to ${origin.host} timed out.`;
+        const reason = `The federation WebSocket connection to ${origin.host} timed out after 10 seconds. Check network reachability, firewall rules, and WebSocket forwarding on the HTTPS/API port.`;
         this.outboundErrors.set(peer.installation_id, reason);
+        this.logOutboundFailure(peer.installation_id, origin.host, reason, undefined, "ETIMEDOUT");
         socket.close();
         reject(new Error(reason));
       }, 10_000);
       timeout.unref();
-      socket.addEventListener("open", () => { clearTimeout(timeout); this.outboundErrors.delete(peer.installation_id); resolve(); }, { once: true });
+      socket.addEventListener("open", () => { clearTimeout(timeout); this.outboundErrors.delete(peer.installation_id); this.loggedOutboundErrors.delete(peer.installation_id); this.app.log.info({ module: "sync", peerInstallationId: peer.installation_id, remoteHost: origin.host }, "Authenticated Sync WebSocket channel connected."); resolve(); }, { once: true });
       socket.addEventListener("error", () => { clearTimeout(timeout); reject(new Error(this.outboundErrors.get(peer.installation_id) ?? "The federation WebSocket connection failed.")); }, { once: true });
     }).finally(() => { if (this.connecting.get(peer.installation_id) === attempt) this.connecting.delete(peer.installation_id); });
     this.connecting.set(peer.installation_id, attempt);
@@ -303,6 +358,23 @@ export class FederationChannels {
     const deadline = Date.now() + Math.min(timeoutMs, 15_000);
     while (!this.has(peer.installation_id) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
     if (!this.has(peer.installation_id)) throw new Error("No authenticated WebSocket channel is open to this peer.");
+  }
+
+  private logOutboundFailure(peerInstallationId: string, remoteHost: string | null, reason: string, error?: unknown, errorCode?: string) {
+    const safeReason = reason.replace(/wss?:\/\/([^/\s?#]+)[^\s]*/gi, "WebSocket endpoint at $1");
+    this.outboundErrors.set(peerInstallationId, safeReason);
+    if (this.loggedOutboundErrors.get(peerInstallationId) === safeReason) return;
+    this.loggedOutboundErrors.set(peerInstallationId, safeReason);
+    let causeMessage: string | undefined;
+    if (error && typeof error === "object") {
+      const candidate = error as { cause?: unknown };
+      const cause = candidate.cause && typeof candidate.cause === "object" ? candidate.cause as { message?: unknown; code?: unknown } : undefined;
+      if (typeof cause?.message === "string") causeMessage = cause.message.slice(0, 180).replace(/wss?:\/\/[^\s?]+(?:\?[^\s]*)?/gi, "WebSocket endpoint");
+      errorCode ??= typeof cause?.code === "string" ? cause.code : undefined;
+    }
+    let safeHost = remoteHost;
+    try { if (remoteHost && remoteHost.includes("://")) safeHost = new URL(remoteHost).host; } catch { safeHost = "invalid server URL"; }
+    this.app.log.warn({ module: "sync", peerInstallationId, remoteHost: safeHost ?? "unknown remote host", reason: safeReason, errorCode, cause: causeMessage }, "Could not establish the outbound Sync WebSocket channel.");
   }
 
   private async accept(request: IncomingMessage, socket: Socket, head: Buffer, url: URL) {
