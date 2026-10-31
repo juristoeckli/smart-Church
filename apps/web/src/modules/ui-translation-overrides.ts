@@ -374,6 +374,9 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
   "file-storage": {
     de: {
       "Church files": "Gemeindedateien", "FILE STORAGE": "DATEIABLAGE", "File storage": "Dateiablage",
+      Files: "Dateien", Trash: "Papierkorb", Restore: "Wiederherstellen", "Delete permanently": "Endgültig löschen",
+      "Trash is empty.": "Der Papierkorb ist leer.", "Move “{title}” to trash?": "„{title}“ in den Papierkorb verschieben?",
+      "Permanently delete “{title}” and its file? This cannot be undone.": "„{title}“ und die Datei endgültig löschen? Dies kann nicht rückgängig gemacht werden.",
       "Shared files for your church community": "Geteilte Dateien für deine Gemeinde",
       "Filter by category": "Nach Kategorie filtern", "Filter files by category": "Dateien nach Kategorie filtern",
       "Keep forms, guides, recordings, and other church files easy to find.": "Formulare, Leitfäden, Aufnahmen und andere Gemeindedateien leicht auffindbar halten.",
@@ -392,6 +395,9 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     },
     fr: {
       "Church files": "Fichiers de l’église", "FILE STORAGE": "FICHIERS", "File storage": "Stockage de fichiers",
+      Files: "Fichiers", Trash: "Corbeille", Restore: "Restaurer", "Delete permanently": "Supprimer définitivement",
+      "Trash is empty.": "La corbeille est vide.", "Move “{title}” to trash?": "Déplacer « {title} » dans la corbeille ?",
+      "Permanently delete “{title}” and its file? This cannot be undone.": "Supprimer définitivement « {title} » et son fichier ? Cette action est irréversible.",
       "Shared files for your church community": "Fichiers partagés de votre église",
       "Filter by category": "Filtrer par catégorie", "Filter files by category": "Filtrer les fichiers par catégorie",
       "Keep forms, guides, recordings, and other church files easy to find.": "Retrouvez facilement les formulaires, guides, enregistrements et autres fichiers de l’église.",
@@ -410,6 +416,9 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     },
     it: {
       "Church files": "File della chiesa", "FILE STORAGE": "ARCHIVIO FILE", "File storage": "Archivio file",
+      Files: "File", Trash: "Cestino", Restore: "Ripristina", "Delete permanently": "Elimina definitivamente",
+      "Trash is empty.": "Il cestino è vuoto.", "Move “{title}” to trash?": "Spostare “{title}” nel cestino?",
+      "Permanently delete “{title}” and its file? This cannot be undone.": "Eliminare definitivamente “{title}” e il relativo file? L’azione non può essere annullata.",
       "Shared files for your church community": "File condivisi della tua chiesa",
       "Filter by category": "Filtra per categoria", "Filter files by category": "Filtra i file per categoria",
       "Keep forms, guides, recordings, and other church files easy to find.": "Trova facilmente moduli, guide, registrazioni e altri file della chiesa.",

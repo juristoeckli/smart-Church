@@ -29,7 +29,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { ready: bytes <= 200 * 1024 * 1024, blockers: bytes > 200 * 1024 * 1024 ? ["Stored files exceed the current 200 MiB snapshot safety limit."] : [], recordCount: count };
     },
     exportSnapshot: async (client: PoolClient, departmentId) => {
-      const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
+      const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
       return { version: 1, files: files.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input) => {
@@ -41,17 +41,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (typeof file.id !== "string" || typeof file.title !== "string" || typeof file.category !== "string" || typeof file.file_name !== "string" || typeof file.content_type !== "string" || typeof file.file_size !== "number" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedData)) throw new Error("The File Storage snapshot contains an invalid file record.");
         const buffer = Buffer.from(encodedData, "base64");
         if (buffer.length !== file.file_size || buffer.length > resourceLimit) throw new Error("A replicated file does not match its declared size or exceeds 25 MiB.");
-        await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.created_at, file.updated_at]);
+        const deletedAt = file.deleted_at == null ? null : file.deleted_at;
+        if (deletedAt !== null && (typeof deletedAt !== "string" || !Number.isFinite(Date.parse(deletedAt)))) throw new Error("The File Storage snapshot contains an invalid deletion date.");
+        await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,created_at,updated_at,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.created_at, file.updated_at, deletedAt]);
       }
       return { recordCount: files.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input) => {
       if (!input || typeof input !== "object" || (input as { version?: unknown }).version !== 1 || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
       const expected = (input as { files: Array<Record<string, unknown>> }).files;
-      const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       if (actual.length !== expected.length) return { ready: false, blockers: [`Stored file count differs: expected ${expected.length}, found ${actual.length}.`] };
-      const expectedRows = expected.map(canonical).sort();
-      const actualRows = actual.map(canonical).sort();
+      const expectedRows = expected.map((row) => canonical({ ...row, deleted_at: row.deleted_at ?? null })).sort();
+      const actualRows = actual.map((row) => canonical({ ...row, deleted_at: row.deleted_at ?? null })).sort();
       return expectedRows.some((row, index) => row !== actualRows[index]) ? { ready: false, blockers: ["Stored file metadata or binary content differs after restore."] } : { ready: true, blockers: [] };
     },
   });
@@ -73,13 +75,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return departmentId;
     }
 
-    routes.get("/api/files", async (request, reply) => {
-      const departmentId = await department(request, reply);
+    routes.get<{ Querystring: { view?: string } }>("/api/files", async (request, reply) => {
+      const view = request.query.view ?? "active";
+      if (view !== "active" && view !== "trash") return reply.code(400).send({ error: "Choose a valid file view." });
+      const departmentId = await department(request, reply, view === "trash");
       if (!departmentId) return reply;
       const result = await pool!.query<ResourceRow>(
         `SELECT id, title, category, file_name, content_type, file_size, created_at FROM stored_files
-          WHERE department_id = $1 ORDER BY lower(category), lower(title), created_at DESC`,
-        [departmentId],
+          WHERE department_id = $1 AND ${view === "trash" ? "deleted_at IS NOT NULL" : "deleted_at IS NULL"}
+          ORDER BY lower(category), lower(title), created_at DESC`, [departmentId],
       );
       return result.rows.map(mapResource);
     });
@@ -116,7 +120,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!title || !category) return reply.code(400).send({ error: "Title and category are required." });
       const result = await pool!.query<ResourceRow>(
         `UPDATE stored_files SET title = $3, category = $4, updated_at = now()
-          WHERE id = $1 AND department_id = $2
+          WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL
           RETURNING id, title, category, file_name, content_type, file_size, created_at`,
         [request.params.id, departmentId, title, category],
       );
@@ -127,7 +131,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get<{ Params: { id: string } }>("/api/files/:id/download", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2", [request.params.id, departmentId]);
+      const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL", [request.params.id, departmentId]);
       const resource = result.rows[0];
       if (!resource) return reply.code(404).send({ error: "Resource not found." });
       reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
@@ -137,9 +141,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.delete<{ Params: { id: string } }>("/api/files/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
-      const result = await pool!.query("DELETE FROM stored_files WHERE id = $1 AND department_id = $2 RETURNING id", [request.params.id, departmentId]);
+      const result = await pool!.query("UPDATE stored_files SET deleted_at = now(), updated_at = now() WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
-      return { deleted: true };
+      return { deleted: true, trashed: true };
+    });
+
+    routes.post<{ Params: { id: string } }>("/api/files/:id/restore", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const result = await pool!.query("UPDATE stored_files SET deleted_at = NULL, updated_at = now() WHERE id = $1 AND department_id = $2 AND deleted_at IS NOT NULL RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return { restored: true };
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/files/:id/permanent", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const result = await pool!.query("DELETE FROM stored_files WHERE id = $1 AND department_id = $2 AND deleted_at IS NOT NULL RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      return { deleted: true, permanently: true };
     });
   });
 }
