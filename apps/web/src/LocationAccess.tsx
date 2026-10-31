@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
+import { ApiKeySettings } from "./ApiKeySettings";
 import { ModuleTranslationHost, registeredModules, translateModuleText } from "./module-registry";
 import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overrides";
 import { translateModuleMessage, translationsForModule } from "./modules/translations";
@@ -11,6 +12,8 @@ type LocationMember = {
   id: string;
   displayName: string;
   username: string;
+  isServiceUser?: boolean;
+  apiKeyEnabled?: boolean;
   role: "site_admin" | "member";
   permissions: LocationPermission[];
   modulePermissions: Record<string, string[]>;
@@ -134,12 +137,13 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
       <div className="location-access-layout">
         <aside className="location-access-list" aria-label={`${department.location} members`}>
           {availableUsers.length > 0 && <div className="location-access-add"><label htmlFor="location-access-add">Add an existing account</label><select id="location-access-add" value={addUserId} onChange={(event) => setAddUserId(event.target.value)}><option value="">Choose a user</option>{availableUsers.map((user) => <option value={user.id} key={user.id}>{user.displayName} (@{user.username})</option>)}</select><button className="button button-secondary" type="button" disabled={!addUserId || saving} onClick={() => void addUser()}><Plus size={15} />Add access</button></div>}
-          {loading ? <p className="user-access-empty" role="status">Loading people…</p> : members.length === 0 ? <p className="user-access-empty">No people have access to this location.</p> : members.map((member) => <button className={`user-access-item ${member.id === selectedId ? "user-access-item-active" : ""}`} type="button" key={member.id} onClick={() => { setSelectedId(member.id); setError(""); setNotice(""); }}><strong>{member.displayName}{member.id === currentUserId ? " (you)" : ""}</strong><small>@{member.username}</small><span>{member.role === "site_admin" ? "Site administrator" : "Member"}</span></button>)}
+          {loading ? <p className="user-access-empty" role="status">Loading people…</p> : members.length === 0 ? <p className="user-access-empty">No people have access to this location.</p> : members.map((member) => <button className={`user-access-item ${member.id === selectedId ? "user-access-item-active" : ""}`} type="button" key={member.id} onClick={() => { setSelectedId(member.id); setError(""); setNotice(""); }}><strong>{member.displayName}{member.id === currentUserId ? " (you)" : ""}</strong><small>@{member.username}</small><span>{member.isServiceUser ? "Service user" : member.role === "site_admin" ? "Site administrator" : "Member"}</span></button>)}
           {!loading && availableUsers.length === 0 && <p className="location-access-hint">New accounts are created by a Server Administrator in User access.</p>}
         </aside>
         <form className="location-access-form" onSubmit={save}>
           {selected ? <>
             <div className="user-access-form-heading"><h3>{selected.displayName}</h3><p>Access changes apply only to {department.location}. Server-wide account settings are managed separately.</p></div>
+            {selected.isServiceUser && <ApiKeySettings key={selected.id} mode="service" userId={selected.id} userName={selected.displayName} departmentId={department.id} enabled={Boolean(selected.apiKeyEnabled)} onEnabledChange={(enabled) => setMembers((current) => current.map((member) => member.id === selected.id ? { ...member, apiKeyEnabled: enabled } : member))} />}
             <label className="location-access-role">Location role<select value={role} onChange={(event) => setRole(event.target.value as LocationMember["role"])}><option value="member">Member</option><option value="site_admin">Site administrator</option></select></label>
             {role === "site_admin" ? <p className="location-access-inherited">Site administrators have all location rights and module rights.</p> : <>
               <fieldset className="module-rights-fieldset"><legend>Location rights</legend>{locationRights.map((right) => <label className="module-right-option" key={right.value}><input type="checkbox" checked={permissions.includes(right.value)} onChange={() => toggle(right.value, permissions, setPermissions)} /><span><strong>{right.label}</strong><small>{right.description}</small></span></label>)}</fieldset>

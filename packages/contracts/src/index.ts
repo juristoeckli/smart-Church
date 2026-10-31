@@ -241,7 +241,7 @@ export interface DepartmentProfile {
 export type VideoPermission = "video_basic" | "streaming_operator" | "stream_admin" | "routing_user" | "routing_admin";
 export type PresenterPermission = "editor" | "operator" | "admin";
 export type LocationPermission = "people_view_private" | "people_manage" | "events_manage" | "groups_manage" | "resources_manage";
-export type ServerPermission = "server_view" | "server_troubleshoot" | "server_manage";
+export type ServerPermission = "server_view" | "server_troubleshoot" | "server_manage" | "server_api";
 
 export type UpdateDepartmentProfile = Omit<DepartmentProfile, "id">;
 
@@ -258,6 +258,7 @@ export interface AuthenticatedUser {
   language: UserLanguage;
   languageIsCustom: boolean;
   serverPermissions: ServerPermission[];
+  isServiceUser?: boolean;
 }
 
 export type DateTimeFormat = "DD.MM.YYYY HH:MM" | "DD/MM/YYYY HH:MM" | "MM/DD/YYYY h:mm AM/PM" | "YYYY-MM-DD HH:MM";
@@ -277,6 +278,12 @@ export interface SiteUser {
   relationships: UserRelationship[];
   accountRole: "server_admin" | "user";
   serverPermissions: ServerPermission[];
+  isServiceUser: boolean;
+  apiKeyEnabled?: boolean;
+  serviceUserOwnerId?: string;
+  serviceUserOwnerName?: string;
+  adminNote?: string;
+  isEnabled: boolean;
   memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 
@@ -294,6 +301,10 @@ export interface CreateSiteUser {
   password: string;
   accountRole: "server_admin" | "user";
   serverPermissions?: ServerPermission[];
+  isServiceUser?: boolean;
+  serviceUserOwnerId?: string;
+  adminNote?: string;
+  isEnabled?: boolean;
   memberships: Array<{ departmentId: string; role: "site_admin" | "member"; contactId?: string; permissions?: LocationPermission[]; videoPermissions?: VideoPermission[]; presenterPermissions?: PresenterPermission[]; modulePermissions?: Record<string, string[]> }>;
 }
 

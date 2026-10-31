@@ -153,11 +153,42 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
         RETURNING user_id
      )
      SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.date_time_format, u.language, u.language_is_custom
-       FROM active_session s JOIN app_users u ON u.id = s.user_id`,
+       FROM active_session s JOIN app_users u ON u.id = s.user_id
+      WHERE u.is_service_user = false AND u.is_enabled = true`,
     [hashToken(token)],
   );
   const row = result.rows[0];
   return row ? { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) } : null;
+}
+
+function newApiKey() {
+  return `sc_${randomBytes(32).toString("base64url")}`;
+}
+
+async function currentApiKeyUser(token: string | undefined): Promise<AuthenticatedUser | null> {
+  if (!pool || !token || !/^sc_[A-Za-z0-9_-]{40,60}$/.test(token)) return null;
+  const result = await pool.query(
+    `SELECT id, email, username, display_name, role, server_permissions, must_change_password,
+            date_time_format, language, language_is_custom, is_service_user, is_enabled
+       FROM app_users WHERE api_key_hash = $1`,
+    [hashToken(token)],
+  );
+  const row = result.rows[0];
+  if (!row || !row.is_enabled || (!row.is_service_user && row.role !== "server_admin" && !(row.server_permissions ?? []).includes("server_api"))) return null;
+  if (row.must_change_password && !row.is_service_user) return null;
+  return {
+    id: row.id,
+    ...(row.email ? { email: row.email } : {}),
+    username: row.username,
+    displayName: row.display_name,
+    role: row.role,
+    mustChangePassword: row.must_change_password,
+    dateTimeFormat: row.date_time_format,
+    language: row.language,
+    languageIsCustom: row.language_is_custom,
+    serverPermissions: serverPermissionsForUser(row.role, row.server_permissions),
+    isServiceUser: row.is_service_user,
+  };
 }
 
 function setupCodeMatches(candidate: string) {
@@ -363,6 +394,8 @@ app.addHook("onRequest", async (request, reply) => {
   if (request.url === "/api/webhooks/resend") return;
   const method = request.method.toUpperCase();
   if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method)) return;
+  const bearerApiRequest = typeof request.headers.authorization === "string" && /^Bearer sc_[A-Za-z0-9_-]{40,60}$/.test(request.headers.authorization);
+  if (bearerApiRequest) return;
   if (process.env.NODE_ENV === "production") {
     const expectedOrigin = process.env.SMART_CHURCH_WEB_ORIGIN;
     const requestOrigin = request.headers.origin;
@@ -408,11 +441,15 @@ app.addHook("preHandler", async (request, reply) => {
   if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/")) return;
   if (!databaseReady) return;
-  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  const authorization = request.headers.authorization;
+  const bearerToken = typeof authorization === "string" && authorization.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  const user = bearerToken?.startsWith("sc_")
+    ? await currentApiKeyUser(bearerToken)
+    : await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
   if (!user) return reply.code(401).send({ error: "Sign in to continue." });
   request.authenticatedUser = user;
   reply.header("Cache-Control", "no-store");
-  if (user.mustChangePassword) return reply.code(403).send({ error: "Change your password before continuing." });
+  if (user.mustChangePassword && !user.isServiceUser) return reply.code(403).send({ error: "Change your password before continuing." });
 });
 
 function realtimeTopicForPath(pathname: string) {
@@ -1010,6 +1047,53 @@ app.get("/api/auth/status", async (request, reply): Promise<AuthStatus | { error
   };
 });
 
+app.get("/api/auth/api-key", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!userHasServerPermission(user.role, user.serverPermissions, "server_api")) return reply.code(403).send({ error: "API access permission is required." });
+  const result = await pool.query("SELECT api_key_hash IS NOT NULL AS enabled FROM app_users WHERE id=$1", [user.id]);
+  return { enabled: Boolean(result.rows[0]?.enabled) };
+});
+
+app.get("/api/auth/service-users", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  const result = await pool.query(
+    `SELECT id, display_name, username, api_key_hash IS NOT NULL AS api_key_enabled
+       FROM app_users WHERE is_service_user=true AND service_user_owner_id=$1
+      ORDER BY lower(display_name), lower(username)`,
+    [user.id],
+  );
+  return result.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username, apiKeyEnabled: row.api_key_enabled }));
+});
+
+app.post("/api/auth/api-key", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!validModuleMutation(request, reply)) return reply;
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!userHasServerPermission(user.role, user.serverPermissions, "server_api")) return reply.code(403).send({ error: "API access permission is required." });
+  const apiKey = newApiKey();
+  await pool.query("UPDATE app_users SET api_key_hash=$2 WHERE id=$1", [user.id, hashToken(apiKey)]);
+  return { enabled: true, apiKey };
+});
+
+app.delete("/api/auth/api-key", async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  if (!validModuleMutation(request, reply)) return reply;
+  const user = await currentUser(cookieValue(request.headers.cookie, sessionCookieNameFor(request)));
+  if (!user) return reply.code(401).send({ error: "Sign in to continue." });
+  if (!userHasServerPermission(user.role, user.serverPermissions, "server_api")) return reply.code(403).send({ error: "API access permission is required." });
+  await pool.query("UPDATE app_users SET api_key_hash=NULL WHERE id=$1", [user.id]);
+  return { enabled: false };
+});
+
 app.put<{ Body: { mode: HttpAccessMode } }>("/api/admin/web-settings/http-access", {
   schema: {
     body: {
@@ -1134,12 +1218,15 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
     return reply.code(429).send({ error: "Too many sign-in attempts. Wait 15 minutes and try again." });
   }
   const result = await pool.query(
-    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, date_time_format, language, language_is_custom FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
+    "SELECT id, email, username, password_hash, display_name, role, server_permissions, must_change_password, date_time_format, language, language_is_custom, is_service_user, is_enabled FROM app_users WHERE lower(email) = $1 OR lower(username) = $1",
     [identifier],
   );
   const row = result.rows[0];
   const passwordMatches = verifyPassword(request.body.password, row?.password_hash ?? dummyPasswordHash);
-  if (!row || !passwordMatches) {
+  if (row && passwordMatches && !row.is_enabled && !row.is_service_user) {
+    return reply.code(403).send({ error: "User disabeld" });
+  }
+  if (!row || !passwordMatches || row.is_service_user) {
     for (let index = 0; index < buckets.length; index += 1) {
       const key = buckets[index]!;
       const current = attempts[index] && attempts[index]!.resetAt > now ? attempts[index]! : { count: 0, resetAt: now + 15 * 60_000 };
@@ -1274,14 +1361,14 @@ app.get("/api/location-access", async (request, reply) => {
   const [location, members, availableUsers] = await Promise.all([
     pool.query("SELECT name FROM departments WHERE id = $1", [selectedDepartmentId]),
     pool.query(
-      `SELECT u.id, u.display_name, u.username, m.role, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
+      `SELECT u.id, u.display_name, u.username, u.is_service_user, (u.api_key_hash IS NOT NULL) AS api_key_enabled, m.role, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
          FROM department_memberships m JOIN app_users u ON u.id = m.user_id
         WHERE m.department_id = $1 ORDER BY lower(u.display_name), lower(u.username)`,
       [selectedDepartmentId],
     ),
     pool.query(
       `SELECT u.id, u.display_name, u.username FROM app_users u
-        WHERE NOT EXISTS (SELECT 1 FROM department_memberships m WHERE m.department_id = $1 AND m.user_id = u.id)
+        WHERE NOT u.is_service_user AND NOT EXISTS (SELECT 1 FROM department_memberships m WHERE m.department_id = $1 AND m.user_id = u.id)
         ORDER BY lower(u.display_name), lower(u.username)`,
       [selectedDepartmentId],
     ),
@@ -1289,7 +1376,7 @@ app.get("/api/location-access", async (request, reply) => {
   return {
     location: location.rows[0]?.name ?? "Location",
     currentUserId: request.authenticatedUser!.id,
-    members: members.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username, role: row.role, permissions: row.permissions ?? [], modulePermissions: { ...(row.module_permissions ?? {}), "video-steffisburg": row.module_permissions?.["video-steffisburg"] ?? row.module_permissions?.video ?? row.video_permissions ?? [], presenter: row.module_permissions?.presenter ?? row.presenter_permissions ?? [] } })),
+    members: members.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username, isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, role: row.role, permissions: row.permissions ?? [], modulePermissions: { ...(row.module_permissions ?? {}), "video-steffisburg": row.module_permissions?.["video-steffisburg"] ?? row.module_permissions?.video ?? row.video_permissions ?? [], presenter: row.module_permissions?.presenter ?? row.presenter_permissions ?? [] } })),
     availableUsers: availableUsers.rows.map((row) => ({ id: row.id, displayName: row.display_name, username: row.username })),
   };
 });
@@ -1387,10 +1474,14 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
   if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const result = await pool.query(
     `SELECT u.id, u.email, u.username, u.display_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
-            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role, u.server_permissions,
+            u.street, u.street_number, u.postal_code, u.city, u.role AS account_role, u.server_permissions, u.is_service_user,
+            u.service_user_owner_id, owner.display_name AS service_user_owner_name,
+            u.api_key_hash IS NOT NULL AS api_key_enabled,
+            u.admin_note, u.is_enabled,
             memberships.memberships,
             phones.phone_numbers, relations.relationships
        FROM app_users u
+       LEFT JOIN app_users owner ON owner.id=u.service_user_owner_id
        LEFT JOIN LATERAL (
          SELECT COALESCE(json_agg(json_build_object('departmentId', m.department_id, 'role', m.role, 'contactId', m.contact_id, 'permissions', m.permissions, 'videoPermissions', m.video_permissions, 'presenterPermissions', m.presenter_permissions, 'modulePermissions', m.module_permissions)), '[]'::json) AS memberships
            FROM department_memberships m WHERE m.user_id = u.id
@@ -1404,9 +1495,36 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
            FROM user_relationships r JOIN app_users related ON related.id = r.related_user_id
           WHERE r.user_id = u.id
        ) relations ON true
+      WHERE NOT u.is_service_user OR $1 = 'server_admin'
       ORDER BY u.display_name, u.email`,
+    [request.authenticatedUser?.role],
   );
-  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.is_service_user ? [] : row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, serviceUserOwnerName: row.service_user_owner_name ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, memberships: row.memberships }));
+});
+
+app.post<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/users/:id/api-key", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["enabled"], properties: { enabled: { type: "boolean" } } },
+  },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
+  const target = await pool.query("SELECT is_service_user, service_user_owner_id FROM app_users WHERE id=$1", [request.params.id]);
+  if (!target.rowCount || !target.rows[0].is_service_user) return reply.code(404).send({ error: "This service user could not be found." });
+  const isOwner = target.rows[0].service_user_owner_id === request.authenticatedUser?.id;
+  if (request.authenticatedUser?.role !== "server_admin" && !isOwner) {
+    const departmentIdForAdmin = await activeDepartmentId(request, reply, true);
+    if (!departmentIdForAdmin) return reply;
+    const membership = await pool.query("SELECT 1 FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.params.id, departmentIdForAdmin]);
+    if (!membership.rowCount) return reply.code(404).send({ error: "This service user was not found at this location." });
+  }
+  if (!request.body.enabled) {
+    await pool.query("UPDATE app_users SET api_key_hash=NULL WHERE id=$1", [request.params.id]);
+    return { enabled: false };
+  }
+  const apiKey = newApiKey();
+  await pool.query("UPDATE app_users SET api_key_hash=$2 WHERE id=$1", [request.params.id, hashToken(apiKey)]);
+  return { enabled: true, apiKey };
 });
 
 app.get("/api/people-options", async (request, reply) => {
@@ -1479,7 +1597,7 @@ async function replaceUserRelationships(client: PoolClient, userId: string, rela
   const relatedIds = relationships.map((relationship) => relationship.relatedUserId);
   if (new Set(relatedIds).size !== relatedIds.length || relatedIds.includes(userId)) return "Choose each related user once and do not select this account.";
   if (relatedIds.length) {
-    const found = await client.query("SELECT id FROM app_users WHERE id = ANY($1::uuid[])", [relatedIds]);
+    const found = await client.query("SELECT id FROM app_users WHERE id = ANY($1::uuid[]) AND is_service_user=false", [relatedIds]);
     if (found.rowCount !== relatedIds.length) return "One of the selected users could not be found.";
   }
   await client.query("DELETE FROM user_relationships WHERE user_id = $1 OR related_user_id = $1", [userId]);
@@ -1521,7 +1639,11 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
         relationships: relationshipsSchema,
         password: { type: "string", minLength: 12, maxLength: 128 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
-        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage"] } },
+        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage", "server_api"] } },
+        isServiceUser: { type: "boolean" },
+        serviceUserOwnerId: { type: "string", format: "uuid" },
+        adminNote: { type: "string", maxLength: 2000 },
+        isEnabled: { type: "boolean" },
         memberships: {
           type: "array", maxItems: 100,
           items: { type: "object", additionalProperties: false, required: ["departmentId", "role"], properties: { departmentId: { type: "string", format: "uuid" }, role: { type: "string", enum: ["site_admin", "member"] }, contactId: { type: "string", format: "uuid" }, permissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["people_view_private", "people_manage", "events_manage", "groups_manage", "resources_manage"] } }, videoPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["video_basic", "streaming_operator", "stream_admin", "routing_user", "routing_admin"] } }, presenterPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["editor", "operator", "admin"] } }, modulePermissions: modulePermissionsSchema } },
@@ -1541,14 +1663,21 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   const postalCode = request.body.postalCode?.trim() || null;
   const city = request.body.city?.trim() || null;
   const phoneNumbers = cleanPhoneNumbers(request.body.phoneNumbers);
-  const relationships = request.body.relationships ?? [];
   const accountRole = request.body.accountRole;
+  const isServiceUser = Boolean(request.body.isServiceUser);
+  const relationships = isServiceUser ? [] : request.body.relationships ?? [];
+  const serviceUserOwnerId = isServiceUser ? request.body.serviceUserOwnerId ?? request.authenticatedUser!.id : null;
+  const adminNote = request.body.adminNote?.trim() || null;
+  const isEnabled = request.body.isEnabled ?? true;
   const serverPermissions = accountRole === "user" ? request.body.serverPermissions ?? [] : [];
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
   if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
   if (accountRole === "server_admin" && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can grant Server Administrator access." });
+  }
+  if (isServiceUser && (accountRole !== "user" || request.authenticatedUser?.role !== "server_admin")) {
+    return reply.code(403).send({ error: "Only a Server Administrator can create a service user." });
   }
   if (serverPermissions.length && request.authenticatedUser?.role !== "server_admin") {
     return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
@@ -1564,11 +1693,15 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   try {
     await client.query("BEGIN");
     if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
+    if (serviceUserOwnerId) {
+      const owner = await client.query("SELECT id FROM app_users WHERE id=$1 AND is_service_user=false", [serviceUserOwnerId]);
+      if (!owner.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an existing non-service user as the owner." }); }
+    }
     const user = await client.query(
-      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password, server_permissions)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, true, $12)
-       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city, server_permissions`,
-      [id, email, username, displayName, hashPassword(request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city, serverPermissions],
+      `INSERT INTO app_users (id, email, username, display_name, password_hash, role, birthday, street, street_number, postal_code, city, must_change_password, server_permissions, is_service_user, service_user_owner_id, admin_note, is_enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, true, $12, $13, $14, $15, $16)
+       RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday, street, street_number, postal_code, city, server_permissions, is_service_user, service_user_owner_id, admin_note, is_enabled`,
+      [id, email, username, displayName, hashPassword(isServiceUser ? randomBytes(48).toString("base64url") : request.body.password), accountRole, birthdayToIso(birthday), street, streetNumber, postalCode, city, serverPermissions, isServiceUser, serviceUserOwnerId, adminNote, isEnabled],
     );
     for (const membership of memberships) {
       if (membership.contactId) {
@@ -1593,7 +1726,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
     }
     await client.query("COMMIT");
     const row = user.rows[0];
-    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], memberships });
+    return reply.code(201).send({ id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: isServiceUser ? [] : await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: false, serviceUserOwnerId: row.service_user_owner_id, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, memberships });
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1604,7 +1737,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   }
 });
 
-app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"]; serverPermissions?: CreateSiteUser["serverPermissions"] } }>("/api/users/:id", {
+app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username" | "displayName" | "birthday" | "street" | "streetNumber" | "postalCode" | "city" | "phoneNumbers" | "relationships" | "memberships"> & { accountRole?: CreateSiteUser["accountRole"]; serverPermissions?: CreateSiteUser["serverPermissions"]; isServiceUser?: boolean; serviceUserOwnerId?: string; adminNote?: string; isEnabled?: boolean } }>("/api/users/:id", {
   schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     body: {
@@ -1619,7 +1752,11 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         postalCode: { type: "string", maxLength: 20 },
         city: { type: "string", maxLength: 100 },
         accountRole: { type: "string", enum: ["server_admin", "user"] },
-        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage"] } },
+        serverPermissions: { type: "array", uniqueItems: true, items: { type: "string", enum: ["server_view", "server_troubleshoot", "server_manage", "server_api"] } },
+        isServiceUser: { type: "boolean" },
+        serviceUserOwnerId: { type: "string", format: "uuid" },
+        adminNote: { type: "string", maxLength: 2000 },
+        isEnabled: { type: "boolean" },
         phoneNumbers: phoneNumbersSchema,
         relationships: relationshipsSchema,
         memberships: {
@@ -1652,7 +1789,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   const postalCode = request.body.postalCode?.trim() || null;
   const city = request.body.city?.trim() || null;
   const phoneNumbers = cleanPhoneNumbers(request.body.phoneNumbers);
-  const relationships = request.body.relationships ?? [];
+  let relationships = request.body.relationships ?? [];
   const memberships = request.body.memberships;
   if (!displayName) return reply.code(400).send({ error: "Enter the user's name." });
   if (!validBirthday(birthday)) return reply.code(400).send({ error: "Enter a valid birthday as DD:MM:YYYY." });
@@ -1666,12 +1803,30 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
-    const current = await client.query("SELECT role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const current = await client.query("SELECT role, is_service_user, server_permissions, service_user_owner_id, is_enabled FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!current.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
+    if (current.rows[0].is_service_user && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
     const accountRole = request.body.accountRole ?? current.rows[0].role;
+    const isEnabled = request.body.isEnabled ?? current.rows[0].is_enabled;
+    if (!isEnabled && request.params.id === request.authenticatedUser?.id) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: "You cannot disable your own account." });
+    }
+    const isServiceUser = accountRole === "server_admin" ? false : request.body.isServiceUser ?? current.rows[0].is_service_user;
+    const serviceUserOwnerId = isServiceUser
+      ? request.body.serviceUserOwnerId ?? current.rows[0].service_user_owner_id ?? request.authenticatedUser!.id
+      : null;
+    if (isServiceUser && (!serviceUserOwnerId || serviceUserOwnerId === request.params.id)) {
+      await client.query("ROLLBACK");
+      return reply.code(400).send({ error: "Choose a valid owner for this service user." });
+    }
+    if (isServiceUser) relationships = [];
     if (accountRole !== current.rows[0].role && request.authenticatedUser?.role !== "server_admin") {
       await client.query("ROLLBACK");
       return reply.code(403).send({ error: "Only a Server Administrator can change an account's installation role." });
@@ -1680,6 +1835,14 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       await client.query("ROLLBACK");
       return reply.code(403).send({ error: "Only a Server Administrator can assign installation permissions." });
     }
+    if ((request.body.isServiceUser !== undefined || request.body.serviceUserOwnerId !== undefined) && request.authenticatedUser?.role !== "server_admin") {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Only a Server Administrator can change service-user status or owner." });
+    }
+    if (serviceUserOwnerId) {
+      const owner = await client.query("SELECT id FROM app_users WHERE id=$1 AND is_service_user=false", [serviceUserOwnerId]);
+      if (!owner.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an existing non-service user as the owner." }); }
+    }
     if (current.rows[0].role === "server_admin" && accountRole !== "server_admin") {
       const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin'");
       if (admins.rows[0].total <= 1) {
@@ -1687,14 +1850,27 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         return reply.code(409).send({ error: "The last Server Administrator account cannot be removed." });
       }
     }
+    if (current.rows[0].role === "server_admin" && current.rows[0].is_enabled && !isEnabled) {
+      const admins = await client.query("SELECT count(*)::int AS total FROM app_users WHERE role = 'server_admin' AND is_enabled=true");
+      if (admins.rows[0].total <= 1) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The last enabled Server Administrator account cannot be disabled." });
+      }
+    }
     const updated = await client.query(
       `UPDATE app_users SET email = $2, username = $3, display_name = $4, birthday = $5::date,
               street = $6, street_number = $7, postal_code = $8, city = $9, role = $10,
-              server_permissions = CASE WHEN $11 THEN $12::TEXT[] ELSE server_permissions END
+              server_permissions = CASE WHEN $11 THEN $12::TEXT[] ELSE server_permissions END,
+              is_service_user = CASE WHEN $11 THEN $13 ELSE is_service_user END,
+              service_user_owner_id = CASE WHEN $11 THEN $14::UUID ELSE service_user_owner_id END,
+              admin_note = CASE WHEN $15 THEN $16::TEXT ELSE admin_note END,
+              is_enabled = CASE WHEN $17 THEN $18 ELSE is_enabled END,
+              api_key_hash = CASE WHEN ($17 AND NOT $18) OR ($11 AND ($13 IS DISTINCT FROM is_service_user OR $14::UUID IS DISTINCT FROM service_user_owner_id OR (NOT $13 AND (role = 'server_admin' OR 'server_api' = ANY(server_permissions)) AND NOT ($10 = 'server_admin' OR 'server_api' = ANY(CASE WHEN $11 THEN $12::TEXT[] ELSE server_permissions END)))) THEN NULL ELSE api_key_hash END
         WHERE id = $1
         RETURNING id, email, username, display_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
-                  street, street_number, postal_code, city, role, server_permissions`,
-      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : []],
+                  street, street_number, postal_code, city, role, server_permissions, is_service_user, service_user_owner_id,
+                   api_key_hash IS NOT NULL AS api_key_enabled, admin_note, is_enabled`,
+      [request.params.id, email, username, displayName, birthdayToIso(birthday), street, streetNumber, postalCode, city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : [], isServiceUser, serviceUserOwnerId, request.body.adminNote !== undefined, request.body.adminNote?.trim() || null, request.body.isEnabled !== undefined, isEnabled],
     );
     if (!updated.rowCount) {
       await client.query("ROLLBACK");
@@ -1726,9 +1902,10 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
         [request.params.id, membership.departmentId, membership.role, membership.contactId ?? null, membership.permissions ?? [], membership.videoPermissions ?? [], membership.presenterPermissions ?? [], JSON.stringify(modulePermissions)],
       );
     }
+    if (updated.rows[0].is_service_user || !updated.rows[0].is_enabled) await client.query("DELETE FROM auth_sessions WHERE user_id=$1", [request.params.id]);
     await client.query("COMMIT");
     const row = updated.rows[0];
-    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], memberships };
+    return { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: row.is_service_user ? [] : await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });
@@ -1754,8 +1931,12 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
-    const target = await client.query("SELECT id, role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const target = await client.query("SELECT id, role, is_service_user FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!target.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    if (target.rows[0].is_service_user && request.authenticatedUser?.role !== "server_admin") {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
@@ -1793,8 +1974,12 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const target = await client.query("SELECT id,role FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    const target = await client.query("SELECT id,role,is_service_user FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!target.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ error: "This local user could not be found." });
+    }
+    if (target.rows[0].is_service_user && request.authenticatedUser?.role !== "server_admin") {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
