@@ -1,4 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { request as httpRequest } from "node:http";
@@ -7,8 +9,8 @@ import { followRuntimeLogFile } from "../../runtime-diagnostics.js";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerRemoteDesktopReplication } from "./replication.js";
 
-type LaptopRole = "controller" | "viewer";
-type ProxyRole = LaptopRole | "takeover";
+type RemoteDesktopRole = "controller" | "viewer";
+type ProxyRole = RemoteDesktopRole | "takeover";
 type RemoteProtocol = "rdp" | "vnc" | "spice";
 type RemoteDestination = { id: string; departmentId: string; name: string; host: string; port: number; protocol: RemoteProtocol; username: string; password: string; autologin: boolean };
 type StoredDestination = Omit<RemoteDestination, "password"> & { password_ciphertext: string; password_iv: string; password_tag: string };
@@ -16,10 +18,24 @@ type ProxyTicket = { authToken: string; connectionId: string; expiresAt: number;
 type ControllerLease = { userId: string; departmentId: string; destinationId: string; ticket: string; shareId: string; width: number; height: number; expiresAt: number; active: boolean };
 const proxyTickets = new Map<string, ProxyTicket>();
 let controllerLease: ControllerLease | null = null;
+const guacdLogLevels = ["error", "warning", "info", "debug", "trace"] as const;
+type GuacdLogLevel = typeof guacdLogLevels[number];
+
+async function readGuacdLogLevel(): Promise<GuacdLogLevel> {
+  const path = process.env.SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_LEVEL_PATH;
+  if (path) {
+    try {
+      const stored = (await readFile(path, "utf8")).trim();
+      if ((guacdLogLevels as readonly string[]).includes(stored)) return stored as GuacdLogLevel;
+    } catch { /* Fall back to the deployment default before the file is initialized. */ }
+  }
+  const configured = process.env.REMOTE_DESKTOP_GUACD_LOG_LEVEL?.trim().toLowerCase();
+  return (guacdLogLevels as readonly string[]).includes(configured ?? "") ? configured as GuacdLogLevel : "info";
+}
 
 function gatewaySettings() {
-  const jsonSecret = process.env.SYSTEM_LAPTOP_JSON_SECRET_KEY ?? "";
-  const apiUrl = process.env.SYSTEM_LAPTOP_GUACAMOLE_API_URL?.trim().replace(/\/$/, "") ?? "";
+  const jsonSecret = process.env.REMOTE_DESKTOP_JSON_SECRET_KEY ?? "";
+  const apiUrl = process.env.REMOTE_DESKTOP_GUACAMOLE_API_URL?.trim().replace(/\/$/, "") ?? "";
   const validUrl = (value: string) => {
     try {
       const url = new URL(value);
@@ -64,7 +80,7 @@ function rejectUpgrade(socket: import("node:stream").Duplex, status: number, mes
   socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 }
 
-function encryptedAuthData(settings: ReturnType<typeof gatewaySettings>, destination: RemoteDestination, username: string, shareId: string, role: LaptopRole, joinShared = false) {
+function encryptedAuthData(settings: ReturnType<typeof gatewaySettings>, destination: RemoteDestination, username: string, shareId: string, role: RemoteDesktopRole, joinShared = false) {
   const key = Buffer.from(settings.jsonSecret, "hex");
   const payload = Buffer.from(JSON.stringify({
     username,
@@ -103,7 +119,31 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   app.addHook("onClose", stopFollowingGuacdLogs);
   let cachedClientLibrary: string | null = null;
 
-  async function requireSystemLaptopAccess(request: FastifyRequest, reply: FastifyReply, allowQueryLocation = false) {
+  app.get("/api/modules/remote-desktop/server-settings", async (request, reply) => {
+    if (request.authenticatedUser?.role !== "server_admin") return reply.code(403).send({ error: "Server administrator access is required." });
+    return { guacdLogLevel: await readGuacdLogLevel(), editable: Boolean(process.env.SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_LEVEL_PATH) };
+  });
+
+  app.put<{ Body: { guacdLogLevel: GuacdLogLevel } }>("/api/modules/remote-desktop/server-settings", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["guacdLogLevel"], properties: { guacdLogLevel: { type: "string", enum: [...guacdLogLevels] } } } },
+  }, async (request, reply) => {
+    if (request.authenticatedUser?.role !== "server_admin") return reply.code(403).send({ error: "Server administrator access is required." });
+    if (!validateMutation(request, reply)) return reply;
+    const path = process.env.SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_LEVEL_PATH;
+    if (!path) return reply.code(503).send({ error: "Live guacd log-level settings are not available in this deployment." });
+    const temporaryPath = `${path}.${randomUUID()}.tmp`;
+    try {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(temporaryPath, `${request.body.guacdLogLevel}\n`, { encoding: "utf8", mode: 0o640 });
+      await rename(temporaryPath, path);
+      return { guacdLogLevel: request.body.guacdLogLevel };
+    } catch {
+      await rm(temporaryPath, { force: true }).catch(() => undefined);
+      return reply.code(500).send({ error: "Could not save the guacd log level." });
+    }
+  });
+
+  async function requireRemoteDesktopAccess(request: FastifyRequest, reply: FastifyReply, allowQueryLocation = false) {
     if (!isDatabaseReady() || !pool) {
       reply.code(503).send({ error: "The account database is unavailable." });
       return null;
@@ -137,12 +177,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     if (!pool) return [] as StoredDestination[];
     const gateway = gatewaySettings();
     const siteSettings = await pool.query("SELECT managed FROM remote_desktop_site_settings WHERE department_id = $1", [departmentId]);
-    const legacyHost = process.env.SYSTEM_LAPTOP_RDP_HOST?.trim() ?? "";
+    const legacyHost = process.env.REMOTE_DESKTOP_RDP_HOST?.trim() ?? "";
     if (siteSettings.rows[0]?.managed === false && departmentId === getDefaultDepartmentId() && gateway.configured && validRemoteHost(legacyHost)) {
       const protocol: RemoteProtocol = "rdp";
-      const encrypted = encryptPassword(process.env.SYSTEM_LAPTOP_RDP_PASSWORD ?? "", gateway.jsonSecret);
+      const encrypted = encryptPassword(process.env.REMOTE_DESKTOP_RDP_PASSWORD ?? "", gateway.jsonSecret);
       const id = randomUUID();
-      const portText = process.env.SYSTEM_LAPTOP_RDP_PORT?.trim() || String(defaultPort(protocol));
+      const portText = process.env.REMOTE_DESKTOP_RDP_PORT?.trim() || String(defaultPort(protocol));
       const port = /^\d{1,5}$/.test(portText) && Number(portText) >= 1 && Number(portText) <= 65535 ? Number(portText) : defaultPort(protocol);
       const client = await pool.connect();
       try {
@@ -153,7 +193,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
             `INSERT INTO remote_desktop_destinations (id, department_id, name, host, port, protocol, username, password_ciphertext, password_iv, password_tag, autologin)
              VALUES ($1, $2, 'Remote desktop', $3, $4, 'rdp', $5, $6, $7, $8, true)
              ON CONFLICT (department_id, name) DO NOTHING`,
-            [id, departmentId, legacyHost, port, process.env.SYSTEM_LAPTOP_RDP_USERNAME ?? "", encrypted.ciphertext, encrypted.iv, encrypted.tag],
+            [id, departmentId, legacyHost, port, process.env.REMOTE_DESKTOP_RDP_USERNAME ?? "", encrypted.ciphertext, encrypted.iv, encrypted.tag],
           );
           await client.query("UPDATE remote_desktop_site_settings SET managed = true, updated_at = now() WHERE department_id = $1", [departmentId]);
         }
@@ -192,7 +232,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!selected) return reply;
       departmentId = selected;
     } else {
-      const access = await requireSystemLaptopAccess(request, reply);
+      const access = await requireRemoteDesktopAccess(request, reply);
       if (!access) return reply;
       departmentId = access.department;
     }
@@ -275,7 +315,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   });
 
   app.get<{ Querystring: { destinationId?: string } }>("/api/modules/remote-desktop/status", async (request, reply) => {
-    const access = await requireSystemLaptopAccess(request, reply);
+    const access = await requireRemoteDesktopAccess(request, reply);
     if (!access) return reply;
     if (controllerLease && !controllerLease.active && controllerLease.expiresAt <= Date.now()) controllerLease = null;
     const destinationId = request.query.destinationId ?? "";
@@ -297,7 +337,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   });
 
   app.get("/api/modules/remote-desktop/client.js", async (request, reply) => {
-    if (!await requireSystemLaptopAccess(request, reply, true)) return reply;
+    if (!await requireRemoteDesktopAccess(request, reply, true)) return reply;
     const settings = gatewaySettings();
     if (!settings.configured) return reply.code(503).send({ error: "The remote desktop gateway is not configured." });
     if (!cachedClientLibrary) {
@@ -320,7 +360,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
   app.post("/api/modules/remote-desktop/size", async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
-    const access = await requireSystemLaptopAccess(request, reply);
+    const access = await requireRemoteDesktopAccess(request, reply);
     if (!access) return reply;
     const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
     const proxyTicket = typeof body.proxyTicket === "string" ? body.proxyTicket : "";
@@ -450,7 +490,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
   app.post<{ Body: { destinationId: string; width?: number; height?: number; takeover?: boolean } }>("/api/modules/remote-desktop/session", async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
-    const access = await requireSystemLaptopAccess(request, reply);
+    const access = await requireRemoteDesktopAccess(request, reply);
     if (!access) return reply;
     const body = request.body && typeof request.body === "object" ? request.body as Record<string, unknown> : {};
     const destinationId = typeof body.destinationId === "string" ? body.destinationId : "";

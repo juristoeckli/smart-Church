@@ -10,9 +10,9 @@ Remote desktop embeds Apache Guacamole's JavaScript client inside the Smart-Chur
    .\apps\api\src\modules\remote-desktop\build-guacd.ps1
    ```
 
-   The build script tags it `smart-church/guacd:1.6.0-wave2`. To select it manually, set `SYSTEM_LAPTOP_GUACD_IMAGE=smart-church/guacd:1.6.0-wave2` in `.env`. Otherwise leave the setting unset to use `guacamole/guacd:1.6.0`.
+   The build script tags it `smart-church/guacd:1.6.0-wave2`. To select it manually, set `REMOTE_DESKTOP_GUACD_IMAGE=smart-church/guacd:1.6.0-wave2` in `.env`. Otherwise leave the setting unset to use `guacamole/guacd:1.6.0`.
 
-   Generate a 128-bit secret for this server's `SYSTEM_LAPTOP_JSON_SECRET_KEY` in `.env`. Keep it stable so this server can decrypt its saved destination passwords. A standby can use its own key; site replication re-encrypts destination passwords for that server after the signed peer key exchange:
+   Generate a 128-bit secret for this server's `REMOTE_DESKTOP_JSON_SECRET_KEY` in `.env`. Keep it stable so this server can decrypt its saved destination passwords. A standby can use its own key; site replication re-encrypts destination passwords for that server after the signed peer key exchange:
 
    ```powershell
    node -e "console.log(require('node:crypto').randomBytes(16).toString('hex'))"
@@ -21,21 +21,21 @@ Remote desktop embeds Apache Guacamole's JavaScript client inside the Smart-Chur
 2. Set the module's signing key and private gateway URL in `.env`. Destination hosts and credentials are managed in Settings → Modules → Remote desktop or through the terminal Manager; they are encrypted in the module-owned database table.
 
    ```dotenv
-   SYSTEM_LAPTOP_JSON_SECRET_KEY=<32-hex-character-secret>
-   SYSTEM_LAPTOP_GUACAMOLE_API_URL=http://127.0.0.1:8080/guacamole
+   REMOTE_DESKTOP_JSON_SECRET_KEY=<32-hex-character-secret>
+   REMOTE_DESKTOP_GUACAMOLE_API_URL=http://127.0.0.1:8080/guacamole
    ```
 
 3. Start the module gateway alongside PostgreSQL:
 
    ```powershell
-   docker compose -f compose.yaml -f apps/api/src/modules/remote-desktop/compose.yaml --profile system-laptop up -d db system-laptop-guacd system-laptop-guacamole
+   docker compose -f compose.yaml -f apps/api/src/modules/remote-desktop/compose.yaml --profile remote-desktop up -d db remote-desktop-guacd remote-desktop-guacamole
    ```
 
 4. Run `pnpm install` if the workspace dependencies have changed, then start Smart-Church. Enable Remote desktop for a location using Settings → Modules or the terminal Manager. Members can open the module to watch; a site administrator starts the controlling session.
 
 Each selected destination must be reachable from `guacd` on its configured protocol and port. The browser loads Guacamole's JavaScript and opens its WebSocket through the authenticated same-origin Remote desktop API routes. Only the API server needs network access to the private Guacamole URL. Do not expose Guacamole's port, destination credentials, or the JSON secret to browsers. The Guacamole WebSocket URL carries a short-lived bearer token and proxy ticket as required by its client protocol; configure the web server not to log query strings for this route.
 
-When the deployment overlay is enabled, `guacd` writes its output to the shared remote-desktop log volume while continuing to write to Docker's normal container log. The API tails that file into the existing runtime diagnostics buffer as source `guacd`; `GET /api/admin/diagnostics` then includes those entries for authorized server diagnostics readers. Set `SYSTEM_LAPTOP_GUACD_LOG_LEVEL=debug` in `.env` only when more detailed connection traces are needed; the default is `info`.
+When the deployment overlay is enabled, `guacd` writes its output to the shared remote-desktop log volume while continuing to write to Docker's normal container log. The API tails that file into the existing runtime diagnostics buffer as source `guacd`; `GET /api/admin/diagnostics` then includes those entries for authorized server diagnostics readers. The default log level is `info`. A server administrator can change it in Settings → Modules → Remote desktop; guacd applies the new level automatically and keeps it across container restarts. `REMOTE_DESKTOP_GUACD_LOG_LEVEL` in `.env` is only the initial default for a fresh log volume.
 
 ## Shared control and display size
 

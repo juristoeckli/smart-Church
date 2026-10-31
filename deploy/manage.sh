@@ -41,6 +41,8 @@ fi
 
 root="$script_root"
 cd "$root"
+source deploy/remote-desktop-env.sh
+migrate_remote_desktop_env .env
 for module_manager in apps/api/src/modules/*/manager.sh; do
   [[ -f "$module_manager" ]] && source "$module_manager"
 done
@@ -55,15 +57,15 @@ build_compose_args() {
   if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
     compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
   fi
-  if [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
+  if [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then
     compose_files+=(-f apps/api/src/modules/remote-desktop/compose.yaml)
   fi
   compose_args=("${compose_files[@]}")
   if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then
     compose_args+=(--profile bundled-proxy)
   fi
-  if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
-    compose_args+=(--profile system-laptop)
+  if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then
+    compose_args+=(--profile remote-desktop)
   fi
 }
 
@@ -202,21 +204,21 @@ set_module_enabled() {
 }
 
 select_module() {
-  local video_state="$1" laptop_state="$2" presenter_state="$3" choice
+  local video_state="$1" remote_desktop_state="$2" presenter_state="$3" choice
   if command -v whiptail >/dev/null; then
     choice="$(whiptail --title "Smart-Church Modules" --menu "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME). Modules are included in the Smart-Church deployment." 17 78 4 \
       video-steffisburg "Video & streaming — $video_state" \
-      remote-desktop "Remote desktop — $laptop_state" \
+      remote-desktop "Remote desktop — $remote_desktop_state" \
       presenter "Presenter — $presenter_state" \
       back "Return" 3>&1 1>&2 2>&3)" || return 1
   elif command -v dialog >/dev/null; then
     choice="$(dialog --title "Smart-Church Modules" --menu "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME). Modules are included in the Smart-Church deployment." 17 78 4 \
       video-steffisburg "Video & streaming — $video_state" \
-      remote-desktop "Remote desktop — $laptop_state" \
+      remote-desktop "Remote desktop — $remote_desktop_state" \
       presenter "Presenter — $presenter_state" \
       back "Return" 3>&1 1>&2 2>&3)" || return 1
   else
-    echo "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME): Video & streaming [$video_state], Remote desktop [$laptop_state], Presenter [$presenter_state]" >/dev/tty
+    echo "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME): Video & streaming [$video_state], Remote desktop [$remote_desktop_state], Presenter [$presenter_state]" >/dev/tty
     select choice in video-steffisburg remote-desktop presenter back; do
       [[ -n "${choice:-}" ]] && break
       echo "Choose a number from the menu." >/dev/tty
@@ -273,7 +275,7 @@ configure_module_settings() {
 }
 
 module_manager() {
-  local department_id department_name video_state laptop_state presenter_state action module_id key
+  local department_id department_name video_state remote_desktop_state presenter_state action module_id key
   department_id="$(env_value SMART_CHURCH_DEPARTMENT_ID)"
   department_name="$(env_value SMART_CHURCH_DEPARTMENT_NAME)"
   [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "SMART_CHURCH_DEPARTMENT_ID is missing or invalid in .env." >&2; return 1; }
@@ -282,10 +284,10 @@ module_manager() {
     return 1
   }
   video_state=disabled
-  laptop_state=disabled
+  remote_desktop_state=disabled
   presenter_state=disabled
   module_enabled "$department_id" video-steffisburg && video_state=enabled
-  module_enabled "$department_id" remote-desktop && laptop_state=enabled
+  module_enabled "$department_id" remote-desktop && remote_desktop_state=enabled
   module_enabled "$department_id" presenter && presenter_state=enabled
 
   while true; do
@@ -302,14 +304,14 @@ module_manager() {
         settings "Change module settings" \
         back "Return to manager" 3>&1 1>&2 2>&3)" || return 0
     else
-      echo "Primary location: ${department_name:-not configured}; Video & streaming: $video_state; Remote desktop: $laptop_state; Presenter: $presenter_state" >/dev/tty
+      echo "Primary location: ${department_name:-not configured}; Video & streaming: $video_state; Remote desktop: $remote_desktop_state; Presenter: $presenter_state" >/dev/tty
       select action in enable disable settings back; do
         [[ -n "${action:-}" ]] && break
         echo "Choose a number from the menu." >/dev/tty
       done </dev/tty >/dev/tty
     fi
     [[ "$action" == back ]] && return 0
-    module_id="$(select_module "$video_state" "$laptop_state" "$presenter_state")" || continue
+    module_id="$(select_module "$video_state" "$remote_desktop_state" "$presenter_state")" || continue
     [[ "$module_id" == back ]] && continue
     case "$action:$module_id" in
       enable:video-steffisburg)
@@ -327,16 +329,16 @@ module_manager() {
         ;;
       enable:remote-desktop)
         [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] || { echo "The Remote desktop deployment module is missing. Update the deployment package first." >&2; continue; }
-        key="$(env_value SYSTEM_LAPTOP_JSON_SECRET_KEY)"
+        key="$(env_value REMOTE_DESKTOP_JSON_SECRET_KEY)"
         if [[ ! "$key" =~ ^[[:xdigit:]]{32}$ ]]; then
           command -v openssl >/dev/null || { echo "openssl is required to generate the Remote desktop service key." >&2; continue; }
-          set_env_value SYSTEM_LAPTOP_JSON_SECRET_KEY "$(openssl rand -hex 16)"
+          set_env_value REMOTE_DESKTOP_JSON_SECRET_KEY "$(openssl rand -hex 16)"
         fi
-        set_env_value SMART_CHURCH_USE_SYSTEM_LAPTOP 1
+        set_env_value SMART_CHURCH_USE_REMOTE_DESKTOP 1
         set_module_enabled "$department_id" remote-desktop true || return 1
         build_compose_args
         run_compose up -d || return 1
-        laptop_state=enabled
+        remote_desktop_state=enabled
         echo "Remote desktop enabled for $department_name. Configure its RDP target in module settings if needed."
         ;;
       enable:presenter)
@@ -355,12 +357,12 @@ module_manager() {
         ;;
       disable:remote-desktop)
         set_module_enabled "$department_id" remote-desktop false || return 1
-        if [[ "$(env_value SMART_CHURCH_USE_SYSTEM_LAPTOP)" == 1 ]]; then
-          run_compose stop system-laptop-guacamole system-laptop-guacd || return 1
-          set_env_value SMART_CHURCH_USE_SYSTEM_LAPTOP 0
+        if [[ "$(env_value SMART_CHURCH_USE_REMOTE_DESKTOP)" == 1 ]]; then
+          run_compose stop remote-desktop-guacamole remote-desktop-guacd || return 1
+          set_env_value SMART_CHURCH_USE_REMOTE_DESKTOP 0
           build_compose_args
         fi
-        laptop_state=disabled
+        remote_desktop_state=disabled
         echo "Remote desktop disabled for $department_name. Its settings remain in .env."
         ;;
       disable:presenter)

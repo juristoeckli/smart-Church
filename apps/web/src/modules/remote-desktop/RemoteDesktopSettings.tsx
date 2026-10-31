@@ -15,6 +15,9 @@ async function responseBody<T>(response: Response): Promise<T & { error?: string
 }
 
 export function RemoteDesktopSettings({ departmentId, csrfToken, departments }: ModuleSettingsContext) {
+  const [guacdLogLevel, setGuacdLogLevel] = useState("info");
+  const [canManageServerSettings, setCanManageServerSettings] = useState(false);
+  const [savingLogLevel, setSavingLogLevel] = useState(false);
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [form, setForm] = useState(blankForm);
   const [editingId, setEditingId] = useState("");
@@ -35,6 +38,34 @@ export function RemoteDesktopSettings({ departmentId, csrfToken, departments }: 
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [departmentId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/modules/remote-desktop/server-settings", { signal: controller.signal })
+      .then((response) => responseBody<{ guacdLogLevel: string; editable: boolean }>(response))
+      .then((settings) => { setGuacdLogLevel(settings.guacdLogLevel); setCanManageServerSettings(settings.editable); })
+      .catch(() => { if (!controller.signal.aborted) setCanManageServerSettings(false); });
+    return () => controller.abort();
+  }, []);
+
+  async function saveGuacdLogLevel(value: string) {
+    setSavingLogLevel(true);
+    setFeedback("");
+    setFeedbackError(false);
+    try {
+      const response = await fetch("/api/modules/remote-desktop/server-settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-csrf-token": csrfToken },
+        body: JSON.stringify({ guacdLogLevel: value }),
+      });
+      const settings = await responseBody<{ guacdLogLevel: string }>(response);
+      setGuacdLogLevel(settings.guacdLogLevel);
+      setFeedback("guacd log level saved. The gateway applies it automatically.");
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Could not save the guacd log level.");
+      setFeedbackError(true);
+    } finally { setSavingLogLevel(false); }
+  }
 
   function startAdd() {
     setEditingId("");
@@ -91,6 +122,7 @@ export function RemoteDesktopSettings({ departmentId, csrfToken, departments }: 
   }
 
   return <section className="remote-desktop-settings" aria-labelledby="remote-desktop-settings-title">
+    {canManageServerSettings && <div className="remote-desktop-gateway-settings"><div className="server-admin-panel-heading"><h3>Gateway diagnostics</h3><p>Choose how much detail guacd writes to the server diagnostics log.</p></div><label>guacd log level<select value={guacdLogLevel} disabled={savingLogLevel} onChange={(event) => void saveGuacdLogLevel(event.target.value)}><option value="error">Error</option><option value="warning">Warning</option><option value="info">Info</option><option value="debug">Debug</option><option value="trace">Trace</option></select></label></div>}
     <div className="server-admin-panel-heading"><h3 id="remote-desktop-settings-title">Remote desktop destinations</h3><p>Destinations are saved for {site?.location ?? "this site"}. Passwords are encrypted on the server.</p></div>
     {loading ? <p className="remote-desktop-settings-empty">Loading destinations…</p> : destinations.length === 0 ? <p className="remote-desktop-settings-empty">No destinations have been configured for this site.</p> : <div className="remote-desktop-destination-list">{destinations.map((destination) => <article className={`remote-desktop-destination ${editingId === destination.id ? "remote-desktop-destination-active" : ""}`} key={destination.id}><button className="remote-desktop-destination-select" type="button" onClick={() => startEdit(destination)}><strong>{destination.name}</strong><small>{destination.protocol.toUpperCase()} · {destination.host}:{destination.port} · {destination.passwordConfigured ? "Password saved" : "No password"}</small></button><button className="icon-button" type="button" aria-label={`Remove ${destination.name}`} onClick={() => void remove(destination)}><Trash2 size={15} /></button></article>)}</div>}
     <form className="remote-desktop-destination-form" onSubmit={save}>

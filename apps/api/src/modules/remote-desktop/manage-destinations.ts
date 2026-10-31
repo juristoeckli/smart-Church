@@ -5,7 +5,7 @@ const [action, departmentId] = process.argv.slice(2);
 if (!new Set(["list", "save", "delete"]).has(action ?? "") || !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(departmentId ?? "")) {
   throw new Error("Usage: manage-destinations.ts list|save|delete <department-uuid>");
 }
-const secret = process.env.SYSTEM_LAPTOP_JSON_SECRET_KEY ?? "";
+const secret = process.env.REMOTE_DESKTOP_JSON_SECRET_KEY ?? "";
 if (!/^[\da-f]{32}$/i.test(secret)) throw new Error("The remote desktop credential key is not configured.");
 const key = createHash("sha256").update(Buffer.from(secret, "hex")).digest();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -70,13 +70,13 @@ async function markManaged() {
 
 async function migrateLegacySettings() {
   const marker = await pool.query("SELECT managed FROM remote_desktop_site_settings WHERE department_id=$1", [departmentId]);
-  const host = process.env.SYSTEM_LAPTOP_RDP_HOST?.trim() ?? "";
+  const host = process.env.REMOTE_DESKTOP_RDP_HOST?.trim() ?? "";
   if (marker.rows[0]?.managed !== false || process.env.SMART_CHURCH_DEPARTMENT_ID !== departmentId || !host || !/^[A-Za-z0-9.:-]+$/.test(host)) return;
-  const portText = process.env.SYSTEM_LAPTOP_RDP_PORT?.trim() || "3389";
+  const portText = process.env.REMOTE_DESKTOP_RDP_PORT?.trim() || "3389";
   const port = /^\d{1,5}$/.test(portText) && Number(portText) >= 1 && Number(portText) <= 65535 ? Number(portText) : 3389;
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(process.env.SYSTEM_LAPTOP_RDP_PASSWORD ?? "", "utf8"), cipher.final()]);
+  const ciphertext = Buffer.concat([cipher.update(process.env.REMOTE_DESKTOP_RDP_PASSWORD ?? "", "utf8"), cipher.final()]);
   const password = [ciphertext.toString("base64"), iv.toString("base64"), cipher.getAuthTag().toString("base64")];
   const client = await pool.connect();
   try {
@@ -86,7 +86,7 @@ async function migrateLegacySettings() {
       await client.query(
         `INSERT INTO remote_desktop_destinations (id, department_id, name, host, port, protocol, username, password_ciphertext, password_iv, password_tag, autologin)
          VALUES ($1,$2,'Remote desktop',$3,$4,'rdp',$5,$6,$7,$8,true) ON CONFLICT (department_id,name) DO NOTHING`,
-        [randomUUID(), departmentId, host, port, process.env.SYSTEM_LAPTOP_RDP_USERNAME ?? "", ...password],
+        [randomUUID(), departmentId, host, port, process.env.REMOTE_DESKTOP_RDP_USERNAME ?? "", ...password],
       );
       await client.query("UPDATE remote_desktop_site_settings SET managed=true, updated_at=now() WHERE department_id=$1", [departmentId]);
     }

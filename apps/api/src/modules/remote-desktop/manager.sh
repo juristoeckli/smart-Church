@@ -99,35 +99,35 @@ configure_remote_desktop_destinations() {
 
 configure_remote_desktop_module() {
   local department_id="$1" secret guacd_image wave2_choice
-  secret="$(env_value SYSTEM_LAPTOP_JSON_SECRET_KEY)"
+  secret="$(env_value REMOTE_DESKTOP_JSON_SECRET_KEY)"
   if [[ ! "$secret" =~ ^[[:xdigit:]]{32}$ ]]; then
     command -v openssl >/dev/null || { echo 'openssl is required to generate the remote desktop service key.' >&2; return 1; }
-    set_env_value SYSTEM_LAPTOP_JSON_SECRET_KEY "$(openssl rand -hex 16)"
-    secret="$(env_value SYSTEM_LAPTOP_JSON_SECRET_KEY)"
+    set_env_value REMOTE_DESKTOP_JSON_SECRET_KEY "$(openssl rand -hex 16)"
+    secret="$(env_value REMOTE_DESKTOP_JSON_SECRET_KEY)"
   fi
-  set_env_value SMART_CHURCH_USE_SYSTEM_LAPTOP 1
+  set_env_value SMART_CHURCH_USE_REMOTE_DESKTOP 1
   build_compose_args
-  run_compose up -d api system-laptop-guacd system-laptop-guacamole || return 1
+  run_compose up -d api remote-desktop-guacd remote-desktop-guacamole || return 1
   configure_remote_desktop_destinations "$department_id" || return 1
-  if [[ -n "$(env_value SYSTEM_LAPTOP_RDP_HOST)" || -n "$(env_value SYSTEM_LAPTOP_RDP_PASSWORD)" ]]; then
-    set_env_value SYSTEM_LAPTOP_RDP_HOST ''
-    set_env_value SYSTEM_LAPTOP_RDP_PORT ''
-    set_env_value SYSTEM_LAPTOP_RDP_USERNAME ''
-    set_env_value SYSTEM_LAPTOP_RDP_PASSWORD ''
+  if [[ -n "$(env_value REMOTE_DESKTOP_RDP_HOST)" || -n "$(env_value REMOTE_DESKTOP_RDP_PASSWORD)" ]]; then
+    set_env_value REMOTE_DESKTOP_RDP_HOST ''
+    set_env_value REMOTE_DESKTOP_RDP_PORT ''
+    set_env_value REMOTE_DESKTOP_RDP_USERNAME ''
+    set_env_value REMOTE_DESKTOP_RDP_PASSWORD ''
     build_compose_args
     run_compose up -d api || return 1
   fi
-  guacd_image="$(env_value SYSTEM_LAPTOP_GUACD_IMAGE)"
+  guacd_image="$(env_value REMOTE_DESKTOP_GUACD_IMAGE)"
   if [[ "$guacd_image" == 'smart-church/guacd:1.6.0-wave2' ]]; then
     read -r -p 'Keep patched Wave2 audio support? [Y/n]: ' wave2_choice </dev/tty
-    if [[ "$wave2_choice" =~ ^[Nn]$ ]]; then unset_env_value SYSTEM_LAPTOP_GUACD_IMAGE; fi
+    if [[ "$wave2_choice" =~ ^[Nn]$ ]]; then unset_env_value REMOTE_DESKTOP_GUACD_IMAGE; fi
   else
     read -r -p 'Build and use patched Wave2 audio support? [y/N]: ' wave2_choice </dev/tty
     if [[ "$wave2_choice" =~ ^[Yy]([Ee][Ss])?$ ]]; then
       if ! docker image inspect smart-church/guacd:1.6.0-wave2 >/dev/null 2>&1; then bash ./apps/api/src/modules/remote-desktop/build-guacd.sh || return 1; fi
-      set_env_value SYSTEM_LAPTOP_GUACD_IMAGE smart-church/guacd:1.6.0-wave2
+      set_env_value REMOTE_DESKTOP_GUACD_IMAGE smart-church/guacd:1.6.0-wave2
     else
-      unset_env_value SYSTEM_LAPTOP_GUACD_IMAGE
+      unset_env_value REMOTE_DESKTOP_GUACD_IMAGE
     fi
   fi
   echo 'Remote desktop destinations are shared with the web app settings.'

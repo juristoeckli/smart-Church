@@ -7,7 +7,7 @@ type Snapshot = { version: 1; settings: Array<Record<string, unknown>>; destinat
 const maxBytes = 50 * 1024 * 1024;
 
 function encryptionKey() {
-  const value = process.env.SYSTEM_LAPTOP_JSON_SECRET_KEY?.trim() ?? "";
+  const value = process.env.REMOTE_DESKTOP_JSON_SECRET_KEY?.trim() ?? "";
   if (!/^[\da-f]{32}$/i.test(value)) return null;
   return createHash("sha256").update(Buffer.from(value, "hex")).digest();
 }
@@ -53,10 +53,10 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
         if (bytes > maxBytes) blockers.push("Remote Desktop settings and destinations exceed the 50 MiB snapshot limit.");
         const key = encryptionKey();
         if (snapshot.destinations.length) {
-          if (!key) blockers.push("Set SYSTEM_LAPTOP_JSON_SECRET_KEY on this server before replicating Remote Desktop credentials.");
+          if (!key) blockers.push("Set REMOTE_DESKTOP_JSON_SECRET_KEY on this server before replicating Remote Desktop credentials.");
           else for (const destination of snapshot.destinations) {
             try { decryptPassword(destination, key); }
-            catch { blockers.push(`The saved password for ${String(destination.name ?? destination.id)} cannot be decrypted with SYSTEM_LAPTOP_JSON_SECRET_KEY.`); break; }
+            catch { blockers.push(`The saved password for ${String(destination.name ?? destination.id)} cannot be decrypted with REMOTE_DESKTOP_JSON_SECRET_KEY.`); break; }
           }
         }
         return { ready: !blockers.length, blockers, recordCount: snapshot.destinations.length + snapshot.settings.length };
@@ -67,7 +67,7 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
       const snapshot = structuredClone(input) as Snapshot & { credentialTransferVersion?: number };
       const key = encryptionKey();
       for (const destination of snapshot.destinations) {
-        if (!key) throw new Error("Configure SYSTEM_LAPTOP_JSON_SECRET_KEY locally before sending Remote Desktop credentials.");
+        if (!key) throw new Error("Configure REMOTE_DESKTOP_JSON_SECRET_KEY locally before sending Remote Desktop credentials.");
         const plaintext = decryptPassword(destination, key);
         const record = destination as Record<string, unknown>;
         record.password_ciphertext = { sealedCredential: sealForPeer(plaintext) };
@@ -86,7 +86,7 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
         const record = destination as Record<string, unknown>;
         const value = record.password_ciphertext;
         if (value && typeof value === "object" && "sealedCredential" in value && typeof value.sealedCredential === "string") {
-          if (!key) throw new Error("Set SYSTEM_LAPTOP_JSON_SECRET_KEY on the standby before restoring Remote Desktop credentials.");
+          if (!key) throw new Error("Set REMOTE_DESKTOP_JSON_SECRET_KEY on the standby before restoring Remote Desktop credentials.");
           Object.assign(record, encryptPassword(openForLocal(value.sealedCredential), key));
         } else throw new Error("A Remote Desktop password was not protected for this standby server.");
       }
@@ -95,7 +95,7 @@ export function registerRemoteDesktopReplication(context: ModuleServerContext) {
     restoreSnapshot: async (client, departmentId, input) => {
       const snapshot = input as Snapshot;
       if (!snapshot || snapshot.version !== 1 || !Array.isArray(snapshot.settings) || snapshot.settings.length > 1 || !Array.isArray(snapshot.destinations) || snapshot.destinations.length > 2000) throw new Error("The Remote Desktop snapshot is invalid or exceeds the supported limits.");
-      if (snapshot.destinations.length && !encryptionKey()) throw new Error("Set SYSTEM_LAPTOP_JSON_SECRET_KEY locally before restoring Remote Desktop credentials.");
+      if (snapshot.destinations.length && !encryptionKey()) throw new Error("Set REMOTE_DESKTOP_JSON_SECRET_KEY locally before restoring Remote Desktop credentials.");
       await client.query("DELETE FROM remote_desktop_destinations WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM remote_desktop_site_settings WHERE department_id=$1", [departmentId]);
       for (const row of snapshot.settings) await client.query("INSERT INTO remote_desktop_site_settings(department_id,managed,updated_at) VALUES($1,$2,$3)", [departmentId, row.managed, row.updated_at]);

@@ -4,6 +4,8 @@ set -Eeuo pipefail
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 [[ -f .env ]] || { echo "Missing .env; run deploy/install.sh first." >&2; exit 1; }
+source ./deploy/remote-desktop-env.sh
+migrate_remote_desktop_env .env
 version="${1:-latest}"
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Use a release version such as 1.2.3 or latest." >&2; exit 1; }
 version="${version#v}"
@@ -186,27 +188,34 @@ fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi
-if [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
+if [[ -f apps/api/src/modules/remote-desktop/compose.yaml ]] && grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then
   compose_files+=(-f apps/api/src/modules/remote-desktop/compose.yaml)
 fi
 profile_args=()
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then profile_args+=(--profile bundled-proxy); fi
-if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then profile_args+=(--profile system-laptop); fi
+if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then profile_args+=(--profile remote-desktop); fi
 pull_services=(db api web)
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then pull_services+=(caddy); fi
-if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
-  pull_services+=(system-laptop-guacamole)
-  guacd_image="$(sed -n 's/^SYSTEM_LAPTOP_GUACD_IMAGE=//p' .env | tail -n 1)"
+if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then
+  pull_services+=(remote-desktop-guacamole)
+  guacd_image="$(sed -n 's/^REMOTE_DESKTOP_GUACD_IMAGE=//p' .env | tail -n 1)"
   if [[ "$guacd_image" == "smart-church/guacd:1.6.0-wave2" ]]; then
     docker image inspect "$guacd_image" >/dev/null 2>&1 || {
       echo "The locally built Wave2 guacd image is missing. Rebuild it with: bash ./apps/api/src/modules/remote-desktop/build-guacd.sh" >&2
       exit 1
     }
   else
-    pull_services+=(system-laptop-guacd)
+    pull_services+=(remote-desktop-guacd)
   fi
 fi
 docker compose "${compose_files[@]}" "${profile_args[@]}" pull "${pull_services[@]}"
 docker compose "${compose_files[@]}" "${profile_args[@]}" up -d
+# Remove containers left behind by the pre-Remote-desktop Compose service names.
+project_name="${COMPOSE_PROJECT_NAME:-$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env | tail -n 1)}"
+project_name="${project_name:-$(basename -- "$root")}"
+for old_service in system-laptop-guacamole system-laptop-guacd; do
+  old_containers="$(docker ps --all --quiet --filter "label=com.docker.compose.project=$project_name" --filter "label=com.docker.compose.service=$old_service")"
+  if [[ -n "$old_containers" ]]; then docker rm --force $old_containers >/dev/null; fi
+done
 echo "Updated to $target_version. Verify with: docker compose ps"
 echo "If migration or startup fails, restore the backup created immediately before this update."
