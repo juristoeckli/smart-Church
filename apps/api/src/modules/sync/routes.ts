@@ -1382,9 +1382,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!sender) return json(reply, 401, { error: "The signed peer request is invalid." }, identity, String(request.headers["x-sc-nonce"] ?? ""));
     const query = request.query as { grantId?: unknown };
     if (typeof query.grantId !== "string") return json(reply, 400, { error: "Choose a share grant." }, identity, request.headers["x-sc-nonce"] as string);
-    const grant = await pool.query("SELECT 1 FROM sync_share_grants WHERE id=$1 AND recipient_installation_id=$2 AND state='active'", [query.grantId, sender.installationId]);
-    if (!grant.rowCount) return json(reply, 410, { error: "This share is no longer available." }, identity, request.headers["x-sc-nonce"] as string);
-    const subscriptions = await pool.query<{ id: string; recipient_department_id: string; state: string }>("SELECT id,recipient_department_id,state FROM sync_subscriptions WHERE source_installation_id=$1 AND source_grant_id=$2 AND state='active'", [identity.installationId, query.grantId]);
+    const subscriptions = await pool.query<{ id: string; recipient_department_id: string; state: string }>("SELECT id,recipient_department_id,state FROM sync_subscriptions WHERE source_installation_id=$1 AND source_grant_id=$2 AND state='active'", [sender.installationId, query.grantId]);
     return json(reply, 200, { subscriptions: subscriptions.rows }, identity, request.headers["x-sc-nonce"] as string);
   });
 
@@ -1453,7 +1451,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       try {
         await client.query("BEGIN");
         const current = await client.query(
-          `SELECT run.id FROM sync_replica_push_runs run
+          `SELECT run.subscription_id FROM sync_replica_push_runs run
              JOIN sync_subscriptions subscription ON subscription.id=run.subscription_id AND subscription.state='active' AND subscription.source_installation_id=$4 AND subscription.source_grant_id=$5
              JOIN sync_peers peer ON peer.installation_id=$4 AND peer.trust_state='trusted'
             WHERE run.subscription_id=$1 AND run.snapshot_id=$2 AND run.next_offset=$3 FOR UPDATE OF run,subscription,peer`,
