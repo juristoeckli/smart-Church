@@ -515,7 +515,20 @@ while true; do
       ;;
     update)
       read -r -p "Release version to install [latest; current $(env_value SMART_CHURCH_VERSION)]: " version </dev/tty
-      bash ./deploy/update.sh "${version:-latest}"
+      version="${version:-latest}"
+      current_version="$(env_value SMART_CHURCH_VERSION)"
+      target_version="$version"
+      if [[ "$version" == latest ]]; then
+        latest_tag="$(curl -fsSL --retry 3 https://api.github.com/repos/juristoeckli/smart-Church/releases/latest \
+          | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+        [[ -n "$latest_tag" ]] || { echo "Could not resolve the latest Smart-Church release." >&2; break; }
+        target_version="${latest_tag#v}"
+      fi
+      if [[ "$target_version" == "${current_version#v}" ]]; then
+        echo "Smart-Church is already at version $target_version; nothing to update."
+      else
+        bash ./deploy/update.sh "$version"
+      fi
       ;;
     uninstall) bash ./deploy/uninstall.sh; exit ;;
     exit) exit 0 ;;

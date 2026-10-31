@@ -10,8 +10,27 @@ version="${version#v}"
 current_version="$(sed -n 's/^SMART_CHURCH_VERSION=//p' .env | tail -n 1)"
 update_branch="$(sed -n 's/^SMART_CHURCH_UPDATE_BRANCH=//p' .env | tail -n 1)"
 [[ -n "$update_branch" ]] || update_branch=release
-if [[ "$current_version" =~ ^[0-9a-f]{40}$ ]]; then current_version="${current_version:0:7}"; fi
-echo "Current version: ${current_version:-unknown} ($update_branch); target: $version"
+
+# Resolve "latest" so rerunning the manager after installing the latest release
+# does not create a needless backup, pull, and restart.
+if [[ "$version" == "latest" ]]; then
+  latest_tag="$(curl -fsSL --retry 3 https://api.github.com/repos/juristoeckli/smart-Church/releases/latest \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$latest_tag" ]] || { echo "Could not resolve the latest Smart-Church release." >&2; exit 1; }
+  target_version="${latest_tag#v}"
+else
+  target_version="$version"
+fi
+
+current_normalized="${current_version#v}"
+if [[ "$target_version" == "$current_normalized" ]]; then
+  echo "Smart-Church is already at version $target_version; nothing to update."
+  exit 0
+fi
+
+display_version="$current_version"
+if [[ "$display_version" =~ ^[0-9a-f]{40}$ ]]; then display_version="${display_version:0:7}"; fi
+echo "Current version: ${display_version:-unknown} ($update_branch); target: $target_version"
 
 bash ./deploy/backup.sh
 
@@ -149,7 +168,7 @@ fi
 
 tmp="$(mktemp .env.XXXXXX)"
 trap 'rm -f "$tmp"' EXIT
-awk -v version="$version" '
+awk -v version="$target_version" '
   BEGIN { found = 0 }
   /^SMART_CHURCH_VERSION=/ { print "SMART_CHURCH_VERSION=" version; found = 1; next }
   { print }
@@ -188,5 +207,5 @@ if grep -q '^SMART_CHURCH_USE_SYSTEM_LAPTOP=1' .env; then
 fi
 docker compose "${compose_files[@]}" "${profile_args[@]}" pull "${pull_services[@]}"
 docker compose "${compose_files[@]}" "${profile_args[@]}" up -d
-echo "Updated to $version. Verify with: docker compose ps"
+echo "Updated to $target_version. Verify with: docker compose ps"
 echo "If migration or startup fails, restore the backup created immediately before this update."
