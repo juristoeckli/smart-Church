@@ -5,11 +5,13 @@ EventDesk is Smart-Church's event operations and rental module. A location can u
 ## Included in the first release
 
 - Create jobs with customer, schedule, venue, notes, and an optional Smart-Church event link.
+- Add sale, service, and consumable charge positions directly to a job with decimal quantities, custom unit labels, unit prices, and unit costs. These positions are included in job estimates, cost/margin reports, quotes, invoices, contracts, and sale/consumable delivery notes; existing document snapshots remain unchanged.
+- Apply a per-booking rental rate factor to the catalog daily rate. Reusable rental packages continue to cover required accessory and equipment bundles.
 - Maintain customer records for companies and individuals, including contact details, billing address, notes, and active status; link customers to jobs.
 - Set a default customer discount; new jobs snapshot that rate and quotes, invoices, and contracts show the discount as a separate line. Existing jobs and issued documents keep their saved prices.
 - Create supplier rate cards with effective dates and category- or equipment-specific daily rates, then select a valid card when creating a job. Each booked rate is saved on the job so later card edits do not change its estimate or issued documents.
 - Maintain separate supplier and venue directories; link a supplier to equipment and select a saved venue for a job.
-- Maintain an equipment catalog with stock quantity and daily rental rates.
+- Maintain an equipment catalog with descriptions, individual stock units, preferred case size/label, a single-unit daily rate, and an optional case-rate override. Job bookings default to a complete case while still allowing singles. Existing bookings save their chosen unit and rate, and availability, maintenance, and warehouse stock remain counted in individual units.
 - Register individual serialised units alongside count-based stock, assign them to warehouses, generate printable barcode labels, and scan their barcodes during checkout and return.
 - Define reusable cases with required equipment and quantities, check scanned contents for missing or extra items, and record each contents check for audit.
 - Track stock quantities per warehouse, choose a warehouse when reserving equipment, and record transfers through dispatch and receipt with timestamps and responsible users.
@@ -47,7 +49,7 @@ Template downloads contain the header row below. Import one entity at a time; im
 | Record | Required columns | Optional columns |
 | --- | --- | --- |
 | Customers | `name` | `id`, `kind` (`company`/`person`), `contact_person`, `email`, `phone`, `street`, `postal_code`, `city`, `country`, `notes`, `active` |
-| Equipment | `name`, `category`, `quantity` | `id`, `daily_rate_cents`, `active`, `notes`, `barcode`, `supplier_ref` |
+| Equipment | `name`, `category`, `quantity` | `id`, `description`, `stock_unit_label`, `package_size`, `package_label`, `package_rate_cents`, `daily_rate_cents`, `active`, `notes`, `barcode`, `supplier_ref` |
 | Suppliers and venues | `name` | `id`, `contact_person`, `email`, `phone`, `street`, `postal_code`, `city`, `country`, `notes`, `active` |
 | Freelancers | `name` | `id`, `email`, `phone`, `roles` (semicolon separated), `hourly_rate_cents`, `notes`, `active` |
 | Jobs | `title`, `starts_at`, `ends_at` | `id`, `customer_name`, `customer_ref`, `venue`, `venue_ref`, `status`, `notes` |
@@ -56,7 +58,7 @@ Job timestamps use ISO 8601 and must include an end after the start. `customer_r
 
 The SQL migrations are applied during normal Smart-Church startup. EventDesk is optional and off by default. A Server Administrator activates optional modules for the whole installation in Settings → Modules. After activation, site administrators can grant EventDesk access levels separately at each location in People & access.
 
-The Contacts directory is the master record for EventDesk customers, suppliers, venues, and freelancers. Selecting roles creates or updates the records used by job, purchasing, equipment, and crew workflows. Existing records are linked to the directory during migration; edits in either the directory or a role-specific form update the shared contact details. Company/person links support multiple people per company and multiple companies per person.
+The Contacts directory is the master record for EventDesk customers, suppliers, venues, and freelancers. A customer is a contact with the `customer` role enabled; the Customers page is a filtered view of those same contacts, and customer IDs are the contact IDs used by jobs. Customer-only settings such as the default discount attach to the customer role. Selecting roles makes a contact available in the matching job, purchasing, equipment, and crew workflows. Company/person links support multiple people per company and multiple companies per person.
 
 Jobs open in a tabbed workspace for basic data, timetable, positions, external rentals and purchases, cost plan, documents, status, and history. The History tab records job creation, detail edits, and status changes.
 

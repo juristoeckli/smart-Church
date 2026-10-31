@@ -35,7 +35,7 @@ export function registerEventDeskDataRoutes(app: FastifyInstance, context: Modul
         const data = Object.fromEntries(Object.entries(row).map(([key, value]) => [key.trim().toLowerCase().replace(/[\s-]+/g, "_"), String(value ?? "").trim()]));
         const errors: string[] = [];
         const lengths: Record<string, number> = entity === "customers" ? { name: 160, contact_person: 160, email: 254, phone: 40, street: 200, postal_code: 24, city: 120, country: 80, notes: 2000 }
-          : entity === "equipment" ? { name: 160, category: 80, notes: 1000, barcode: 120 }
+          : entity === "equipment" ? { name: 160, description: 4000, category: 80, stock_unit_label: 32, package_label: 32, notes: 1000, barcode: 120 }
           : entity === "suppliers" || entity === "venues" ? { name: 160, contact_person: 160, email: 254, phone: 40, street: 200, postal_code: 24, city: 120, country: 80, notes: 2000 }
           : entity === "freelancers" ? { name: 160, email: 254, phone: 40, notes: 2000 }
           : { title: 160, customer_name: 160, venue: 240, notes: 4000 };
@@ -51,12 +51,13 @@ export function registerEventDeskDataRoutes(app: FastifyInstance, context: Modul
         if (data.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) errors.push("Email must be a valid address.");
         const tableByEntity: Record<Entity, string> = { customers: "eventdesk_customers", equipment: "eventdesk_assets", suppliers: "eventdesk_partners", venues: "eventdesk_partners", freelancers: "eventdesk_freelancers", jobs: "eventdesk_jobs" };
         let duplicate: string | null = id && (await client.query(`SELECT 1 FROM ${tableByEntity[entity]} WHERE id=$1 LIMIT 1`, [id])).rowCount ? "Stable ID already exists." : null;
+        if (entity === "customers" && id && (await client.query("SELECT 1 FROM eventdesk_contacts WHERE id=$1 AND department_id=$2", [id, departmentId])).rowCount && !duplicate) duplicate = "Stable ID already exists in the shared contact directory.";
         if (entity === "customers") {
           required("name"); if (data.kind && !["company", "person"].includes(data.kind)) errors.push("Kind must be company or person.");
           const match = await client.query("SELECT id FROM eventdesk_customers WHERE department_id=$1 AND (($2::uuid IS NOT NULL AND id=$2) OR lower(name)=lower($3) OR ($4<>'' AND lower(email)=lower($4))) LIMIT 1", [departmentId, id, data.name ?? "", data.email ?? ""]);
           if (match.rowCount && !duplicate) duplicate = `Customer already exists (${match.rows[0].id}).`;
         } else if (entity === "equipment") {
-          required("name"); required("category"); required("quantity", "Quantity"); number("quantity", "Quantity", 1, 100000, true); number("daily_rate_cents", "Daily rate in cents", 0, 100000000, true);
+          required("name"); required("category"); required("quantity", "Quantity"); number("quantity", "Quantity", 1, 100000, true); number("package_size", "Package size", 1, 10000, true); number("daily_rate_cents", "Daily rate in cents", 0, 100000000, true); number("package_rate_cents", "Package rate in cents", 0, 100000000, true);
           const match = await client.query("SELECT id FROM eventdesk_assets WHERE department_id=$1 AND (($2::uuid IS NOT NULL AND id=$2) OR ($3<>'' AND lower(barcode)=lower($3)) OR lower(name)=lower($4)) LIMIT 1", [departmentId, id, data.barcode ?? "", data.name ?? ""]);
           if (match.rowCount && !duplicate) duplicate = `Equipment already exists (${match.rows[0].id}).`;
           if (data.supplier_ref && !safeUuid(data.supplier_ref)) errors.push("Supplier reference must be a UUID.");
@@ -132,11 +133,17 @@ export function registerEventDeskDataRoutes(app: FastifyInstance, context: Modul
         const inserted: string[] = [];
         for (const { data } of checked) {
           const id = safeUuid(data.id) ?? randomUUID();
-          if (entity === "customers") await client.query(`INSERT INTO eventdesk_customers (id,department_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,active)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [id,departmentId,data.kind || "company",data.name,data.contact_person ?? "",data.email ?? "",data.phone ?? "",data.street ?? "",data.postal_code ?? "",data.city ?? "",data.country ?? "",data.notes ?? "",isTrue(data.active)]);
+          if (entity === "customers") {
+            const kind = data.kind || "company";
+            const active = isTrue(data.active);
+            await client.query(`INSERT INTO eventdesk_contacts (id,department_id,kind,name,email,phone,street,postal_code,city,country,notes,roles,active)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,ARRAY['customer'], $12)`, [id,departmentId,kind,data.name,data.email ?? "",data.phone ?? "",data.street ?? "",data.postal_code ?? "",data.city ?? "",data.country ?? "",data.notes ?? "",active]);
+            await client.query(`INSERT INTO eventdesk_customers (id,department_id,directory_contact_id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,active)
+              VALUES ($1,$2,$1,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [id,departmentId,kind,data.name,data.contact_person ?? "",data.email ?? "",data.phone ?? "",data.street ?? "",data.postal_code ?? "",data.city ?? "",data.country ?? "",data.notes ?? "",active]);
+          }
           else if (entity === "equipment") {
-            await client.query(`INSERT INTO eventdesk_assets (id,department_id,name,category,quantity,daily_rate_cents,active,notes,barcode,supplier_id)
-              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [id,departmentId,data.name,data.category,Number(data.quantity),cents(data.daily_rate_cents),isTrue(data.active),data.notes ?? "",data.barcode ?? "",safeUuid(data.supplier_ref)]);
+            await client.query(`INSERT INTO eventdesk_assets (id,department_id,name,description,category,quantity,stock_unit_label,package_size,package_label,package_rate_cents,daily_rate_cents,active,notes,barcode,supplier_id)
+              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, [id,departmentId,data.name,data.description ?? "",data.category,Number(data.quantity),data.stock_unit_label?.trim() || "unit",Number(data.package_size) || 1,data.package_label?.trim() || "case",data.package_rate_cents === undefined || data.package_rate_cents === "" ? null : cents(data.package_rate_cents),cents(data.daily_rate_cents),isTrue(data.active),data.notes ?? "",data.barcode ?? "",safeUuid(data.supplier_ref)]);
             let warehouse = await client.query("SELECT id FROM eventdesk_warehouses WHERE department_id=$1 AND is_default=true AND active=true LIMIT 1", [departmentId]);
             if (!warehouse.rowCount) {
               await client.query("UPDATE eventdesk_warehouses SET is_default=false WHERE department_id=$1 AND is_default AND NOT active", [departmentId]);
@@ -173,7 +180,7 @@ export function registerEventDeskDataRoutes(app: FastifyInstance, context: Modul
       const entity = request.query.entity!; const departmentId = await department(request, reply, permissions[entity]); if (!departmentId) return reply;
       let headers: string[]; let rows: unknown[][];
       if (entity === "customers") { headers = ["id","kind","name","contact_person","email","phone","street","postal_code","city","country","notes","active"]; rows = (await pool!.query("SELECT id,kind,name,contact_person,email,phone,street,postal_code,city,country,notes,active FROM eventdesk_customers WHERE department_id=$1 ORDER BY lower(name)",[departmentId])).rows.map((r) => headers.map((key) => r[key])); }
-      else if (entity === "equipment") { headers = ["id","name","category","quantity","daily_rate_cents","active","notes","barcode","supplier_ref"]; rows = (await pool!.query("SELECT a.id,a.name,a.category,a.quantity,a.daily_rate_cents,a.active,a.notes,a.barcode,a.supplier_id AS supplier_ref FROM eventdesk_assets a WHERE a.department_id=$1 ORDER BY lower(a.name)",[departmentId])).rows.map((r) => headers.map((key) => r[key])); }
+      else if (entity === "equipment") { headers = ["id","name","description","category","quantity","stock_unit_label","package_size","package_label","package_rate_cents","daily_rate_cents","active","notes","barcode","supplier_ref"]; rows = (await pool!.query("SELECT a.id,a.name,a.description,a.category,a.quantity,a.stock_unit_label,a.package_size,a.package_label,a.package_rate_cents,a.daily_rate_cents,a.active,a.notes,a.barcode,a.supplier_id AS supplier_ref FROM eventdesk_assets a WHERE a.department_id=$1 ORDER BY lower(a.name)",[departmentId])).rows.map((r) => headers.map((key) => r[key])); }
       else if (entity === "suppliers" || entity === "venues") { headers = ["id","name","contact_person","email","phone","street","postal_code","city","country","notes","active"]; rows = (await pool!.query("SELECT id,name,contact_person,email,phone,street,postal_code,city,country,notes,active FROM eventdesk_partners WHERE department_id=$1 AND kind=$2 ORDER BY lower(name)",[departmentId,entity === "suppliers" ? "supplier" : "venue"])).rows.map((r) => headers.map((key) => r[key])); }
       else if (entity === "freelancers") { headers = ["id","name","email","phone","roles","hourly_rate_cents","notes","active"]; rows = (await pool!.query("SELECT id,name,email,phone,array_to_string(roles,';') AS roles,hourly_rate_cents,notes,active FROM eventdesk_freelancers WHERE department_id=$1 ORDER BY lower(name)",[departmentId])).rows.map((r) => headers.map((key) => r[key])); }
       else { headers = ["id","title","customer_name","customer_ref","starts_at","ends_at","venue","venue_ref","status","notes"]; rows = (await pool!.query("SELECT j.id,j.title,j.customer_name,j.customer_id AS customer_ref,j.starts_at,j.ends_at,j.venue,j.venue_id AS venue_ref,j.status,j.notes FROM eventdesk_jobs j WHERE j.department_id=$1 ORDER BY j.starts_at",[departmentId])).rows.map((r) => headers.map((key) => r[key])); }
@@ -205,16 +212,17 @@ export function registerEventDeskDataRoutes(app: FastifyInstance, context: Modul
             WHERE a.department_id=$1 AND ($6::uuid IS NULL OR a.id=$6) AND ($4='' OR j.status=$4) AND ($5::uuid IS NULL OR j.customer_id=$5)
             GROUP BY a.id,a.name,a.category,s.quantity,w.starts_on,w.ends_on ORDER BY lower(a.name)`,[departmentId,from,to,status,customerId,assetId])).rows;
           break;
-        case "job_costs": rows = (await pool!.query(`WITH bookings AS (SELECT b.department_id,b.job_id,sum(b.quantity*b.daily_rate_cents*greatest(1,ceil(extract(epoch FROM (j.ends_at-j.starts_at))/86400)))::bigint AS cents FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id WHERE b.status<>'cancelled' GROUP BY b.department_id,b.job_id),
+        case "job_costs": rows = (await pool!.query(`WITH bookings AS (SELECT b.department_id,b.job_id,sum(b.booking_quantity*b.booking_rate_cents*greatest(1,ceil(extract(epoch FROM (j.ends_at-j.starts_at))/86400))*b.rate_factor_bps/10000)::bigint AS cents FROM eventdesk_job_assets b JOIN eventdesk_jobs j ON j.id=b.job_id AND j.department_id=b.department_id WHERE b.status<>'cancelled' GROUP BY b.department_id,b.job_id),
+            billable_positions AS (SELECT department_id,job_id,sum(quantity*unit_cost_cents)::bigint AS cents FROM eventdesk_job_lines GROUP BY department_id,job_id),
             crew AS (SELECT department_id,job_id,sum(hours*hourly_rate_cents)::bigint AS cents FROM eventdesk_job_crew WHERE status<>'declined' GROUP BY department_id,job_id),
             rentals AS (SELECT department_id,job_id,sum(quantity*daily_cost_cents*greatest(1,ceil(extract(epoch FROM (ends_at-starts_at))/86400))+supplier_charges_cents)::bigint AS cents FROM eventdesk_subrentals WHERE status<>'cancelled' GROUP BY department_id,job_id),
             purchases AS (SELECT o.department_id,o.job_id,sum((l.quantity_ordered-l.quantity_cancelled)*l.unit_cost_cents)::bigint AS cents FROM eventdesk_purchase_orders o JOIN eventdesk_purchase_order_lines l ON l.purchase_order_id=o.id AND l.department_id=o.department_id WHERE o.status NOT IN ('requested','cancelled') GROUP BY o.department_id,o.job_id),
             revenue AS (SELECT department_id,job_id,sum(CASE WHEN kind='credit_note' THEN -total_cents ELSE total_cents END)::bigint AS cents FROM eventdesk_documents WHERE kind IN ('invoice','deposit_invoice','credit_note') AND status NOT IN ('draft','cancelled') GROUP BY department_id,job_id)
             SELECT j.id AS job_id,j.title,j.customer_name,j.status,coalesce(r.cents,0)::bigint AS recognized_document_cents,
-              (coalesce(b.cents,0)+coalesce(c.cents,0)+coalesce(sr.cents,0)+coalesce(p.cents,0))::bigint AS projected_cost_cents,
-              (coalesce(r.cents,0)-coalesce(b.cents,0)-coalesce(c.cents,0)-coalesce(sr.cents,0)-coalesce(p.cents,0))::bigint AS projected_margin_cents
+              (coalesce(b.cents,0)+coalesce(c.cents,0)+coalesce(sr.cents,0)+coalesce(p.cents,0)+coalesce(pl.cents,0))::bigint AS projected_cost_cents,
+              (coalesce(r.cents,0)-coalesce(b.cents,0)-coalesce(c.cents,0)-coalesce(sr.cents,0)-coalesce(p.cents,0)-coalesce(pl.cents,0))::bigint AS projected_margin_cents
             FROM eventdesk_jobs j LEFT JOIN bookings b ON b.department_id=j.department_id AND b.job_id=j.id LEFT JOIN crew c ON c.department_id=j.department_id AND c.job_id=j.id
-            LEFT JOIN rentals sr ON sr.department_id=j.department_id AND sr.job_id=j.id LEFT JOIN purchases p ON p.department_id=j.department_id AND p.job_id=j.id LEFT JOIN revenue r ON r.department_id=j.department_id AND r.job_id=j.id
+             LEFT JOIN rentals sr ON sr.department_id=j.department_id AND sr.job_id=j.id LEFT JOIN purchases p ON p.department_id=j.department_id AND p.job_id=j.id LEFT JOIN billable_positions pl ON pl.department_id=j.department_id AND pl.job_id=j.id LEFT JOIN revenue r ON r.department_id=j.department_id AND r.job_id=j.id
             WHERE j.department_id=$1 AND j.starts_at<$3::date+interval '1 day' AND j.ends_at>=$2::date AND ($4='' OR j.status=$4) AND ($5::uuid IS NULL OR j.customer_id=$5)
               AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM eventdesk_job_assets x WHERE x.department_id=j.department_id AND x.job_id=j.id AND x.asset_id=$6))
             ORDER BY j.starts_at`,[departmentId,from,to,status,customerId,assetId])).rows;

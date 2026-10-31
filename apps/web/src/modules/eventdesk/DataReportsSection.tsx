@@ -7,7 +7,7 @@ type DataRow = Record<string, string>;
 const entityLabels: Record<Entity, string> = { customers: "Customers", equipment: "Equipment", suppliers: "Suppliers", venues: "Venues", freelancers: "Freelancers", jobs: "Jobs" };
 const templates: Record<Entity, string[]> = {
   customers: ["id","kind","name","contact_person","email","phone","street","postal_code","city","country","notes","active"],
-  equipment: ["id","name","category","quantity","daily_rate_cents","active","notes","barcode","supplier_ref"],
+  equipment: ["id","name","description","category","quantity","stock_unit_label","package_size","package_label","package_rate_cents","daily_rate_cents","active","notes","barcode","supplier_ref"],
   suppliers: ["id","name","contact_person","email","phone","street","postal_code","city","country","notes","active"],
   venues: ["id","name","contact_person","email","phone","street","postal_code","city","country","notes","active"],
   freelancers: ["id","name","email","phone","roles","hourly_rate_cents","notes","active"],
