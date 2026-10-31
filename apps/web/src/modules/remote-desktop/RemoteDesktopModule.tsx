@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Expand, Laptop, LoaderCircle, LogOut, MonitorUp, Volume2, VolumeX, WifiOff } from "lucide-react";
-import type { ModuleRealtime } from "../../module-registry";
-import "./system-laptop.css";
+import type { ModuleContext, ModuleRealtime } from "../../module-registry";
+import "./remote-desktop.css";
 
 interface GuacMouseState {}
 interface GuacMouse {
@@ -145,7 +145,7 @@ async function readApiResponse<T>(response: Response, fallback: string): Promise
   return result;
 }
 
-export function SystemLaptopModule({ departmentId, csrfToken, realtime }: { departmentId: string; csrfToken: string; realtime?: ModuleRealtime }) {
+export function RemoteDesktopModule({ departmentId, csrfToken, realtime, state, onStateChange }: ModuleContext) {
   const displayRef = useRef<HTMLDivElement>(null);
   const screenRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<GuacClient | null>(null);
@@ -153,8 +153,10 @@ export function SystemLaptopModule({ departmentId, csrfToken, realtime }: { depa
   const resizeTimerRef = useRef<number | null>(null);
   const lastSizeRef = useRef<{ width: number; height: number } | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
+  const onStateChangeRef = useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
   const [destinations, setDestinations] = useState<RemoteDesktopDestination[]>([]);
-  const [selectedDestinationId, setSelectedDestinationId] = useState("");
+  const selectedDestinationId = state;
   const [canControl, setCanControl] = useState(false);
   const [canTakeOver, setCanTakeOver] = useState(false);
   const [controllerActive, setControllerActive] = useState(false);
@@ -232,8 +234,8 @@ export function SystemLaptopModule({ departmentId, csrfToken, realtime }: { depa
         const result = await readApiResponse<{ configured?: boolean; canControl?: boolean; canTakeOver?: boolean; controllerActive?: boolean; controllerStarting?: boolean; controllerBusy?: boolean; destinations?: RemoteDesktopDestination[] }>(response, "Could not check Remote desktop configuration.");
         const nextDestinations = result.destinations ?? [];
         setDestinations(nextDestinations);
-        if (!selectedDestinationId && nextDestinations[0]) setSelectedDestinationId(nextDestinations[0].id);
-        if (selectedDestinationId && !nextDestinations.some((destination) => destination.id === selectedDestinationId)) setSelectedDestinationId(nextDestinations[0]?.id ?? "");
+        if (!selectedDestinationId && nextDestinations[0]) onStateChangeRef.current(nextDestinations[0].id);
+        if (selectedDestinationId && !nextDestinations.some((destination) => destination.id === selectedDestinationId)) onStateChangeRef.current(nextDestinations[0]?.id ?? "");
         setConfigured(Boolean(result.configured));
         setCanControl(Boolean(result.canControl));
         setCanTakeOver(Boolean(result.canTakeOver));
@@ -314,7 +316,7 @@ export function SystemLaptopModule({ departmentId, csrfToken, realtime }: { depa
       };
       const display = client.getDisplay();
       const remoteDisplay = display.getElement();
-      remoteDisplay.classList.add("system-laptop-guac-display");
+      remoteDisplay.classList.add("remote-desktop-guac-display");
       remoteDisplay.tabIndex = result.role === "controller" ? 0 : -1;
       displayRef.current.replaceChildren(remoteDisplay);
       if (result.role === "viewer") display.onresize = () => fitViewerDisplay(display, screenRef.current);
@@ -415,18 +417,18 @@ export function SystemLaptopModule({ departmentId, csrfToken, realtime }: { depa
     } catch { setClipboardMessage("Allow clipboard access in your browser, then try again."); }
   }
 
-  return <section className="system-laptop-module">
-    {error && <div className="system-laptop-error" role="alert"><WifiOff size={17} /><span>{error}</span></div>}
-    {configured === false && !error && <div className="system-laptop-setup"><Laptop size={30} /><strong>{destinations.length ? "Choose a remote destination" : "Remote desktop is not configured"}</strong><p>{destinations.length ? "Select a destination to connect." : "Ask a server administrator to add a destination in Settings → Modules → Remote desktop destinations."}</p></div>}
+  return <section className="remote-desktop-module">
+    {error && <div className="remote-desktop-error" role="alert"><WifiOff size={17} /><span>{error}</span></div>}
+    {configured === false && !error && <div className="remote-desktop-setup"><Laptop size={30} /><strong>{destinations.length ? "Choose a remote destination" : "Remote desktop is not configured"}</strong><p>{destinations.length ? "Select a destination to connect." : "Ask a server administrator to add a destination in Settings → Modules → Remote desktop destinations."}</p></div>}
 
-    <section className="system-laptop-screen" aria-label="Remote desktop">
-      <div className="system-laptop-toolbar"><div className="system-laptop-toolbar-title"><MonitorUp size={16} /><strong className="system-laptop-title">Remote desktop</strong>{destinations.length > 0 && <select className="remote-desktop-destination-picker" aria-label="Remote desktop destination" value={selectedDestinationId} disabled={connected || connecting} onChange={(event) => { disconnect(); setSelectedDestinationId(event.target.value); }}><option value="">Choose destination</option>{destinations.map((destination) => <option key={destination.id} value={destination.id}>{destination.name}</option>)}</select>}<span>{selectedDestination?.host ?? "Choose a destination"} · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="system-laptop-toolbar-actions"><div className={`system-laptop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label={audioEnabled ? "Mute remote audio" : "Unmute remote audio"} aria-pressed={audioEnabled} title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "Remote audio playback"} onClick={() => void setRemoteAudioPlayback(!audioEnabled).then(setAudioEnabled)}>{audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />} {audioEnabled ? "Audio on" : "Audio off"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
+    <section className="remote-desktop-screen" aria-label="Remote Desktop">
+      <div className="remote-desktop-toolbar"><div className="remote-desktop-toolbar-title"><MonitorUp size={16} /><strong className="remote-desktop-title">Remote Desktop</strong><span>{selectedDestination?.host ?? "Choose a computer from the menu"} · {connected ? role === "viewer" ? "View-only session" : "Live remote session" : "Remote screen"}</span></div><div className="remote-desktop-toolbar-actions"><div className={`remote-desktop-status ${connected ? "is-connected" : ""}`}><span />{connected ? (role === "viewer" ? "Watching" : "Controlling") : connecting ? "Connecting" : "Disconnected"}</div>{connected && <button className="button button-secondary" type="button" aria-label={audioEnabled ? "Mute remote audio" : "Unmute remote audio"} aria-pressed={audioEnabled} title={audioStreamStatus ? `RDP audio stream: ${audioStreamStatus}` : "Remote audio playback"} onClick={() => void setRemoteAudioPlayback(!audioEnabled).then(setAudioEnabled)}>{audioEnabled ? <Volume2 size={14} /> : <VolumeX size={14} />} {audioEnabled ? "Audio on" : "Audio off"}</button>}{connected && role === "viewer" && canTakeOver && <button className="button button-secondary" type="button" title="Disconnect the current controller and take over the desktop" onClick={() => void connect(true)}><MonitorUp size={14} /> Take control</button>}{connected && <button className="button button-secondary" type="button" onClick={fullscreen}><Expand size={14} /> Full screen</button>}{(connected || connecting) && <button className="button button-secondary" type="button" onClick={disconnect}><LogOut size={14} /> Disconnect</button>}</div></div>
       {connected && <section className="remote-desktop-clipboard" aria-label="Clipboard"><textarea value={remoteClipboard} onChange={(event) => setRemoteClipboard(event.target.value)} aria-label="Remote clipboard text" placeholder="Remote clipboard text appears here" /><div className="remote-desktop-clipboard-actions"><button className="button button-secondary" type="button" onClick={() => void copyRemoteClipboard()}>Copy from remote</button><button className="button button-secondary" type="button" onClick={() => void pasteLocalClipboard()}>Paste to remote</button><label><input type="checkbox" checked={autoClipboardSync} onChange={(event) => { setClipboardMessage(""); setAutoClipboardSync(event.target.checked); }} /> Auto-sync this session</label></div>{clipboardMessage && <small role="status">{clipboardMessage}</small>}</section>}
-      <div ref={screenRef} className={`system-laptop-display ${connected ? "system-laptop-display-live" : ""} ${connected && role === "viewer" ? "system-laptop-display-viewer" : ""}`}>
-        <div className="system-laptop-guac-mount" ref={displayRef} />
-        {configured && !connected && !connecting && selectedDestination && <div className="system-laptop-launch"><span className="system-laptop-launch-icon"><Laptop size={25} /></span><strong>{controllerActive ? `Active session · ${selectedDestination.name}` : controllerStarting ? "Controller is connecting" : controllerBusy ? "Another destination is in use" : canControl ? `Connect to ${selectedDestination.name}` : "Waiting for a controller"}</strong><p>{controllerActive ? "Watch in view-only mode, or take control and disconnect the current controller." : controllerStarting ? "The site administrator's session is starting. Try again shortly." : controllerBusy ? "Another remote desktop destination is currently being used." : canControl ? `Connect to ${selectedDestination.host} over ${selectedDestination.protocol.toUpperCase()}.` : "A site administrator must start this remote desktop. You can watch once the session is active."}</p>{controllerActive && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Watch session</button>}{controllerActive && canTakeOver && <button className="button button-secondary" type="button" onClick={() => void connect(true)}><MonitorUp size={15} /> Take control</button>}{!controllerActive && canControl && !controllerStarting && !controllerBusy && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Start remote session</button>}<small>{controllerActive ? "Taking control disconnects the current controller; viewers stay read-only." : controllerStarting ? "This module checks for the session automatically." : controllerBusy ? "Another destination is currently active." : canControl ? "Keyboard and mouse input go to the remote computer." : "This module checks for an active session automatically."}</small></div>}
-        {connecting && <div className="system-laptop-launch"><LoaderCircle className="system-laptop-spinner" size={29} /><strong>Connecting to the AV computer…</strong><p>Remote sessions can take a few seconds to start.</p></div>}
-        {connected && <div className="system-laptop-connected-label" aria-hidden="true">{role === "viewer" ? "Watching Remote desktop" : "Controlling Remote desktop"}</div>}
+      <div ref={screenRef} className={`remote-desktop-display ${connected ? "remote-desktop-display-live" : ""} ${connected && role === "viewer" ? "remote-desktop-display-viewer" : ""}`}>
+        <div className="remote-desktop-guac-mount" ref={displayRef} />
+        {configured && !connected && !connecting && selectedDestination && <div className="remote-desktop-launch"><span className="remote-desktop-launch-icon"><Laptop size={25} /></span><strong>{controllerActive ? `Active session · ${selectedDestination.name}` : controllerStarting ? "Controller is connecting" : controllerBusy ? "Another destination is in use" : canControl ? `Connect to ${selectedDestination.name}` : "Waiting for a controller"}</strong><p>{controllerActive ? "Watch in view-only mode, or take control and disconnect the current controller." : controllerStarting ? "The site administrator's session is starting. Try again shortly." : controllerBusy ? "Another remote desktop destination is currently being used." : canControl ? `Connect to ${selectedDestination.host} over ${selectedDestination.protocol.toUpperCase()}.` : "A site administrator must start this remote desktop. You can watch once the session is active."}</p>{controllerActive && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Watch session</button>}{controllerActive && canTakeOver && <button className="button button-secondary" type="button" onClick={() => void connect(true)}><MonitorUp size={15} /> Take control</button>}{!controllerActive && canControl && !controllerStarting && !controllerBusy && <button className="button button-primary" type="button" onClick={() => void connect()}><MonitorUp size={15} /> Start remote session</button>}<small>{controllerActive ? "Taking control disconnects the current controller; viewers stay read-only." : controllerStarting ? "This module checks for the session automatically." : controllerBusy ? "Another destination is currently active." : canControl ? "Keyboard and mouse input go to the remote computer." : "This module checks for an active session automatically."}</small></div>}
+        {connecting && <div className="remote-desktop-launch"><LoaderCircle className="remote-desktop-spinner" size={29} /><strong>Connecting to the AV computer…</strong><p>Remote sessions can take a few seconds to start.</p></div>}
+        {connected && <div className="remote-desktop-connected-label" aria-hidden="true">{role === "viewer" ? "Watching Remote desktop" : "Controlling Remote desktop"}</div>}
       </div>
     </section>
   </section>;
