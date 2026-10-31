@@ -66,6 +66,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The File Storage snapshot is invalid.": "Der File-Storage-Snapshot ist ungültig.",
     },
     "file-storage": {
+      "Choose a valid file view.": "Wähle eine gültige Dateiansicht.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Eine replizierte Datei entspricht nicht der angegebenen Größe oder überschreitet 25 MiB.",
       "The File Storage snapshot contains an invalid file record.": "Der File-Storage-Snapshot enthält einen ungültigen Dateieintrag.",
       "The File Storage snapshot is invalid.": "Der File-Storage-Snapshot ist ungültig.",
@@ -239,6 +240,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The File Storage snapshot is invalid.": "L’instantané File Storage est invalide.",
     },
     "file-storage": {
+      "Choose a valid file view.": "Choisissez un affichage de fichiers valide.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un fichier répliqué ne correspond pas à la taille déclarée ou dépasse 25 Mio.",
       "The File Storage snapshot contains an invalid file record.": "L’instantané File Storage contient une entrée de fichier invalide.",
       "The File Storage snapshot is invalid.": "L’instantané File Storage est invalide.",
@@ -410,6 +412,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "The File Storage snapshot is invalid.": "L'istantanea File Storage non è valida.",
     },
     "file-storage": {
+      "Choose a valid file view.": "Scegli una visualizzazione file valida.",
       "A replicated file does not match its declared size or exceeds 25 MiB.": "Un file replicato non corrisponde alla dimensione dichiarata o supera 25 MiB.",
       "The File Storage snapshot contains an invalid file record.": "L'istantanea File Storage contiene un record file non valido.",
       "The File Storage snapshot is invalid.": "L'istantanea File Storage non è valida.",
