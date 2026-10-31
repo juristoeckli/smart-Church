@@ -86,6 +86,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "Module Demo is not enabled for this site.": "Das Modul-Demo ist für diesen Standort nicht aktiviert.",
       "The Module Demo snapshot is invalid or exceeds the supported limits.": "Der Modul-Demo-Snapshot ist ungültig oder überschreitet die zulässigen Grenzen.",
       "The note was not found in this site.": "Die Notiz wurde an diesem Standort nicht gefunden.",
+      "The account database is unavailable.": "Die Kontodatenbank ist nicht verfügbar.",
     },
     "people-flows": {
       "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links.": "Ein Elvanto-Schritt wurde geändert oder ist nicht mehr vorhanden. Aktualisiere den importierten Personenablauf, bevor du Verknüpfungen speicherst.",
@@ -134,6 +135,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "This broadcast cannot be stopped from its current status: {status}.": "Die Übertragung kann beim aktuellen Status ({status}) nicht gestoppt werden.",
       "This location is read-only while it is a redundancy standby or fenced site.": "Dieser Standort ist im Redundanz-Standby oder isolierten Zustand schreibgeschützt.",
       "YouTube sync failed: {message}": "Die YouTube-Synchronisierung ist fehlgeschlagen: {message}",
+      "Configure the private video settings file and map its sites to location IDs.": "Konfiguriere die private Video-Einstellungsdatei und ordne ihre Standorte den Standort-IDs zu.",
       "Configure the YouTube client ID and secret in Video module settings.": "Konfiguriere die YouTube-Client-ID und das Secret in den Video-Moduleinstellungen.",
       "Configure the YouTube client ID, client secret, and redirect URL in Video module settings.": "Konfiguriere die YouTube-Client-ID, das Client-Secret und die Weiterleitungs-URL in den Video-Moduleinstellungen.",
       "Connect a YouTube channel before scheduling this stream.": "Verbinde einen YouTube-Kanal, bevor du diesen Stream planst.",
@@ -281,6 +283,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "Module Demo is not enabled for this site.": "Le module Demo n’est pas activé pour ce site.",
       "The Module Demo snapshot is invalid or exceeds the supported limits.": "L’instantané du module Demo est invalide ou dépasse les limites prises en charge.",
       "The note was not found in this site.": "La note est introuvable sur ce site.",
+      "The account database is unavailable.": "La base de données des comptes est indisponible.",
     },
     "people-flows": {
       "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links.": "Une étape Elvanto a changé ou a disparu. Actualisez le parcours de personnes importé avant d’enregistrer les liens.",
@@ -327,6 +330,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "This broadcast cannot be stopped from its current status: {status}.": "Cette diffusion ne peut pas être arrêtée avec son statut actuel : {status}.",
       "This location is read-only while it is a redundancy standby or fenced site.": "Ce site est en lecture seule lorsqu’il est en mode secours/redondance ou isolé.",
       "YouTube sync failed: {message}": "La synchronisation YouTube a échoué : {message}",
+      "Configure the private video settings file and map its sites to location IDs.": "Configurez le fichier privé des paramètres vidéo et associez ses sites aux identifiants d’emplacement.",
       "Configure the YouTube client ID and secret in Video module settings.": "Configurez l’identifiant client et le secret YouTube dans les paramètres du module Video.",
       "Configure the YouTube client ID, client secret, and redirect URL in Video module settings.": "Configurez l’identifiant client, le secret client et l’URL de redirection YouTube dans les paramètres du module Video.",
       "Connect a YouTube channel before scheduling this stream.": "Connectez une chaîne YouTube avant de planifier ce flux.",
@@ -474,6 +478,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "Module Demo is not enabled for this site.": "Il modulo Demo non è attivo per questa sede.",
       "The Module Demo snapshot is invalid or exceeds the supported limits.": "L'istantanea del modulo Demo non è valida o supera i limiti supportati.",
       "The note was not found in this site.": "La nota non è stata trovata in questa sede.",
+      "The account database is unavailable.": "Il database degli account non è disponibile.",
     },
     "people-flows": {
       "An Elvanto step changed or disappeared. Refresh the imported People Flow before saving links.": "Un passaggio Elvanto è cambiato o non è più disponibile. Aggiorna il flusso Persone importato prima di salvare i collegamenti.",
@@ -520,6 +525,7 @@ export const moduleApiErrorAdditions: Partial<Record<UserLanguage, ModulesById>>
       "This broadcast cannot be stopped from its current status: {status}.": "Questa trasmissione non può essere fermata con il suo stato attuale: {status}.",
       "This location is read-only while it is a redundancy standby or fenced site.": "Questa sede è di sola lettura in modalità standby di ridondanza o quando è isolata.",
       "YouTube sync failed: {message}": "Sincronizzazione YouTube non riuscita: {message}",
+      "Configure the private video settings file and map its sites to location IDs.": "Configura il file privato delle impostazioni Video e associa i suoi siti agli ID delle sedi.",
       "Configure the YouTube client ID and secret in Video module settings.": "Configura l'ID client e il secret YouTube nelle impostazioni del modulo Video.",
       "Configure the YouTube client ID, client secret, and redirect URL in Video module settings.": "Configura l'ID client, il secret client e l'URL di reindirizzamento YouTube nelle impostazioni del modulo Video.",
       "Connect a YouTube channel before scheduling this stream.": "Collega un canale YouTube prima di pianificare questo streaming.",
