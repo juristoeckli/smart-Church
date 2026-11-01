@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.5";
+  const VERSION = "0.3.6";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -135,6 +135,8 @@
   async function disconnect(reason = "") {
     const previous = credentials;
     credentials = null; plan = null;
+    clearTimeout(controlRetry); controlRetry = null; fullscreenVersion = 0;
+    if (controlSocket) { const socket = controlSocket; controlSocket = null; socket.close(); }
     connectionState(false);
     controllers.forEach(controller => controller.abort());
     stopPlayback(); memory.clear();
@@ -299,7 +301,7 @@
     if (key === currentKey) return;
     stopPlayback(); currentKey = key; currentShow = show || null;
     slideIndex = nextIndex;
-    if (show) await renderSlide(); else text("", "");
+    if (show) await renderSlide(); else { replaceScreen(); screen.className = "blank"; }
   }
   async function renderSlide() {
     clearTimeout(slideTimer);
@@ -332,6 +334,64 @@
       if (currentShow === show) void selectPlayback();
     }, 250);
   }
+  function applyReload(result) {
+    if (!credentials) return;
+      const reloadKey = CONNECTION_KEY + "-reload-" + credentials.displayId;
+      if (Number.isInteger(result.reloadVersion) && result.reloadVersion > 0) {
+        let previous = 0;
+        try { previous = Number(localStorage.getItem(reloadKey) || 0); } catch (ignored) {}
+        const url = new URL(location.href);
+        if (url.searchParams.get("reloadDisplay") === credentials.displayId) previous = Math.max(previous, Number(url.searchParams.get("reloadVersion") || 0));
+        if (result.reloadVersion > previous) {
+          try { localStorage.setItem(reloadKey, String(result.reloadVersion)); } catch (ignored) {
+            // Retain the acknowledgment in this tab's URL when TV storage is blocked.
+            url.searchParams.set("reloadDisplay", credentials.displayId);
+            url.searchParams.set("reloadVersion", String(result.reloadVersion));
+            try { history.replaceState(null, "", url.href); } catch (ignoredHistory) { return; }
+          }
+          location.reload(); return;
+        }
+      }
+  }
+  let controlSocket = null, controlConnecting = false, controlRetry = null, controlDelay = 1000, fullscreenVersion = 0;
+  function applyFullscreen(result) {
+    if (Number.isInteger(result.fullscreenVersion) && result.fullscreenVersion > fullscreenVersion) {
+      fullscreenVersion = result.fullscreenVersion;
+      requestFullscreen();
+    }
+  }
+  async function connectControl() {
+    if (!credentials || typeof WebSocket === "undefined" || controlConnecting || controlRetry || controlSocket) return;
+    const connection = credentials;
+    controlConnecting = true;
+    function retry() {
+      if (controlRetry || credentials !== connection) return;
+      controlRetry = setTimeout(() => { controlRetry = null; void connectControl(); }, controlDelay + Math.random() * 500);
+      controlDelay = Math.min(30000, controlDelay * 2);
+    }
+    try {
+      const ticket = await (await api("/control-ticket", {}, connection)).json();
+      if (credentials !== connection) return;
+      const url = new URL("/api/signage/control", location.href);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("departmentId", connection.departmentId); url.searchParams.set("ticket", ticket.ticket);
+      const socket = new WebSocket(url.href); controlSocket = socket;
+      const openTimeout = setTimeout(() => socket.close(), 20000);
+      socket.onopen = () => { clearTimeout(openTimeout); controlDelay = 1000; void heartbeat(); };
+      socket.onmessage = event => {
+        if (credentials !== connection) { socket.close(); return; }
+        try {
+          const message = JSON.parse(event.data);
+          if (message.departmentId !== connection.departmentId || !message.payload || message.payload.displayId !== connection.displayId) return;
+          if (message.topic === "signage:reload") applyReload(message.payload);
+          if (message.topic === "signage:fullscreen") applyFullscreen(message.payload);
+        } catch (ignored) {}
+      };
+      socket.onerror = () => socket.close();
+      socket.onclose = () => { clearTimeout(openTimeout); if (controlSocket === socket) controlSocket = null; retry(); };
+    } catch (ignored) { retry(); }
+    finally { controlConnecting = false; }
+  }
   let reporting = false;
   async function heartbeat() {
     if (!credentials || reporting) return;
@@ -352,22 +412,7 @@
         clockAnchor = serverTime + roundTrip / 2; clockTick = performance.now();
       }
       connectionState(true);
-      const reloadKey = CONNECTION_KEY + "-reload-" + credentials.displayId;
-      if (Number.isInteger(result.reloadVersion) && result.reloadVersion > 0) {
-        let previous = 0;
-        try { previous = Number(localStorage.getItem(reloadKey) || 0); } catch (ignored) {}
-        const url = new URL(location.href);
-        if (url.searchParams.get("reloadDisplay") === credentials.displayId) previous = Math.max(previous, Number(url.searchParams.get("reloadVersion") || 0));
-        if (result.reloadVersion > previous) {
-          try { localStorage.setItem(reloadKey, String(result.reloadVersion)); } catch (ignored) {
-            // Retain the acknowledgment in this tab's URL when TV storage is blocked.
-            url.searchParams.set("reloadDisplay", credentials.displayId);
-            url.searchParams.set("reloadVersion", String(result.reloadVersion));
-            try { history.replaceState(null, "", url.href); } catch (ignoredHistory) { return; }
-          }
-          location.reload(); return;
-        }
-      }
+      applyReload(result); applyFullscreen(result); void connectControl();
       void selectPlayback();
     } catch (ignored) { connectionState(false); } finally { reporting = false; }
   }

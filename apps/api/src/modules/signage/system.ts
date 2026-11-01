@@ -4,10 +4,12 @@ import type { ModuleServerContext } from '../module-sdk.js';
 type Access = (request: FastifyRequest, reply: FastifyReply) => Promise<string | null>;
 type DeviceAccess = (request: FastifyRequest, reply: FastifyReply, id: string) => Promise<{id:string;department_id:string}|null>;
 import {registerSignagePairing} from "./pairing.js";
+import {signageControl} from './control.js';
 const idParams = {type:'object',required:['id'],properties:{id:{type:'string',format:'uuid'}}};
 
 export function registerSignageSystem(routes: FastifyInstance, context: ModuleServerContext, manager: Access, device: DeviceAccess, admin: Access) {
  const {pool,validateMutation}=context;
+ const control=signageControl(routes,context,device);
  const uploads=new Set<FastifyRequest>();
  routes.addHook('onResponse',async request=>{uploads.delete(request);});
  routes.addHook('onRequestAbort',async request=>{uploads.delete(request);});
@@ -65,9 +67,16 @@ export function registerSignageSystem(routes: FastifyInstance, context: ModuleSe
   const result=await pool!.query('UPDATE signage_displays SET name=$3,default_show_id=$4 WHERE id=$1 AND department_id=$2 RETURNING id',[request.params.id,site,request.body.name.trim(),request.body.defaultShowId]);return result.rowCount?result.rows[0]:reply.code(404).send({error:'Display not found.'});
  });
  registerSignagePairing(routes,context,admin);
+ routes.post<{Params:{id:string}}>('/api/signage/displays/:id/fullscreen',{schema:{params:idParams}},async(request,reply)=>{
+  if(!validateMutation(request,reply))return reply;const site=await manager(request,reply);if(!site)return reply;
+  const result=await pool!.query('UPDATE signage_displays SET fullscreen_version=fullscreen_version+1 WHERE id=$1 AND department_id=$2 RETURNING id,service_user_id,fullscreen_version',[request.params.id,site]);
+  if(result.rowCount)control.fullscreen(site,result.rows[0].service_user_id,result.rows[0].id,result.rows[0].fullscreen_version);
+  return result.rowCount?{ok:true}:reply.code(404).send({error:'Display not found.'});
+ });
  routes.post<{Params:{id:string}}>('/api/signage/displays/:id/reload',{schema:{params:idParams}},async(request,reply)=>{
   if(!validateMutation(request,reply))return reply;const site=await manager(request,reply);if(!site)return reply;
-  const result=await pool!.query('UPDATE signage_displays SET reload_version=reload_version+1 WHERE id=$1 AND department_id=$2 RETURNING id',[request.params.id,site]);
+  const result=await pool!.query('UPDATE signage_displays SET reload_version=reload_version+1 WHERE id=$1 AND department_id=$2 RETURNING id,service_user_id,reload_version',[request.params.id,site]);
+  if(result.rowCount)control.reload(site,result.rows[0].service_user_id,result.rows[0].id,result.rows[0].reload_version);
   return result.rowCount?{ok:true}:reply.code(404).send({error:'Display not found.'});
  });
  async function plan(site:string,id:string){

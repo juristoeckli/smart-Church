@@ -5,6 +5,7 @@ import {localToIso} from '../../web/src/modules/signage/time.ts';
 import {readFile} from 'node:fs/promises';
 import QRCode from 'qrcode';
 import ffmpeg from 'ffmpeg-static';
+import {controlClient} from './signage-websocket-test-client.mjs';
 import {execFileSync} from 'node:child_process';
 
 const databaseUrl=process.env.SIGNAGE_TEST_DATABASE_URL;
@@ -100,7 +101,20 @@ try {
  assert.equal((await must('GET','/api/signage/displays')).find(d=>d.id===a.id).playerVersion,'0.2.0');
  await must('POST',`/api/signage/displays/${a.id}/reload`,undefined,200,outsiderId);
  await must('POST',`/api/signage/displays/${a.id}/reload`,undefined,403,userA);
+ const address=await app.listen({host:'127.0.0.1',port:0});
+ const ticket=await must('GET',`/api/signage/device/${a.id}/control-ticket`,undefined,200,userA);
+ const controlPath=`/api/signage/control?departmentId=${departmentId}&ticket=${ticket.ticket}`;
+ const socket=await controlClient(address,controlPath);
+ assert.match(socket.status,/101/);await socket.wait('realtime:connected');
+ const replay=await controlClient(address,controlPath);assert.match(replay.status,/401/);replay.socket.destroy();
+ const wrongOriginTicket=await must('GET',`/api/signage/device/${a.id}/control-ticket`,undefined,200,userA);
+ const wrongOrigin=await controlClient(address,`/api/signage/control?departmentId=${departmentId}&ticket=${wrongOriginTicket.ticket}`,'https://untrusted.example');assert.match(wrongOrigin.status,/403/);wrongOrigin.socket.destroy();
  await must('POST',`/api/signage/displays/${a.id}/reload`,undefined,200);
+ assert.equal((await socket.wait('signage:reload')).payload.displayId,a.id);
+ await must('POST',`/api/signage/displays/${a.id}/fullscreen`,undefined,403,userA);
+ await must('POST',`/api/signage/displays/${a.id}/fullscreen`,undefined,200,outsiderId);
+ assert.equal((await socket.wait('signage:fullscreen')).payload.fullscreenVersion,1);
+ socket.socket.destroy();
  const heartbeat=await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:43,clockOffsetMs:60000,clockRoundTripMs:42},200,userA);
  assert.equal(heartbeat.reloadVersion,2);assert.ok(Number.isFinite(Date.parse(heartbeat.serverTime)));
  const timing=(await must('GET','/api/signage/displays')).find(d=>d.id===a.id);

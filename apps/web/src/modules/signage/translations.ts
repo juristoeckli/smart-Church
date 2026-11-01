@@ -1,5 +1,8 @@
 import type {UserLanguage} from '@smart-church/contracts';
 const phrases: Array<[string,string,string,string]> = [
+ ['Request fullscreen','Vollbild anfordern','Demander le plein écran','Richiedi schermo intero'],
+ ['Fullscreen requested. The TV browser may require a local click.','Vollbild angefordert. Der TV-Browser benötigt möglicherweise einen Klick am Gerät.','Plein écran demandé. Le navigateur du téléviseur peut nécessiter un clic local.','Schermo intero richiesto. Il browser del televisore potrebbe richiedere un clic locale.'],
+ ['Reload requested. Connected displays reload immediately; the heartbeat provides a fallback.','Neuladen angefordert. Verbundene Bildschirme laden sofort neu; der Statusabgleich dient als Rückfallebene.','Rechargement demandé. Les écrans connectés se rechargent immédiatement ; le suivi périodique sert de secours.','Ricaricamento richiesto. Gli schermi connessi si ricaricano subito; il controllo periodico funge da riserva.'],
  ['Reload display','Bildschirm neu laden','Recharger l’écran','Ricarica schermo'],
  ['Reload requested. The display will reload within 30 seconds when connected.','Neuladen angefordert. Der verbundene Bildschirm lädt innerhalb von 30 Sekunden neu.','Rechargement demandé. L’écran connecté se rechargera sous 30 secondes.','Ricaricamento richiesto. Lo schermo connesso si ricaricherà entro 30 secondi.'],
  ['Clock offset','Zeitabweichung','Décalage horaire','Scostamento orario'],

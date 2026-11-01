@@ -52,14 +52,15 @@ export class RealtimeHub {
     private readonly authenticate: Authenticate,
     private readonly authorize: Authorize,
     private readonly isOriginAllowed: IsOriginAllowed,
+    private readonly options: {path?: string; revalidate?: boolean} = {},
   ) {
     this.server.on("upgrade", this.onUpgrade);
   }
 
-  publish(topic: string, departmentId: string, payload?: unknown) {
+  publish(topic: string, departmentId: string, payload?: unknown, userId?: string) {
     const message = Buffer.from(JSON.stringify({ topic, departmentId, payload }));
     for (const client of this.clients) {
-      if (client.departmentId === departmentId && !client.socket.destroyed) writeFrame(client.socket, 1, message);
+      if (client.departmentId === departmentId && (!userId || client.userId === userId) && !client.socket.destroyed) writeFrame(client.socket, 1, message);
     }
   }
 
@@ -75,14 +76,14 @@ export class RealtimeHub {
 
   close() {
     this.server.off("upgrade", this.onUpgrade);
-    for (const client of this.clients) this.disconnect(client);
+    for (const client of this.clients) { this.disconnect(client); client.socket.destroy(); }
   }
 
   private onUpgrade = (request: IncomingMessage, socket: Socket, head: Buffer) => {
     let url: URL;
     try { url = new URL(request.url ?? "/", "http://localhost"); }
     catch { return; }
-    if (url.pathname !== "/api/realtime") return;
+    if (url.pathname !== (this.options.path ?? "/api/realtime")) return;
     void this.accept(request, socket, head, url);
   };
 
@@ -131,6 +132,7 @@ export class RealtimeHub {
       heartbeat: setInterval(() => {
         if (socket.destroyed) return;
         if (Date.now() - client.lastPongAt > 60_000) return socket.destroy();
+        if (this.options.revalidate) void this.authorize(identity!, departmentId).then(allowed => { if (!allowed) socket.destroy(); }).catch(() => socket.destroy());
         writeFrame(socket, 9, Buffer.alloc(0));
       }, 25_000),
     };

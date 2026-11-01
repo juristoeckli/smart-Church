@@ -1,7 +1,7 @@
 {
   "id": "signage",
   "name": "Public signage",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "serverEntry": "./routes.ts",
   "required": false,
   "enabledByDefault": false,

@@ -180,8 +180,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (await context.isDepartmentWritable(display.department_id)) {
         await pool!.query(`UPDATE signage_displays SET installation_type=$3,last_ip_address=CASE WHEN $4::inet IS NULL THEN last_ip_address ELSE $4::inet END,last_seen_at=now(),uptime_seconds=$5,player_version=$6,playback_error=$7,current_show_id=$8,download_progress=$9,clock_offset_ms=$10,clock_round_trip_ms=$11,updated_at=now() WHERE id=$1 AND department_id=$2`, [display.id, display.department_id, request.body.installationType, ip, request.body.uptimeSeconds,request.body.playerVersion ?? null,request.body.playbackError ?? null,request.body.currentShowId ?? null,request.body.downloadProgress ?? null,request.body.clockOffsetMs ?? null,request.body.clockRoundTripMs ?? null]);
       }
-      const command=(await pool!.query('SELECT reload_version FROM signage_displays WHERE id=$1 AND department_id=$2',[display.id,display.department_id])).rows[0];
-      return reply.header("Cache-Control","no-store").send({ ok: true, serverTime: new Date().toISOString(),reloadVersion:command?.reload_version??0 });
+      const command=(await pool!.query('SELECT reload_version,fullscreen_version FROM signage_displays WHERE id=$1 AND department_id=$2',[display.id,display.department_id])).rows[0];
+      return reply.header("Cache-Control","no-store").send({ ok: true, serverTime: new Date().toISOString(),reloadVersion:command?.reload_version??0,fullscreenVersion:command?.fullscreen_version??0 });
     });
   });
 }
