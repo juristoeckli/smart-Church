@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.9";
+  const VERSION = "0.3.10";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -41,6 +41,8 @@
       reportFullscreen("blocked");
       if (fullscreenNeedsClick && fullscreenButton.focus) fullscreenButton.focus();
     }
+    // A remote command cannot create the browser's required local user gesture.
+    if (navigator.userActivation && !navigator.userActivation.isActive) { blocked(); return false; }
     reportFullscreen("pending");
     try {
       const result = request.call(root);
@@ -55,10 +57,8 @@
     } catch (ignored) { blocked(); return false; }
   }
   function setConnectionOnline(online) {
-    const wasOnline = connectionOnline;
     connectionOnline = online;
     updateConnectionChrome();
-    if (online && !wasOnline && fullscreenWanted && !fullscreenActive()) requestFullscreen(false);
   }
   function fullscreenChanged() {
     clearTimeout(fullscreenCheck);

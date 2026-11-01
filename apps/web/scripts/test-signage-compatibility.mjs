@@ -149,6 +149,13 @@ assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'clicking in fullscr
 controlled.context.document.fullscreenElement=null;
 controlled.listeners.get('click')({target:{closest:()=>({id:'disconnect'})}});
 assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'disconnect control does not enter fullscreen');
+controlled.context.navigator.userActivation={isActive:false};
+send('signage:fullscreen',{displayId:'display',fullscreenVersion:3});
+assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'remote command cannot bypass browser user activation');
+assert.equal(controlled.nodes.get('fullscreen').hidden,false);
+controlled.context.navigator.userActivation.isActive=true;
+controlled.listeners.get('click')({target:{closest:()=>null}});
+assert.equal(controlled.fullscreenRequests(),clicksBefore+2,'local click grants fullscreen activation');
 const black=await boot({paired:true,blank:true});assert.equal(black.nodes.get('screen').className,'blank');assert.equal(black.nodes.get('screen').children.length,0);
 for(const fullscreenMode of ['reject','throw','noop','unsupported','webkit']) {
  const run=await boot({paired:true,control:true,fullscreenMode});
