@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.8";
+  const VERSION = "0.3.9";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -82,6 +82,12 @@
   document.addEventListener("fullscreenerror", () => { fullscreenNeedsClick = true; reportFullscreen("blocked"); });
   document.addEventListener("webkitfullscreenerror", () => { fullscreenNeedsClick = true; reportFullscreen("blocked"); });
   fullscreenButton.onclick = () => requestFullscreen(true);
+  document.addEventListener("click", event => {
+    // Run during the real click so browsers can grant fullscreen permission.
+    // These controls already handle their own clicks; disconnect stays separate.
+    if (event.target && event.target.closest && event.target.closest("#disconnect,#fullscreen,#pair-button")) return;
+    if (!fullscreenActive()) requestFullscreen(true);
+  }, true);
   const pendingKey="smart-church-signage-pending"; let pairingPending=null,pairingBusy=false,pairingTimer;
   const boot = performance.now();
   const memory = new Map();

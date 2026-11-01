@@ -26,7 +26,7 @@ function element(tag = '') {
 async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false, timing = false, reloadVersion = 0, control = false, blank = false, fullscreenMode = 'success'} = {}) {
   const nodes = new Map(), calls = [], timers = [];
   const intervals = [], reports = [], saved = new Map(); let reloads = 0;
-  const sockets=[],fullscreenChecks=[];let fullscreenRequests=0;
+  const sockets=[],fullscreenChecks=[],listeners=new Map();let fullscreenRequests=0;
   const connection = {displayId: 'display', departmentId: 'department', apiKey: 'sc_' + 'k'.repeat(43)};
   const pending = {code: 'ABCD-EFGH', pairingToken: 't'.repeat(43), apiKey: connection.apiKey, expiresAt: new Date(Date.now()+900000).toISOString()};
   const plan = {serverTime: new Date().toISOString(), validUntil: new Date(Date.now()+86400000).toISOString(),
@@ -36,7 +36,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
   if(blank){plan.shows=[];plan.media=[];plan.defaultShowId=null;}
   const context = {screen:{width:1920,height:1080},innerWidth:1920,innerHeight:1080,devicePixelRatio:1,performance, Map, Set, Blob: LegacyBlob, FileReader: LegacyFileReader,
     crypto: webcrypto, AbortController, Response, URL: class extends URL {static createObjectURL(){return 'blob:test';} static revokeObjectURL(){}},
-    document: {body:{classList:{toggle(){}}},documentElement:element(),getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener() {}},
+    document: {body:{classList:{toggle(){}}},documentElement:element(),getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener(name,handler) {listeners.set(name,handler);}},
     localStorage: {getItem: key => saved.get(key) || (paired && key.endsWith('connection') ? JSON.stringify(connection) : null),
       setItem(key,value) { if (blockedStorage) throw Error('storage blocked'); saved.set(key,value); }, removeItem(key) {saved.delete(key);}},
     navigator: {userAgent: 'SMART-TV Tizen 6.0 Chrome/76'},
@@ -92,7 +92,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
   vm.runInNewContext(source, context);
   const settle = async () => { for (let i=0; i<30; i++) await new Promise(resolve => setImmediate(resolve)); };
   await settle();
-  return {context, nodes, calls, timers, settle, intervals, reports, reloads:()=>reloads,sockets,fullscreenRequests:()=>fullscreenRequests,fullscreenChecks};
+  return {context, nodes, calls, timers, settle, intervals, reports, reloads:()=>reloads,sockets,fullscreenRequests:()=>fullscreenRequests,fullscreenChecks,listeners};
 }
 const connected = await boot({paired: true});
 assert.equal(connected.nodes.get('screen').children[0].tag, 'img');
@@ -141,6 +141,14 @@ controlled.intervals.find(item=>item.delay===30000&&item.fn.toString().includes(
 assert.equal(controlled.reports.at(-1).fullscreenState,'windowed');
 assert.equal(controlled.reports.at(-1).displayMetrics.screenWidth,1920);
 assert.equal(controlled.reports.at(-1).displayMetrics.viewportHeight,1080);
+const clicksBefore=controlled.fullscreenRequests();
+controlled.listeners.get('click')({target:{closest:()=>null}});
+assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'clicking player content enters fullscreen after remote exit');
+controlled.listeners.get('click')({target:{closest:()=>null}});
+assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'clicking in fullscreen does not request it again');
+controlled.context.document.fullscreenElement=null;
+controlled.listeners.get('click')({target:{closest:()=>({id:'disconnect'})}});
+assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'disconnect control does not enter fullscreen');
 const black=await boot({paired:true,blank:true});assert.equal(black.nodes.get('screen').className,'blank');assert.equal(black.nodes.get('screen').children.length,0);
 for(const fullscreenMode of ['reject','throw','noop','unsupported','webkit']) {
  const run=await boot({paired:true,control:true,fullscreenMode});
