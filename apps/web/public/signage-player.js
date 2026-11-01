@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.6";
+  const VERSION = "0.3.7";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -44,7 +44,7 @@
   const boot = performance.now();
   const memory = new Map();
   const controllers = new Set();
-  let credentials = null, plan = null, offset = 0, syncing = false;
+  let credentials = null, plan = null, offset = 0, syncing = false, syncAgain = false;
   let progress = 0, networkError = "", storageError = "", playbackError = "";
   let currentKey = "", currentShow = null, slideIndex = 0, slideTimer, mediaUrl = "";
   let databasePromise;
@@ -228,7 +228,8 @@
     return true;
   }
   async function synchronize() {
-    if (!credentials || syncing) return;
+    if (!credentials) return;
+    if (syncing) { syncAgain = true; return; }
     const connection = credentials;
     syncing = true;
     try {
@@ -282,7 +283,10 @@
       connectionState(false);
       setConnectionOnline(false);
       status.textContent = plan ? "Offline · playing downloaded content" : "Waiting for connection";
-    } finally { syncing = false; }
+    } finally {
+      syncing = false;
+      if (syncAgain) { syncAgain = false; void synchronize(); }
+    }
   }
   async function selectPlayback() {
     if (!credentials || !plan) return;
@@ -377,11 +381,12 @@
       url.searchParams.set("departmentId", connection.departmentId); url.searchParams.set("ticket", ticket.ticket);
       const socket = new WebSocket(url.href); controlSocket = socket;
       const openTimeout = setTimeout(() => socket.close(), 20000);
-      socket.onopen = () => { clearTimeout(openTimeout); controlDelay = 1000; void heartbeat(); };
+      socket.onopen = () => { clearTimeout(openTimeout); controlDelay = 1000; void heartbeat(); void synchronize(); };
       socket.onmessage = event => {
         if (credentials !== connection) { socket.close(); return; }
         try {
           const message = JSON.parse(event.data);
+          if (message.departmentId === connection.departmentId && message.topic === "signage:update") { void synchronize(); return; }
           if (message.departmentId !== connection.departmentId || !message.payload || message.payload.displayId !== connection.displayId) return;
           if (message.topic === "signage:reload") applyReload(message.payload);
           if (message.topic === "signage:fullscreen") applyFullscreen(message.payload);

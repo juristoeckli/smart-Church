@@ -9,6 +9,12 @@ type Slide = { heading: string; body: string; duration?: number; mediaId?: strin
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   app.register(async (routes) => {
+    const mutationSites=new WeakMap<FastifyRequest,string>();
+    routes.addHook('onResponse',async(request,reply)=>{
+      const site=mutationSites.get(request);
+      // Publish only after a successful handler has committed its changes.
+      if(site&&reply.statusCode>=200&&reply.statusCode<300&&['POST','PUT','PATCH','DELETE'].includes(request.method)&&! /\/(reload|fullscreen)(?:\?|$)/.test(request.url))control.changed(site);
+    });
     routes.setErrorHandler((error,request,reply)=>{
       const code=(error as {code?:string}).code;
       if(code==='40P01'||code==='40001')return reply.code(409).send({error:'Another change was saved at the same time. Refresh and try again.'});
@@ -33,6 +39,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const grants = row.module_permissions?.signage ?? [];
       const isAdmin = row.role === "site_admin" || grants.includes("admin") || grants.includes("manage");
       if (!isAdmin && (requireAdmin || !grants.includes("operator"))) { reply.code(403).send({ error: requireAdmin ? "Signage Admin access is required." : "Signage Operator access is required." }); return null; }
+      mutationSites.set(request,departmentId);
       return departmentId;
     }
     const admin = (request: FastifyRequest, reply: FastifyReply) => manager(request, reply, true);
@@ -165,7 +172,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return result.rows[0];
     }
 
-    registerSignageSystem(routes, context, manager, serviceAccountDisplay, admin);
+    const control=registerSignageSystem(routes, context, manager, serviceAccountDisplay, admin);
     routes.get<{ Params: { displayId: string } }>("/api/signage/device/:displayId/current", { schema: { params: { type: "object", required: ["displayId"], properties: { displayId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const display = await serviceAccountDisplay(request, reply, request.params.displayId);
       if (!display) return reply;

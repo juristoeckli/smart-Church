@@ -1,4 +1,4 @@
-const cacheName = 'smart-church-signage-shell-v9';
+const cacheName = 'smart-church-signage-shell-v10';
 const shellPaths = ['/signage-display.html', '/signage-player.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(shellPaths)).then(() => self.skipWaiting()));

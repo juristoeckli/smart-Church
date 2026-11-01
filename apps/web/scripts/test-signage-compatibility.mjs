@@ -118,6 +118,12 @@ assert.equal(timed.nodes.get('fullscreen').hidden,true,'controls hidden while co
 const controlled=await boot({paired:true,control:true});
 assert.equal(controlled.sockets.length,1);
 const websocket=controlled.sockets[0];assert.match(websocket.url,/wss:/);assert.match(websocket.url,/ticket=single-use-ticket/);assert.ok(!websocket.url.includes('sc_'));
+const plansBefore=controlled.calls.filter(path=>path.endsWith('/plan')).length;
+for(let index=0;index<10;index++)websocket.onmessage({data:JSON.stringify({topic:'signage:update',departmentId:'department'})});
+await controlled.settle();
+assert.equal(controlled.calls.filter(path=>path.endsWith('/plan')).length,plansBefore+2,'updates synchronize immediately and coalesce changes arriving during a download');
+websocket.onmessage({data:JSON.stringify({topic:'signage:update',departmentId:'other-site'})});await controlled.settle();
+assert.equal(controlled.calls.filter(path=>path.endsWith('/plan')).length,plansBefore+2,'ignore updates for another site');
 const send=(topic,payload)=>websocket.onmessage({data:JSON.stringify({topic,departmentId:'department',payload})});
 send('signage:reload',{displayId:'other-display',reloadVersion:1});assert.equal(controlled.reloads(),0);
 send('signage:reload',{displayId:'display',reloadVersion:1});assert.equal(controlled.reloads(),1);

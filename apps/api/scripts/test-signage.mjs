@@ -114,6 +114,8 @@ try {
  await must('POST',`/api/signage/displays/${a.id}/fullscreen`,undefined,403,userA);
  await must('POST',`/api/signage/displays/${a.id}/fullscreen`,undefined,200,outsiderId);
  assert.equal((await socket.wait('signage:fullscreen')).payload.fullscreenVersion,1);
+ await must('PUT',`/api/signage/displays/${a.id}/settings`,{name:'Updated display',defaultShowId:show.id});
+ assert.equal((await socket.wait('signage:update')).departmentId,departmentId);
  socket.socket.destroy();
  const heartbeat=await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:43,clockOffsetMs:60000,clockRoundTripMs:42},200,userA);
  assert.equal(heartbeat.reloadVersion,2);assert.ok(Number.isFinite(Date.parse(heartbeat.serverTime)));

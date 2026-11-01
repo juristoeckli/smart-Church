@@ -96,4 +96,5 @@ export function registerSignageSystem(routes: FastifyInstance, context: ModuleSe
   if(!playback?.shows.some(show=>show.slides.some((slide:{mediaId?:string})=>slide.mediaId===request.params.mediaId)))return reply.code(403).send({error:'This media is not assigned to this display.'});
   const row=(await pool!.query('SELECT content_type,data FROM signage_media WHERE id=$1 AND department_id=$2',[request.params.mediaId,display.department_id])).rows[0];return row?reply.type(row.content_type).header('Cache-Control','no-store').send(row.data):reply.code(404).send({error:'Media not found.'});
  });
+ return control;
 }
