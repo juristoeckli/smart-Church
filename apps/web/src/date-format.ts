@@ -6,6 +6,7 @@ let activeDateTimeFormat: DateTimeFormat = defaultDateTimeFormat;
 export function setUserDateTimeFormat(format: DateTimeFormat) {
   activeDateTimeFormat = format;
 }
+export function getUserDateTimeFormat() { return activeDateTimeFormat; }
 
 export function formatUserDate(value: string | Date, includeTime = false, selectedFormat?: DateTimeFormat) {
   const format = selectedFormat ?? activeDateTimeFormat;
