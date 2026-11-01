@@ -1,25 +1,22 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.10";
+  const VERSION = "0.3.11";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
   const setup = document.getElementById("setup");
   const pairError = document.getElementById("pair-error");
   const pairButton = document.getElementById("pair-button");
-  const fullscreenButton = document.getElementById("fullscreen");
-  let connectionOnline = false, fullscreenState = "windowed", fullscreenNeedsClick = false, fullscreenCheck, fullscreenWanted = true;
+  let connectionOnline = false, fullscreenState = "windowed", fullscreenCheck, fullscreenWanted = true;
   function fullscreenActive() {
     return document.fullscreenElement === document.documentElement || document.webkitFullscreenElement === document.documentElement;
   }
   function updateConnectionChrome() {
     document.body.classList.toggle("display-connected", connectionOnline);
-    fullscreenButton.hidden = fullscreenActive() || (connectionOnline && !fullscreenNeedsClick);
   }
   function reportFullscreen(state) {
     const changed = fullscreenState !== state;
     fullscreenState = state;
-    if (state === "active") fullscreenNeedsClick = false;
     updateConnectionChrome();
     if (changed) setTimeout(() => void heartbeat(), 0);
   }
@@ -30,16 +27,12 @@
     const root = document.documentElement;
     const request = root.requestFullscreen || root.webkitRequestFullscreen || root.webkitRequestFullScreen;
     if (typeof request !== "function") {
-      fullscreenNeedsClick = false;
       reportFullscreen("unsupported");
       return false;
     }
     function blocked() {
       if (!fullscreenWanted) { reportFullscreen(fullscreenActive() ? "active" : "windowed"); return; }
-      fullscreenNeedsClick = !!remote;
-      fullscreenButton.textContent = "Press OK for fullscreen";
       reportFullscreen("blocked");
-      if (fullscreenNeedsClick && fullscreenButton.focus) fullscreenButton.focus();
     }
     // A remote command cannot create the browser's required local user gesture.
     if (navigator.userActivation && !navigator.userActivation.isActive) { blocked(); return false; }
@@ -66,7 +59,7 @@
     reportFullscreen(fullscreenActive() ? "active" : "windowed");
   }
   function exitFullscreen() {
-    fullscreenWanted = false; fullscreenNeedsClick = false; clearTimeout(fullscreenCheck);
+    fullscreenWanted = false; clearTimeout(fullscreenCheck);
     const exit = document.exitFullscreen || document.webkitExitFullscreen || document.webkitCancelFullScreen;
     function finished() { reportFullscreen(fullscreenActive() ? "active" : "windowed"); }
     if (!fullscreenActive() || typeof exit !== "function") { finished(); return; }
@@ -79,13 +72,12 @@
   }
   document.addEventListener("fullscreenchange", fullscreenChanged);
   document.addEventListener("webkitfullscreenchange", fullscreenChanged);
-  document.addEventListener("fullscreenerror", () => { fullscreenNeedsClick = true; reportFullscreen("blocked"); });
-  document.addEventListener("webkitfullscreenerror", () => { fullscreenNeedsClick = true; reportFullscreen("blocked"); });
-  fullscreenButton.onclick = () => requestFullscreen(true);
+  document.addEventListener("fullscreenerror", () => { reportFullscreen("blocked"); });
+  document.addEventListener("webkitfullscreenerror", () => { reportFullscreen("blocked"); });
   document.addEventListener("click", event => {
     // Run during the real click so browsers can grant fullscreen permission.
     // These controls already handle their own clicks; disconnect stays separate.
-    if (event.target && event.target.closest && event.target.closest("#disconnect,#fullscreen,#pair-button")) return;
+    if (event.target && event.target.closest && event.target.closest("#disconnect,#pair-button")) return;
     if (!fullscreenActive()) requestFullscreen(true);
   }, true);
   const pendingKey="smart-church-signage-pending"; let pairingPending=null,pairingBusy=false,pairingTimer;

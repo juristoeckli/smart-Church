@@ -120,7 +120,7 @@ timed.intervals.find(item=>item.delay===30000&&item.fn.toString().includes('hear
 assert.equal(timed.reloads(),1,'reload command is remembered before reloading');
 assert.ok(Math.abs(timed.reports.at(-1).clockOffsetMs-60000)<1000);
 assert.ok(timed.reports.at(-1).clockRoundTripMs>=0);
-assert.equal(timed.nodes.get('fullscreen').hidden,true,'controls hidden while connected');
+assert.ok(!timed.nodes.has('fullscreen'),'player does not create a fullscreen button');
 const controlled=await boot({paired:true,control:true});
 assert.equal(controlled.sockets.length,1);
 const websocket=controlled.sockets[0];assert.match(websocket.url,/wss:/);assert.match(websocket.url,/ticket=single-use-ticket/);assert.ok(!websocket.url.includes('sc_'));
@@ -152,7 +152,7 @@ assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'disconnect control 
 controlled.context.navigator.userActivation={isActive:false};
 send('signage:fullscreen',{displayId:'display',fullscreenVersion:3});
 assert.equal(controlled.fullscreenRequests(),clicksBefore+1,'remote command cannot bypass browser user activation');
-assert.equal(controlled.nodes.get('fullscreen').hidden,false);
+assert.ok(!controlled.nodes.has('fullscreen'));
 controlled.context.navigator.userActivation.isActive=true;
 controlled.listeners.get('click')({target:{closest:()=>null}});
 assert.equal(controlled.fullscreenRequests(),clicksBefore+2,'local click grants fullscreen activation');
@@ -165,10 +165,10 @@ for(const fullscreenMode of ['reject','throw','noop','unsupported','webkit']) {
  heartbeat();await run.settle();
  assert.equal(run.reports.at(-1).fullscreenState,fullscreenMode==='unsupported'?'unsupported':fullscreenMode==='webkit'?'active':'blocked',fullscreenMode);
  if(['reject','throw','noop'].includes(fullscreenMode)) {
-  assert.equal(run.nodes.get('fullscreen').hidden,false,'blocked remote request offers a local click');
+  assert.ok(!run.nodes.has('fullscreen'),'blocked remote request does not create a button');
   run.context.document.documentElement.requestFullscreen=()=>{run.context.document.fullscreenElement=run.context.document.documentElement;};
-  run.nodes.get('fullscreen').onclick();heartbeat();await run.settle();
-  assert.equal(run.reports.at(-1).fullscreenState,'active');assert.equal(run.nodes.get('fullscreen').hidden,true);
+  run.listeners.get('click')({target:{closest:()=>null}});heartbeat();await run.settle();
+  assert.equal(run.reports.at(-1).fullscreenState,'active');assert.ok(!run.nodes.has('fullscreen'));
  }
 }
 console.log('PASS: TV pairing, playback, heartbeat, legacy DOM/Blob, unavailable storage');
