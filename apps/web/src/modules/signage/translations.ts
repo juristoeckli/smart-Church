@@ -1,5 +1,10 @@
 import type {UserLanguage} from '@smart-church/contracts';
 const phrases: Array<[string,string,string,string]> = [
+ ['Exit fullscreen on this display?','Vollbild auf diesem Bildschirm verlassen?','Quitter le plein écran sur cet écran ?','Uscire dallo schermo intero su questo display?'],
+ ['Webpage','Webseite','Page web','Pagina web'],
+ ['Webpage URL','Webseiten-URL','URL de la page web','URL della pagina web'],
+ ['Load webpage preview','Webseiten-Vorschau laden','Charger l’aperçu de la page','Carica anteprima della pagina'],
+ ['Webpages require an internet connection and must allow embedding. Some websites block embedding or require sign-in.','Webseiten benötigen eine Internetverbindung und müssen das Einbetten erlauben. Manche Webseiten blockieren dies oder erfordern eine Anmeldung.','Les pages web nécessitent une connexion Internet et doivent autoriser l’intégration. Certains sites la bloquent ou nécessitent une connexion.','Le pagine web richiedono una connessione Internet e devono consentire l’incorporamento. Alcuni siti lo bloccano o richiedono l’accesso.'],
  ['Fullscreen','Vollbild','Plein écran','Schermo intero'],
  ['Exit fullscreen','Vollbild verlassen','Quitter le plein écran','Esci da schermo intero'],
  ['Exit fullscreen requested.','Verlassen des Vollbilds angefordert.','Sortie du plein écran demandée.','Uscita da schermo intero richiesta.'],

@@ -30,6 +30,11 @@ try {
  await pool.query(`UPDATE department_memberships SET module_permissions='{"signage":["operator"]}' WHERE user_id=$1`,[outsiderId]);
  await must('GET','/api/signage/shows',undefined,200,outsiderId);
  await must('GET','/api/signage/media',undefined,200,outsiderId);
+ for(const url of ['javascript:alert(1)','data:text/html,test','https://user:password@example.com','not a URL'])await must('POST','/api/signage/shows',{title:'Invalid webpage',slides:[{heading:'',body:'',kind:'webpage',url}]},400,outsiderId);
+ const webpageShow=await must('POST','/api/signage/shows',{title:'Noticeboard',slides:[{heading:'',body:'',kind:'webpage',url:'https://example.com/noticeboard',duration:30}]},201,outsiderId);
+ await must('POST',`/api/signage/shows/${webpageShow.id}/publish`,undefined,200,outsiderId);
+ assert.equal((await must('GET','/api/signage/shows')).find(show=>show.id===webpageShow.id).slides[0].url,'https://example.com/noticeboard');
+ await must('DELETE',`/api/signage/shows/${webpageShow.id}`,undefined,204,outsiderId);
  await must('GET','/api/signage/displays',undefined,200,outsiderId);
  await must('GET','/api/signage/service-accounts',undefined,403,outsiderId);
  await must('POST','/api/signage/displays/provision',{name:'Operator cannot provision'},403,outsiderId);

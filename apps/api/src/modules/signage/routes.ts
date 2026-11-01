@@ -4,7 +4,7 @@ import { registerSignageSystem } from "./system.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 
-type Slide = { heading: string; body: string; duration?: number; mediaId?: string; kind?: "text" | "image" | "video" };
+type Slide = { heading: string; body: string; duration?: number; mediaId?: string; url?: string; kind?: "text" | "image" | "video" | "webpage" };
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
@@ -45,6 +45,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const admin = (request: FastifyRequest, reply: FastifyReply) => manager(request, reply, true);
 
     async function validSlides(site:string, slides:Slide[], reply:FastifyReply) {
+      for(const slide of slides) {
+        if(slide.kind==='webpage') {
+          try { const url=new URL(slide.url||'');if(!['https:','http:'].includes(url.protocol)||url.username||url.password)throw new Error('Invalid URL'); }
+          catch {reply.code(400).send({error:'Enter a valid HTTP or HTTPS webpage URL without login credentials.'});return false;}
+        } else if(slide.url) {reply.code(400).send({error:'Only webpage slides may contain a URL.'});return false;}
+      }
       if(slides.some(slide=>slide.mediaId && slide.kind!=='image' && slide.kind!=='video')){reply.code(400).send({error:'Choose Image or Video for slides containing media.'});return false;}
       if (slides.some(slide => (slide.kind === "image" || slide.kind === "video") && !slide.mediaId)) {reply.code(400).send({error:"Choose a media file for every image or video slide."});return false;}
       for(const slide of slides.filter(slide=>slide.mediaId)) {
@@ -61,7 +67,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return result.rows;
     });
 
-    routes.post<{ Body: { title: string; slides: Slide[]; expectedVersion?: number } }>("/api/signage/shows", { schema: { body: { type: "object", additionalProperties: false, required: ["title", "slides"], properties: { expectedVersion: { type: "integer", minimum: 1 }, title: { type: "string", minLength: 1, maxLength: 160 }, slides: { type: "array", maxItems: 50, items: { type: "object", additionalProperties: false, required: ["heading", "body"], properties: { heading: { type: "string", maxLength: 160 }, body: { type: "string", maxLength: 4000 }, duration: { type: "integer", minimum: 3, maximum: 600 }, mediaId: { type: "string", format: "uuid" }, kind: { type: "string", enum: ["text", "image", "video"] } } } } } } } }, async (request, reply) => {
+    routes.post<{ Body: { title: string; slides: Slide[]; expectedVersion?: number } }>("/api/signage/shows", { schema: { body: { type: "object", additionalProperties: false, required: ["title", "slides"], properties: { expectedVersion: { type: "integer", minimum: 1 }, title: { type: "string", minLength: 1, maxLength: 160 }, slides: { type: "array", maxItems: 50, items: { type: "object", additionalProperties: false, required: ["heading", "body"], properties: { heading: { type: "string", maxLength: 160 }, body: { type: "string", maxLength: 4000 }, duration: { type: "integer", minimum: 3, maximum: 600 }, mediaId: { type: "string", format: "uuid" }, url: {type:"string",maxLength:2048}, kind: { type: "string", enum: ["text", "image", "video", "webpage"] } } } } } } } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await manager(request, reply);
       if (!departmentId) return reply;
@@ -72,7 +78,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.code(201).send(result.rows[0]);
     });
 
-    routes.put<{ Params: { id: string }; Body: { title: string; slides: Slide[]; expectedVersion?: number } }>("/api/signage/shows/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["title", "slides"], properties: { expectedVersion: { type: "integer", minimum: 1 }, title: { type: "string", minLength: 1, maxLength: 160 }, slides: { type: "array", minItems: 1, maxItems: 50, items: { type: "object", additionalProperties: false, required: ["heading", "body"], properties: { heading: { type: "string", maxLength: 160 }, body: { type: "string", maxLength: 4000 }, duration: { type: "integer", minimum: 3, maximum: 600 }, mediaId: { type: "string", format: "uuid" }, kind: { type: "string", enum: ["text", "image", "video"] } } } } } } } }, async (request, reply) => {
+    routes.put<{ Params: { id: string }; Body: { title: string; slides: Slide[]; expectedVersion?: number } }>("/api/signage/shows/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["title", "slides"], properties: { expectedVersion: { type: "integer", minimum: 1 }, title: { type: "string", minLength: 1, maxLength: 160 }, slides: { type: "array", minItems: 1, maxItems: 50, items: { type: "object", additionalProperties: false, required: ["heading", "body"], properties: { heading: { type: "string", maxLength: 160 }, body: { type: "string", maxLength: 4000 }, duration: { type: "integer", minimum: 3, maximum: 600 }, mediaId: { type: "string", format: "uuid" }, url: {type:"string",maxLength:2048}, kind: { type: "string", enum: ["text", "image", "video", "webpage"] } } } } } } } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await manager(request, reply);
       if (!departmentId) return reply;

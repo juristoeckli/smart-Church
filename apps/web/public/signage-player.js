@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.11";
+  const VERSION = "0.4.0";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -254,10 +254,15 @@
     const media = new Map((candidate.media || []).map(item => [item.id, item]));
     return candidate.shows.every(show => typeof show.id === "string" && Array.isArray(show.slides) &&
       show.slides.length > 0 && show.slides.length <= 50 && show.slides.every(slide =>
+        (slide.kind !== "webpage" || validWebpageUrl(slide.url)) &&
         (!slide.duration || Number.isInteger(slide.duration) && slide.duration >= 3 && slide.duration <= 600) &&
         (!slide.mediaId || media.has(slide.mediaId)))) &&
       [...media.values()].every(item => Number.isInteger(item.size) && item.size > 0 && item.size <= 104857600 && /^[a-f0-9]{64}$/.test(item.sha256));
     } catch (ignored) { return false; }
+  }
+  function validWebpageUrl(value) {
+    try { const url = new URL(value); return typeof value === "string" && value.length <= 2048 && ["https:","http:"].includes(url.protocol) && !url.username && !url.password; }
+    catch (ignored) { return false; }
   }
   async function verified(blob, asset) {
     if (!(blob instanceof Blob) || blob.size !== asset.size) return false;
@@ -355,7 +360,18 @@
     const slide = show.slides[slideIndex];
     if (!slide) return;
     try {
-      if (slide.mediaId) {
+      if (slide.kind === "webpage") {
+        if (!validWebpageUrl(slide.url)) throw new Error("Invalid webpage URL.");
+        if (navigator.onLine === false) {
+          text("Webpage unavailable offline", "This slide requires an internet connection.");
+        } else {
+          const frame = document.createElement("iframe");
+          frame.setAttribute("sandbox", "allow-scripts");
+          frame.setAttribute("referrerpolicy", "no-referrer");
+          frame.title = slide.heading || "Webpage"; frame.tabIndex = -1; frame.src = slide.url;
+          screen.className = "media"; replaceScreen(frame);
+        }
+      } else if (slide.mediaId) {
         const key = connection.displayId + ":media:" + slide.mediaId;
         const cached = memory.get(key) || await cache("get", key);
         const blob = cached instanceof Blob ? cached : (cached && cached.blob);
@@ -528,7 +544,7 @@
     }
     await synchronize(); void heartbeat();
   }
-  addEventListener("online", () => { void synchronize(); void heartbeat(); });
+  addEventListener("online", () => { if(currentShow&&currentShow.slides[slideIndex]&&currentShow.slides[slideIndex].kind==="webpage")currentKey=""; void synchronize(); void heartbeat(); });
   addEventListener("resize", () => { void heartbeat(); if(currentShow && !(currentShow.slides[slideIndex] && currentShow.slides[slideIndex].mediaId))void renderSlide(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { void selectPlayback(); void synchronize(); } });
   void start();

@@ -18,12 +18,12 @@ class LegacyFileReader {
   }
 }
 function element(tag = '') {
-  return {tag, children: [], hidden: false, style: {}, textContent: '',
+  return {tag, children: [], hidden: false, style: {}, textContent: '', attributes:{},setAttribute(name,value){this.attributes[name]=value;},
     get firstChild() { return this.children[0]; },
     removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
     appendChild(child) { this.children.push(child); }};
 }
-async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false, timing = false, reloadVersion = 0, control = false, blank = false, fullscreenMode = 'success'} = {}) {
+async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false, timing = false, reloadVersion = 0, control = false, blank = false, fullscreenMode = 'success', webpage = false, online = true} = {}) {
   const nodes = new Map(), calls = [], timers = [];
   const intervals = [], reports = [], saved = new Map(); let reloads = 0;
   const sockets=[],fullscreenChecks=[],listeners=new Map();let fullscreenRequests=0;
@@ -34,12 +34,13 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
     shows: [{id: 'show', revision: 1, slides: [{kind: 'image', mediaId: 'image'}]}]};
   if(timing) {plan.serverTime=new Date(1060000).toISOString();plan.validUntil=new Date(2060000).toISOString();plan.media=[];plan.shows[0].slides=[{heading:'Early',duration:12},{heading:'Late',duration:12}];}
   if(blank){plan.shows=[];plan.media=[];plan.defaultShowId=null;}
+  if(webpage){plan.media=[];plan.shows[0].slides=[{kind:'webpage',url:'https://example.com/noticeboard',duration:12}];}
   const context = {screen:{width:1920,height:1080},innerWidth:1920,innerHeight:1080,devicePixelRatio:1,performance, Map, Set, Blob: LegacyBlob, FileReader: LegacyFileReader,
     crypto: webcrypto, AbortController, Response, URL: class extends URL {static createObjectURL(){return 'blob:test';} static revokeObjectURL(){}},
     document: {body:{classList:{toggle(){}}},documentElement:element(),getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener(name,handler) {listeners.set(name,handler);}},
     localStorage: {getItem: key => saved.get(key) || (paired && key.endsWith('connection') ? JSON.stringify(connection) : null),
       setItem(key,value) { if (blockedStorage) throw Error('storage blocked'); saved.set(key,value); }, removeItem(key) {saved.delete(key);}},
-    navigator: {userAgent: 'SMART-TV Tizen 6.0 Chrome/76'},
+    navigator: {userAgent: 'SMART-TV Tizen 6.0 Chrome/76',onLine:online},
     indexedDB: {open() { throw Error('offline storage unavailable'); }},
     location: {href:'https://test/signage-display.html',pathname: '/signage-display.html',reload(){reloads++;}}, history: {replaceState(_a, _b, path) { context.location.pathname = path; }},
     setTimeout(fn, delay) { if (delay === 3000) timers.push(fn); if(delay===1500)fullscreenChecks.push(fn); return 1; }, clearTimeout() {}, setInterval(fn,delay) {intervals.push({fn,delay});},
@@ -157,6 +158,9 @@ controlled.context.navigator.userActivation.isActive=true;
 controlled.listeners.get('click')({target:{closest:()=>null}});
 assert.equal(controlled.fullscreenRequests(),clicksBefore+2,'local click grants fullscreen activation');
 const black=await boot({paired:true,blank:true});assert.equal(black.nodes.get('screen').className,'blank');assert.equal(black.nodes.get('screen').children.length,0);
+const web=await boot({paired:true,webpage:true,legacyTransport:true});
+const frame=web.nodes.get('screen').children[0];assert.equal(frame.tag,'iframe');assert.equal(frame.src,'https://example.com/noticeboard');assert.equal(frame.attributes.sandbox,'allow-scripts');assert.equal(frame.attributes.referrerpolicy,'no-referrer');
+const offlineWeb=await boot({paired:true,webpage:true,online:false});assert.equal(offlineWeb.nodes.get('screen').children[0].textContent,'Webpage unavailable offline');
 for(const fullscreenMode of ['reject','throw','noop','unsupported','webkit']) {
  const run=await boot({paired:true,control:true,fullscreenMode});
  run.sockets[0].onmessage({data:JSON.stringify({topic:'signage:fullscreen',departmentId:'department',payload:{displayId:'display',fullscreenVersion:1}})});await run.settle();
