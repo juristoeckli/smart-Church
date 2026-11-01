@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.3.7";
+  const VERSION = "0.3.8";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");
@@ -8,38 +8,80 @@
   const pairError = document.getElementById("pair-error");
   const pairButton = document.getElementById("pair-button");
   const fullscreenButton = document.getElementById("fullscreen");
-  let connectionOnline = false;
+  let connectionOnline = false, fullscreenState = "windowed", fullscreenNeedsClick = false, fullscreenCheck, fullscreenWanted = true;
   function fullscreenActive() {
     return document.fullscreenElement === document.documentElement || document.webkitFullscreenElement === document.documentElement;
   }
   function updateConnectionChrome() {
     document.body.classList.toggle("display-connected", connectionOnline);
-    fullscreenButton.hidden = connectionOnline || fullscreenActive();
+    fullscreenButton.hidden = fullscreenActive() || (connectionOnline && !fullscreenNeedsClick);
   }
-  function requestFullscreen() {
-    if (fullscreenActive()) return true;
+  function reportFullscreen(state) {
+    const changed = fullscreenState !== state;
+    fullscreenState = state;
+    if (state === "active") fullscreenNeedsClick = false;
+    updateConnectionChrome();
+    if (changed) setTimeout(() => void heartbeat(), 0);
+  }
+  function requestFullscreen(remote) {
+    fullscreenWanted = true;
+    clearTimeout(fullscreenCheck);
+    if (fullscreenActive()) { reportFullscreen("active"); return true; }
     const root = document.documentElement;
-    const request = root.requestFullscreen || root.webkitRequestFullscreen;
+    const request = root.requestFullscreen || root.webkitRequestFullscreen || root.webkitRequestFullScreen;
     if (typeof request !== "function") {
-      fullscreenButton.textContent = "Fullscreen unavailable";
-      fullscreenButton.disabled = true;
-      updateConnectionChrome();
+      fullscreenNeedsClick = false;
+      reportFullscreen("unsupported");
       return false;
     }
+    function blocked() {
+      if (!fullscreenWanted) { reportFullscreen(fullscreenActive() ? "active" : "windowed"); return; }
+      fullscreenNeedsClick = !!remote;
+      fullscreenButton.textContent = "Press OK for fullscreen";
+      reportFullscreen("blocked");
+      if (fullscreenNeedsClick && fullscreenButton.focus) fullscreenButton.focus();
+    }
+    reportFullscreen("pending");
     try {
       const result = request.call(root);
-      if (result && typeof result.catch === "function") result.catch(updateConnectionChrome);
+      if (result && typeof result.then === "function") result.then(() => {
+        if (!fullscreenWanted) { exitFullscreen(); return; }
+        if (fullscreenActive()) reportFullscreen("active"); else blocked();
+      }, blocked);
+      // Older WebKit APIs return no promise. Verify the actual browser state.
+      fullscreenCheck = setTimeout(() => { if (fullscreenActive()) reportFullscreen("active"); else blocked(); }, 1500);
+      if (fullscreenActive()) reportFullscreen("active");
       return true;
-    } catch (ignored) { updateConnectionChrome(); return false; }
+    } catch (ignored) { blocked(); return false; }
   }
   function setConnectionOnline(online) {
+    const wasOnline = connectionOnline;
     connectionOnline = online;
     updateConnectionChrome();
-    if (online && !fullscreenActive()) requestFullscreen();
+    if (online && !wasOnline && fullscreenWanted && !fullscreenActive()) requestFullscreen(false);
   }
-  document.addEventListener("fullscreenchange", updateConnectionChrome);
-  document.addEventListener("webkitfullscreenchange", updateConnectionChrome);
-  fullscreenButton.onclick = () => requestFullscreen();
+  function fullscreenChanged() {
+    clearTimeout(fullscreenCheck);
+    if (fullscreenActive() && !fullscreenWanted) { exitFullscreen(); return; }
+    reportFullscreen(fullscreenActive() ? "active" : "windowed");
+  }
+  function exitFullscreen() {
+    fullscreenWanted = false; fullscreenNeedsClick = false; clearTimeout(fullscreenCheck);
+    const exit = document.exitFullscreen || document.webkitExitFullscreen || document.webkitCancelFullScreen;
+    function finished() { reportFullscreen(fullscreenActive() ? "active" : "windowed"); }
+    if (!fullscreenActive() || typeof exit !== "function") { finished(); return; }
+    try {
+      const result = exit.call(document);
+      if (result && typeof result.then === "function") result.then(finished, finished);
+      setTimeout(finished, 1500);
+      finished();
+    } catch (ignored) { finished(); }
+  }
+  document.addEventListener("fullscreenchange", fullscreenChanged);
+  document.addEventListener("webkitfullscreenchange", fullscreenChanged);
+  document.addEventListener("fullscreenerror", () => { fullscreenNeedsClick = true; reportFullscreen("blocked"); });
+  document.addEventListener("webkitfullscreenerror", () => { fullscreenNeedsClick = true; reportFullscreen("blocked"); });
+  fullscreenButton.onclick = () => requestFullscreen(true);
   const pendingKey="smart-church-signage-pending"; let pairingPending=null,pairingBusy=false,pairingTimer;
   const boot = performance.now();
   const memory = new Map();
@@ -361,7 +403,7 @@
   function applyFullscreen(result) {
     if (Number.isInteger(result.fullscreenVersion) && result.fullscreenVersion > fullscreenVersion) {
       fullscreenVersion = result.fullscreenVersion;
-      requestFullscreen();
+      if (result.fullscreenAction === "exit") exitFullscreen(); else requestFullscreen(true);
     }
   }
   async function connectControl() {
@@ -397,9 +439,10 @@
     } catch (ignored) { retry(); }
     finally { controlConnecting = false; }
   }
-  let reporting = false;
+  let reporting = false, reportAgain = false;
   async function heartbeat() {
-    if (!credentials || reporting) return;
+    if (!credentials) return;
+    if (reporting) { reportAgain = true; return; }
     reporting = true;
     try {
       const sentAt = Date.now(), sentTick = performance.now();
@@ -407,7 +450,12 @@
         installationType: /Electron/i.test(navigator.userAgent) ? "Windows app" : matchMedia("(display-mode: standalone)").matches ? "Installed browser" : "Browser",
         uptimeSeconds: Math.floor((performance.now() - boot) / 1000), playerVersion: VERSION,
         currentShowId: (currentShow && currentShow.id) || "", playbackError: [playbackError, storageError, networkError].filter(Boolean).join(" · ").slice(0, 1000),
-        downloadProgress: progress,
+        downloadProgress: progress, fullscreenState,
+        displayMetrics: {
+          screenWidth: window.screen.width, screenHeight: window.screen.height,
+          viewportWidth: window.innerWidth, viewportHeight: window.innerHeight,
+          pixelRatio: window.devicePixelRatio || 1,
+        },
         ...(clockRoundTrip === null ? {} : {clockOffsetMs:correctedNow()-Date.now(),clockRoundTripMs:clockRoundTrip}),
       }) })).json();
       const roundTrip = performance.now() - sentTick;
@@ -419,7 +467,10 @@
       connectionState(true);
       applyReload(result); applyFullscreen(result); void connectControl();
       void selectPlayback();
-    } catch (ignored) { connectionState(false); } finally { reporting = false; }
+    } catch (ignored) { connectionState(false); } finally {
+      reporting = false;
+      if (reportAgain) { reportAgain = false; void heartbeat(); }
+    }
   }
   function showPairing() {
     setup.hidden=false;
@@ -480,7 +531,7 @@
     await synchronize(); void heartbeat();
   }
   addEventListener("online", () => { void synchronize(); void heartbeat(); });
-  addEventListener("resize", () => { if(currentShow && !(currentShow.slides[slideIndex] && currentShow.slides[slideIndex].mediaId))void renderSlide(); });
+  addEventListener("resize", () => { void heartbeat(); if(currentShow && !(currentShow.slides[slideIndex] && currentShow.slides[slideIndex].mediaId))void renderSlide(); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { void selectPlayback(); void synchronize(); } });
   void start();
   setInterval(() => void synchronize(), 30000);

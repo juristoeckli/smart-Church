@@ -114,6 +114,11 @@ try {
  await must('POST',`/api/signage/displays/${a.id}/fullscreen`,undefined,403,userA);
  await must('POST',`/api/signage/displays/${a.id}/fullscreen`,undefined,200,outsiderId);
  assert.equal((await socket.wait('signage:fullscreen')).payload.fullscreenVersion,1);
+ await must('POST',`/api/signage/displays/${a.id}/exit-fullscreen`,undefined,403,userA);
+ await must('POST',`/api/signage/displays/${a.id}/exit-fullscreen`,undefined,200,outsiderId);
+ await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:44,fullscreenState:'windowed',displayMetrics:{screenWidth:1920,screenHeight:1080,viewportWidth:1920,viewportHeight:1080,pixelRatio:1}},200,userA);
+ const displayStatus=(await must('GET','/api/signage/displays')).find(d=>d.id===a.id);
+ assert.equal(displayStatus.fullscreenState,'windowed');assert.equal(displayStatus.displayMetrics.screenWidth,1920);
  await must('PUT',`/api/signage/displays/${a.id}/settings`,{name:'Updated display',defaultShowId:show.id});
  assert.equal((await socket.wait('signage:update')).departmentId,departmentId);
  socket.socket.destroy();

@@ -1,5 +1,16 @@
 import type {UserLanguage} from '@smart-church/contracts';
 const phrases: Array<[string,string,string,string]> = [
+ ['Fullscreen','Vollbild','Plein écran','Schermo intero'],
+ ['Exit fullscreen','Vollbild verlassen','Quitter le plein écran','Esci da schermo intero'],
+ ['Exit fullscreen requested.','Verlassen des Vollbilds angefordert.','Sortie du plein écran demandée.','Uscita da schermo intero richiesta.'],
+ ['Requires a click on the TV','Klick am Fernseher erforderlich','Clic sur le téléviseur requis','Richiede un clic sul televisore'],
+ ['Windowed','Fenstermodus','Mode fenêtré','In finestra'],
+ ['Not supported','Nicht unterstützt','Non pris en charge','Non supportato'],
+ ['Pending','Ausstehend','En attente','In attesa'],
+ ['Screen resolution','Bildschirmauflösung','Résolution de l’écran','Risoluzione dello schermo'],
+ ['Player viewport','Player-Anzeigebereich','Zone du lecteur','Area del lettore'],
+ ['Aspect ratio','Seitenverhältnis','Format de l’image','Rapporto d’aspetto'],
+ ['Viewport aspect ratio','Seitenverhältnis des Anzeigebereichs','Format de la zone du lecteur','Rapporto dell’area del lettore'],
  ['Request fullscreen','Vollbild anfordern','Demander le plein écran','Richiedi schermo intero'],
  ['Fullscreen requested. The TV browser may require a local click.','Vollbild angefordert. Der TV-Browser benötigt möglicherweise einen Klick am Gerät.','Plein écran demandé. Le navigateur du téléviseur peut nécessiter un clic local.','Schermo intero richiesto. Il browser del televisore potrebbe richiedere un clic locale.'],
  ['Reload requested. Connected displays reload immediately; the heartbeat provides a fallback.','Neuladen angefordert. Verbundene Bildschirme laden sofort neu; der Statusabgleich dient als Rückfallebene.','Rechargement demandé. Les écrans connectés se rechargent immédiatement ; le suivi périodique sert de secours.','Ricaricamento richiesto. Gli schermi connessi si ricaricano subito; il controllo periodico funge da riserva.'],

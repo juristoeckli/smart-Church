@@ -23,10 +23,10 @@ function element(tag = '') {
     removeChild(child) { this.children.splice(this.children.indexOf(child), 1); },
     appendChild(child) { this.children.push(child); }};
 }
-async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false, timing = false, reloadVersion = 0, control = false, blank = false} = {}) {
+async function boot({paired = false, blockedStorage = false, legacyTransport = false, timeout = false, timing = false, reloadVersion = 0, control = false, blank = false, fullscreenMode = 'success'} = {}) {
   const nodes = new Map(), calls = [], timers = [];
   const intervals = [], reports = [], saved = new Map(); let reloads = 0;
-  const sockets=[];let fullscreenRequests=0;
+  const sockets=[],fullscreenChecks=[];let fullscreenRequests=0;
   const connection = {displayId: 'display', departmentId: 'department', apiKey: 'sc_' + 'k'.repeat(43)};
   const pending = {code: 'ABCD-EFGH', pairingToken: 't'.repeat(43), apiKey: connection.apiKey, expiresAt: new Date(Date.now()+900000).toISOString()};
   const plan = {serverTime: new Date().toISOString(), validUntil: new Date(Date.now()+86400000).toISOString(),
@@ -34,7 +34,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
     shows: [{id: 'show', revision: 1, slides: [{kind: 'image', mediaId: 'image'}]}]};
   if(timing) {plan.serverTime=new Date(1060000).toISOString();plan.validUntil=new Date(2060000).toISOString();plan.media=[];plan.shows[0].slides=[{heading:'Early',duration:12},{heading:'Late',duration:12}];}
   if(blank){plan.shows=[];plan.media=[];plan.defaultShowId=null;}
-  const context = {performance, Map, Set, Blob: LegacyBlob, FileReader: LegacyFileReader,
+  const context = {screen:{width:1920,height:1080},innerWidth:1920,innerHeight:1080,devicePixelRatio:1,performance, Map, Set, Blob: LegacyBlob, FileReader: LegacyFileReader,
     crypto: webcrypto, AbortController, Response, URL: class extends URL {static createObjectURL(){return 'blob:test';} static revokeObjectURL(){}},
     document: {body:{classList:{toggle(){}}},documentElement:element(),getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); }, createElement: element, addEventListener() {}},
     localStorage: {getItem: key => saved.get(key) || (paired && key.endsWith('connection') ? JSON.stringify(connection) : null),
@@ -42,7 +42,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
     navigator: {userAgent: 'SMART-TV Tizen 6.0 Chrome/76'},
     indexedDB: {open() { throw Error('offline storage unavailable'); }},
     location: {href:'https://test/signage-display.html',pathname: '/signage-display.html',reload(){reloads++;}}, history: {replaceState(_a, _b, path) { context.location.pathname = path; }},
-    setTimeout(fn, delay) { if (delay === 3000) timers.push(fn); return 1; }, clearTimeout() {}, setInterval(fn,delay) {intervals.push({fn,delay});},
+    setTimeout(fn, delay) { if (delay === 3000) timers.push(fn); if(delay===1500)fullscreenChecks.push(fn); return 1; }, clearTimeout() {}, setInterval(fn,delay) {intervals.push({fn,delay});},
     requestAnimationFrame() {}, addEventListener() {}, matchMedia: () => ({matches: false}),
     fetch: async (path,options) => {
       calls.push(path);
@@ -53,6 +53,12 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
     }};
   if(timing) context.Date=class extends Date { static now(){return 1000000;} };
   if(control){context.WebSocket=class {constructor(url){this.url=url;sockets.push(this);}close(){if(this.onclose)this.onclose();}};context.document.documentElement.requestFullscreen=()=>{fullscreenRequests++;context.document.fullscreenElement=context.document.documentElement;};}
+  if(control&&fullscreenMode==='reject')context.document.documentElement.requestFullscreen=()=>Promise.reject(Error('User gesture required'));
+  if(control&&fullscreenMode==='throw')context.document.documentElement.requestFullscreen=()=>{throw Error('User gesture required');};
+  if(control&&fullscreenMode==='noop')context.document.documentElement.requestFullscreen=()=>{};
+  if(control&&fullscreenMode==='unsupported')delete context.document.documentElement.requestFullscreen;
+  if(control&&fullscreenMode==='webkit'){context.document.documentElement.webkitRequestFullScreen=()=>{context.document.webkitFullscreenElement=context.document.documentElement;};delete context.document.documentElement.requestFullscreen;}
+  context.document.exitFullscreen=()=>{context.document.fullscreenElement=null;context.document.webkitFullscreenElement=null;return Promise.resolve();};
   // Response.blob also returns the older Blob shape.
   context.Response = class extends Response { async blob() { return new LegacyBlob([await this.arrayBuffer()]); } };
   if (legacyTransport) {
@@ -86,7 +92,7 @@ async function boot({paired = false, blockedStorage = false, legacyTransport = f
   vm.runInNewContext(source, context);
   const settle = async () => { for (let i=0; i<30; i++) await new Promise(resolve => setImmediate(resolve)); };
   await settle();
-  return {context, nodes, calls, timers, settle, intervals, reports, reloads:()=>reloads,sockets,fullscreenRequests:()=>fullscreenRequests};
+  return {context, nodes, calls, timers, settle, intervals, reports, reloads:()=>reloads,sockets,fullscreenRequests:()=>fullscreenRequests,fullscreenChecks};
 }
 const connected = await boot({paired: true});
 assert.equal(connected.nodes.get('screen').children[0].tag, 'img');
@@ -130,5 +136,24 @@ send('signage:reload',{displayId:'display',reloadVersion:1});assert.equal(contro
 send('signage:reload',{displayId:'display',reloadVersion:1});assert.equal(controlled.reloads(),1);
 controlled.context.document.fullscreenElement=null;const before=controlled.fullscreenRequests();
 send('signage:fullscreen',{displayId:'display',fullscreenVersion:1});assert.equal(controlled.fullscreenRequests(),before+1);
+send('signage:fullscreen',{displayId:'display',fullscreenVersion:2,fullscreenAction:'exit'});await controlled.settle();
+controlled.intervals.find(item=>item.delay===30000&&item.fn.toString().includes('heartbeat')).fn();await controlled.settle();
+assert.equal(controlled.reports.at(-1).fullscreenState,'windowed');
+assert.equal(controlled.reports.at(-1).displayMetrics.screenWidth,1920);
+assert.equal(controlled.reports.at(-1).displayMetrics.viewportHeight,1080);
 const black=await boot({paired:true,blank:true});assert.equal(black.nodes.get('screen').className,'blank');assert.equal(black.nodes.get('screen').children.length,0);
+for(const fullscreenMode of ['reject','throw','noop','unsupported','webkit']) {
+ const run=await boot({paired:true,control:true,fullscreenMode});
+ run.sockets[0].onmessage({data:JSON.stringify({topic:'signage:fullscreen',departmentId:'department',payload:{displayId:'display',fullscreenVersion:1}})});await run.settle();
+ if(fullscreenMode==='noop')run.fullscreenChecks.at(-1)();
+ const heartbeat=run.intervals.find(item=>item.delay===30000&&item.fn.toString().includes('heartbeat')).fn;
+ heartbeat();await run.settle();
+ assert.equal(run.reports.at(-1).fullscreenState,fullscreenMode==='unsupported'?'unsupported':fullscreenMode==='webkit'?'active':'blocked',fullscreenMode);
+ if(['reject','throw','noop'].includes(fullscreenMode)) {
+  assert.equal(run.nodes.get('fullscreen').hidden,false,'blocked remote request offers a local click');
+  run.context.document.documentElement.requestFullscreen=()=>{run.context.document.fullscreenElement=run.context.document.documentElement;};
+  run.nodes.get('fullscreen').onclick();heartbeat();await run.settle();
+  assert.equal(run.reports.at(-1).fullscreenState,'active');assert.equal(run.nodes.get('fullscreen').hidden,true);
+ }
+}
 console.log('PASS: TV pairing, playback, heartbeat, legacy DOM/Blob, unavailable storage');
