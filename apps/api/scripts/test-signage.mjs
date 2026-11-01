@@ -14,6 +14,7 @@ process.env.DATABASE_URL=databaseUrl;
 const {initializeDatabase,pool,departmentId}=await import('../src/database.ts');
 const {registerModuleRoutes}=await import('../src/modules/signage/routes.ts');
 const app=Fastify();
+const realtimeEvents=[];
 try {
  assert.equal((await pool.query("SELECT to_regclass('public.app_users') AS existing")).rows[0].existing,null,'Use a fresh disposable database');
  assert.equal(await initializeDatabase(),true);
@@ -22,7 +23,7 @@ try {
  await pool.query(`UPDATE departments SET enabled_modules=ARRAY['signage']::text[] WHERE id=$1`,[departmentId]);
  await pool.query(`INSERT INTO department_memberships(user_id,department_id,role,module_permissions) VALUES($1,$3,'member','{"signage":["admin"]}'),($2,$3,'member','{}')`,[managerId,outsiderId,departmentId]);
  app.addHook('preHandler',async request=>{request.authenticatedUser={id:request.headers['x-test-user']||managerId};});
- registerModuleRoutes(app,{pool,isDatabaseReady:()=>true,resolveDepartmentId:async request=>String(request.headers['x-test-site']||departmentId),validateMutation:()=>true,isDepartmentWritable:async()=>true,lockDepartmentForWrite:async()=>true});
+ registerModuleRoutes(app,{realtime:{publish:(topic,departmentId,payload)=>realtimeEvents.push({topic,departmentId,payload})},pool,isDatabaseReady:()=>true,resolveDepartmentId:async request=>String(request.headers['x-test-site']||departmentId),validateMutation:()=>true,isDepartmentWritable:async()=>true,lockDepartmentForWrite:async()=>true});
  await app.ready();
  const call=async(method,url,payload,user=managerId)=>app.inject({method,url,headers:{'x-test-user':user},...(payload===undefined?{}:{payload})});
  const must=async(method,url,payload,status=200,user)=>{const response=await call(method,url,payload,user);assert.equal(response.statusCode,status,response.body);return response.statusCode===204?null:response.json();};
@@ -124,8 +125,14 @@ try {
  await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:44,fullscreenState:'windowed',displayMetrics:{screenWidth:1920,screenHeight:1080,viewportWidth:1920,viewportHeight:1080,pixelRatio:1}},200,userA);
  const displayStatus=(await must('GET','/api/signage/displays')).find(d=>d.id===a.id);
  assert.equal(displayStatus.fullscreenState,'windowed');assert.equal(displayStatus.displayMetrics.screenWidth,1920);
+ assert.ok(realtimeEvents.some(event=>event.topic==='signage:status'&&event.departmentId===departmentId&&event.payload.displayId===a.id),'display status must reach management over the shared socket');
+ realtimeEvents.length=0;
  await must('PUT',`/api/signage/displays/${a.id}/settings`,{name:'Updated display',defaultShowId:show.id});
  assert.equal((await socket.wait('signage:update')).departmentId,departmentId);
+ assert.ok(realtimeEvents.some(event=>event.topic==='signage:changed'&&event.departmentId===departmentId),'committed changes must reach management over the shared socket');
+ realtimeEvents.length=0;
+ await must('PUT',`/api/signage/displays/${a.id}/settings`,{name:' ',defaultShowId:show.id},400);
+ assert.equal(realtimeEvents.length,0,'failed mutations must not announce a change');
  socket.socket.destroy();
  const heartbeat=await must('POST',`/api/signage/device/${a.id}/heartbeat`,{installationType:'Browser',uptimeSeconds:43,clockOffsetMs:60000,clockRoundTripMs:42},200,userA);
  assert.equal(heartbeat.reloadVersion,2);assert.ok(Number.isFinite(Date.parse(heartbeat.serverTime)));

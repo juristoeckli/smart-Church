@@ -1,6 +1,6 @@
 (() => {
   "use strict";
-  const VERSION = "0.4.0";
+  const VERSION = "0.4.1";
   const CONNECTION_KEY = "smart-church-signage-connection";
   const screen = document.getElementById("screen");
   const status = document.getElementById("status");

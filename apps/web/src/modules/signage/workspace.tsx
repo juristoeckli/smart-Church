@@ -1,6 +1,6 @@
 import type {UserLanguage} from "@smart-church/contracts";
 import {ModuleTranslationHost,translateModuleText} from "../../module-registry";
-import {subscribeRealtime} from "../../realtime";
+import {isRealtimeConnected,subscribeRealtime} from "../../realtime";
 import {signageTranslations} from "./translations";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ArrowLeft, ArrowUp, ArrowDown, Check, FileImage, Monitor, Plus, Save, Trash2, Upload } from "lucide-react";
@@ -73,8 +73,25 @@ export function SignageWorkspace({departmentId,csrfToken,canManage,canAdmin,stat
   const warn=(event:BeforeUnloadEvent)=>{event.preventDefault();event.returnValue="";};
   window.addEventListener("beforeunload",warn);return()=>window.removeEventListener("beforeunload",warn);
  },[dirty,draft,loading,departmentId]);
- useEffect(()=>subscribeRealtime("signage:status",event=>{if(event.departmentId===departmentId)void refresh().catch(()=>{});}),[departmentId,refresh]);
- useEffect(()=>{if(root!=="Displays"&&root!=="Overview")return;const timer=setInterval(()=>void refresh().catch(()=>{}),30000);return()=>clearInterval(timer);},[root,refresh]);
+ useEffect(()=>{
+  let stopped=false,running=false,pending=false;
+  const update=async()=>{
+   if(stopped)return;
+   if(running){pending=true;return;}
+   running=true;
+   try{await refresh();}catch{}finally{running=false;if(pending&&!stopped){pending=false;void update();}}
+  };
+  const subscriptions=["signage:changed","signage:status","realtime:connected"].map(topic=>subscribeRealtime(topic,event=>{if(event.departmentId===departmentId)void update();}));
+  return()=>{stopped=true;subscriptions.forEach(unsubscribe=>unsubscribe());};
+ },[departmentId,refresh]);
+ useEffect(()=>{
+  const timer=setInterval(()=>{
+   if(!isRealtimeConnected())void refresh().catch(()=>{});
+   // Re-evaluate connection freshness and schedule badges without polling the server.
+   else if(root==="Displays"||root==="Overview"||root==="Schedule")setData(current=>({...current}));
+  },30000);
+  return()=>clearInterval(timer);
+ },[root,refresh]);
  function navigate(next:string){if(dirty&&!confirm("Discard unsaved show changes?"))return;setDirty(false);setDraft(null);setError("");setNotice("");setFilter("");onStateChange(next);}
  async function request(path:string,method="POST",body?:unknown,raw=false){
   const r=await fetch("/api/signage/"+path,{method,signal:AbortSignal.timeout(raw?120000:20000),headers:{"x-department-id":departmentId,"x-csrf-token":csrfToken,...(body===undefined?{}:{"content-type":raw?"application/vnd.smart-church.signage-media":"application/json"})},body:raw?body as Blob:body===undefined?undefined:JSON.stringify(body)});

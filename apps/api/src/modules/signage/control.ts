@@ -28,7 +28,10 @@ export function signageControl(routes:FastifyInstance,context:ModuleServerContex
   return reply.header('Cache-Control','no-store').send({ticket:token});
  });
  return {
-  changed:(departmentId:string)=>hub.publish('signage:update',departmentId),
+  changed:(departmentId:string)=>{
+   hub.publish('signage:update',departmentId);
+   context.realtime?.publish('signage:changed',departmentId);
+  },
   reload:(departmentId:string,userId:string,displayId:string,reloadVersion:number)=>hub.publish('signage:reload',departmentId,{displayId,reloadVersion},userId),
   fullscreen:(departmentId:string,userId:string,displayId:string,fullscreenVersion:number,fullscreenAction='enter')=>hub.publish('signage:fullscreen',departmentId,{displayId,fullscreenVersion,fullscreenAction},userId),
  };
