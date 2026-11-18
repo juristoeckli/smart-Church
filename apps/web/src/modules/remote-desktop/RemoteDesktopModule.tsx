@@ -342,12 +342,18 @@ export function RemoteDesktopModule({ departmentId, csrfToken, realtime, state, 
           setConnecting(false);
           if (result.role === "controller") remoteDisplay.focus({ preventScroll: true });
           if (screenRef.current) {
+            const afterLayout = (callback: () => void) => {
+              window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+                if (clientRef.current === client) callback();
+              }));
+            };
             if (fitDisplayToBrowser) {
               const fitDisplay = () => fitViewerDisplay(display, screenRef.current, fixedVncDisplay);
               resizeObserverRef.current?.disconnect();
               resizeObserverRef.current = new ResizeObserver(fitDisplay);
               resizeObserverRef.current.observe(screenRef.current);
               fitDisplay();
+              afterLayout(fitDisplay);
             }
             else {
               const sendCurrentSize = () => {
@@ -371,6 +377,7 @@ export function RemoteDesktopModule({ departmentId, csrfToken, realtime, state, 
               resizeObserverRef.current = new ResizeObserver(sendCurrentSize);
               resizeObserverRef.current.observe(screenRef.current);
               sendCurrentSize();
+              afterLayout(sendCurrentSize);
             }
           }
         }
