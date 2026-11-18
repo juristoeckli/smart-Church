@@ -421,10 +421,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const selectedDepartmentId = await activeVideoDepartment(request, reply);
     if (!selectedDepartmentId) return reply;
     try {
-      const connection = await youtubeConnection(selectedDepartmentId);
-      const remoteSync = connection ? await syncUpcomingYoutubeStreams(selectedDepartmentId) : { broadcasts: [] as YoutubeBroadcast[], created: 0, updated: 0 };
+      const [connection, oauthSettings] = await Promise.all([
+        youtubeConnection(selectedDepartmentId),
+        youtubeOAuthSettings(selectedDepartmentId),
+      ]);
+      const needsReconnect = Boolean(connection?.oauth_client_id?.trim() && oauthSettings.clientId && connection.oauth_client_id.trim() !== oauthSettings.clientId);
+      const remoteSync = connection && !needsReconnect
+        ? await syncUpcomingYoutubeStreams(selectedDepartmentId)
+        : { broadcasts: [] as YoutubeBroadcast[], created: 0, updated: 0 };
       const youtubeIds = remoteSync.broadcasts.flatMap((broadcast) => broadcast.id ? [broadcast.id] : []);
-      const [streams, nextEvent, adjacentEvents, oauthSettings] = await Promise.all([
+      const [streams, nextEvent, adjacentEvents] = await Promise.all([
         youtubeIds.length ? pool!.query<{ id: string; event_id: string | null; speaker: string; theme: string; youtube_broadcast_id: string; youtube_error: string | null; youtube_playlist_id: string | null; youtube_playlist_title: string | null }>(
           `SELECT id,event_id,speaker,theme,youtube_broadcast_id,youtube_error,youtube_playlist_id,youtube_playlist_title
              FROM video_planned_streams
@@ -432,7 +438,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ) : { rows: [] as Array<{ id: string; event_id: string | null; speaker: string; theme: string; youtube_broadcast_id: string; youtube_error: string | null; youtube_playlist_id: string | null; youtube_playlist_title: string | null }> },
         currentOrNextService(selectedDepartmentId),
         previousAndFollowingServices(selectedDepartmentId),
-        youtubeOAuthSettings(selectedDepartmentId),
       ]);
       const streamByBroadcastId = new Map(streams.rows.map((stream) => [stream.youtube_broadcast_id, stream]));
       let playlists: Array<{ id: string; title: string }> = [];
@@ -443,7 +448,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return {
         nextEvent,
         adjacentEvents,
-        youtube: { configured: youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, oauthSettings.redirectUri), connected: Boolean(connection), ...(connection ? { channelId: connection.channel_id, channelTitle: connection.channel_title } : {}) },
+        youtube: { configured: youtubeOAuthConfigured(oauthSettings.clientId, oauthSettings.clientSecret, oauthSettings.redirectUri), connected: Boolean(connection) && !needsReconnect, ...(needsReconnect ? { needsReconnect: true } : {}), ...(connection ? { channelId: connection.channel_id, channelTitle: connection.channel_title } : {}) },
         playlists,
         streams: remoteSync.broadcasts.flatMap((broadcast) => {
           const youtubeBroadcastId = broadcast.id;
