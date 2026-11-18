@@ -599,6 +599,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       role: role === "takeover" ? "controller" : role,
       width,
       height,
+      disableDisplayResize: destination.protocol === "vnc" && destination.disableDisplayResize,
       tunnelUrl: "/api/modules/remote-desktop/tunnel",
       libraryUrl: `/api/modules/remote-desktop/client.js?departmentId=${encodeURIComponent(access.department)}`,
     };

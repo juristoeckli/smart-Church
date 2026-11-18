@@ -183,6 +183,14 @@ export interface StoredFile {
   contentType: string;
   fileSize: number;
   createdAt: string;
+  folderId?: string | null;
+}
+
+export interface StoredFolder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  createdAt: string;
 }
 
 export interface BookableResource {

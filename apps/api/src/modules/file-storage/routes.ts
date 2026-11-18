@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { StoredFile } from "@smart-church/contracts";
+import type { StoredFile, StoredFolder } from "@smart-church/contracts";
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { PoolClient } from "pg";
@@ -12,15 +12,17 @@ function canonical(value: unknown): string {
   if (value && typeof value === "object") return "{" + Object.keys(value as Record<string, unknown>).sort().map((key) => JSON.stringify(key) + ":" + canonical((value as Record<string, unknown>)[key])).join(",") + "}";
   return JSON.stringify(value);
 }
-type ResourceRow = { id: string; title: string; category: string; file_name: string; content_type: string; file_size: number; created_at: Date | string };
+type ResourceRow = { id: string; title: string; category: string; file_name: string; content_type: string; file_size: number; created_at: Date | string; folder_id?: string | null };
 function mapResource(row: ResourceRow): StoredFile {
-  return { id: row.id, title: row.title, category: row.category, fileName: row.file_name, contentType: row.content_type, fileSize: row.file_size, createdAt: new Date(row.created_at).toISOString() };
+  return { id: row.id, title: row.title, category: row.category, fileName: row.file_name, contentType: row.content_type, fileSize: row.file_size, createdAt: new Date(row.created_at).toISOString(), folderId: row.folder_id ?? null };
 }
+type FolderRow = { id: string; name: string; parent_id: string | null; created_at: Date | string };
+function mapFolder(row: FolderRow): StoredFolder { return { id: row.id, name: row.name, parentId: row.parent_id, createdAt: new Date(row.created_at).toISOString() }; }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = context;
   context.replication.register({
-    schemaVersion: "1",
+    schemaVersion: "2",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The file storage database is unavailable."], recordCount: 0 };
       const result = await pool.query<{ count: string; bytes: string }>("SELECT count(*)::text,sum(file_size)::text AS bytes FROM stored_files WHERE department_id=$1", [departmentId]);
@@ -29,13 +31,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { ready: bytes <= 200 * 1024 * 1024, blockers: bytes > 200 * 1024 * 1024 ? ["Stored files exceed the current 200 MiB snapshot safety limit."] : [], recordCount: count };
     },
     exportSnapshot: async (client: PoolClient, departmentId) => {
-      const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
-      return { version: 1, files: files.rows };
+      const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,folder_id,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
+      const folders = await client.query("SELECT id,name,parent_id,created_at FROM stored_file_folders WHERE department_id=$1 ORDER BY id", [departmentId]);
+      return { version: 2, files: files.rows, folders: folders.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input) => {
-      if (!input || typeof input !== "object" || (input as { version?: unknown }).version !== 1 || !Array.isArray((input as { files?: unknown }).files)) throw new Error("The File Storage snapshot is invalid.");
+      if (!input || typeof input !== "object" || ![1, 2].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) throw new Error("The File Storage snapshot is invalid.");
       const files = (input as { files: Array<Record<string, unknown>> }).files;
+      const folders = (input as { folders?: Array<Record<string, unknown>> }).folders ?? [];
       await client.query("DELETE FROM stored_files WHERE department_id=$1", [departmentId]);
+      await client.query("DELETE FROM stored_file_folders WHERE department_id=$1", [departmentId]);
+      const pendingFolders = [...folders];
+      while (pendingFolders.length) {
+        const readyIndex = pendingFolders.findIndex((folder) => folder.parent_id == null || !pendingFolders.some((candidate) => candidate.id === folder.parent_id));
+        if (readyIndex < 0) throw new Error("The File Storage snapshot contains an invalid folder hierarchy.");
+        const [folder] = pendingFolders.splice(readyIndex, 1);
+        if (typeof folder.id !== "string" || typeof folder.name !== "string" || (folder.parent_id != null && typeof folder.parent_id !== "string")) throw new Error("The File Storage snapshot contains an invalid folder.");
+        await client.query("INSERT INTO stored_file_folders(id,department_id,name,parent_id,created_at) VALUES($1,$2,$3,$4,$5)", [folder.id, departmentId, folder.name, folder.parent_id ?? null, folder.created_at]);
+      }
       for (const file of files) {
         const encodedData = typeof file.file_data === "string" ? file.file_data.replace(/[\r\n]/g, "") : "";
         if (typeof file.id !== "string" || typeof file.title !== "string" || typeof file.category !== "string" || typeof file.file_name !== "string" || typeof file.content_type !== "string" || typeof file.file_size !== "number" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedData)) throw new Error("The File Storage snapshot contains an invalid file record.");
@@ -43,18 +56,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (buffer.length !== file.file_size || buffer.length > resourceLimit) throw new Error("A replicated file does not match its declared size or exceeds 25 MiB.");
         const deletedAt = file.deleted_at == null ? null : file.deleted_at;
         if (deletedAt !== null && (typeof deletedAt !== "string" || !Number.isFinite(Date.parse(deletedAt)))) throw new Error("The File Storage snapshot contains an invalid deletion date.");
-        await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,created_at,updated_at,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.created_at, file.updated_at, deletedAt]);
+        if (file.folder_id != null && typeof file.folder_id !== "string") throw new Error("The File Storage snapshot contains an invalid file folder.");
+        await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,folder_id,created_at,updated_at,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.folder_id ?? null, file.created_at, file.updated_at, deletedAt]);
       }
-      return { recordCount: files.length };
+      return { recordCount: files.length + folders.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input) => {
-      if (!input || typeof input !== "object" || (input as { version?: unknown }).version !== 1 || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
+      if (!input || typeof input !== "object" || ![1, 2].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
       const expected = (input as { files: Array<Record<string, unknown>> }).files;
-      const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,folder_id,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       if (actual.length !== expected.length) return { ready: false, blockers: [`Stored file count differs: expected ${expected.length}, found ${actual.length}.`] };
-      const expectedRows = expected.map((row) => canonical({ ...row, deleted_at: row.deleted_at ?? null })).sort();
-      const actualRows = actual.map((row) => canonical({ ...row, deleted_at: row.deleted_at ?? null })).sort();
-      return expectedRows.some((row, index) => row !== actualRows[index]) ? { ready: false, blockers: ["Stored file metadata or binary content differs after restore."] } : { ready: true, blockers: [] };
+      const normalizeFiles = (rows: Array<Record<string, unknown>>) => rows.map((row) => canonical({ ...row, deleted_at: row.deleted_at ?? null, folder_id: row.folder_id ?? null })).sort();
+      const expectedRows = normalizeFiles(expected);
+      const actualRows = normalizeFiles(actual);
+      if (expectedRows.some((row, index) => row !== actualRows[index])) return { ready: false, blockers: ["Stored file metadata or binary content differs after restore."] };
+      const expectedFolders = (input as { folders?: Array<Record<string, unknown>> }).folders ?? [];
+      const actualFolders = (await client.query("SELECT id,name,parent_id,created_at FROM stored_file_folders WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const normalized = (rows: Array<Record<string, unknown>>) => rows.map((row) => canonical({ ...row, parent_id: row.parent_id ?? null })).sort();
+      return canonical(normalized(expectedFolders)) !== canonical(normalized(actualFolders)) ? { ready: false, blockers: ["Stored folder metadata differs after restore."] } : { ready: true, blockers: [] };
     },
   });
   app.register(async (routes) => {
@@ -81,15 +100,71 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, view === "trash");
       if (!departmentId) return reply;
       const result = await pool!.query<ResourceRow>(
-        `SELECT id, title, category, file_name, content_type, file_size, created_at FROM stored_files
+        `SELECT id, title, category, file_name, content_type, file_size, created_at, folder_id FROM stored_files
           WHERE department_id = $1 AND ${view === "trash" ? "deleted_at IS NOT NULL" : "deleted_at IS NULL"}
           ORDER BY lower(category), lower(title), created_at DESC`, [departmentId],
       );
       return result.rows.map(mapResource);
     });
 
-    routes.post<{ Body: Buffer; Querystring: { title?: string; category?: string; filename?: string } }>("/api/files", { bodyLimit: resourceLimit, schema: {
-      querystring: { type: "object", properties: { title: { type: "string", maxLength: 160 }, category: { type: "string", maxLength: 80 }, filename: { type: "string", maxLength: 255 } } },
+    routes.get("/api/files/folders", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query<FolderRow>("SELECT id,name,parent_id,created_at FROM stored_file_folders WHERE department_id=$1 ORDER BY lower(name),created_at", [departmentId]);
+      return result.rows.map(mapFolder);
+    });
+
+    routes.post<{ Body: { name: string; parentId?: string | null } }>("/api/files/folders", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, parentId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Folder name is required." });
+      const parentId = request.body.parentId ?? null;
+      if (parentId) {
+        const parent = await pool!.query("SELECT id FROM stored_file_folders WHERE id=$1 AND department_id=$2", [parentId, departmentId]);
+        if (!parent.rowCount) return reply.code(404).send({ error: "Parent folder not found." });
+      }
+      try {
+        const result = await pool!.query<FolderRow>("INSERT INTO stored_file_folders(id,department_id,name,parent_id) VALUES($1,$2,$3,$4) RETURNING id,name,parent_id,created_at", [randomUUID(), departmentId, name, parentId]);
+        return reply.code(201).send(mapFolder(result.rows[0]));
+      } catch (error) {
+        if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A folder with that name already exists here." });
+        throw error;
+      }
+    });
+
+    routes.put<{ Params: { id: string }; Body: { name: string } }>("/api/files/folders/:id", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Folder name is required." });
+      try {
+        const result = await pool!.query<FolderRow>("UPDATE stored_file_folders SET name=$3 WHERE id=$1 AND department_id=$2 RETURNING id,name,parent_id,created_at", [request.params.id, departmentId, name]);
+        if (!result.rowCount) return reply.code(404).send({ error: "Folder not found." });
+        return mapFolder(result.rows[0]);
+      } catch (error) {
+        if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A folder with that name already exists here." });
+        throw error;
+      }
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/files/folders/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const childCount = await pool!.query<{ count: string }>("SELECT ((SELECT count(*) FROM stored_files WHERE folder_id=$1 AND department_id=$2) + (SELECT count(*) FROM stored_file_folders WHERE parent_id=$1 AND department_id=$2))::text AS count", [request.params.id, departmentId]);
+      if (Number(childCount.rows[0].count) > 0) return reply.code(409).send({ error: "Move or delete the folder contents before deleting this folder." });
+      const result = await pool!.query("DELETE FROM stored_file_folders WHERE id=$1 AND department_id=$2 RETURNING id", [request.params.id, departmentId]);
+      if (!result.rowCount) return reply.code(404).send({ error: "Folder not found." });
+      return { deleted: true };
+    });
+
+    routes.post<{ Body: Buffer; Querystring: { title?: string; category?: string; filename?: string; folderId?: string } }>("/api/files", { bodyLimit: resourceLimit, schema: {
+      querystring: { type: "object", properties: { title: { type: "string", maxLength: 160 }, category: { type: "string", maxLength: 80 }, filename: { type: "string", maxLength: 255 }, folderId: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
@@ -100,29 +175,39 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const category = (request.query.category?.trim() || "General").slice(0, 80);
       const requestedType = request.headers["x-resource-content-type"];
       const contentType = typeof requestedType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(requestedType) ? requestedType.slice(0, 120) : "application/octet-stream";
+      const folderId = request.query.folderId ?? null;
+      if (folderId) {
+        const folder = await pool!.query("SELECT id FROM stored_file_folders WHERE id=$1 AND department_id=$2", [folderId, departmentId]);
+        if (!folder.rowCount) return reply.code(404).send({ error: "Folder not found." });
+      }
       const result = await pool!.query<ResourceRow>(
-        `INSERT INTO stored_files (id, department_id, title, category, file_name, content_type, file_size, file_data)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         RETURNING id, title, category, file_name, content_type, file_size, created_at`,
-        [randomUUID(), departmentId, title, category, fileName, contentType, request.body.length, request.body],
+        `INSERT INTO stored_files (id, department_id, title, category, file_name, content_type, file_size, file_data, folder_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         RETURNING id, title, category, file_name, content_type, file_size, created_at, folder_id`,
+        [randomUUID(), departmentId, title, category, fileName, contentType, request.body.length, request.body, folderId],
       );
       return reply.code(201).send(mapResource(result.rows[0]));
     });
 
-    routes.put<{ Params: { id: string }; Body: { title: string; category: string } }>("/api/files/:id", { schema: {
+    routes.put<{ Params: { id: string }; Body: { title: string; category: string; folderId?: string | null } }>("/api/files/:id", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["title", "category"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", minLength: 1, maxLength: 80 } } },
+      body: { type: "object", additionalProperties: false, required: ["title", "category"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, category: { type: "string", minLength: 1, maxLength: 80 }, folderId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
       const title = request.body.title.trim();
       const category = request.body.category.trim();
       if (!title || !category) return reply.code(400).send({ error: "Title and category are required." });
+      const folderId = request.body.folderId ?? null;
+      if (folderId) {
+        const folder = await pool!.query("SELECT id FROM stored_file_folders WHERE id=$1 AND department_id=$2", [folderId, departmentId]);
+        if (!folder.rowCount) return reply.code(404).send({ error: "Folder not found." });
+      }
       const result = await pool!.query<ResourceRow>(
-        `UPDATE stored_files SET title = $3, category = $4, updated_at = now()
+        `UPDATE stored_files SET title = $3, category = $4, folder_id = $5, updated_at = now()
           WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL
-          RETURNING id, title, category, file_name, content_type, file_size, created_at`,
-        [request.params.id, departmentId, title, category],
+          RETURNING id, title, category, file_name, content_type, file_size, created_at, folder_id`,
+        [request.params.id, departmentId, title, category, folderId],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
       return mapResource(result.rows[0]);

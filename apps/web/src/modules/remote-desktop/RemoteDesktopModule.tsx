@@ -54,6 +54,7 @@ interface GuacSession {
   role: "controller" | "viewer";
   width: number;
   height: number;
+  disableDisplayResize: boolean;
   tunnelUrl: string;
   libraryUrl: string;
 }
@@ -98,11 +99,11 @@ function setRemoteAudioPlayback(enabled: boolean): Promise<boolean> {
   } catch { return Promise.resolve(false); }
 }
 
-function fitViewerDisplay(display: GuacDisplay, container: HTMLElement | null) {
+function fitViewerDisplay(display: GuacDisplay, container: HTMLElement | null, allowUpscale = false) {
   const width = display.getWidth();
   const height = display.getHeight();
   if (!container || !width || !height || !container.clientWidth || !container.clientHeight) return;
-  display.scale(Math.min(1, container.clientWidth / width, container.clientHeight / height));
+  display.scale(Math.min(allowUpscale ? Number.POSITIVE_INFINITY : 1, container.clientWidth / width, container.clientHeight / height));
 }
 
 function loadGuacamoleClient(libraryUrl: string) {
@@ -316,10 +317,14 @@ export function RemoteDesktopModule({ departmentId, csrfToken, realtime, state, 
       };
       const display = client.getDisplay();
       const remoteDisplay = display.getElement();
+      const fixedVncDisplay = selectedDestination?.protocol === "vnc" && result.disableDisplayResize;
+      const fitDisplayToBrowser = result.role === "viewer" || fixedVncDisplay;
       remoteDisplay.classList.add("remote-desktop-guac-display");
       remoteDisplay.tabIndex = result.role === "controller" ? 0 : -1;
       displayRef.current.replaceChildren(remoteDisplay);
-      if (result.role === "viewer") display.onresize = () => fitViewerDisplay(display, screenRef.current);
+      display.onresize = () => {
+        if (fitDisplayToBrowser) fitViewerDisplay(display, screenRef.current, fixedVncDisplay);
+      };
 
       if (result.role === "controller") {
         remoteDisplay.addEventListener("mousedown", () => remoteDisplay.focus({ preventScroll: true }));
@@ -337,8 +342,8 @@ export function RemoteDesktopModule({ departmentId, csrfToken, realtime, state, 
           setConnecting(false);
           if (result.role === "controller") remoteDisplay.focus({ preventScroll: true });
           if (screenRef.current) {
-            if (result.role === "viewer") {
-              const fitDisplay = () => fitViewerDisplay(display, screenRef.current);
+            if (fitDisplayToBrowser) {
+              const fitDisplay = () => fitViewerDisplay(display, screenRef.current, fixedVncDisplay);
               resizeObserverRef.current?.disconnect();
               resizeObserverRef.current = new ResizeObserver(fitDisplay);
               resizeObserverRef.current.observe(screenRef.current);

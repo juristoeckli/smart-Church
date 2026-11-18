@@ -4,5 +4,10 @@
 .community-category-filter select{height:34px;min-width:140px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px}
 .community-resource-list{padding:0 20px 8px}
 .community-resource-row{min-height:64px;display:flex;align-items:center;gap:12px;border-top:1px solid var(--line)}
+.file-folder-breadcrumb{display:flex;align-items:center;gap:8px;padding:0 20px 12px;color:var(--muted);font-size:12px}
+.file-folder-breadcrumb span{display:inline-flex;align-items:center;gap:8px}
+.file-folder-breadcrumb button{padding:0;border:0;background:none;color:var(--accent);font:inherit;cursor:pointer}
+.file-folder-open{display:flex;flex:1;flex-direction:column;align-items:flex-start;gap:3px;padding:8px 0;border:0;background:none;color:var(--ink);text-align:left;cursor:pointer}
+.file-folder-open small{color:var(--muted);font-size:11px}
 @media(max-width:520px){.community-resource-list{padding-left:13px;padding-right:13px}.community-resource-row{gap:7px}.community-category-filter{flex:1}.community-category-filter select{width:100%;min-width:0}}
 :root[data-theme="dark"] .community-category-filter select{color-scheme:dark}

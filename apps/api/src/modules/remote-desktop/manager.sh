@@ -68,7 +68,7 @@ configure_remote_desktop_destinations() {
     protocol="rdp"
     username=""
     auto=1
-    disable_resize=0
+    disable_resize=1
   fi
   read -r -p "Destination name [${name:-new destination}]: " choice </dev/tty
   name="${choice:-$name}"
