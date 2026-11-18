@@ -183,7 +183,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const connection = await youtubeConnection(departmentId);
     if (!connection) throw new Error("Connect a YouTube channel before scheduling this stream.");
     const settings = await youtubeOAuthSettings(departmentId);
-    const oauthClientId = connection.oauth_client_id || settings.clientId;
+    if (connection.oauth_client_id && settings.clientId && connection.oauth_client_id !== settings.clientId) {
+      throw new Error("The YouTube OAuth client changed. Reconnect the YouTube channel from Video overview to refresh its credentials.");
+    }
+    const oauthClientId = settings.clientId;
     if (!oauthClientId || !settings.clientSecret || !process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim()) throw new Error("Configure the YouTube client ID and secret in Video module settings.");
     return refreshYoutubeAccessToken(decryptYoutubeToken(connection.encrypted_refresh_token), oauthClientId, settings.clientSecret);
   }
@@ -829,7 +832,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
     }
     try {
-      const current = await pool!.query<{ youtube_client_secret_encrypted: string | null }>("SELECT youtube_client_secret_encrypted FROM video_module_department_settings WHERE department_id=$1", [selectedDepartmentId]);
+      const current = await pool!.query<{ youtube_client_id: string; youtube_client_secret_encrypted: string | null }>("SELECT youtube_client_id, youtube_client_secret_encrypted FROM video_module_department_settings WHERE department_id=$1", [selectedDepartmentId]);
+      const currentClientId = current.rows[0]?.youtube_client_id?.trim() ?? "";
+      if (clientId && clientId !== currentClientId && !clientSecret) {
+        return reply.code(400).send({ error: "Enter the OAuth client secret when changing the client ID." });
+      }
       let encryptedSecret = current.rows[0]?.youtube_client_secret_encrypted ?? null;
       if (clientSecret) {
         if (!process.env.SMART_CHURCH_VIDEO_STEFFISBURG_YOUTUBE_TOKEN_KEY?.trim()) return reply.code(503).send({ error: "Set the module's YOUTUBE_TOKEN_KEY in the server environment before saving a client secret." });
