@@ -31,6 +31,14 @@ function addressBytes(address: DeviceAddress) {
   return bytes;
 }
 
+function describeAddress(address: DeviceAddress) {
+  return `${address.device}:${address.port}:${address.system}`;
+}
+
+function describeFrame(frame: IcspFrame) {
+  return `command 0x${frame.command.toString(16).padStart(4, "0")}, message ${frame.messageId}, source ${describeAddress(frame.source)}, destination ${describeAddress(frame.destination)}`;
+}
+
 function frameBytes(frame: IcspFrame) {
   const payload = Buffer.alloc(19 + frame.data.length);
   payload[0] = PROTOCOL;
@@ -166,10 +174,17 @@ async function waitForReply(
   deviceInfoSource: DeviceAddress,
 ) {
   const deadline = Date.now() + timeoutMs;
+  const observed: string[] = [];
   while (Date.now() < deadline) {
     let frame: IcspFrame;
     try { frame = await connection.nextFrame(deadline - Date.now()); }
-    catch { throw new Error(`The AMX master did not reply to ICSP message ${expected.messageId}.`); }
+    catch (error) {
+      if (error instanceof Error && error.message !== "ICSP receive timed out.") throw error;
+      const details = observed.length ? ` Received: ${observed.slice(0, 5).join("; ")}.` : " No ICSP frames were received.";
+      throw new Error(`The AMX master did not reply to ICSP message ${expected.messageId}.${details}`);
+    }
+
+    observed.push(describeFrame(frame));
 
     // Device information can arrive asynchronously while a request is pending;
     // acknowledge it without mistaking it for the requested reply.
@@ -177,13 +192,19 @@ async function waitForReply(
       await ackIncoming(connection, frame, deviceInfoSource);
       continue;
     }
-    if (frame.messageId !== expected.messageId) continue;
+    if (frame.messageId !== expected.messageId) {
+      if (expected.commands.includes(frame.command)) {
+        throw new Error(`The AMX master replied with ${describeFrame(frame)}, but ICSP message ${expected.messageId} was expected.`);
+      }
+      continue;
+    }
     if (frame.command === COMMAND_NAK) {
       throw new Error(`The AMX master rejected ICSP message ${expected.messageId}.`);
     }
     if (expected.commands.includes(frame.command)) return frame;
   }
-  throw new Error(`The AMX master did not reply to ICSP message ${expected.messageId}.`);
+  const details = observed.length ? ` Received: ${observed.slice(0, 5).join("; ")}.` : " No ICSP frames were received.";
+  throw new Error(`The AMX master did not reply to ICSP message ${expected.messageId}.${details}`);
 }
 
 async function registerDynamicDevice(connection: IcspConnection, host: string) {
@@ -208,16 +229,10 @@ async function registerDynamicDevice(connection: IcspConnection, host: string) {
     data: requestData,
   });
 
-  let frame: IcspFrame;
-  try {
-    frame = await waitForReply(connection, {
-      messageId: 1,
-      commands: [COMMAND_DYNAMIC_DEVICE_ADDRESS],
-    }, 2500, { device: 0, port: 1, system: 0 });
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("rejected")) throw error;
-    throw new Error(`The AMX master did not assign a temporary ICSP device address for ${host}.`);
-  }
+  const frame = await waitForReply(connection, {
+    messageId: 1,
+    commands: [COMMAND_DYNAMIC_DEVICE_ADDRESS],
+  }, 2500, { device: 0, port: 1, system: 0 });
   if (frame.data.length < 4) throw new Error("The AMX master returned a truncated dynamic ICSP address.");
   const address = { device: frame.data.readUInt16BE(0), system: frame.data.readUInt16BE(2), port: frame.destination.port };
   await ackIncoming(connection, frame, address);
