@@ -11,7 +11,7 @@ remote_desktop_encode() { printf '%s' "$1" | base64 | tr -d '\r\n'; }
 remote_desktop_decode() { printf '%s' "$1" | base64 -d; }
 
 configure_remote_desktop_destinations() {
-  local department_id="$1" action choice row id name64 host64 port protocol username64 auto disable_resize name host username password password_mode payload auto_text resize_text rows_text vnc_encodings vnc_encodings64 ready=0 attempt
+  local department_id="$1" action choice row id name64 host64 port protocol username64 auto disable_resize name host username password password_mode payload auto_text resize_text rows_text vnc_encodings vnc_encodings64 vnc_color_depth ready=0 attempt
   local -a rows=() choices=()
   for attempt in {1..30}; do
     if rows_text="$(remote_desktop_store list "$department_id" 2>/dev/null)"; then ready=1; break; fi
@@ -54,13 +54,14 @@ configure_remote_desktop_destinations() {
     fi
     id="$choice"
     for row in "${rows[@]}"; do
-      IFS=$'\t' read -r row_id name64 host64 port protocol username64 auto disable_resize vnc_encodings64 <<< "$row"
+      IFS=$'\t' read -r row_id name64 host64 port protocol username64 auto disable_resize vnc_encodings64 vnc_color_depth <<< "$row"
       [[ "$row_id" == "$id" ]] && break
     done
     name="$(remote_desktop_decode "$name64")"
     host="$(remote_desktop_decode "$host64")"
     username="$(remote_desktop_decode "$username64")"
     vnc_encodings="$(remote_desktop_decode "${vnc_encodings64:-}")"
+    vnc_color_depth="${vnc_color_depth:-}"
   else
     id=""
     name=""
@@ -71,6 +72,7 @@ configure_remote_desktop_destinations() {
     auto=1
     disable_resize=1
     vnc_encodings=""
+    vnc_color_depth=""
   fi
   read -r -p "Destination name [${name:-new destination}]: " choice </dev/tty
   name="${choice:-$name}"
@@ -93,9 +95,12 @@ configure_remote_desktop_destinations() {
     if [[ -n "$choice" ]]; then [[ "$choice" =~ ^[Yy]$ ]] && disable_resize=1 || disable_resize=0; fi
     read -r -p "VNC encodings [${vnc_encodings:-server defaults}]: " choice </dev/tty
     vnc_encodings="${choice:-$vnc_encodings}"
+    read -r -p "VNC color depth [${vnc_color_depth:-server default; 8/16/24/32}]: " choice </dev/tty
+    vnc_color_depth="${choice:-$vnc_color_depth}"
   else
     disable_resize=0
     vnc_encodings=""
+    vnc_color_depth=""
   fi
   if [[ "$id" ]]; then
     read -r -s -p 'New password (Enter = empty password; type - to keep current): ' password </dev/tty
@@ -106,7 +111,7 @@ configure_remote_desktop_destinations() {
     echo >/dev/tty
     password_mode=set
   fi
-  payload="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$(remote_desktop_encode "$name")" "$(remote_desktop_encode "$host")" "$port" "$protocol" "$(remote_desktop_encode "$username")" "$(remote_desktop_encode "$password")" "$auto_text" "$disable_resize" "$password_mode" "$(remote_desktop_encode "$vnc_encodings")")"
+  payload="$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' "$id" "$(remote_desktop_encode "$name")" "$(remote_desktop_encode "$host")" "$port" "$protocol" "$(remote_desktop_encode "$username")" "$(remote_desktop_encode "$password")" "$auto_text" "$disable_resize" "$password_mode" "$(remote_desktop_encode "$vnc_encodings")" "$vnc_color_depth")"
   remote_desktop_store save "$department_id" "$payload"
 }
 
