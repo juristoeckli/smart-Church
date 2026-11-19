@@ -74,22 +74,19 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       {feedback && <p className={failed ? "amx-toast amx-toast-error" : "amx-toast"} role="status">{feedback}</p>}
     </div>
     {settings && !configured && <p className="amx-setup-note">Enter the NetLinx master IP address or hostname under Settings → Modules → AMX. Controls stay disabled until it is configured.</p>}
-    {settings && <p className="amx-setup-note">Room selection and Gemeindesaal quer volume/microphone buttons use verified TPDesign mappings. Other audio pages remain unavailable.</p>}
     <section className="amx-pages" aria-label="AMX audio pages">
       <h3>Audio pages</h3>
-      <p>Gemeindesaal quer volume and microphone mute/level buttons are mapped from TPDesign. Other speaker, microphone, and volume pages remain unavailable.</p>
+      <p>These controls use channel mappings read from the Steffisburg TP4 panel project. Volume buttons send channel pulses; level feedback is not displayed.</p>
       <div className="amx-page-nav">{audioPages.map((page) => <button key={page.id} type="button" className={selectedPage === page.id ? "amx-page-tab active" : "amx-page-tab"} onClick={() => setSelectedPage((current) => current === page.id ? "" : page.id)} aria-pressed={selectedPage === page.id}>{page.room} · {page.page}</button>)}</div>
       {selectedAudioPage && <div className="amx-audio-placeholder">
         <h4>{selectedAudioPage.room} · {selectedAudioPage.page}</h4>
-        {selectedAudioPage.id === "Que_Volume" || selectedAudioPage.id === "Que_Mik" ? <>
           <div className="amx-audio-controls">{selectedAudioPage.controls.map((control) => <div className="amx-audio-control" key={control.id} aria-disabled={control.unavailable || Boolean(control.readonly) || undefined}>
             <span>{control.name}</span>
-            {control.actions && <div className="amx-audio-control-actions">{control.actions.map((action) => <button type="button" key={action.id} disabled={!configured || Boolean(busy)} title={!configured ? "Enter the NetLinx host in AMX module settings" : `Verified ICSP input channel ${action.channel}`} aria-label={`${control.name} ${action.name}`} onClick={() => void send({ id: action.id, name: `${control.name} ${action.name}` })}>{busy === action.id ? "…" : action.name}</button>)}</div>}
+            {control.actions && <div className="amx-audio-control-actions">{control.actions.map((action) => <button type="button" key={action.id} disabled={!configured || Boolean(busy)} title={!configured ? "Enter the NetLinx host in AMX module settings" : `TPDesign port ${action.port ?? 2}, channel ${action.channel}`} aria-label={`${control.name} ${action.name}`} onClick={() => void send({ id: action.id, name: `${control.name} ${action.name}` })}>{busy === action.id ? "…" : action.name}</button>)}</div>}
             {control.readonly && <span className="amx-control-unavailable">{control.readonly}</span>}
             {control.unavailable && <span className="amx-control-unavailable">Unavailable</span>}
           </div>)}</div>
-          <p>{selectedAudioPage.id === "Que_Volume" ? "+ / − / Mute buttons send verified momentary input channels. Faders are display-only in TPDesign and are not draggable here. No level feedback is available yet." : "Mapped mute buttons send verified momentary input channels. Ambient level is a read-only display; the choir-sum popup is disabled and warning channel 180 is informational only."}</p>
-        </> : <><div className="amx-audio-controls" aria-label="Unavailable audio controls">{selectedAudioPage.controls.map((control) => <div className="amx-audio-control" key={control.id} aria-disabled="true"><span>{control.name}</span><span className="amx-control-unavailable">Unavailable</span></div>)}</div><p>This page is shown for reference only. Its control behavior and channel mappings are not verified, so it cannot be operated here.</p></>}
+          <p>Buttons send the listed NetLinx channel. Display-only level meters and page popups are not interactive in this module.</p>
       </div>}
     </section>
   </section>;
