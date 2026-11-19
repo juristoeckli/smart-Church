@@ -5,6 +5,7 @@
 .community-upcoming-card{overflow:hidden}
 .community-upcoming-list{padding:0 20px 8px}
 .community-upcoming-item{min-height:58px;display:grid;grid-template-columns:115px minmax(0,1fr) auto;align-items:center;gap:14px;border-top:1px solid var(--line)}
+.community-upcoming-button{width:100%;padding:0;border-right:0;border-bottom:0;border-left:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}.community-upcoming-button:hover{background:var(--green-soft)}.community-upcoming-button:focus-visible{outline:2px solid var(--green);outline-offset:-2px}
 .community-upcoming-date{font-size:10px;color:var(--muted);font-weight:600}
 .community-upcoming-item>div,.community-resource-title{min-width:0;display:flex;flex-direction:column;gap:4px}
 .community-upcoming-item strong,.community-resource-title strong{font-size:11px;color:var(--ink);font-weight:650}

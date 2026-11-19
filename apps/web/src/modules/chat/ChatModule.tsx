@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { CircleAlert, MessageCircle, Pencil, Plus, Search, Send, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
+import { CircleAlert, Info, MessageCircle, Pencil, Plus, Search, Send, Shield, Trash2, UserPlus, Users, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { formatUserDate } from "../../date-format";
 import { translateChatUi } from "./chat-translations";
 import "./chat.css";
+import "./chat-details.css";
 
 type PresenceStatus = "offline" | "online" | "away";
 type Contact = { id: string; displayName: string; online: boolean; presenceStatus?: PresenceStatus; isAdmin?: boolean; role?: "owner" | "admin" | "member" };
@@ -80,6 +81,7 @@ export function ChatModule({ department, departmentId, csrfToken, language, syst
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [groupName, setGroupName] = useState("");
   const [managingConversation, setManagingConversation] = useState(false);
+  const [conversationDetailsOpen, setConversationDetailsOpen] = useState(false);
   const [conversationEditName, setConversationEditName] = useState("");
   const [conversationEditSuffix, setConversationEditSuffix] = useState("");
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
@@ -175,6 +177,13 @@ export function ChatModule({ department, departmentId, csrfToken, language, syst
     setComposing(false);
     onChatConversationOpened?.(requestedChatConversationId);
   }, [requestedChatConversationId, onChatConversationOpened]);
+
+  useEffect(() => {
+    if (!conversationDetailsOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setConversationDetailsOpen(false); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [conversationDetailsOpen]);
 
   useEffect(() => {
     if (!activeId) { setMessages([]); return; }
@@ -435,6 +444,7 @@ export function ChatModule({ department, departmentId, csrfToken, language, syst
           <div className="chat-thread-heading">
             <span className="chat-avatar">{conversationTitle(activeConversation, currentUserId, t).split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span>
             <div className="chat-thread-title"><h2>{conversationTitle(activeConversation, currentUserId, t)}</h2><p>{activeConversation.kind === "group" ? `${t("{count} participants").replace("{count}", String(activeConversation.participants.length))} · ${t("Group chat")}` : (() => { const other = activeConversation.participants.find((person) => person.id !== currentUserId); const status = other ? presenceStatus(other) : "offline"; return status === "offline" ? t("Direct message") : status === "away" ? t("Away") : t("Online"); })()}</p></div>
+            <button className="chat-close-button" type="button" onClick={() => setConversationDetailsOpen(true)} aria-label={t("Conversation details")} title={t("Conversation details")}><Info size={15} /></button>
             {(activeConversation.kind === "direct" || canManageActiveGroup) && <button className="chat-close-button" type="button" onClick={() => managingConversation ? setManagingConversation(false) : beginManagingConversation(activeConversation)} aria-label={t(managingConversation ? "Close chat settings" : "Edit chat settings")} title={t(managingConversation ? "Close chat settings" : "Edit chat settings")}><Pencil size={15} /></button>}
           </div>
           {managingConversation ? <section className="chat-management-panel">
@@ -493,6 +503,7 @@ export function ChatModule({ department, departmentId, csrfToken, language, syst
         </> : <div className="chat-select-empty"><span><MessageCircle size={23} /></span><strong>{t("Select a conversation")}</strong><p>{t("Select a conversation or start a new chat with one or more people.")}</p><button className="button button-primary" type="button" onClick={() => { setComposing(true); setManagingConversation(false); setSelectedIds([]); }}><Plus size={14} />{t("New chat")}</button></div>}
       </div>
     </section>
+      {conversationDetailsOpen && activeConversation && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setConversationDetailsOpen(false)}><section className="modal chat-details-modal" role="dialog" aria-modal="true" aria-labelledby="chat-details-title"><div className="modal-heading"><div><span className="eyebrow">{t(activeConversation.kind === "group" ? "Group chat" : "Direct message")}</span><h2 id="chat-details-title">{conversationTitle(activeConversation, currentUserId, t)}</h2><p>{t("Conversation details")}</p></div><button className="icon-button" type="button" aria-label={t("Close dialog")} onClick={() => setConversationDetailsOpen(false)}><X size={19} /></button></div><dl className="chat-details-grid"><div><dt>{t("Participants")}</dt><dd>{activeConversation.participants.length}</dd></div><div><dt>{t("Last activity")}</dt><dd>{timeLabel(activeConversation.updatedAt)}</dd></div><div className="chat-details-wide"><dt>{t("Latest message")}</dt><dd>{activeConversation.lastMessage || t("No messages yet.")}</dd></div></dl><section className="chat-details-participants"><h3>{t("Participants")}</h3><ul>{activeConversation.participants.map((person) => <li key={person.id}><span className="chat-contact-avatar">{person.displayName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span><span><strong>{person.displayName}{person.id === currentUserId ? ` · ${t("You")}` : ""}</strong><small>{person.id === activeConversation.createdBy ? t("Creator") : person.role === "admin" ? t("Admin") : t("Member")}</small></span><small>{presenceStatus(person) === "offline" ? t("Offline") : presenceStatus(person) === "away" ? t("Away") : t("Online")}</small></li>)}</ul></section><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setConversationDetailsOpen(false)}>{t("Close")}</button></div></section></div>}
       <footer className="page-footer"><span>{t("Conversations are private to their participants in {location}.").replace("{location}", department.location)}</span><span>{t("Direct chat suffixes sync between both participants; group settings are managed by admins.")}</span></footer>
   </>;
 }

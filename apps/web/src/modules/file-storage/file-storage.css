@@ -1,4 +1,5 @@
 .community-resource-card{overflow:hidden}
+.file-detail-trigger{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}.file-detail-trigger strong{font-size:11px;color:var(--ink);font-weight:650}.file-detail-trigger small{font-size:9px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.file-detail-trigger:hover strong,.file-detail-trigger:focus-visible strong{color:var(--green);text-decoration:underline}
 .community-resource-toolbar{display:flex;gap:10px;align-items:center}
 .community-resource-toolbar .search-field{max-width:none;flex:1;background:var(--panel)}
 .community-category-filter select{height:34px;min-width:140px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px}

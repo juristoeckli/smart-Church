@@ -5,6 +5,7 @@ import { translateModuleText } from "../../module-registry";
 import { formatUserDate } from "../../date-format";
 import { translationsForModule } from "../translations";
 import "./community-feed.css";
+import "./community-feed-details.css";
 
 type FeedComment = { id: string; body: string; authorId: string; authorName: string; createdAt: string };
 type FeedPost = {
@@ -34,6 +35,14 @@ export function CommunityFeedModule({ departmentId, csrfToken, language }: Modul
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
+  const [detailsPost, setDetailsPost] = useState<FeedPost | null>(null);
+
+  useEffect(() => {
+    if (!detailsPost) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetailsPost(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [detailsPost]);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     setError("");
@@ -116,10 +125,11 @@ export function CommunityFeedModule({ departmentId, csrfToken, language }: Modul
       {loading ? <p className="community-feed-empty">{t("Loading posts…")}</p> : posts.length ? posts.map((post) => <article className="community-post-card" key={post.id}>
         <header className="community-post-header"><span className="community-post-avatar">{post.authorName.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase()}</span><div className="community-post-author"><strong>{post.authorName}</strong><time dateTime={post.createdAt}>{formatPostDate(post.createdAt)}</time></div>{post.canDelete && <button className="community-post-delete" type="button" aria-label={t("Delete post")} title={t("Delete post")} onClick={() => void deletePost(post)}><Trash2 size={16} /></button>}</header>
         {post.title && <h2>{post.title}</h2>}<p className="community-post-body">{post.body}</p>
-        <div className="community-post-actions"><button type="button" className={post.likedByMe ? "community-post-like is-liked" : "community-post-like"} onClick={() => void toggleLike(post)} aria-pressed={post.likedByMe}><Heart size={16} fill={post.likedByMe ? "currentColor" : "none"} />{post.likeCount} {t(post.likeCount === 1 ? "like" : "likes")}</button><span><MessageCircle size={16} />{post.comments.length} {t(post.comments.length === 1 ? "comment" : "comments")}</span></div>
+        <div className="community-post-actions"><button type="button" className={post.likedByMe ? "community-post-like is-liked" : "community-post-like"} onClick={() => void toggleLike(post)} aria-pressed={post.likedByMe}><Heart size={16} fill={post.likedByMe ? "currentColor" : "none"} />{post.likeCount} {t(post.likeCount === 1 ? "like" : "likes")}</button><span><MessageCircle size={16} />{post.comments.length} {t(post.comments.length === 1 ? "comment" : "comments")}</span><button type="button" className="community-post-details" onClick={() => setDetailsPost(post)}>{t("View details")}</button></div>
         {post.comments.length > 0 && <div className="community-post-comments">{post.comments.map((item) => <div className="community-post-comment" key={item.id}><strong>{item.authorName}</strong><p>{item.body}</p><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></div>)}</div>}
         <form className="community-comment-form" onSubmit={(event) => void comment(post, event)}><input aria-label={t("Write a comment…")} maxLength={1000} placeholder={t("Write a comment…")} value={commentDrafts[post.id] ?? ""} onChange={(event) => setCommentDrafts((current) => ({ ...current, [post.id]: event.target.value }))} /><button type="submit" className="community-comment-submit" disabled={!(commentDrafts[post.id] ?? "").trim()} aria-label={t("Post comment")}><Send size={16} /></button></form>
       </article>) : <p className="community-feed-empty">{t("There are no posts yet. Share the first update with your church.")}</p>}
     </section>
+    {detailsPost && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsPost(null)}><section className="modal community-post-details-modal" role="dialog" aria-modal="true" aria-labelledby="community-post-details-title"><div className="modal-heading"><div><span className="eyebrow">{t("Church life")}</span><h2 id="community-post-details-title">{detailsPost.title || t("Community update")}</h2><p>{detailsPost.authorName} · {formatPostDate(detailsPost.createdAt)}</p></div><button className="icon-button" type="button" aria-label={t("Close dialog")} onClick={() => setDetailsPost(null)}><span aria-hidden="true">×</span></button></div><p className="community-post-details-body">{detailsPost.body}</p><section className="community-post-details-comments"><h3>{t("Comments ({count})").replace("{count}", String(detailsPost.comments.length))}</h3>{detailsPost.comments.length ? <ul>{detailsPost.comments.map((item) => <li key={item.id}><strong>{item.authorName}</strong><p>{item.body}</p><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></li>)}</ul> : <p>{t("No comments yet.")}</p>}</section><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsPost(null)}>{t("Close")}</button></div></section></div>}
   </main>;
 }

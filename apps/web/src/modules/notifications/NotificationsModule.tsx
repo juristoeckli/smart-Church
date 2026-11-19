@@ -51,6 +51,7 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
+  const [detailsNotification, setDetailsNotification] = useState<Notification | null>(null);
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [announcementAudience, setAnnouncementAudience] = useState<"location" | "groups">("location");
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
@@ -77,6 +78,13 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   }, [departmentId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (!detailsNotification) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setDetailsNotification(null); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [detailsNotification]);
 
   useEffect(() => {
     if (!canSend) return;
@@ -108,7 +116,9 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     if (notification.readAt) return;
     try {
       await mutate(`/api/modules/notifications/${encodeURIComponent(notification.id)}/read`, "POST");
-      setNotifications((current) => current.map((item) => item.id === notification.id ? { ...item, readAt: new Date().toISOString() } : item));
+      const readAt = new Date().toISOString();
+      setNotifications((current) => current.map((item) => item.id === notification.id ? { ...item, readAt } : item));
+      setDetailsNotification((current) => current?.id === notification.id ? { ...current, readAt } : current);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this notification."); }
   }
 
@@ -206,13 +216,14 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     <section className="directory-card notification-inbox">
       <div className="directory-heading"><div><h2>Your inbox</h2><p>{format("Showing your latest {count} notifications.", { count: String(notifications.length) })}</p></div><span className="notification-unread-pill"><Bell size={13} />{unreadCount} unread</span></div>
       {loading ? <p className="notification-empty" role="status">Loading notifications…</p> : notifications.length === 0 ? <div className="notification-empty-state"><span><Bell size={20} /></span><strong>You’re all caught up</strong><p>New announcements and event reminders will appear here.</p></div> : <div className="notification-list">
-        {notifications.map((notification) => <article className={`notification-item${notification.readAt ? " notification-item-read" : " notification-item-unread"}`} key={notification.id}>
+        {notifications.map((notification) => <article className={`notification-item notification-clickable-item${notification.readAt ? " notification-item-read" : " notification-item-unread"}`} key={notification.id} tabIndex={0} onClick={(event) => { if (event.target instanceof Element && event.target.closest("button, a, input, select, textarea")) return; setDetailsNotification(notification); }} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); setDetailsNotification(notification); } }}>
           <div className={`notification-item-icon ${notification.kind === "event_reminder" || notification.kind === "follow_up_reminder" ? "notification-item-icon-event" : notification.kind === "service_request" || notification.kind === "follow_up_assignment" ? "notification-item-icon-request" : "notification-item-icon-announcement"}`}>{notification.kind === "event_reminder" || notification.kind === "follow_up_reminder" ? <CalendarClock size={17} /> : notification.kind === "service_request" ? <ClipboardCheck size={17} /> : notification.kind === "follow_up_assignment" ? <UserCheck size={17} /> : <Megaphone size={17} />}</div>
           <div className="notification-item-content"><div className="notification-item-heading"><strong>{notification.title}</strong><time dateTime={notification.createdAt}>{formatUserDate(notification.createdAt, true)}</time></div><p>{notification.body}</p><small>{notification.kind === "event_reminder" ? "Event reminder" : notification.kind === "service_request" ? "Volunteer request" : notification.kind === "follow_up_assignment" ? "Visitor follow-up assignment" : notification.kind === "follow_up_reminder" ? "Visitor follow-up reminder" : "Location announcement"}</small>{notification.emailDeliveryStatus && <small className={`notification-email-status notification-email-status-${notification.emailDeliveryStatus}`}>{format("Email {status}", { status: t(notification.emailDeliveryStatus === "pending" ? "queued" : notification.emailDeliveryStatus === "sent" ? "accepted by provider" : notification.emailDeliveryStatus) })}</small>}</div>
           {!notification.readAt && <button className="button button-secondary notification-read-button" type="button" onClick={() => void markRead(notification)} aria-label={format("Mark “{title}” as read", { title: notification.title })}><Check size={14} />Read</button>}
         </article>)}
       </div>}
     </section>
+    {detailsNotification && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsNotification(null)}><section className="modal item-details-modal notification-details-modal" role="dialog" aria-modal="true" aria-labelledby="notification-details-title"><div className="modal-heading"><div><span className="eyebrow">{detailsNotification.kind === "event_reminder" ? "EVENT REMINDER" : detailsNotification.kind === "service_request" ? "VOLUNTEER REQUEST" : detailsNotification.kind === "follow_up_assignment" ? "VISITOR FOLLOW-UP" : detailsNotification.kind === "follow_up_reminder" ? "FOLLOW-UP REMINDER" : "ANNOUNCEMENT"}</span><h2 id="notification-details-title">{detailsNotification.title}</h2><p>{formatUserDate(detailsNotification.createdAt, true)}</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={() => setDetailsNotification(null)}>×</button></div><p className="notification-details-body">{detailsNotification.body}</p><dl className="event-details-grid"><div><dt>Type</dt><dd>{detailsNotification.kind === "event_reminder" ? "Event reminder" : detailsNotification.kind === "service_request" ? "Volunteer request" : detailsNotification.kind === "follow_up_assignment" ? "Visitor follow-up assignment" : detailsNotification.kind === "follow_up_reminder" ? "Visitor follow-up reminder" : "Location announcement"}</dd></div><div><dt>Status</dt><dd>{detailsNotification.readAt ? "Read" : "Unread"}</dd></div>{detailsNotification.emailDeliveryStatus && <div><dt>Email delivery</dt><dd>{format("Email {status}", { status: t(detailsNotification.emailDeliveryStatus === "pending" ? "queued" : detailsNotification.emailDeliveryStatus === "sent" ? "accepted by provider" : detailsNotification.emailDeliveryStatus) })}</dd></div>}</dl><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsNotification(null)}>Close</button>{!detailsNotification.readAt && <button className="button button-primary" type="button" onClick={() => void markRead(detailsNotification)}><Check size={14} />Read</button>}</div></section></div>}
     <footer className="page-footer"><span>Notifications are private to your account and selected location.</span><span>Reminders, requests, and follow-ups are delivered in-app.</span></footer>
   </>;
 }

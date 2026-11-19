@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Building2, CalendarDays, ContactRound, UsersRound } from "lucide-react";
+import { ArrowRight, Building2, CalendarDays, ContactRound, UsersRound, X } from "lucide-react";
 import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { getActiveLanguage, translate } from "./i18n";
@@ -17,6 +17,7 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [resources, setResources] = useState<BookableResource[]>([]);
+  const [detailsEvent, setDetailsEvent] = useState<ServiceEvent | null>(null);
   const [error, setError] = useState("");
   const today = new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date());
 
@@ -54,8 +55,9 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
       {stats.map(({ label, value, detail, icon: Icon, page }) => <button className="stat-card community-stat-card" type="button" key={label} onClick={() => onNavigate(page)}><div className="stat-icon stat-icon-green"><Icon size={19} /></div><div className="stat-content"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div><ArrowRight className="community-stat-arrow" size={15} /></button>)}
     </section>
     <section className="directory-card community-upcoming-card"><div className="directory-heading"><div><h2>{translate("overview.comingUp")}</h2><p>{translate("overview.nextAt").replace("{location}", departmentLocation)}</p></div><button className="button button-secondary" type="button" onClick={() => onNavigate("Services & events")}>{translate("overview.openCalendar")} <ArrowRight size={14} /></button></div>
-      {upcoming.length ? <div className="community-upcoming-list">{upcoming.map((event) => <article className="community-upcoming-item" key={event.id}><span className="community-upcoming-date">{formatUserDate(event.eventDate)}</span><div><strong>{event.title}</strong><small>{event.startTime}{event.endTime ? `–${event.endTime}` : ""} · {event.location}</small></div><span className="event-kind">{event.kind === "service" ? translate("overview.service") : event.kind}</span></article>)}</div> : <p className="community-empty">{translate("overview.noUpcoming")}</p>}
+      {upcoming.length ? <div className="community-upcoming-list">{upcoming.map((event) => <button className="community-upcoming-item community-upcoming-button" type="button" key={event.id} onClick={() => setDetailsEvent(event)}><span className="community-upcoming-date">{formatUserDate(event.eventDate)}</span><div><strong>{event.title}</strong><small>{event.startTime}{event.endTime ? `–${event.endTime}` : ""} · {event.location}</small></div><span className="event-kind">{event.kind === "service" ? translate("overview.service") : event.kind}</span></button>)}</div> : <p className="community-empty">{translate("overview.noUpcoming")}</p>}
     </section>
+    {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="overview-event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{detailsEvent.kind === "service" ? translate("overview.service") : detailsEvent.kind}</span><h2 id="overview-event-details-title">{detailsEvent.title}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatUserDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{detailsEvent.allDay ? translate("events.allDay") : `${detailsEvent.startTime}${detailsEvent.endTime ? `–${detailsEvent.endTime}` : ""}`}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div></dl>{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsEvent(null)}>{translate("events.close")}</button><button className="button button-primary" type="button" onClick={() => { setDetailsEvent(null); onNavigate("Services & events"); }}>{translate("overview.openCalendar")} <ArrowRight size={14} /></button></div></section></div>}
     <footer className="page-footer"><span>{translate("overview.footer")}</span><span>© 2026 Smart Church</span></footer>
   </>;
 }
