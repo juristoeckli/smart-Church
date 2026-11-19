@@ -113,19 +113,53 @@ export function ModuleTranslationHost({ children, translations, language }: { ch
   return <>{Children.map(children, (child) => translateModuleNode(child, translations, language))}</>;
 }
 
-const registrations = import.meta.glob<{ moduleRegistration: ModuleRegistration }>(["./modules/*/module.tsx", "!./modules/amx/module.tsx"]);
+const registrations = import.meta.glob<{ moduleRegistration: ModuleRegistration }>(["./modules/*/module.tsx", "!./modules/amx/module.tsx", "!./modules/remote-desktop/module.tsx"]);
+const separatelyPackagedModules = new Set(["amx", "remote-desktop"]);
 
 export const registeredModules: ModuleRegistration[] = [];
 const loadedModules = new Map<string, Promise<ModuleRegistration | null>>();
 
+async function loadOptionalModuleStylesheet(moduleId: string) {
+  let link = document.querySelector<HTMLLinkElement>(`link[data-smart-church-module-css="${moduleId}"]`);
+  if (!link) {
+    link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = `/optional-modules/${moduleId}/module.css`;
+    link.dataset.smartChurchModuleCss = moduleId;
+    const loaded = new Promise<void>((resolve, reject) => {
+      link!.addEventListener("load", () => resolve(), { once: true });
+      link!.addEventListener("error", () => reject(new Error(`Unable to load ${moduleId} module styles.`)), { once: true });
+    });
+    document.head.append(link);
+    await loaded;
+    return;
+  }
+  if (link.sheet) return;
+  await new Promise<void>((resolve, reject) => {
+    link!.addEventListener("load", () => resolve(), { once: true });
+    link!.addEventListener("error", () => reject(new Error(`Unable to load ${moduleId} module styles.`)), { once: true });
+  });
+}
+
 export async function loadRegisteredModules(moduleIds: string[]) {
   const requested = new Set(moduleIds);
-  const matches = Object.entries(registrations).filter(([path]) => requested.has(path.split("/").at(-2) ?? ""));
-  const modules = await Promise.all(matches.map(([path, load]) => {
-    const moduleId = path.split("/").at(-2) ?? "";
+  const bundledMatches = Object.entries(registrations).filter(([path]) => requested.has(path.split("/").at(-2) ?? ""));
+  const bundledIds = new Set(bundledMatches.map(([path]) => path.split("/").at(-2) ?? ""));
+  const bundledModules = await Promise.all(bundledMatches.map(async ([path, load]) => [path.split("/").at(-2) ?? "", (await load()).moduleRegistration] as const));
+  const optionalModules = await Promise.all([...requested].filter((id) => separatelyPackagedModules.has(id) && !bundledIds.has(id)).map(async (moduleId) => {
+    try {
+      await loadOptionalModuleStylesheet(moduleId);
+      const { moduleRegistration } = await import(/* @vite-ignore */ `/optional-modules/${moduleId}/module.js`);
+      return [moduleId, moduleRegistration as ModuleRegistration] as const;
+    } catch (error) {
+      console.error(`Optional module bundle failed to load (${moduleId}); the rest of Smart-Church will continue.`, error);
+      return [moduleId, null] as const;
+    }
+  }));
+  const modules = await Promise.all([...bundledModules, ...optionalModules].filter((module): module is readonly [string, ModuleRegistration] => module[1] !== null).map(([moduleId, moduleRegistration]) => {
     let pending = loadedModules.get(moduleId);
     if (!pending) {
-      pending = load().then(({ moduleRegistration }) => {
+      pending = Promise.resolve().then(() => {
         const iconType = typeof moduleRegistration?.icon;
         const componentType = typeof moduleRegistration?.component;
         if (!moduleRegistration || moduleRegistration.id !== moduleId || !/^[a-z0-9][a-z0-9-]*$/.test(moduleRegistration.id) || !moduleRegistration.name || moduleRegistration.icon == null || (iconType !== "function" && iconType !== "object") || moduleRegistration.component == null || (componentType !== "function" && componentType !== "object")) {
@@ -134,7 +168,7 @@ export async function loadRegisteredModules(moduleIds: string[]) {
         return moduleRegistration;
       }).catch((error: unknown) => {
         loadedModules.delete(moduleId);
-        console.error(`Optional module registration failed (${path}); the rest of Smart-Church will continue.`, error);
+        console.error(`Optional module registration failed (${moduleId}); the rest of Smart-Church will continue.`, error);
         return null;
       });
       loadedModules.set(moduleId, pending);

@@ -28,3 +28,17 @@ migrate_remote_desktop_env() {
   chmod 600 "$tmp"
   mv "$tmp" "$env_file"
 }
+
+initialize_remote_desktop_module_installation() {
+  local env_file="${1:-.env}" installed active tmp
+  [[ -f "$env_file" ]] || return 0
+  installed="$(sed -n 's/^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=//p' "$env_file" | tail -n 1)"
+  active="$(sed -n 's/^SMART_CHURCH_USE_REMOTE_DESKTOP=//p' "$env_file" | tail -n 1)"
+  [[ -n "$installed" ]] && return 0
+  [[ "$active" == 1 ]] && installed=1 || installed=0
+  tmp="$(mktemp "${env_file}.XXXXXX")"
+  cat "$env_file" > "$tmp"
+  printf 'SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=%s\n' "$installed" >> "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$env_file"
+}

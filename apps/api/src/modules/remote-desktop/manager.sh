@@ -1,9 +1,10 @@
 remote_desktop_store() {
   local action="$1" department_id="$2" payload="${3:-}"
+  local command='cp /var/lib/smart-church/modules/remote-desktop/manage-destinations.ts /workspace/apps/api/src/manage-destinations.ts; trap "rm -f /workspace/apps/api/src/manage-destinations.ts" EXIT; node --import tsx src/manage-destinations.ts "$@"'
   if [[ -n "$payload" ]]; then
-    printf '%s' "$payload" | run_compose exec -T api node --import tsx src/modules/remote-desktop/manage-destinations.ts "$action" "$department_id"
+    printf '%s' "$payload" | run_compose exec -T api sh -ec "$command" manager "$action" "$department_id"
   else
-    run_compose exec -T api node --import tsx src/modules/remote-desktop/manage-destinations.ts "$action" "$department_id"
+    run_compose exec -T api sh -ec "$command" manager "$action" "$department_id"
   fi
 }
 
@@ -117,6 +118,10 @@ configure_remote_desktop_destinations() {
 
 configure_remote_desktop_module() {
   local department_id="$1" secret guacd_image wave2_choice
+  [[ "$(env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED)" == 1 ]] || {
+    echo 'Install Remote desktop before changing its settings.' >&2
+    return 1
+  }
   secret="$(env_value REMOTE_DESKTOP_JSON_SECRET_KEY)"
   if [[ ! "$secret" =~ ^[[:xdigit:]]{32}$ ]]; then
     command -v openssl >/dev/null || { echo 'openssl is required to generate the remote desktop service key.' >&2; return 1; }

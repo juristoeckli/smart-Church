@@ -34,6 +34,19 @@ migrate_remote_desktop_env() {
   mv "$tmp" "$env_file"
 }
 migrate_remote_desktop_env .env
+initialize_remote_desktop_module_installation() {
+  local installed active tmp
+  installed="$(sed -n 's/^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=//p' .env | tail -n 1)"
+  [[ -n "$installed" ]] && return 0
+  active="$(sed -n 's/^SMART_CHURCH_USE_REMOTE_DESKTOP=//p' .env | tail -n 1)"
+  [[ "$active" == 1 ]] && installed=1 || installed=0
+  tmp="$(mktemp .env.XXXXXX)"
+  cat .env > "$tmp"
+  printf 'SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=%s\n' "$installed" >> "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" .env
+}
+initialize_remote_desktop_module_installation
 version="${1:-latest}"
 [[ "$version" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Use a release version such as 1.2.3 or latest." >&2; exit 1; }
 version="${version#v}"
@@ -71,6 +84,7 @@ sync_deployment_files() {
     .env.production.example
     deploy/compose.direct.yaml
     deploy/compose.amx.yaml
+    deploy/compose.remote-desktop.yaml
     deploy/README.md
     deploy/Caddyfile
     deploy/Caddyfile.self-signed
@@ -87,6 +101,7 @@ sync_deployment_files() {
     apps/api/src/modules/video-steffisburg/.env.example
     apps/api/src/modules/video-steffisburg/README.md
     apps/api/src/modules/remote-desktop/compose.yaml
+    apps/api/src/modules/remote-desktop/manager.sh
     apps/api/src/modules/remote-desktop/guacd-log-entrypoint.sh
     apps/api/src/modules/remote-desktop/guacd-wave2.patch
     apps/api/src/modules/remote-desktop/build-guacd.sh
@@ -215,6 +230,9 @@ compose_files=(-f compose.yaml)
 if [[ -f deploy/compose.amx.yaml ]] && grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env; then
   compose_files+=(-f deploy/compose.amx.yaml)
 fi
+if [[ -f deploy/compose.remote-desktop.yaml ]] && grep -q '^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=1' .env; then
+  compose_files+=(-f deploy/compose.remote-desktop.yaml)
+fi
 if [[ -f deploy/compose.direct.yaml ]]; then
   compose_files+=(-f deploy/compose.direct.yaml)
 fi
@@ -229,6 +247,7 @@ if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then profile_args+=(--profi
 if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then profile_args+=(--profile remote-desktop); fi
 pull_services=(db api web)
 if grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env; then pull_services+=(amx-module); fi
+if grep -q '^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=1' .env; then pull_services+=(remote-desktop-module); fi
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then pull_services+=(caddy); fi
 if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then
   pull_services+=(remote-desktop-guacamole)

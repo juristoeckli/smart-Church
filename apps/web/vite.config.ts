@@ -1,15 +1,37 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import { resolve } from "node:path";
+
+function optionalModuleCssEntry(): Plugin {
+  return {
+    name: "optional-module-entry-css",
+    apply: "build" as const,
+    generateBundle(_options, bundle) {
+      const entry = Object.values(bundle).find((item) => item.type === "chunk" && item.isEntry);
+      const importedCss = (entry as (typeof entry & { viteMetadata?: { importedCss?: Set<string> } }) | undefined)?.viteMetadata?.importedCss;
+      const css = [...(importedCss ?? [])].map((fileName) => {
+        const asset = bundle[fileName];
+        if (!asset || asset.type !== "asset") return "";
+        delete bundle[fileName];
+        return typeof asset.source === "string" ? asset.source : new TextDecoder().decode(asset.source);
+      }).filter(Boolean).join("\n");
+      this.emitFile({ type: "asset", fileName: "module.css", source: css });
+    },
+  };
+}
 
 export default defineConfig(({ command }) => {
-  const includeAmx = command === "serve" || process.env.SMART_CHURCH_INCLUDE_AMX === "1";
+  const optionalWebModule = process.env.SMART_CHURCH_BUILD_OPTIONAL_WEB_MODULE;
+  const reactRuntimeBuild = process.env.SMART_CHURCH_BUILD_REACT_RUNTIME === "1";
+  const appRoot = process.cwd();
   return {
-    plugins: [react(), {
-      name: "optional-amx-module",
+    base: optionalWebModule ? `/optional-modules/${optionalWebModule}/` : reactRuntimeBuild ? "/optional-modules/runtime/" : "/",
+    plugins: [react(), ...(optionalWebModule ? [optionalModuleCssEntry()] : []), {
+      name: "optional-module-development-registry",
       enforce: "pre",
       transform(source: string, id: string) {
-        if (includeAmx && id.endsWith("/module-registry.tsx")) {
-          return source.replace('["./modules/*/module.tsx", "!./modules/amx/module.tsx"]', '"./modules/*/module.tsx"');
+        if (command === "serve" && id.endsWith("/module-registry.tsx")) {
+          return source.replace('["./modules/*/module.tsx", "!./modules/amx/module.tsx", "!./modules/remote-desktop/module.tsx"]', '"./modules/*/module.tsx"');
         }
         return null;
       },
@@ -22,6 +44,29 @@ export default defineConfig(({ command }) => {
         });
       },
     }],
+    publicDir: optionalWebModule || reactRuntimeBuild ? false : undefined,
+    build: optionalWebModule ? {
+      outDir: resolve(appRoot, `dist-optional/${optionalWebModule}`),
+      emptyOutDir: true,
+      rollupOptions: {
+        input: resolve(appRoot, `src/modules/${optionalWebModule}/module.tsx`),
+        external: ["react", "react/jsx-runtime"],
+        output: { entryFileNames: "module.js", chunkFileNames: "assets/[name]-[hash].js", assetFileNames: "assets/[name]-[hash][extname]" },
+      },
+    } : reactRuntimeBuild ? {
+      outDir: resolve(appRoot, "dist/optional-modules/runtime"),
+      emptyOutDir: true,
+      rollupOptions: {
+        input: {
+          react: resolve(appRoot, "node_modules/react/index.js"),
+          "jsx-runtime": resolve(appRoot, "node_modules/react/jsx-runtime.js"),
+        },
+        external: ["react"],
+        output: { entryFileNames: "[name].js", chunkFileNames: "assets/[name]-[hash].js" },
+      },
+    } : {
+      rollupOptions: { external: ["react", "react/jsx-runtime"] },
+    },
     server: {
       proxy: {
         "/api": { target: process.env.VITE_API_PROXY_TARGET ?? "http://localhost:3001", ws: true },

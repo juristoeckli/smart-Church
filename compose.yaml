@@ -82,6 +82,8 @@ services:
     restart: unless-stopped
     ports:
       - "${SMART_CHURCH_WEB_BIND_ADDRESS:-127.0.0.1}:${SMART_CHURCH_WEB_HOST_PORT:-8080}:8080"
+    volumes:
+      - smart-church-modules:/app/optional-modules:ro
     depends_on:
       api:
         condition: service_healthy

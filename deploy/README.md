@@ -59,7 +59,7 @@ Do not expose the API or web upstream ports to the public internet. Production s
 
 ## Optional modules
 
-Use **Modules** in `./deploy/manage.sh` to install, enable, disable, and configure optional modules for the primary location. AMX is distributed as a separate API module image and AMX-enabled web image, so installations that do not use it do not pull its server or browser code. To install AMX, open **Modules → Install / enable module → AMX** in the manager. The manager downloads the AMX images for the currently selected Smart-Church version, starts the AMX-enabled stack, and enables the module for the primary location. After startup, set the NetLinx address under **Settings → Modules → AMX** in the web app. The manager keeps the images and settings when AMX is disabled so it can be re-enabled without downloading again. This image split currently applies to AMX only; other optional modules are still present in the standard API or web images. See [optional module packaging](../docs/optional-module-packaging.md) for the image contents, install/update behavior, and release workflow.
+Use **Modules** in `./deploy/manage.sh` to install, enable, disable, and configure optional modules. AMX and Remote desktop are separate module images, each carrying its own API implementation and browser bundle. An installation downloads only the optional code it uses. To install either module, open **Modules → Install / enable module** in the manager. The manager downloads images for the currently selected Smart-Church version and enables the module installation-wide. Module settings and data remain location-scoped. AMX uses the NetLinx address under **Settings → Modules → AMX**. Remote desktop destinations are configured under **Settings → Modules → Remote desktop**. Disabling a module turns it off installation-wide but keeps its image and settings so it can be re-enabled without downloading again. See [optional module packaging](../docs/optional-module-packaging.md) for image contents, install/update behavior, and release workflow.
 
 Steffisburg Video has a module-owned Compose overlay and site configuration included in the deployment package. The included `streaming.steffisburg.json` contains the Steffisburg and linked site network/device settings. Configure the UniFi API key and optional DS-700 overrides through the manager or using `apps/api/src/modules/video-steffisburg/.env.example`. The UniFi API key is kept in `.env`, not in the module JSON. For manual Compose startup, set `SMART_CHURCH_STREAMING_CONFIG_PATH` to that file and include both Compose files:
 
@@ -73,7 +73,7 @@ For a direct HTTP installation, include the direct-access overlay and start the 
 docker compose -f compose.yaml -f deploy/compose.direct.yaml -f apps/api/src/modules/video-steffisburg/compose.yaml up -d db api
 ```
 
-Remote desktop and other hardware integrations have separate prerequisites; they are not required for a standard church installation.
+Remote desktop and other hardware integrations have separate prerequisites; they are not required for a standard church installation. The Remote desktop installer pulls its API files into the shared module volume and starts Guacamole only while the module is enabled.
 
 ## Backups and restore
 

@@ -128,6 +128,7 @@ SMART_CHURCH_DEPARTMENT_NAME=$location
 SMART_CHURCH_SYNC_ENCRYPTION_KEY=$sync_key
 SMART_CHURCH_VERSION=$version
 SMART_CHURCH_USE_AMX_MODULE=0
+SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=0
 SMART_CHURCH_USE_BUNDLED_PROXY=$bundled_proxy
 EOF
 if [[ "$location" == "Steffisburg" ]]; then
@@ -141,6 +142,9 @@ cd "$root"
 compose_files=(-f compose.yaml -f deploy/compose.direct.yaml)
 if grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env && [[ -f deploy/compose.amx.yaml ]]; then
   compose_files+=(-f deploy/compose.amx.yaml)
+fi
+if grep -q '^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=1' .env && [[ -f deploy/compose.remote-desktop.yaml ]]; then
+  compose_files+=(-f deploy/compose.remote-desktop.yaml)
 fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)

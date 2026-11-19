@@ -24,6 +24,7 @@ export type ReplicationRestoreContext = {
 };
 
 export interface ModuleServerContext {
+  followRuntimeLogFile: (source: string, filePath: string | undefined) => () => void;
   authenticate?: (request: FastifyRequest, reply: FastifyReply) => Promise<boolean>;
   activation: {
     isEnabled: () => boolean;

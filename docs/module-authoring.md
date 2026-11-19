@@ -42,6 +42,8 @@ Use `moduleTranslation(moduleRegistration.translations, language, "greeting")` i
 
 The optional `realtime` client context uses the core-owned authenticated WebSocket connection. Subscribe to module-owned topics such as `module:<id>:changed`; use `realtime:connected` to refresh after reconnect because events are transient and are not queued. Call `send(topic, payload)` only for commands handled by that module's API routes. Modules should not open their own socket or depend on another module's topics. Realtime is an invalidation/notification channel: fetch authoritative state from the module's API after receiving an event.
 
+AMX and Remote desktop are independently packaged modules. Their registrations are excluded from the core client glob and loaded from `/optional-modules/<id>/module.js` after the module image installs its browser bundle in the shared modules volume. Each module image carries its own API files and client entry/assets; keep these bundles separate when changing the Docker targets or release workflow. The core and optional bundles share React through the import map in `index.html`.
+
 ## Optional API routes
 
 Add `apps/api/src/modules/<id>/manifest.json` with a semantic version, required/default enablement flags, dependency lists, and a `serverEntry`:

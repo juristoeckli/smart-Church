@@ -13,7 +13,7 @@ import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-superv
 import { getRegisteredServerModuleIds, getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
-import { recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
+import { followRuntimeLogFile, recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 import { createEmailConnector } from "./modules/email-worker/service.js";
 import { allServerPermissions, hasServerPermission as userHasServerPermission, serverPermissionsForUser } from "./server-permissions.js";
 
@@ -3207,6 +3207,7 @@ try {
   if (!databaseReady) app.log.warn("Database is unavailable; department data will not be saved.");
   if (pool && databaseReady) registerCoreReplicationAdapter(pool);
   await registerServerModules(app, {
+    followRuntimeLogFile,
     realtime: {
       publish: (topic, selectedDepartmentId, payload) => realtime.publish(topic, selectedDepartmentId, payload),
       onMessage: (topic, handler) => realtime.onMessage(topic, handler),

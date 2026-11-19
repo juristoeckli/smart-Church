@@ -1,7 +1,4 @@
 services:
-  web:
-    image: ghcr.io/juristoeckli/smart-church-web-amx:${SMART_CHURCH_VERSION:-latest}
-
   api:
     depends_on:
       amx-module:

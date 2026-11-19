@@ -43,6 +43,7 @@ root="$script_root"
 cd "$root"
 source deploy/remote-desktop-env.sh
 migrate_remote_desktop_env .env
+initialize_remote_desktop_module_installation .env
 for module_manager in apps/api/src/modules/*/manager.sh; do
   [[ -f "$module_manager" ]] && source "$module_manager"
 done
@@ -56,6 +57,9 @@ build_compose_args() {
   fi
   if [[ -f deploy/compose.amx.yaml ]] && grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env; then
     compose_files+=(-f deploy/compose.amx.yaml)
+  fi
+  if [[ -f deploy/compose.remote-desktop.yaml ]] && grep -q '^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=1' .env; then
+    compose_files+=(-f deploy/compose.remote-desktop.yaml)
   fi
   if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
     compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
@@ -168,9 +172,17 @@ force_update_branch() {
     fi
   done
   if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
-    for image in smart-church-module-amx smart-church-web-amx; do
+    for image in smart-church-module-amx; do
       if ! docker manifest inspect "ghcr.io/juristoeckli/$image:$commit_sha" >/dev/null 2>&1; then
-        echo "The AMX images for commit $commit_sha are not published yet. Wait for the branch image build to finish, then retry." >&2
+        echo "The AMX module image for commit $commit_sha is not published yet. Wait for the branch image build to finish, then retry." >&2
+        return 0
+      fi
+    done
+  fi
+  if [[ "$(env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED)" == 1 ]]; then
+    for image in smart-church-module-remote-desktop; do
+      if ! docker manifest inspect "ghcr.io/juristoeckli/$image:$commit_sha" >/dev/null 2>&1; then
+        echo "The Remote desktop module image for commit $commit_sha is not published yet. Wait for the branch image build to finish, then retry." >&2
         return 0
       fi
     done
@@ -200,16 +212,61 @@ module_enabled() {
 }
 
 set_module_enabled() {
-  local department_id="$1" module_id="$2" desired="$3" query result expected
+  local department_id="$1" module_id="$2" desired="$3" query result expected installation_query installation_id
   case "$module_id" in amx|video-steffisburg|remote-desktop|presenter) ;; *) return 2 ;; esac
   [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "The primary location ID is missing or invalid." >&2; return 1; }
   [[ "$desired" == true || "$desired" == false ]] || return 2
-  query="UPDATE departments SET enabled_modules = CASE WHEN $desired AND NOT ('$module_id' = ANY(enabled_modules)) THEN array_append(enabled_modules, '$module_id') WHEN NOT $desired THEN array_remove(enabled_modules, '$module_id') ELSE enabled_modules END, updated_at = now() WHERE id = '$department_id'::uuid RETURNING '$module_id' = ANY(enabled_modules)"
-  result="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$query" | tr -d '\r')"
+  installation_query="SELECT installation_id FROM departments WHERE id = '$department_id'::uuid"
+  installation_id="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$installation_query" | tr -d '\r')"
+  [[ "$installation_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "Could not determine the installation for location $department_id." >&2; return 1; }
   expected=t
   [[ "$desired" == false ]] && expected=f
+  query="DO \$amx\$
+DECLARE
+  registry_row_exists BOOLEAN;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM installation_modules
+     WHERE installation_id='$installation_id'::uuid AND module_id='$module_id'
+  ) INTO registry_row_exists;
+
+  IF registry_row_exists THEN
+    UPDATE installation_modules SET enabled=$desired,updated_at=now()
+     WHERE installation_id='$installation_id'::uuid AND module_id='$module_id'
+       AND client_managed=TRUE AND required=FALSE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Module $module_id is not an optional client-managed module';
+    END IF;
+  END IF;
+
+  UPDATE departments AS department
+     SET enabled_modules=COALESCE((
+       SELECT array_agg(module_id ORDER BY module_id)
+         FROM (
+           SELECT module.module_id FROM installation_modules AS module
+            WHERE module.installation_id=department.installation_id
+              AND module.client_managed=TRUE AND module.enabled=TRUE
+           UNION SELECT '$module_id'::text WHERE $desired
+         ) AS active_modules
+     ), ARRAY['file-storage','notifications']::TEXT[]), updated_at=now()
+   WHERE department.installation_id='$installation_id'::uuid;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'No locations found for installation $installation_id';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM departments
+     WHERE installation_id='$installation_id'::uuid
+       AND (('$module_id'=ANY(enabled_modules)) IS DISTINCT FROM $desired)
+  ) THEN
+    RAISE EXCEPTION 'Location module state verification failed for $module_id';
+  END IF;
+END
+\$amx\$;
+SELECT '$expected'"
+  result="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$query" | tr -d '\r' | tail -n 1)"
   [[ "$result" == "$expected" ]] || {
-    echo "Could not set $module_id to $desired for location $department_id (database verification returned '${result:-no row}')." >&2
+    echo "Could not set $module_id to $desired for installation $installation_id (database verification returned '${result:-no row}')." >&2
     return 1
   }
 }
@@ -297,7 +354,7 @@ module_manager() {
     return 1
   }
   video_state=disabled
-  remote_desktop_state=disabled
+  remote_desktop_state=not-installed
   presenter_state=disabled
   amx_state=not-installed
   if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
@@ -305,7 +362,10 @@ module_manager() {
     module_enabled "$department_id" amx && amx_state=enabled
   fi
   module_enabled "$department_id" video-steffisburg && video_state=enabled
-  module_enabled "$department_id" remote-desktop && remote_desktop_state=enabled
+  if [[ "$(env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED)" == 1 ]]; then
+    remote_desktop_state=disabled
+    module_enabled "$department_id" remote-desktop && remote_desktop_state=enabled
+  fi
   module_enabled "$department_id" presenter && presenter_state=enabled
 
   while true; do
@@ -347,6 +407,7 @@ module_manager() {
         set_module_enabled "$department_id" amx true || return 1
         build_compose_args
         run_compose up -d || return 1
+        run_compose restart api || return 1
         amx_state=enabled
         echo "AMX installed and enabled for $department_name. Configure the NetLinx address under Settings → Modules → AMX."
         ;;
@@ -370,10 +431,21 @@ module_manager() {
           command -v openssl >/dev/null || { echo "openssl is required to generate the Remote desktop service key." >&2; continue; }
           set_env_value REMOTE_DESKTOP_JSON_SECRET_KEY "$(openssl rand -hex 16)"
         fi
+        set_env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED 1
+        build_compose_args
+        if ! run_compose pull remote-desktop-module; then
+          if [[ "$(env_value SMART_CHURCH_USE_REMOTE_DESKTOP)" != 1 ]]; then
+            set_env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED 0
+          fi
+          build_compose_args
+          echo "Could not download the Remote desktop images for version $(env_value SMART_CHURCH_VERSION). Confirm that this version has finished building, then retry." >&2
+          continue
+        fi
         set_env_value SMART_CHURCH_USE_REMOTE_DESKTOP 1
         set_module_enabled "$department_id" remote-desktop true || return 1
         build_compose_args
         run_compose up -d || return 1
+        run_compose restart api || return 1
         remote_desktop_state=enabled
         echo "Remote desktop enabled for $department_name. Configure its RDP target in module settings if needed."
         ;;
@@ -393,6 +465,7 @@ module_manager() {
         ;;
       disable:amx)
         set_module_enabled "$department_id" amx false || return 1
+        run_compose restart api || return 1
         amx_state=disabled
         echo "AMX disabled for $department_name. Its images and settings remain installed so it can be enabled again."
         ;;
@@ -403,6 +476,7 @@ module_manager() {
           set_env_value SMART_CHURCH_USE_REMOTE_DESKTOP 0
           build_compose_args
         fi
+        run_compose restart api || return 1
         remote_desktop_state=disabled
         echo "Remote desktop disabled for $department_name. Its settings remain in .env."
         ;;

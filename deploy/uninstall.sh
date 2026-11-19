@@ -47,6 +47,12 @@ compose_files=(-f compose.yaml)
 if [[ -f "$install_dir/deploy/compose.direct.yaml" ]]; then
   compose_files+=(-f deploy/compose.direct.yaml)
 fi
+if [[ -f "$install_dir/deploy/compose.amx.yaml" ]] && grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env 2>/dev/null; then
+  compose_files+=(-f deploy/compose.amx.yaml)
+fi
+if [[ -f "$install_dir/deploy/compose.remote-desktop.yaml" ]] && grep -q '^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=1' .env 2>/dev/null; then
+  compose_files+=(-f deploy/compose.remote-desktop.yaml)
+fi
 if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env 2>/dev/null; then
   compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
 fi

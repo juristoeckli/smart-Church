@@ -4,6 +4,8 @@ Remote desktop embeds Apache Guacamole's JavaScript client inside the Smart-Chur
 
 ## Local development
 
+Production installations receive this module from the separate `smart-church-module-remote-desktop` image. The default API and web images exclude its server files and browser bundle; `deploy/manage.sh` installs the module image, which supplies both its API files and its independently loaded web bundle. The deployment package contains the manager and Compose overlays, while implementation code is delivered by the module image.
+
 1. The deployment uses the public Apache Guacamole 1.6.0 `guacd` image by default. In the terminal Manager's Remote desktop settings, choose the patched Wave2 audio option when an RDP destination requires RDPSND Wave2 support from [Apache PR #696](https://github.com/apache/guacamole-server/pull/696). The manager builds the image locally; the server needs `git`, Docker, and outbound access to GitHub and the Docker build dependencies. To build it manually instead:
 
    ```powershell

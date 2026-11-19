@@ -1,0 +1,12 @@
+services:
+  api:
+    depends_on:
+      remote-desktop-module:
+        condition: service_completed_successfully
+
+  remote-desktop-module:
+    image: ghcr.io/juristoeckli/smart-church-module-remote-desktop:${SMART_CHURCH_VERSION:-latest}
+    pull_policy: missing
+    restart: "no"
+    volumes:
+      - smart-church-modules:/modules

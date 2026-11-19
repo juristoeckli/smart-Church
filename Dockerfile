@@ -20,10 +20,18 @@ ENV PYTHON_BINARY=python3
 
 FROM build AS api-build
 RUN cp -a /workspace/apps/api/src /workspace/apps/api/src-core \
-  && rm -rf /workspace/apps/api/src-core/modules/amx
+  && rm -rf /workspace/apps/api/src-core/modules/amx /workspace/apps/api/src-core/modules/remote-desktop
 
 FROM build AS web-amx-build
-ENV SMART_CHURCH_INCLUDE_AMX=1
+ENV SMART_CHURCH_BUILD_OPTIONAL_WEB_MODULE=amx
+RUN pnpm --filter @smart-church/web build
+
+FROM build AS web-remote-desktop-build
+ENV SMART_CHURCH_BUILD_OPTIONAL_WEB_MODULE=remote-desktop
+RUN pnpm --filter @smart-church/web build
+
+FROM build AS react-runtime-build
+ENV SMART_CHURCH_BUILD_REACT_RUNTIME=1
 RUN pnpm --filter @smart-church/web build
 
 FROM node:24-bookworm-slim AS api
@@ -53,21 +61,20 @@ CMD ["node", "--import", "tsx", "src/server.ts"]
 FROM node:24-bookworm-slim AS web
 WORKDIR /app
 COPY --from=build --chown=node:node /workspace/apps/web/dist /app/dist
+COPY --from=react-runtime-build --chown=node:node /workspace/apps/web/dist/optional-modules/runtime /app/dist/optional-modules/runtime
 COPY --from=build --chown=node:node /workspace/apps/web/serve.mjs /app/serve.mjs
-ENV HOST=0.0.0.0 PORT=8080
-USER node
-EXPOSE 8080
-CMD ["node", "serve.mjs"]
-
-FROM node:24-bookworm-slim AS web-amx
-WORKDIR /app
-COPY --from=web-amx-build --chown=node:node /workspace/apps/web/dist /app/dist
-COPY --from=web-amx-build --chown=node:node /workspace/apps/web/serve.mjs /app/serve.mjs
+ENV SMART_CHURCH_OPTIONAL_MODULES_DIR=/app/optional-modules/.web
 ENV HOST=0.0.0.0 PORT=8080
 USER node
 EXPOSE 8080
 CMD ["node", "serve.mjs"]
 
 FROM alpine:3.22 AS module-amx
-COPY apps/api/src/modules/amx /opt/smart-church/module/amx
-CMD ["sh", "-c", "mkdir -p /modules/amx && cp -R /opt/smart-church/module/amx/. /modules/amx/"]
+COPY apps/api/src/modules/amx /opt/smart-church/module/amx/api
+COPY --from=web-amx-build /workspace/apps/web/dist-optional/amx /opt/smart-church/module/amx/web
+CMD ["sh", "-c", "rm -rf /modules/amx /modules/.web/amx && mkdir -p /modules/amx /modules/.web/amx && cp -R /opt/smart-church/module/amx/api/. /modules/amx/ && cp -R /opt/smart-church/module/amx/web/. /modules/.web/amx/"]
+
+FROM alpine:3.22 AS module-remote-desktop
+COPY apps/api/src/modules/remote-desktop /opt/smart-church/module/remote-desktop/api
+COPY --from=web-remote-desktop-build /workspace/apps/web/dist-optional/remote-desktop /opt/smart-church/module/remote-desktop/web
+CMD ["sh", "-c", "rm -rf /modules/remote-desktop /modules/.web/remote-desktop && mkdir -p /modules/remote-desktop /modules/.web/remote-desktop && cp -R /opt/smart-church/module/remote-desktop/api/. /modules/remote-desktop/ && cp -R /opt/smart-church/module/remote-desktop/web/. /modules/.web/remote-desktop/"]
