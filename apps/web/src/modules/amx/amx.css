@@ -1,0 +1,43 @@
+.amx-workspace{width:100%;max-width:1120px;margin:0 auto;padding:clamp(8px,1.5vw,20px)}
+.amx-screen{position:relative;display:grid;grid-template-rows:13% 34% minmax(0,1fr) 8%;gap:1%;width:100%;aspect-ratio:4/3;padding:1.1%;overflow:hidden;background:#15231c;border:1px solid #36463b;border-radius:8px;box-shadow:0 18px 48px #0003}
+.amx-photo-strip{display:grid;grid-template-columns:repeat(6,1fr);overflow:hidden;border:2px solid #33352d;background:#c9896a}
+.amx-photo-tile{position:relative;overflow:hidden;display:block;background:linear-gradient(120deg,#dbb085,#e8c889 45%,#b96569)}
+.amx-photo-tile:nth-child(2){background:linear-gradient(135deg,#dfbb91,#d6c94e 53%,#b2a841)}
+.amx-photo-tile:nth-child(3){background:linear-gradient(120deg,#a26b63,#d89a7e 54%,#714c4d)}
+.amx-photo-tile:nth-child(4){background:linear-gradient(120deg,#d29b59,#e4c55d 55%,#ac7747)}
+.amx-photo-tile:nth-child(5){background:linear-gradient(130deg,#d89991,#c28ab4 50%,#8f6075)}
+.amx-photo-tile:nth-child(6){background:linear-gradient(125deg,#d2a189,#c17f73 50%,#ad5558)}
+.amx-photo-tile:before{content:"";position:absolute;left:27%;top:14%;width:47%;height:78%;border-radius:48% 48% 42% 42%;background:radial-gradient(ellipse at 48% 35%,#f4d2a4 0 18%,transparent 19%),radial-gradient(ellipse at 50% 46%,#b16e59 0 37%,transparent 39%),linear-gradient(100deg,#654d43,#e4b68c 52%,#745349);filter:saturate(.8)}
+.amx-photo-tile:after{content:"";position:absolute;left:4%;bottom:-35%;width:92%;height:58%;border-radius:50% 50% 0 0;background:linear-gradient(90deg,#514b4c,#957975 50%,#5b514a)}
+.amx-photo-tile:nth-child(2):before{background:radial-gradient(ellipse at 48% 35%,#f4d2a4 0 18%,transparent 19%),radial-gradient(ellipse at 50% 46%,#9c584c 0 37%,transparent 39%),linear-gradient(100deg,#76514a,#e5c496 52%,#794d42)}
+.amx-photo-tile:nth-child(3):before{background:radial-gradient(ellipse at 48% 35%,#f4d2a4 0 18%,transparent 19%),radial-gradient(ellipse at 50% 46%,#4f342d 0 37%,transparent 39%),linear-gradient(100deg,#382e31,#bb8b75 52%,#47343c)}
+.amx-photo-tile:nth-child(4):before{background:radial-gradient(ellipse at 48% 35%,#f4d2a4 0 18%,transparent 19%),radial-gradient(ellipse at 50% 46%,#a94f42 0 37%,transparent 39%),linear-gradient(100deg,#735247,#f0c48d 52%,#684841)}
+.amx-photo-tile:nth-child(5):before{background:radial-gradient(ellipse at 48% 35%,#f4d2a4 0 18%,transparent 19%),radial-gradient(ellipse at 50% 46%,#70483b 0 37%,transparent 39%),linear-gradient(100deg,#725348,#dbb58f 52%,#56403b)}
+.amx-photo-tile:nth-child(6):before{background:radial-gradient(ellipse at 48% 35%,#f4d2a4 0 18%,transparent 19%),radial-gradient(ellipse at 50% 46%,#835244 0 37%,transparent 39%),linear-gradient(100deg,#745045,#d6a17f 52%,#49383a)}
+.amx-church-banner{display:flex;align-items:center;gap:clamp(16px,4vw,48px);min-height:0;padding:2.3% 3%;overflow:hidden;border:2px solid #34352c;background:#e4e1c1;color:#080907}
+.amx-church-banner img{width:clamp(88px,16%,150px);height:90%;object-fit:contain;flex:none}
+.amx-church-banner div{display:grid;gap:.12em;min-width:0}
+.amx-church-banner strong{font-size:clamp(1.5rem,4.5vw,3.8rem);font-weight:400;line-height:1.05;white-space:nowrap}
+.amx-church-banner span{font-size:clamp(1rem,3.1vw,2.8rem);line-height:1.08;white-space:nowrap}
+.amx-room-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-template-rows:repeat(3,minmax(0,1fr));gap:1.2%;padding:0 .8%;min-height:0;border:2px solid #37372f;background:#dedcc0}
+.amx-room-button{min-width:0;padding:.3em .4em;border:3px solid #888875;border-radius:3px;background:linear-gradient(180deg,#a7a58a 0%,#96947a 100%);box-shadow:inset 0 1px 2px #f2f0dd,inset 0 -3px 4px #686754;color:#f3f0da;text-shadow:1px 2px 2px #45443c,-1px -1px 0 #68675a;font-family:Arial,sans-serif;font-size:clamp(1rem,3.3vw,2.7rem);font-weight:700;line-height:1.05;cursor:pointer}
+.amx-room-button:hover:not(:disabled){background:linear-gradient(180deg,#b5b292,#9f9d7f);border-color:#aaa88d}
+.amx-room-button:active:not(:disabled){box-shadow:inset 0 3px 7px #4d4d42;transform:translateY(1px)}
+.amx-room-button:disabled{cursor:not-allowed;opacity:.72}
+.amx-status-bar{display:flex;align-items:center;gap:clamp(6px,1vw,13px);min-width:0;padding:0 1%;background:#e7e4ca;color:#282a26;font-family:Arial,sans-serif;font-size:clamp(.7rem,1.2vw,1rem);font-weight:600}
+.amx-dsp-label{margin-right:2px}
+.amx-dsp-indicator{display:flex;align-items:center;gap:4px}
+.amx-dsp-indicator i{width:clamp(12px,1.5vw,19px);height:clamp(12px,1.5vw,19px);border-radius:50%;background:#d23429;border:2px solid #c7c5a9;box-shadow:0 0 1px #322}
+.amx-status-divider{width:1px;height:60%;margin:0 auto 0 1.5%;background:#a5a28a}
+.amx-network-icon{color:#25934d;flex:none}
+.amx-status-bar time{min-width:3.2em;text-align:right;font-size:clamp(.9rem,1.5vw,1.3rem)}
+.amx-toast{position:absolute;left:2%;bottom:9%;margin:0;padding:8px 12px;border:1px solid #8d8b70;border-radius:4px;background:#f5f1dc;color:#30482c;font-size:clamp(.75rem,1.2vw,1rem);box-shadow:0 3px 8px #0003}
+.amx-toast-error{color:#8b2924;border-color:#a4534b}
+.amx-setup-note{margin:.6rem 0 0;color:var(--muted);font-size:.85rem}
+.amx-form{display:grid;gap:.85rem;max-width:860px;margin-top:1rem}
+.amx-form-grid{display:grid;grid-template-columns:minmax(0,1fr) 130px;gap:.75rem}
+.amx-action-editor{display:grid;grid-template-columns:minmax(180px,1fr) minmax(260px,2fr);gap:.65rem;align-items:center;padding:.75rem;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.amx-action-editor strong{color:var(--ink)}
+.amx-feedback{color:var(--success,#23734d)}
+.amx-error{color:var(--danger,#a83232)}
+@media(max-width:650px){.amx-workspace{padding:4px}.amx-screen{gap:.7%;padding:.8%;border-radius:3px}.amx-church-banner{gap:8px;padding:2%}.amx-church-banner strong{font-size:clamp(.8rem,4vw,1.5rem)}.amx-church-banner span{font-size:clamp(.58rem,2.9vw,1rem)}.amx-room-grid{gap:1%;padding:0 .5%}.amx-room-button{border-width:2px;font-size:clamp(.64rem,3vw,1rem);text-shadow:1px 1px 1px #45443c}.amx-status-bar{gap:4px}.amx-dsp-indicator{gap:2px}.amx-form-grid,.amx-action-editor{grid-template-columns:1fr}}

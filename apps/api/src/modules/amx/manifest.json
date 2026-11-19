@@ -1,0 +1,10 @@
+{
+  "id": "amx",
+  "name": "AMX control",
+  "version": "0.1.0",
+  "description": "Optional control of AMX NetLinx controllers over TCP.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": false,
+  "dependencies": { "required": [], "optional": [] }
+}

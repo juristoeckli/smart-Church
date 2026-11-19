@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS amx_site_settings (
+  department_id UUID PRIMARY KEY REFERENCES departments(id) ON DELETE CASCADE,
+  host TEXT NOT NULL DEFAULT '',
+  port INTEGER NOT NULL DEFAULT 23 CHECK (port BETWEEN 1 AND 65535),
+  actions JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
