@@ -4,7 +4,7 @@ import { ModuleTranslationHost, type ModuleContext, type ModuleRegistration } fr
 import { translationsForModule } from "../translations";
 import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 import { VideoSettings } from "./VideoSettings";
-import { videoTabs, type VideoTab } from "./VideoModule";
+import { videoTabs, type VideoTab } from "./video-tabs";
 
 const VideoWorkspace = lazy(() => import("./VideoModule").then(({ VideoModule }) => ({ default: VideoModule })));
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import type { VideoTab } from "./video-tabs";
 import { Activity, AlertTriangle, Check, ChevronDown, Clock3, Cloud, Download, LockKeyhole, Monitor, Play, Plus, Radio, RefreshCw, Route, Save, Settings2, Shield, Square, Trash2, Video } from "lucide-react";
 import type { ModuleRealtime } from "../../module-registry";
 import { ModuleTranslationHost } from "../../module-registry";
@@ -76,8 +77,8 @@ function youtubeQualityLabel(status?: string | null) {
   }
 }
 
-export const videoTabs = ["Overview", "Routing", "Names & locks", "Streaming", "XML tools"] as const;
-export type VideoTab = typeof videoTabs[number];
+export { videoTabs } from "./video-tabs";
+export type { VideoTab } from "./video-tabs";
 const starterXml = `<?xml version="1.0" encoding="UTF-8"?>\n<streaming>\n  <service customizable-url="false">\n    <name>Service 1</name>\n    <servers>\n      <server>\n        <name>Primary</name>\n        <url>rtmp://example.com/live</url>\n      </server>\n    </servers>\n    <profiles default="Streaming High">\n      <profile>\n        <name>Streaming High</name>\n        <config resolution="1080p" fps="30" codec="H264">\n          <bitrate>6000000</bitrate>\n          <audio-bitrate>128000</audio-bitrate>\n        </config>\n      </profile>\n    </profiles>\n  </service>\n</streaming>`;
 const videoTranslations = mergeModuleTranslationOverrides("video-steffisburg", translationsForModule("video-steffisburg"));
 export function VideoModule({ language, departmentId, csrfToken, realtime, capabilities, tab, onTabChange }: { language: UserLanguage; departmentId: string; csrfToken: string; realtime?: ModuleRealtime; capabilities: { canOperateStreaming: boolean; canManageEncoders: boolean; canManageRouting: boolean; canAdminRouting: boolean }; tab: VideoTab; onTabChange: (tab: VideoTab) => void }) {

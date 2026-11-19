@@ -145,7 +145,15 @@ export async function loadRegisteredModules(moduleIds: string[]) {
   const requested = new Set(moduleIds);
   const bundledMatches = Object.entries(registrations).filter(([path]) => requested.has(path.split("/").at(-2) ?? ""));
   const bundledIds = new Set(bundledMatches.map(([path]) => path.split("/").at(-2) ?? ""));
-  const bundledModules = await Promise.all(bundledMatches.map(async ([path, load]) => [path.split("/").at(-2) ?? "", (await load()).moduleRegistration] as const));
+  const bundledModules = await Promise.all(bundledMatches.map(async ([path, load]) => {
+    const moduleId = path.split("/").at(-2) ?? "";
+    try {
+      return [moduleId, (await load()).moduleRegistration] as const;
+    } catch (error) {
+      console.error(`Bundled module failed to load (${moduleId}); the remaining modules will continue.`, error);
+      return [moduleId, null] as const;
+    }
+  }));
   const optionalModules = await Promise.all([...requested].filter((id) => separatelyPackagedModules.has(id) && !bundledIds.has(id)).map(async (moduleId) => {
     try {
       await loadOptionalModuleStylesheet(moduleId);
