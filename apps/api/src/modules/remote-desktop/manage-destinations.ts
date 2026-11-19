@@ -15,8 +15,8 @@ const encode = (value: unknown) => Buffer.from(String(value ?? ""), "utf8").toSt
 try {
   await migrateLegacySettings();
   if (action === "list") {
-    const result = await pool.query("SELECT id, name, host, port, protocol, username, autologin, disable_display_resize FROM remote_desktop_destinations WHERE department_id=$1 ORDER BY name", [departmentId]);
-    for (const row of result.rows) console.log([row.id, encode(row.name), encode(row.host), row.port, row.protocol, encode(row.username), row.autologin ? "1" : "0", row.disable_display_resize ? "1" : "0"].join("\t"));
+    const result = await pool.query("SELECT id, name, host, port, protocol, username, autologin, disable_display_resize, vnc_encodings FROM remote_desktop_destinations WHERE department_id=$1 ORDER BY name", [departmentId]);
+    for (const row of result.rows) console.log([row.id, encode(row.name), encode(row.host), row.port, row.protocol, encode(row.username), row.autologin ? "1" : "0", row.disable_display_resize ? "1" : "0", encode(row.vnc_encodings ?? "")].join("\t"));
   } else if (action === "delete") {
     const [id = ""] = (await stdin()).trim().split("\t");
     const result = await pool.query("DELETE FROM remote_desktop_destinations WHERE id=$1 AND department_id=$2 RETURNING id", [id, departmentId]);
@@ -24,17 +24,19 @@ try {
     await markManaged();
     console.log("Destination removed.");
   } else {
-    const [id = "", encodedName = "", encodedHost = "", portText = "", protocol = "", encodedUsername = "", encodedPassword = "", autologinText = "1", disableResizeText = "0", passwordMode = "set"] = (await stdin()).trimEnd().split("\t");
+    const [id = "", encodedName = "", encodedHost = "", portText = "", protocol = "", encodedUsername = "", encodedPassword = "", autologinText = "1", disableResizeText = "0", passwordMode = "set", encodedVncEncodings = ""] = (await stdin()).trimEnd().split("\t");
     const name = decode(encodedName).trim();
     const host = decode(encodedHost).trim();
     const username = decode(encodedUsername).trim();
     const password = decode(encodedPassword);
+    const vncEncodings = protocol === "vnc" ? decode(encodedVncEncodings).trim() || null : null;
     const disableDisplayResize = protocol === "vnc" && disableResizeText === "1";
     const port = Number(portText);
     if (!name || name.length > 100 || /[\u0000-\u001f\u007f]/.test(name)) throw new Error("Enter a destination name up to 100 characters.");
     if (!host || host.length > 253 || !/^[A-Za-z0-9.:-]+$/.test(host)) throw new Error("Enter an IP address or DNS hostname.");
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Enter a port from 1 to 65535.");
     if (!new Set(["rdp", "vnc", "spice"]).has(protocol)) throw new Error("Choose RDP, VNC, or SPICE.");
+    if (vncEncodings && (vncEncodings.length > 100 || !/^(?:tight|zrle|ultra|copyrect|hextile|zlib|corre|rre|raw)(?: (?:tight|zrle|ultra|copyrect|hextile|zlib|corre|rre|raw))*$/.test(vncEncodings))) throw new Error("Enter a space-separated list of supported VNC encodings.");
     let encrypted: string[];
     if (id && passwordMode === "keep") {
       const existing = await pool.query("SELECT password_ciphertext, password_iv, password_tag FROM remote_desktop_destinations WHERE id=$1 AND department_id=$2", [id, departmentId]);
@@ -49,15 +51,15 @@ try {
     if (id) {
       await pool.query(
         `UPDATE remote_desktop_destinations SET name=$3, host=$4, port=$5, protocol=$6, username=$7,
-                password_ciphertext=$8, password_iv=$9, password_tag=$10, autologin=$11, disable_display_resize=$12, updated_at=now()
+                password_ciphertext=$8, password_iv=$9, password_tag=$10, autologin=$11, disable_display_resize=$12, vnc_encodings=$13, updated_at=now()
           WHERE id=$1 AND department_id=$2`,
-        [id, departmentId, name, host, port, protocol, username, ...encrypted, autologinText === "1", disableDisplayResize],
+        [id, departmentId, name, host, port, protocol, username, ...encrypted, autologinText === "1", disableDisplayResize, vncEncodings],
       );
     } else {
       await pool.query(
-        `INSERT INTO remote_desktop_destinations (id, department_id, name, host, port, protocol, username, password_ciphertext, password_iv, password_tag, autologin, disable_display_resize)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-        [randomUUID(), departmentId, name, host, port, protocol, username, ...encrypted, autologinText === "1", disableDisplayResize],
+        `INSERT INTO remote_desktop_destinations (id, department_id, name, host, port, protocol, username, password_ciphertext, password_iv, password_tag, autologin, disable_display_resize, vnc_encodings)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+        [randomUUID(), departmentId, name, host, port, protocol, username, ...encrypted, autologinText === "1", disableDisplayResize, vncEncodings],
       );
     }
     await markManaged();

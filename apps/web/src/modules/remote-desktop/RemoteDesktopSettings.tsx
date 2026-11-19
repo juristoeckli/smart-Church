@@ -4,9 +4,9 @@ import type { ModuleSettingsContext } from "../../module-registry";
 import "./remote-desktop-settings.css";
 
 type Protocol = "rdp" | "vnc" | "spice";
-type Destination = { id: string; name: string; host: string; port: number; protocol: Protocol; username: string; autologin: boolean; disableDisplayResize: boolean; passwordConfigured: boolean };
-type DestinationForm = { name: string; host: string; port: string; protocol: Protocol; username: string; password: string; noPassword: boolean; autologin: boolean; disableDisplayResize: boolean };
-const blankForm: DestinationForm = { name: "", host: "", port: "3389", protocol: "rdp", username: "", password: "", noPassword: false, autologin: true, disableDisplayResize: false };
+type Destination = { id: string; name: string; host: string; port: number; protocol: Protocol; username: string; autologin: boolean; disableDisplayResize: boolean; vncEncodings: string | null; passwordConfigured: boolean };
+type DestinationForm = { name: string; host: string; port: string; protocol: Protocol; username: string; password: string; noPassword: boolean; autologin: boolean; disableDisplayResize: boolean; vncEncodings: string };
+const blankForm: DestinationForm = { name: "", host: "", port: "3389", protocol: "rdp", username: "", password: "", noPassword: false, autologin: true, disableDisplayResize: false, vncEncodings: "" };
 
 async function responseBody<T>(response: Response): Promise<T & { error?: string }> {
   const body = await response.json() as T & { error?: string };
@@ -76,7 +76,7 @@ export function RemoteDesktopSettings({ departmentId, csrfToken, departments }: 
 
   function startEdit(destination: Destination) {
     setEditingId(destination.id);
-    setForm({ name: destination.name, host: destination.host, port: String(destination.port), protocol: destination.protocol, username: destination.username, password: "", noPassword: false, autologin: destination.autologin, disableDisplayResize: destination.disableDisplayResize });
+    setForm({ name: destination.name, host: destination.host, port: String(destination.port), protocol: destination.protocol, username: destination.username, password: "", noPassword: false, autologin: destination.autologin, disableDisplayResize: destination.disableDisplayResize, vncEncodings: destination.vncEncodings ?? "" });
     setFeedback("");
     setFeedbackError(false);
   }
@@ -87,7 +87,7 @@ export function RemoteDesktopSettings({ departmentId, csrfToken, departments }: 
     setFeedback("");
     setFeedbackError(false);
     try {
-      const payload: Record<string, unknown> = { name: form.name.trim(), host: form.host.trim(), port: Number(form.port), protocol: form.protocol, username: form.username.trim(), autologin: form.autologin, disableDisplayResize: form.protocol === "vnc" && form.disableDisplayResize };
+      const payload: Record<string, unknown> = { name: form.name.trim(), host: form.host.trim(), port: Number(form.port), protocol: form.protocol, username: form.username.trim(), autologin: form.autologin, disableDisplayResize: form.protocol === "vnc" && form.disableDisplayResize, vncEncodings: form.protocol === "vnc" ? form.vncEncodings.trim() : "" };
       if (!editingId || form.noPassword) payload.password = form.noPassword ? "" : form.password;
       else if (form.password) payload.password = form.password;
       const response = await fetch(editingId ? `/api/modules/remote-desktop/destinations/${encodeURIComponent(editingId)}` : "/api/modules/remote-desktop/destinations", {
@@ -131,6 +131,7 @@ export function RemoteDesktopSettings({ departmentId, csrfToken, departments }: 
       <label className="remote-desktop-setting-toggle"><input type="checkbox" checked={form.noPassword} onChange={(event) => setForm((value) => ({ ...value, noPassword: event.target.checked, password: "" }))} /><span>Use an empty password</span></label>
       <label className="remote-desktop-setting-toggle"><input type="checkbox" checked={form.autologin} onChange={(event) => setForm((value) => ({ ...value, autologin: event.target.checked }))} /><span>Autologin with saved credentials</span></label>
       {form.protocol === "vnc" && <label className="remote-desktop-setting-toggle"><input type="checkbox" checked={form.disableDisplayResize} onChange={(event) => setForm((value) => ({ ...value, disableDisplayResize: event.target.checked }))} /><span>Disable dynamic screen resizing</span><small>Use this for fixed-size VNC panels that cannot resize to match the browser.</small></label>}
+      {form.protocol === "vnc" && <label>VNC encodings<input value={form.vncEncodings} onChange={(event) => setForm((value) => ({ ...value, vncEncodings: event.target.value }))} maxLength={100} placeholder="Use server defaults" /><small>Optional space-separated encoding list, for example: tight zrle ultra copyrect hextile zlib corre rre raw.</small></label>}
       <div className="remote-desktop-form-actions"><button className="button button-secondary" type="button" onClick={startAdd}><Plus size={15} />New</button><button className="button button-primary" type="submit" disabled={saving || !departmentId}><Check size={15} />{saving ? "Saving…" : editingId ? "Save destination" : "Add destination"}</button></div>
       {feedback && <p className={feedbackError ? "remote-desktop-settings-error" : "remote-desktop-settings-feedback"} role={feedbackError ? "alert" : "status"}>{feedback}</p>}
     </form>

@@ -12,14 +12,15 @@ import { registerRemoteDesktopReplication } from "./replication.js";
 type RemoteDesktopRole = "controller" | "viewer";
 type ProxyRole = RemoteDesktopRole | "takeover";
 type RemoteProtocol = "rdp" | "vnc" | "spice";
-type RemoteDestination = { id: string; departmentId: string; name: string; host: string; port: number; protocol: RemoteProtocol; username: string; password: string; autologin: boolean; disableDisplayResize: boolean };
-type StoredDestination = Omit<RemoteDestination, "password" | "disableDisplayResize"> & { disable_display_resize: boolean; password_ciphertext: string; password_iv: string; password_tag: string };
+type RemoteDestination = { id: string; departmentId: string; name: string; host: string; port: number; protocol: RemoteProtocol; username: string; password: string; autologin: boolean; disableDisplayResize: boolean; vncEncodings: string | null };
+type StoredDestination = Omit<RemoteDestination, "password" | "disableDisplayResize" | "vncEncodings"> & { disable_display_resize: boolean; vnc_encodings: string | null; password_ciphertext: string; password_iv: string; password_tag: string };
 type ProxyTicket = { authToken: string; connectionId: string; expiresAt: number; active: boolean; role: ProxyRole; shareId: string; departmentId: string; destinationId: string; userId: string; socket?: import("node:stream").Duplex };
 type ControllerLease = { userId: string; departmentId: string; destinationId: string; ticket: string; shareId: string; width: number; height: number; expiresAt: number; active: boolean };
 const proxyTickets = new Map<string, ProxyTicket>();
 let controllerLease: ControllerLease | null = null;
 const guacdLogLevels = ["error", "warning", "info", "debug", "trace"] as const;
 type GuacdLogLevel = typeof guacdLogLevels[number];
+const vncEncodingsSchema = { type: "string", maxLength: 100, pattern: "^(?:(?:tight|zrle|ultra|copyrect|hextile|zlib|corre|rre|raw)(?: (?:tight|zrle|ultra|copyrect|hextile|zlib|corre|rre|raw))*)?$" };
 
 async function readGuacdLogLevel(): Promise<GuacdLogLevel> {
   const path = process.env.SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_LEVEL_PATH;
@@ -104,6 +105,7 @@ function encryptedAuthData(settings: ReturnType<typeof gatewaySettings>, destina
           "resize-method": "display-update",
           } : {}),
           ...(destination.protocol === "vnc" && destination.disableDisplayResize ? { "disable-display-resize": "true" } : {}),
+          ...(destination.protocol === "vnc" && destination.vncEncodings ? { encodings: destination.vncEncodings } : {}),
         },
       },
     },
@@ -205,7 +207,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       } finally { client.release(); }
     }
     const result = await pool.query(
-      `SELECT id, department_id AS "departmentId", name, host, port, protocol, username, autologin, disable_display_resize,
+      `SELECT id, department_id AS "departmentId", name, host, port, protocol, username, autologin, disable_display_resize, vnc_encodings,
               password_ciphertext, password_iv, password_tag
          FROM remote_desktop_destinations WHERE department_id = $1 ORDER BY name, id`,
       [departmentId],
@@ -214,7 +216,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
   }
 
   function publicDestination(destination: StoredDestination) {
-    return { id: destination.id, name: destination.name, host: destination.host, port: destination.port, protocol: destination.protocol, username: destination.username, autologin: destination.autologin, disableDisplayResize: destination.disable_display_resize, passwordConfigured: Buffer.from(destination.password_ciphertext, "base64").length > 0 };
+    return { id: destination.id, name: destination.name, host: destination.host, port: destination.port, protocol: destination.protocol, username: destination.username, autologin: destination.autologin, disableDisplayResize: destination.disable_display_resize, vncEncodings: destination.vnc_encodings, passwordConfigured: Buffer.from(destination.password_ciphertext, "base64").length > 0 };
   }
 
   async function resolveDestination(departmentId: string, id: string) {
@@ -222,7 +224,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     const rows = await listDestinationRows(departmentId);
     const row = rows.find((destination) => destination.id === id);
     if (!row || !gateway.configured) return null;
-    return { settings: gateway, destination: { id: row.id, departmentId: row.departmentId, name: row.name, host: row.host, port: Number(row.port), protocol: row.protocol, username: row.username, password: decryptPassword(row, gateway.jsonSecret), autologin: row.autologin, disableDisplayResize: row.disable_display_resize } as RemoteDestination };
+    return { settings: gateway, destination: { id: row.id, departmentId: row.departmentId, name: row.name, host: row.host, port: Number(row.port), protocol: row.protocol, username: row.username, password: decryptPassword(row, gateway.jsonSecret), autologin: row.autologin, disableDisplayResize: row.disable_display_resize, vncEncodings: row.vnc_encodings } as RemoteDestination };
   }
 
   app.get<{ Querystring: { departmentId?: string } }>("/api/modules/remote-desktop/destinations", async (request, reply) => {
@@ -241,8 +243,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     return rows.map(publicDestination);
   });
 
-  app.post<{ Body: { name: string; host: string; port: number; protocol: RemoteProtocol; username?: string; password: string; autologin: boolean; disableDisplayResize?: boolean } }>("/api/modules/remote-desktop/destinations", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["name", "host", "port", "protocol", "password", "autologin"], properties: { name: { type: "string", minLength: 1, maxLength: 100 }, host: { type: "string", minLength: 1, maxLength: 253 }, port: { type: "integer", minimum: 1, maximum: 65535 }, protocol: { type: "string", enum: ["rdp", "vnc", "spice"] }, username: { type: "string", maxLength: 256 }, password: { type: "string", maxLength: 1024 }, autologin: { type: "boolean" }, disableDisplayResize: { type: "boolean" } } } },
+  app.post<{ Body: { name: string; host: string; port: number; protocol: RemoteProtocol; username?: string; password: string; autologin: boolean; disableDisplayResize?: boolean; vncEncodings?: string } }>("/api/modules/remote-desktop/destinations", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["name", "host", "port", "protocol", "password", "autologin"], properties: { name: { type: "string", minLength: 1, maxLength: 100 }, host: { type: "string", minLength: 1, maxLength: 253 }, port: { type: "integer", minimum: 1, maximum: 65535 }, protocol: { type: "string", enum: ["rdp", "vnc", "spice"] }, username: { type: "string", maxLength: 256 }, password: { type: "string", maxLength: 1024 }, autologin: { type: "boolean" }, disableDisplayResize: { type: "boolean" }, vncEncodings: vncEncodingsSchema } } },
   }, async (request, reply) => {
     if (!isDatabaseReady() || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
     if (!validateMutation(request, reply)) return reply;
@@ -257,10 +259,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     const id = randomUUID();
     try {
       const result = await pool.query(
-        `INSERT INTO remote_desktop_destinations (id, department_id, name, host, port, protocol, username, password_ciphertext, password_iv, password_tag, autologin, disable_display_resize)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         RETURNING id, department_id AS "departmentId", name, host, port, protocol, username, autologin, disable_display_resize, password_ciphertext, password_iv, password_tag`,
-        [id, departmentId, name, host, request.body.port, request.body.protocol, request.body.username?.trim() ?? "", encrypted.ciphertext, encrypted.iv, encrypted.tag, request.body.autologin, request.body.protocol === "vnc" && request.body.disableDisplayResize === true],
+        `INSERT INTO remote_desktop_destinations (id, department_id, name, host, port, protocol, username, password_ciphertext, password_iv, password_tag, autologin, disable_display_resize, vnc_encodings)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         RETURNING id, department_id AS "departmentId", name, host, port, protocol, username, autologin, disable_display_resize, vnc_encodings, password_ciphertext, password_iv, password_tag`,
+        [id, departmentId, name, host, request.body.port, request.body.protocol, request.body.username?.trim() ?? "", encrypted.ciphertext, encrypted.iv, encrypted.tag, request.body.autologin, request.body.protocol === "vnc" && request.body.disableDisplayResize === true, request.body.protocol === "vnc" ? request.body.vncEncodings?.trim() || null : null],
       );
       await pool.query("INSERT INTO remote_desktop_site_settings (department_id, managed) VALUES ($1, true) ON CONFLICT (department_id) DO UPDATE SET managed = true, updated_at = now()", [departmentId]);
       return reply.code(201).send(publicDestination(result.rows[0] as StoredDestination));
@@ -270,8 +272,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     }
   });
 
-  app.put<{ Params: { id: string }; Body: { name: string; host: string; port: number; protocol: RemoteProtocol; username?: string; password?: string; autologin: boolean; disableDisplayResize?: boolean } }>("/api/modules/remote-desktop/destinations/:id", {
-    schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["name", "host", "port", "protocol", "autologin"], properties: { name: { type: "string", minLength: 1, maxLength: 100 }, host: { type: "string", minLength: 1, maxLength: 253 }, port: { type: "integer", minimum: 1, maximum: 65535 }, protocol: { type: "string", enum: ["rdp", "vnc", "spice"] }, username: { type: "string", maxLength: 256 }, password: { type: "string", maxLength: 1024 }, autologin: { type: "boolean" }, disableDisplayResize: { type: "boolean" } } } },
+  app.put<{ Params: { id: string }; Body: { name: string; host: string; port: number; protocol: RemoteProtocol; username?: string; password?: string; autologin: boolean; disableDisplayResize?: boolean; vncEncodings?: string } }>("/api/modules/remote-desktop/destinations/:id", {
+    schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["name", "host", "port", "protocol", "autologin"], properties: { name: { type: "string", minLength: 1, maxLength: 100 }, host: { type: "string", minLength: 1, maxLength: 253 }, port: { type: "integer", minimum: 1, maximum: 65535 }, protocol: { type: "string", enum: ["rdp", "vnc", "spice"] }, username: { type: "string", maxLength: 256 }, password: { type: "string", maxLength: 1024 }, autologin: { type: "boolean" }, disableDisplayResize: { type: "boolean" }, vncEncodings: vncEncodingsSchema } } },
   }, async (request, reply) => {
     if (!isDatabaseReady() || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
     if (!validateMutation(request, reply)) return reply;
@@ -282,18 +284,21 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     if (!name || /[\u0000-\u001f\u007f]/.test(name) || !validRemoteHost(host)) return reply.code(400).send({ error: "Enter a destination name and a valid IP address or DNS host." });
     const gateway = gatewaySettings();
     if (!gateway.configured) return reply.code(503).send({ error: "The remote desktop gateway is not configured." });
-    const existing = await pool.query("SELECT password_ciphertext, password_iv, password_tag, disable_display_resize FROM remote_desktop_destinations WHERE id = $1 AND department_id = $2", [request.params.id, departmentId]);
+    const existing = await pool.query("SELECT password_ciphertext, password_iv, password_tag, disable_display_resize, vnc_encodings FROM remote_desktop_destinations WHERE id = $1 AND department_id = $2", [request.params.id, departmentId]);
     if (!existing.rowCount) return reply.code(404).send({ error: "This destination could not be found." });
     const password = request.body.password === undefined ? existing.rows[0] : encryptPassword(request.body.password, gateway.jsonSecret);
     const encrypted = "ciphertext" in password ? { password_ciphertext: password.ciphertext, password_iv: password.iv, password_tag: password.tag } : password;
     const disableDisplayResize = request.body.protocol === "vnc" && (request.body.disableDisplayResize ?? Boolean(existing.rows[0].disable_display_resize));
+    const vncEncodings = request.body.protocol === "vnc"
+      ? request.body.vncEncodings === undefined ? existing.rows[0].vnc_encodings : request.body.vncEncodings.trim() || null
+      : null;
     try {
       const result = await pool.query(
         `UPDATE remote_desktop_destinations SET name=$3, host=$4, port=$5, protocol=$6, username=$7,
-                password_ciphertext=$8, password_iv=$9, password_tag=$10, autologin=$11, disable_display_resize=$12, updated_at=now()
+                password_ciphertext=$8, password_iv=$9, password_tag=$10, autologin=$11, disable_display_resize=$12, vnc_encodings=$13, updated_at=now()
           WHERE id=$1 AND department_id=$2
-          RETURNING id, department_id AS "departmentId", name, host, port, protocol, username, autologin, disable_display_resize, password_ciphertext, password_iv, password_tag`,
-        [request.params.id, departmentId, name, host, request.body.port, request.body.protocol, request.body.username?.trim() ?? "", encrypted.password_ciphertext, encrypted.password_iv, encrypted.password_tag, request.body.autologin, disableDisplayResize],
+          RETURNING id, department_id AS "departmentId", name, host, port, protocol, username, autologin, disable_display_resize, vnc_encodings, password_ciphertext, password_iv, password_tag`,
+        [request.params.id, departmentId, name, host, request.body.port, request.body.protocol, request.body.username?.trim() ?? "", encrypted.password_ciphertext, encrypted.password_iv, encrypted.password_tag, request.body.autologin, disableDisplayResize, vncEncodings],
       );
       await pool.query("INSERT INTO remote_desktop_site_settings (department_id, managed) VALUES ($1, true) ON CONFLICT (department_id) DO UPDATE SET managed = true, updated_at = now()", [departmentId]);
       return publicDestination(result.rows[0] as StoredDestination);
