@@ -76,13 +76,6 @@ const queMicActions: AmxAction[] = [
 ];
 const defaultSettings: AmxSettings = { host: "", port: 1319, actions: roomActions };
 
-function sanitizeStoredActions(actions: AmxAction[]): AmxAction[] {
-  return roomActions.map((preset) => {
-    const stored = actions.find((action) => action && action.id === preset.id);
-    return stored && stored.command === preset.command ? preset : { ...preset, command: "" };
-  });
-}
-
 function validHost(host: string) {
   if (!host || host.length > 253 || host.includes("://") || /[\s/@\\]/.test(host)) return false;
   if (isIP(host)) return true;
@@ -134,9 +127,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool!.query("SELECT host,port,actions FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const row = result.rows[0] as { host: string; port: number; actions: AmxAction[] } | undefined;
     if (!row) return defaultSettings;
-    // Normalize old six-room settings while preserving any added page mappings.
-    const storedActions = Array.isArray(row.actions) ? row.actions : [];
-    return { host: row.host, port: row.port === 23 ? 1319 : row.port, actions: sanitizeStoredActions(storedActions) };
+    // Mappings are fixed, verified module data. Older installs may have an
+    // empty or outdated actions JSON column, so never let that disable control.
+    return { host: row.host, port: row.port === 23 ? 1319 : row.port, actions: roomActions };
   });
 
   app.put<{ Body: AmxSettings }>("/api/modules/amx/settings", {
@@ -167,15 +160,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool!.query<{ host: string; port: number; actions: AmxAction[] }>("SELECT host,port,actions FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const storedSettings = result.rows[0];
     const settings = storedSettings
-      ? { ...storedSettings, actions: sanitizeStoredActions(storedSettings.actions), port: storedSettings.port === 23 ? 1319 : storedSettings.port }
+      ? { ...storedSettings, port: storedSettings.port === 23 ? 1319 : storedSettings.port }
       : defaultSettings;
     if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
     const action = [...roomActions, ...querVolumeActions, ...queMicActions].find((item) => item.id === request.body.actionId);
     if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });
-    if (roomActions.some((item) => item.id === action.id)) {
-      const storedAction = settings.actions.find((item) => item.id === action.id);
-      if (!storedAction || storedAction.command !== action.command) return reply.code(409).send({ error: "The confirmed AMX room mapping is missing or invalid." });
-    }
     try {
       const match = action.command.match(/^PULSE\[10001:(\d+):0,(\d+)\]$/);
       const port = Number(match?.[1]);
