@@ -13,6 +13,67 @@ const roomActions: AmxAction[] = [
   { id: "all-autonomous", name: "Alle Räume Autonom", command: "PULSE[10001:1:0,15]" },
   { id: "conference-large", name: "Konferenz gross", command: "PULSE[10001:1:0,14]" },
 ];
+const querVolumeActions: AmxAction[] = [
+  { id: "que-volume-kanzel-up", name: "Kanzel +", command: "PULSE[10001:2:0,1]" },
+  { id: "que-volume-kanzel-down", name: "Kanzel −", command: "PULSE[10001:2:0,2]" },
+  { id: "que-volume-kanzel-mute", name: "Kanzel Mute", command: "PULSE[10001:2:0,3]" },
+  { id: "que-volume-stativ-1-up", name: "Stativ Mik 1 +", command: "PULSE[10001:2:0,4]" },
+  { id: "que-volume-stativ-1-down", name: "Stativ Mik 1 −", command: "PULSE[10001:2:0,5]" },
+  { id: "que-volume-stativ-1-mute", name: "Stativ Mik 1 Mute", command: "PULSE[10001:2:0,6]" },
+  { id: "que-volume-stativ-2-up", name: "Stativ Mik 2 +", command: "PULSE[10001:2:0,7]" },
+  { id: "que-volume-stativ-2-down", name: "Stativ Mik 2 −", command: "PULSE[10001:2:0,8]" },
+  { id: "que-volume-stativ-2-mute", name: "Stativ Mik 2 Mute", command: "PULSE[10001:2:0,9]" },
+  { id: "que-volume-stativ-3-up", name: "Stativ Mik 3 +", command: "PULSE[10001:2:0,10]" },
+  { id: "que-volume-stativ-3-down", name: "Stativ Mik 3 −", command: "PULSE[10001:2:0,11]" },
+  { id: "que-volume-stativ-3-mute", name: "Stativ Mik 3 Mute", command: "PULSE[10001:2:0,12]" },
+  { id: "que-volume-stativ-4-up", name: "Stativ Mik 4 +", command: "PULSE[10001:2:0,13]" },
+  { id: "que-volume-stativ-4-down", name: "Stativ Mik 4 −", command: "PULSE[10001:2:0,14]" },
+  { id: "que-volume-stativ-4-mute", name: "Stativ Mik 4 Mute", command: "PULSE[10001:2:0,15]" },
+  { id: "que-volume-ambient-up", name: "Ambient +", command: "PULSE[10001:2:0,37]" },
+  { id: "que-volume-ambient-down", name: "Ambient −", command: "PULSE[10001:2:0,38]" },
+  { id: "que-volume-ambient-mute", name: "Ambient Mute", command: "PULSE[10001:2:0,39]" },
+  { id: "que-volume-mixer-in-up", name: "Mixer In +", command: "PULSE[10001:2:0,40]" },
+  { id: "que-volume-mixer-in-down", name: "Mixer In −", command: "PULSE[10001:2:0,41]" },
+  { id: "que-volume-mixer-in-mute-obertr", name: "Mixer In Mute Obertr", command: "PULSE[10001:2:0,42]" },
+  { id: "que-volume-mixer-in-mute-saal", name: "Mixer In Mute Saal", command: "PULSE[10001:2:0,310]" },
+  { id: "que-volume-line-in-2-up", name: "Line In 2 +", command: "PULSE[10001:2:0,43]" },
+  { id: "que-volume-line-in-2-down", name: "Line In 2 −", command: "PULSE[10001:2:0,44]" },
+  { id: "que-volume-line-in-2-mute", name: "Line In 2 Mute", command: "PULSE[10001:2:0,45]" },
+  { id: "que-volume-drahtlos-1-up", name: "Drahtlos 1 +", command: "PULSE[10001:2:0,223]" },
+  { id: "que-volume-drahtlos-1-down", name: "Drahtlos 1 −", command: "PULSE[10001:2:0,224]" },
+  { id: "que-volume-drahtlos-1-mute", name: "Drahtlos 1 Mute", command: "PULSE[10001:2:0,300]" },
+  { id: "que-volume-drahtlos-2-up", name: "Drahtlos 2 +", command: "PULSE[10001:2:0,226]" },
+  { id: "que-volume-drahtlos-2-down", name: "Drahtlos 2 −", command: "PULSE[10001:2:0,227]" },
+  { id: "que-volume-drahtlos-2-mute", name: "Drahtlos 2 Mute", command: "PULSE[10001:2:0,301]" },
+  { id: "que-volume-drahtlos-3-up", name: "Drahtlos 3 +", command: "PULSE[10001:2:0,229]" },
+  { id: "que-volume-drahtlos-3-down", name: "Drahtlos 3 −", command: "PULSE[10001:2:0,230]" },
+  { id: "que-volume-drahtlos-3-mute", name: "Drahtlos 3 Mute", command: "PULSE[10001:2:0,302]" },
+  { id: "que-volume-drahtlos-4-up", name: "Drahtlos 4 +", command: "PULSE[10001:2:0,232]" },
+  { id: "que-volume-drahtlos-4-down", name: "Drahtlos 4 −", command: "PULSE[10001:2:0,233]" },
+  { id: "que-volume-drahtlos-4-mute", name: "Drahtlos 4 Mute", command: "PULSE[10001:2:0,303]" },
+];
+const queMicActions: AmxAction[] = [
+  { id: "que-mik-kanzel-mute", name: "Kanzel Mute", command: "PULSE[10001:2:0,3]" },
+  { id: "que-mik-stativ-1-mute-obertr", name: "Stativ Mik 1 Obertr", command: "PULSE[10001:2:0,6]" },
+  { id: "que-mik-stativ-1-mute-saal", name: "Stativ Mik 1 Saal", command: "PULSE[10001:2:0,321]" },
+  { id: "que-mik-stativ-2-mute-obertr", name: "Stativ Mik 2 Obertr", command: "PULSE[10001:2:0,9]" },
+  { id: "que-mik-stativ-2-mute-saal", name: "Stativ Mik 2 Saal", command: "PULSE[10001:2:0,322]" },
+  { id: "que-mik-stativ-3-mute-obertr", name: "Stativ Mik 3 Obertr", command: "PULSE[10001:2:0,12]" },
+  { id: "que-mik-stativ-3-mute-saal", name: "Stativ Mik 3 Saal", command: "PULSE[10001:2:0,323]" },
+  { id: "que-mik-stativ-4-mute-obertr", name: "Stativ Mik 4 Obertr", command: "PULSE[10001:2:0,15]" },
+  { id: "que-mik-stativ-4-mute-saal", name: "Stativ Mik 4 Saal", command: "PULSE[10001:2:0,324]" },
+  { id: "que-mik-chor-1-mute", name: "Chor 1 Mute", command: "PULSE[10001:2:0,24]" },
+  { id: "que-mik-chor-2-mute", name: "Chor 2 Mute", command: "PULSE[10001:2:0,27]" },
+  { id: "que-mik-chor-3-mute", name: "Chor 3 Mute", command: "PULSE[10001:2:0,30]" },
+  { id: "que-mik-chor-4-mute", name: "Chor 4 Mute", command: "PULSE[10001:2:0,33]" },
+  { id: "que-mik-drahtlos-1-mute", name: "Drahtlos 1 Mute", command: "PULSE[10001:2:0,300]" },
+  { id: "que-mik-drahtlos-2-mute", name: "Drahtlos 2 Mute", command: "PULSE[10001:2:0,301]" },
+  { id: "que-mik-drahtlos-3-mute", name: "Drahtlos 3 Mute", command: "PULSE[10001:2:0,302]" },
+  { id: "que-mik-drahtlos-4-mute", name: "Drahtlos 4 Mute", command: "PULSE[10001:2:0,303]" },
+  { id: "que-mik-ambient-mute", name: "Ambient Mute", command: "PULSE[10001:2:0,39]" },
+  { id: "que-mik-ambient-up", name: "Ambient +", command: "PULSE[10001:2:0,37]" },
+  { id: "que-mik-ambient-down", name: "Ambient −", command: "PULSE[10001:2:0,38]" },
+];
 const defaultSettings: AmxSettings = { host: "", port: 1319, actions: roomActions };
 
 function sanitizeStoredActions(actions: AmxAction[]): AmxAction[] {
@@ -109,14 +170,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ? { ...storedSettings, actions: sanitizeStoredActions(storedSettings.actions), port: storedSettings.port === 23 ? 1319 : storedSettings.port }
       : defaultSettings;
     if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
-    const action = roomActions.find((item) => item.id === request.body.actionId);
+    const action = [...roomActions, ...querVolumeActions, ...queMicActions].find((item) => item.id === request.body.actionId);
     if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });
-    const storedAction = settings.actions.find((item) => item.id === action.id);
-    if (!storedAction || storedAction.command !== action.command) return reply.code(409).send({ error: "The confirmed AMX room mapping is missing or invalid." });
+    if (roomActions.some((item) => item.id === action.id)) {
+      const storedAction = settings.actions.find((item) => item.id === action.id);
+      if (!storedAction || storedAction.command !== action.command) return reply.code(409).send({ error: "The confirmed AMX room mapping is missing or invalid." });
+    }
     try {
-      const channel = Number(action.command.match(/,(\d+)\]$/)?.[1]);
-      if (!Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed AMX room mapping is invalid." });
-      await pulseChannel(settings.host, settings.port, { device: 10001, port: 1, system: 0 }, channel);
+      const match = action.command.match(/^PULSE\[10001:(\d+):0,(\d+)\]$/);
+      const port = Number(match?.[1]);
+      const channel = Number(match?.[2]);
+      if (!Number.isInteger(port) || !Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed AMX mapping is invalid." });
+      await pulseChannel(settings.host, settings.port, { device: 10001, port, system: 0 }, channel);
       return { sent: true, actionId: action.id };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not send the AMX command." });

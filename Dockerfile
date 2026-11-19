@@ -69,10 +69,12 @@ USER node
 EXPOSE 8080
 CMD ["node", "serve.mjs"]
 
+FROM web AS web-amx
+COPY --from=web-amx-build --chown=node:node /workspace/apps/web/dist-optional/amx /app/dist/optional-modules/amx
+
 FROM alpine:3.22 AS module-amx
 COPY apps/api/src/modules/amx /opt/smart-church/module/amx/api
-COPY --from=web-amx-build /workspace/apps/web/dist-optional/amx /opt/smart-church/module/amx/web
-CMD ["sh", "-c", "rm -rf /modules/amx /modules/.web/amx && mkdir -p /modules/amx /modules/.web/amx && cp -R /opt/smart-church/module/amx/api/. /modules/amx/ && cp -R /opt/smart-church/module/amx/web/. /modules/.web/amx/"]
+CMD ["sh", "-c", "rm -rf /modules/amx && mkdir -p /modules/amx && cp -R /opt/smart-church/module/amx/api/. /modules/amx/"]
 
 FROM alpine:3.22 AS module-remote-desktop
 COPY apps/api/src/modules/remote-desktop /opt/smart-church/module/remote-desktop/api

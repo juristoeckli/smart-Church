@@ -58,6 +58,22 @@ jobs:
           cache-from: type=gha,scope=module-amx-branch-${{ github.ref_name }}
           cache-to: type=gha,mode=max,scope=module-amx-branch-${{ github.ref_name }}
 
+      - name: Publish AMX web branch image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: web-amx
+          push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/smart-church-web-amx:${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/smart-church-web-amx:${{ github.ref_name }}
+          cache-from: type=gha,scope=web-amx-branch-${{ github.ref_name }}
+          cache-to: type=gha,mode=max,scope=web-amx-branch-${{ github.ref_name }}
+
       - name: Publish Remote desktop module branch image
         uses: docker/build-push-action@v7
         with:

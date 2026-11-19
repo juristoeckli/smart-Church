@@ -172,9 +172,9 @@ force_update_branch() {
     fi
   done
   if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
-    for image in smart-church-module-amx; do
+    for image in smart-church-web-amx smart-church-module-amx; do
       if ! docker manifest inspect "ghcr.io/juristoeckli/$image:$commit_sha" >/dev/null 2>&1; then
-        echo "The AMX module image for commit $commit_sha is not published yet. Wait for the branch image build to finish, then retry." >&2
+        echo "The AMX images for commit $commit_sha are not published yet. Wait for the branch image build to finish, then retry." >&2
         return 0
       fi
     done

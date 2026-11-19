@@ -50,4 +50,7 @@
 .amx-audio-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.5rem}
 .amx-audio-control{display:grid;gap:.3rem;min-height:52px;align-content:center;padding:.55rem;border:1px solid var(--line);border-radius:7px;background:var(--surface,#fff);color:var(--ink);opacity:.65}
 .amx-control-unavailable{font-size:.75rem;color:var(--muted)}
+.amx-audio-control-actions{display:flex;gap:.35rem}
+.amx-audio-control-actions button{min-width:40px;min-height:34px;padding:.3rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:var(--ink);cursor:pointer}
+.amx-audio-control-actions button:disabled{cursor:not-allowed;opacity:.55}
 @media(max-width:650px){.amx-workspace{padding:4px}.amx-screen{gap:.7%;padding:.8%;border-radius:3px}.amx-church-banner{gap:8px;padding:2%}.amx-church-banner strong{font-size:clamp(.8rem,4vw,1.5rem)}.amx-church-banner span{font-size:clamp(.58rem,2.9vw,1rem)}.amx-room-grid{gap:1%;padding:0 .5%}.amx-room-button{border-width:2px;font-size:clamp(.64rem,3vw,1rem);text-shadow:1px 1px 1px #45443c}.amx-status-bar{gap:4px}.amx-dsp-indicator{gap:2px}.amx-form-grid,.amx-action-editor{grid-template-columns:1fr}}

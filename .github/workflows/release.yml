@@ -127,6 +127,29 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
+      - id: web-amx-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/smart-church-web-amx
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: web-amx
+          push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
+          tags: ${{ steps.web-amx-meta.outputs.tags }}
+          labels: ${{ steps.web-amx-meta.outputs.labels }}
+          cache-from: type=gha,scope=web-amx
+          cache-to: type=gha,mode=max,scope=web-amx
+
       - name: Assemble self-hosted deployment package
         shell: bash
         run: |

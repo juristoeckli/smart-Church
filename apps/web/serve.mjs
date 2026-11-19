@@ -28,15 +28,20 @@ const server = createServer(async (request, response) => {
 
   const optionalMatch = pathname.match(/^\/optional-modules\/([a-z0-9][a-z0-9-]*)\/(.+)$/);
   if (optionalMatch) {
-    const moduleRoot = optionalMatch[1] === "runtime"
-      ? resolve(root, "optional-modules/runtime")
-      : resolve(optionalModulesRoot, optionalMatch[1]);
-    const optionalTarget = resolve(moduleRoot, optionalMatch[2]);
-    if (!optionalTarget.startsWith(`${moduleRoot}${sep}`)) { response.writeHead(400).end(); return; }
-    try {
-      const details = await stat(optionalTarget);
-      if (!details.isFile()) { response.writeHead(404).end(); return; }
-    } catch { response.writeHead(404).end(); return; }
+    const moduleId = optionalMatch[1];
+    const moduleRoots = moduleId === "runtime"
+      ? [resolve(root, "optional-modules/runtime")]
+      : [resolve(root, "optional-modules", moduleId), resolve(optionalModulesRoot, moduleId)];
+    let optionalTarget = "";
+    for (const moduleRoot of moduleRoots) {
+      const candidate = resolve(moduleRoot, optionalMatch[2]);
+      if (!candidate.startsWith(`${moduleRoot}${sep}`)) { response.writeHead(400).end(); return; }
+      try {
+        const details = await stat(candidate);
+        if (details.isFile()) { optionalTarget = candidate; break; }
+      } catch { /* Try the next module asset root. */ }
+    }
+    if (!optionalTarget) { response.writeHead(404).end(); return; }
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Cache-Control", /-[a-zA-Z0-9_-]{8,}\.[a-z0-9]+$/i.test(optionalMatch[2]) ? "public, max-age=31536000, immutable" : "no-cache");
     response.setHeader("Content-Type", contentTypes.get(extname(optionalTarget).toLowerCase()) ?? "application/octet-stream");

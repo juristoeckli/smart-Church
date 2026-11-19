@@ -4,6 +4,9 @@ services:
       amx-module:
         condition: service_completed_successfully
 
+  web:
+    image: ghcr.io/juristoeckli/smart-church-web-amx:${SMART_CHURCH_VERSION:-latest}
+
   amx-module:
     image: ghcr.io/juristoeckli/smart-church-module-amx:${SMART_CHURCH_VERSION:-latest}
     pull_policy: missing
