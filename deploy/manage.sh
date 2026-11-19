@@ -167,6 +167,14 @@ force_update_branch() {
       return 0
     fi
   done
+  if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
+    for image in smart-church-module-amx smart-church-web-amx; do
+      if ! docker manifest inspect "ghcr.io/juristoeckli/$image:$commit_sha" >/dev/null 2>&1; then
+        echo "The AMX images for commit $commit_sha are not published yet. Wait for the branch image build to finish, then retry." >&2
+        return 0
+      fi
+    done
+  fi
   echo "Forcing an update to $branch commit $commit_sha."
   update_script="deploy/.update-${commit_sha}.sh"
   curl -fsSL --retry 3 "https://raw.githubusercontent.com/juristoeckli/smart-Church/$commit_sha/deploy/update.sh" -o "$update_script" || {
@@ -184,7 +192,7 @@ force_update_branch() {
 
 module_enabled() {
   local department_id="$1" module_id="$2" query result
-  case "$module_id" in video-steffisburg|remote-desktop|presenter) ;; *) return 2 ;; esac
+  case "$module_id" in amx|video-steffisburg|remote-desktop|presenter) ;; *) return 2 ;; esac
   [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "The primary location ID is missing or invalid." >&2; return 1; }
   query="SELECT '$module_id' = ANY(enabled_modules) FROM departments WHERE id = '$department_id'::uuid"
   result="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -c "$1"' sh "$query" | tr -d '\r')"
@@ -193,7 +201,7 @@ module_enabled() {
 
 set_module_enabled() {
   local department_id="$1" module_id="$2" desired="$3" query result expected
-  case "$module_id" in video-steffisburg|remote-desktop|presenter) ;; *) return 2 ;; esac
+  case "$module_id" in amx|video-steffisburg|remote-desktop|presenter) ;; *) return 2 ;; esac
   [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "The primary location ID is missing or invalid." >&2; return 1; }
   [[ "$desired" == true || "$desired" == false ]] || return 2
   query="UPDATE departments SET enabled_modules = CASE WHEN $desired AND NOT ('$module_id' = ANY(enabled_modules)) THEN array_append(enabled_modules, '$module_id') WHEN NOT $desired THEN array_remove(enabled_modules, '$module_id') ELSE enabled_modules END, updated_at = now() WHERE id = '$department_id'::uuid RETURNING '$module_id' = ANY(enabled_modules)"
@@ -207,22 +215,24 @@ set_module_enabled() {
 }
 
 select_module() {
-  local video_state="$1" remote_desktop_state="$2" presenter_state="$3" choice
+  local amx_state="$1" video_state="$2" remote_desktop_state="$3" presenter_state="$4" choice
   if command -v whiptail >/dev/null; then
-    choice="$(whiptail --title "Smart-Church Modules" --menu "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME). Modules are included in the Smart-Church deployment." 17 78 4 \
+    choice="$(whiptail --title "Smart-Church Modules" --menu "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME). Install downloads the selected module images." 18 78 5 \
+      amx "AMX — $amx_state" \
       video-steffisburg "Video & streaming — $video_state" \
       remote-desktop "Remote desktop — $remote_desktop_state" \
       presenter "Presenter — $presenter_state" \
       back "Return" 3>&1 1>&2 2>&3)" || return 1
   elif command -v dialog >/dev/null; then
-    choice="$(dialog --title "Smart-Church Modules" --menu "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME). Modules are included in the Smart-Church deployment." 17 78 4 \
+    choice="$(dialog --title "Smart-Church Modules" --menu "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME). Install downloads the selected module images." 18 78 5 \
+      amx "AMX — $amx_state" \
       video-steffisburg "Video & streaming — $video_state" \
       remote-desktop "Remote desktop — $remote_desktop_state" \
       presenter "Presenter — $presenter_state" \
       back "Return" 3>&1 1>&2 2>&3)" || return 1
   else
-    echo "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME): Video & streaming [$video_state], Remote desktop [$remote_desktop_state], Presenter [$presenter_state]" >/dev/tty
-    select choice in video-steffisburg remote-desktop presenter back; do
+    echo "Optional modules for $(env_value SMART_CHURCH_DEPARTMENT_NAME): AMX [$amx_state], Video & streaming [$video_state], Remote desktop [$remote_desktop_state], Presenter [$presenter_state]" >/dev/tty
+    select choice in amx video-steffisburg remote-desktop presenter back; do
       [[ -n "${choice:-}" ]] && break
       echo "Choose a number from the menu." >/dev/tty
     done </dev/tty >/dev/tty
@@ -278,7 +288,7 @@ configure_module_settings() {
 }
 
 module_manager() {
-  local department_id department_name video_state remote_desktop_state presenter_state action module_id key
+  local department_id department_name amx_state video_state remote_desktop_state presenter_state action module_id key
   department_id="$(env_value SMART_CHURCH_DEPARTMENT_ID)"
   department_name="$(env_value SMART_CHURCH_DEPARTMENT_NAME)"
   [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "SMART_CHURCH_DEPARTMENT_ID is missing or invalid in .env." >&2; return 1; }
@@ -289,34 +299,57 @@ module_manager() {
   video_state=disabled
   remote_desktop_state=disabled
   presenter_state=disabled
+  amx_state=not-installed
+  if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
+    amx_state=disabled
+    module_enabled "$department_id" amx && amx_state=enabled
+  fi
   module_enabled "$department_id" video-steffisburg && video_state=enabled
   module_enabled "$department_id" remote-desktop && remote_desktop_state=enabled
   module_enabled "$department_id" presenter && presenter_state=enabled
 
   while true; do
     if command -v whiptail >/dev/null; then
-      action="$(whiptail --title "Smart-Church Module Manager" --menu "Primary location: ${department_name:-not configured}. Install enables a bundled module for this location; disable keeps its settings." 16 78 4 \
+      action="$(whiptail --title "Smart-Church Module Manager" --menu "Primary location: ${department_name:-not configured}. Install downloads and enables a module; disable keeps its settings." 16 78 4 \
         enable "Install / enable module" \
         disable "Disable module" \
         settings "Change module settings" \
         back "Return to manager" 3>&1 1>&2 2>&3)" || return 0
     elif command -v dialog >/dev/null; then
-      action="$(dialog --title "Smart-Church Module Manager" --menu "Primary location: ${department_name:-not configured}. Install enables a bundled module for this location; disable keeps its settings." 16 78 4 \
+      action="$(dialog --title "Smart-Church Module Manager" --menu "Primary location: ${department_name:-not configured}. Install downloads and enables a module; disable keeps its settings." 16 78 4 \
         enable "Install / enable module" \
         disable "Disable module" \
         settings "Change module settings" \
         back "Return to manager" 3>&1 1>&2 2>&3)" || return 0
     else
-      echo "Primary location: ${department_name:-not configured}; Video & streaming: $video_state; Remote desktop: $remote_desktop_state; Presenter: $presenter_state" >/dev/tty
+      echo "Primary location: ${department_name:-not configured}; AMX: $amx_state; Video & streaming: $video_state; Remote desktop: $remote_desktop_state; Presenter: $presenter_state" >/dev/tty
       select action in enable disable settings back; do
         [[ -n "${action:-}" ]] && break
         echo "Choose a number from the menu." >/dev/tty
       done </dev/tty >/dev/tty
     fi
     [[ "$action" == back ]] && return 0
-    module_id="$(select_module "$video_state" "$remote_desktop_state" "$presenter_state")" || continue
+    module_id="$(select_module "$amx_state" "$video_state" "$remote_desktop_state" "$presenter_state")" || continue
     [[ "$module_id" == back ]] && continue
     case "$action:$module_id" in
+      enable:amx)
+        if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" != 1 ]]; then
+          [[ -f deploy/compose.amx.yaml ]] || { echo "The AMX deployment files are missing. Update Smart-Church first." >&2; continue; }
+          set_env_value SMART_CHURCH_USE_AMX_MODULE 1
+          build_compose_args
+          if ! run_compose pull web amx-module; then
+            set_env_value SMART_CHURCH_USE_AMX_MODULE 0
+            build_compose_args
+            echo "Could not download the AMX images for version $(env_value SMART_CHURCH_VERSION). Confirm that this version has finished building, then retry." >&2
+            continue
+          fi
+        fi
+        set_module_enabled "$department_id" amx true || return 1
+        build_compose_args
+        run_compose up -d || return 1
+        amx_state=enabled
+        echo "AMX installed and enabled for $department_name. Configure the NetLinx address under Settings → Modules → AMX."
+        ;;
       enable:video-steffisburg)
         [[ "$department_name" == "Steffisburg" ]] || { echo "Video & streaming is only available for a Steffisburg location." >&2; continue; }
         [[ -f apps/api/src/modules/video-steffisburg/streaming.steffisburg.json ]] || { echo "The bundled Steffisburg configuration is missing. Update the deployment package first." >&2; continue; }
@@ -357,6 +390,11 @@ module_manager() {
         run_compose up -d api || return 1
         video_state=disabled
         echo "Video & streaming disabled for $department_name. Its settings remain in .env."
+        ;;
+      disable:amx)
+        set_module_enabled "$department_id" amx false || return 1
+        amx_state=disabled
+        echo "AMX disabled for $department_name. Its images and settings remain installed so it can be enabled again."
         ;;
       disable:remote-desktop)
         set_module_enabled "$department_id" remote-desktop false || return 1

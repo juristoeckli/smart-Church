@@ -228,6 +228,7 @@ profile_args=()
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then profile_args+=(--profile bundled-proxy); fi
 if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then profile_args+=(--profile remote-desktop); fi
 pull_services=(db api web)
+if grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env; then pull_services+=(amx-module); fi
 if grep -q '^SMART_CHURCH_USE_BUNDLED_PROXY=1' .env; then pull_services+=(caddy); fi
 if grep -q '^SMART_CHURCH_USE_REMOTE_DESKTOP=1' .env; then
   pull_services+=(remote-desktop-guacamole)
