@@ -54,6 +54,9 @@ build_compose_args() {
   if [[ -f deploy/compose.direct.yaml ]]; then
     compose_files+=(-f deploy/compose.direct.yaml)
   fi
+  if [[ -f deploy/compose.amx.yaml ]] && grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env; then
+    compose_files+=(-f deploy/compose.amx.yaml)
+  fi
   if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
     compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
   fi

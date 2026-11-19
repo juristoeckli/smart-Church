@@ -272,30 +272,40 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
   const { readdir, readFile } = await import("node:fs/promises");
   const { dirname, join, resolve, sep } = await import("node:path");
   const { fileURLToPath, pathToFileURL } = await import("node:url");
-  const modulesRoot = join(dirname(fileURLToPath(import.meta.url)));
-  const directories = await readdir(modulesRoot, { withFileTypes: true });
+  const builtInModulesRoot = join(dirname(fileURLToPath(import.meta.url)));
+  const optionalModulesRoot = process.env.SMART_CHURCH_MODULES_DIR?.trim();
+  const moduleRoots = [...new Set([builtInModulesRoot, optionalModulesRoot].filter((root): root is string => Boolean(root)))];
 
   const discovered: DiscoveredModule[] = [];
   const invalid = new Set<string>();
   const manifestIds = new Set<string>();
-  for (const directory of directories) {
-    if (!directory.isDirectory()) continue;
-    const moduleRoot = resolve(modulesRoot, directory.name);
+  for (const modulesRoot of moduleRoots) {
+    let directories;
     try {
-      const manifest = validateManifest(JSON.parse(await readFile(join(moduleRoot, "manifest.json"), "utf8")) as unknown, directory.name);
-      if (manifestIds.has(manifest.id)) throw new Error(`Duplicate module ID ${manifest.id}.`);
-      manifestIds.add(manifest.id);
-      if (manifest.required) requiredServerModuleIds.add(manifest.id);
-      requiredModuleDependencies.set(manifest.id, manifest.dependencies?.required ?? []);
-      if (!manifest.serverEntry) continue;
-      if (manifest.serverEntry.includes("..") || !/^\.\/[-a-zA-Z0-9._]+\.ts$/.test(manifest.serverEntry)) throw new Error("The server entry must be a module-local TypeScript file.");
-      const entry = resolve(moduleRoot, manifest.serverEntry.slice(2));
-      if (!entry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The server entry must stay inside its module folder.");
-      discovered.push({ id: manifest.id, root: moduleRoot, manifest, entry });
+      directories = await readdir(modulesRoot, { withFileTypes: true });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-      invalid.add(directory.name);
-      app.log.error({ err: error, module: directory.name }, "Optional server module manifest is invalid; the core server will continue.");
+      throw error;
+    }
+    for (const directory of directories) {
+      if (!directory.isDirectory()) continue;
+      const moduleRoot = resolve(modulesRoot, directory.name);
+      try {
+        const manifest = validateManifest(JSON.parse(await readFile(join(moduleRoot, "manifest.json"), "utf8")) as unknown, directory.name);
+        if (manifestIds.has(manifest.id)) throw new Error(`Duplicate module ID ${manifest.id}.`);
+        manifestIds.add(manifest.id);
+        if (manifest.required) requiredServerModuleIds.add(manifest.id);
+        requiredModuleDependencies.set(manifest.id, manifest.dependencies?.required ?? []);
+        if (!manifest.serverEntry) continue;
+        if (manifest.serverEntry.includes("..") || !/^\.\/[-a-zA-Z0-9._]+\.ts$/.test(manifest.serverEntry)) throw new Error("The server entry must be a module-local TypeScript file.");
+        const entry = resolve(moduleRoot, manifest.serverEntry.slice(2));
+        if (!entry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The server entry must stay inside its module folder.");
+        discovered.push({ id: manifest.id, root: moduleRoot, manifest, entry });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        invalid.add(directory.name);
+        app.log.error({ err: error, module: directory.name }, "Optional server module manifest is invalid; the core server will continue.");
+      }
     }
   }
 

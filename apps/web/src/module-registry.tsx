@@ -113,25 +113,39 @@ export function ModuleTranslationHost({ children, translations, language }: { ch
   return <>{Children.map(children, (child) => translateModuleNode(child, translations, language))}</>;
 }
 
-const registrations = import.meta.glob<{ moduleRegistration: ModuleRegistration }>("./modules/*/module.tsx");
+const registrations = import.meta.glob<{ moduleRegistration: ModuleRegistration }>(["./modules/*/module.tsx", "!./modules/amx/module.tsx"]);
 
 export const registeredModules: ModuleRegistration[] = [];
-export const moduleRegistryReady = Promise.all(Object.entries(registrations).map(async ([path, load]) => {
-  try {
-    const { moduleRegistration } = await load();
-    const iconType = typeof moduleRegistration?.icon;
-    const componentType = typeof moduleRegistration?.component;
-    if (!moduleRegistration || !/^[a-z0-9][a-z0-9-]*$/.test(moduleRegistration.id) || !moduleRegistration.name || moduleRegistration.icon == null || (iconType !== "function" && iconType !== "object") || moduleRegistration.component == null || (componentType !== "function" && componentType !== "object")) {
-      throw new Error("The module registration is missing a valid ID, name, icon, or component.");
+const loadedModules = new Map<string, Promise<ModuleRegistration | null>>();
+
+export async function loadRegisteredModules(moduleIds: string[]) {
+  const requested = new Set(moduleIds);
+  const matches = Object.entries(registrations).filter(([path]) => requested.has(path.split("/").at(-2) ?? ""));
+  const modules = await Promise.all(matches.map(([path, load]) => {
+    const moduleId = path.split("/").at(-2) ?? "";
+    let pending = loadedModules.get(moduleId);
+    if (!pending) {
+      pending = load().then(({ moduleRegistration }) => {
+        const iconType = typeof moduleRegistration?.icon;
+        const componentType = typeof moduleRegistration?.component;
+        if (!moduleRegistration || moduleRegistration.id !== moduleId || !/^[a-z0-9][a-z0-9-]*$/.test(moduleRegistration.id) || !moduleRegistration.name || moduleRegistration.icon == null || (iconType !== "function" && iconType !== "object") || moduleRegistration.component == null || (componentType !== "function" && componentType !== "object")) {
+          throw new Error("The module registration is missing a valid ID, name, icon, or component.");
+        }
+        return moduleRegistration;
+      }).catch((error: unknown) => {
+        loadedModules.delete(moduleId);
+        console.error(`Optional module registration failed (${path}); the rest of Smart-Church will continue.`, error);
+        return null;
+      });
+      loadedModules.set(moduleId, pending);
     }
-    return moduleRegistration;
-  } catch (error) {
-    console.error(`Optional module registration failed (${path}); the rest of Smart-Church will continue.`, error);
-    return null;
+    return pending;
+  }));
+  for (const module of modules) {
+    if (module && !registeredModules.some((registered) => registered.id === module.id)) registeredModules.push(module);
   }
-})).then((modules) => {
-  registeredModules.push(...modules.filter((module): module is ModuleRegistration => module !== null));
-});
+  return modules.filter((module): module is ModuleRegistration => module !== null);
+}
 
 interface ModuleBoundaryProps { children: ReactNode; language?: UserLanguage; }
 interface ModuleBoundaryState { failed: boolean; }

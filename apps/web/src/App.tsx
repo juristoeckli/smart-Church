@@ -41,7 +41,7 @@ import { Overview } from "./Overview";
 import { smartChurchBuildInfo } from "./build-info";
 import { Groups } from "./Groups";
 import { BookableResources } from "./BookableResources";
-import { ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleRegistryReady, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
+import { loadRegisteredModules, ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
 import { translateKnownModuleMessage, translateModuleMessage, translationsForModule } from "./modules/translations";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
@@ -500,7 +500,8 @@ function WorkspaceApp() {
 
   useEffect(() => {
     let active = true;
-    void moduleRegistryReady.then(() => {
+    if (!authUser || !department.id) return () => { active = false; };
+    void loadRegisteredModules(department.enabledModules ?? []).then(() => {
       if (!active) return;
       setModulesReady(true);
       const routePage = workspacePageFromHash(window.location.hash);
@@ -509,7 +510,7 @@ function WorkspaceApp() {
       else if (savedPage.startsWith("module:")) setPage(savedPage);
     });
     return () => { active = false; };
-  }, []);
+  }, [authUser?.id, department.id, department.enabledModules]);
 
   useEffect(() => {
     if (!authUser) {
@@ -1013,7 +1014,9 @@ function WorkspaceApp() {
       const result = await response.json() as { modules?: Array<{id:string;enabled:boolean}>; error?:string };
       if (!response.ok || !result.modules) throw new Error(result.error || "Update the API to load the installed module catalog.");
       if (!cancelled) {
-        setInstalledModuleIds(result.modules.map(module => module.id));
+        const moduleIds = result.modules.map(module => module.id);
+        await loadRegisteredModules(moduleIds);
+        setInstalledModuleIds(moduleIds);
         setModuleDraftIds(result.modules.filter(module => module.enabled).map(module => module.id));
       }
     }).catch(error => { if (!cancelled) { setInstalledModuleIds([]); setModuleManagementFeedback(error.message); } });

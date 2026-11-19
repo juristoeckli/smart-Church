@@ -1,6 +1,6 @@
 # AMX Control
 
-AMX Control is an optional Smart-Church module and is disabled by default. It shows six room controls and connects directly to the NetLinx master over ICSP TCP; it does not use the touch panel as a relay. A server administrator enables the module in **Settings → Modules**; a site administrator configures the master under **Settings → Modules → AMX Control**.
+AMX Control is an optional Smart-Church module and is disabled by default. It shows six room controls and connects directly to the NetLinx master over ICSP TCP; it does not use the touch panel as a relay. Installations that use AMX pull a separate AMX module image and AMX-enabled web image; standard Smart-Church images exclude the AMX server code and browser bundle. A server administrator enables the module in **Settings → Modules**; a site administrator configures the master under **Settings → Modules → AMX**.
 
 The room actions use the channel mappings bundled with this integration. Enter the controller address under the AMX module settings for each installation; no site-specific IP address is shipped in the module.
 

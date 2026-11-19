@@ -70,6 +70,7 @@ sync_deployment_files() {
     compose.yaml
     .env.production.example
     deploy/compose.direct.yaml
+    deploy/compose.amx.yaml
     deploy/README.md
     deploy/Caddyfile
     deploy/Caddyfile.self-signed
@@ -211,6 +212,9 @@ mv "$tmp" .env
 trap - EXIT
 
 compose_files=(-f compose.yaml)
+if [[ -f deploy/compose.amx.yaml ]] && grep -q '^SMART_CHURCH_USE_AMX_MODULE=1' .env; then
+  compose_files+=(-f deploy/compose.amx.yaml)
+fi
 if [[ -f deploy/compose.direct.yaml ]]; then
   compose_files+=(-f deploy/compose.direct.yaml)
 fi

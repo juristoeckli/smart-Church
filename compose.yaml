@@ -43,6 +43,7 @@ services:
       EVENTDESK_EMAIL_FROM: ${EVENTDESK_EMAIL_FROM:-}
       PRESENTER_DATASETS_DIR: /var/lib/smart-church/presenter-datasets
       PRESENTER_MEDIA_DIR: /var/lib/smart-church/presenter-media
+      SMART_CHURCH_MODULES_DIR: /var/lib/smart-church/modules
       SMART_CHURCH_SYNC_ENCRYPTION_KEY: ${SMART_CHURCH_SYNC_ENCRYPTION_KEY:-}
       SMART_CHURCH_SYNC_IDENTITY_KEY_FILE: ${SMART_CHURCH_SYNC_IDENTITY_KEY_FILE:-/var/lib/smart-church/sync/identity-ed25519.pem}
       SMART_CHURCH_SYNC_PEER_BASE_URL: ${SMART_CHURCH_SYNC_PEER_BASE_URL:-auto}
@@ -62,6 +63,7 @@ services:
       - "${SMART_CHURCH_API_BIND_ADDRESS:-127.0.0.1}:${SMART_CHURCH_API_HOST_PORT:-3001}:3001"
     volumes:
       - smart-church-data:/var/lib/smart-church
+      - smart-church-modules:/var/lib/smart-church/modules
     depends_on:
       db:
         condition: service_healthy
@@ -117,6 +119,7 @@ services:
 volumes:
   smart-church-postgres:
   smart-church-data:
+  smart-church-modules:
   smart-church-caddy-data:
   smart-church-caddy-config:
 

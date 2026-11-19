@@ -64,6 +64,26 @@ jobs:
           cache-from: type=gha,scope=api
           cache-to: type=gha,mode=max,scope=api
 
+      - id: amx-module-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/smart-church-module-amx
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: module-amx
+          push: true
+          tags: ${{ steps.amx-module-meta.outputs.tags }}
+          labels: ${{ steps.amx-module-meta.outputs.labels }}
+          cache-from: type=gha,scope=module-amx
+          cache-to: type=gha,mode=max,scope=module-amx
+
       - id: web-meta
         uses: docker/metadata-action@v6
         with:
@@ -87,12 +107,35 @@ jobs:
           cache-from: type=gha,scope=web
           cache-to: type=gha,mode=max,scope=web
 
+      - id: web-amx-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/smart-church-web-amx
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          target: web-amx
+          push: true
+          build-args: |
+            SMART_CHURCH_VERSION=${{ github.ref_name }}
+            SMART_CHURCH_BUILD_NUMBER=${{ github.run_number }}
+          tags: ${{ steps.web-amx-meta.outputs.tags }}
+          labels: ${{ steps.web-amx-meta.outputs.labels }}
+          cache-from: type=gha,scope=web-amx
+          cache-to: type=gha,mode=max,scope=web-amx
+
       - name: Assemble self-hosted deployment package
         shell: bash
         run: |
           mkdir -p release-package/deploy release-package/apps/api/src/modules/video-steffisburg release-package/apps/api/src/modules/remote-desktop
           cp compose.yaml .env.production.example release-package/
-          cp deploy/compose.direct.yaml release-package/deploy/compose.direct.yaml
+          cp deploy/compose.direct.yaml deploy/compose.amx.yaml release-package/deploy/
           cp deploy/README.md deploy/Caddyfile deploy/Caddyfile.self-signed deploy/install.sh deploy/uninstall.sh deploy/backup.sh deploy/restore.sh deploy/update.sh deploy/manage.sh deploy/remote-desktop-env.sh deploy/nginx-central-example.conf release-package/deploy/
           cp apps/api/src/modules/video-steffisburg/compose.yaml apps/api/src/modules/video-steffisburg/streaming.example.json apps/api/src/modules/video-steffisburg/streaming.steffisburg.json apps/api/src/modules/video-steffisburg/.env.example apps/api/src/modules/video-steffisburg/README.md release-package/apps/api/src/modules/video-steffisburg/
           cp apps/api/src/modules/remote-desktop/compose.yaml apps/api/src/modules/remote-desktop/guacd-log-entrypoint.sh apps/api/src/modules/remote-desktop/guacd-wave2.patch apps/api/src/modules/remote-desktop/build-guacd.sh apps/api/src/modules/remote-desktop/README.md release-package/apps/api/src/modules/remote-desktop/
