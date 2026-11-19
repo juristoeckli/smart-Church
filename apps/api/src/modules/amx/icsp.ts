@@ -159,6 +159,33 @@ async function ackIncoming(connection: IcspConnection, frame: IcspFrame, source:
   });
 }
 
+async function waitForReply(
+  connection: IcspConnection,
+  expected: { messageId: number; commands: number[] },
+  timeoutMs: number,
+  deviceInfoSource: DeviceAddress,
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let frame: IcspFrame;
+    try { frame = await connection.nextFrame(deadline - Date.now()); }
+    catch { throw new Error(`The AMX master did not reply to ICSP message ${expected.messageId}.`); }
+
+    // Device information can arrive asynchronously while a request is pending;
+    // acknowledge it without mistaking it for the requested reply.
+    if (frame.command === COMMAND_DEVICE_INFO) {
+      await ackIncoming(connection, frame, deviceInfoSource);
+      continue;
+    }
+    if (frame.messageId !== expected.messageId) continue;
+    if (frame.command === COMMAND_NAK) {
+      throw new Error(`The AMX master rejected ICSP message ${expected.messageId}.`);
+    }
+    if (expected.commands.includes(frame.command)) return frame;
+  }
+  throw new Error(`The AMX master did not reply to ICSP message ${expected.messageId}.`);
+}
+
 async function registerDynamicDevice(connection: IcspConnection, host: string) {
   const localAddress = connection.socket.localAddress?.replace(/^::ffff:/, "");
   if (!localAddress) throw new Error("The local IP address for the AMX ICSP connection is unavailable.");
@@ -181,23 +208,20 @@ async function registerDynamicDevice(connection: IcspConnection, host: string) {
     data: requestData,
   });
 
-  const deadline = Date.now() + 2500;
-  while (Date.now() < deadline) {
-    let frame: IcspFrame;
-    try { frame = await connection.nextFrame(deadline - Date.now()); }
-    catch { break; }
-    if (frame.command === COMMAND_DEVICE_INFO) {
-      await ackIncoming(connection, frame, { device: 0, port: 1, system: 0 });
-      continue;
-    }
-    if (frame.command === COMMAND_NAK) throw new Error("The AMX master rejected the ICSP device registration.");
-    if (frame.command === COMMAND_DYNAMIC_DEVICE_ADDRESS && frame.data.length >= 4) {
-      const address = { device: frame.data.readUInt16BE(0), system: frame.data.readUInt16BE(2), port: frame.destination.port };
-      await ackIncoming(connection, frame, address);
-      return address;
-    }
+  let frame: IcspFrame;
+  try {
+    frame = await waitForReply(connection, {
+      messageId: 1,
+      commands: [COMMAND_DYNAMIC_DEVICE_ADDRESS],
+    }, 2500, { device: 0, port: 1, system: 0 });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("rejected")) throw error;
+    throw new Error(`The AMX master did not assign a temporary ICSP device address for ${host}.`);
   }
-  throw new Error(`The AMX master did not assign a temporary ICSP device address for ${host}.`);
+  if (frame.data.length < 4) throw new Error("The AMX master returned a truncated dynamic ICSP address.");
+  const address = { device: frame.data.readUInt16BE(0), system: frame.data.readUInt16BE(2), port: frame.destination.port };
+  await ackIncoming(connection, frame, address);
+  return address;
 }
 
 export async function pulseChannel(host: string, port: number, address: DeviceAddress, channel: number) {
@@ -224,8 +248,10 @@ export async function pulseChannel(host: string, port: number, address: DeviceAd
     const master = { device: MASTER_ADDRESS.device, port: MASTER_ADDRESS.port, system: dynamicAddress.system };
     const messageId = 2;
     await connection.send({ flags: 0, destination: master, source: dynamicAddress, messageId, command: COMMAND_INPUT_CHANNEL_ON, data: channelData });
+    await waitForReply(connection, { messageId, commands: [COMMAND_ACK] }, 2500, dynamicAddress);
     await new Promise((resolve) => setTimeout(resolve, 500));
     await connection.send({ flags: 0, destination: master, source: dynamicAddress, messageId: messageId + 1, command: COMMAND_INPUT_CHANNEL_OFF, data: channelData });
+    await waitForReply(connection, { messageId: messageId + 1, commands: [COMMAND_ACK] }, 2500, dynamicAddress);
     await new Promise((resolve) => setTimeout(resolve, 100));
   } finally {
     connection.close();

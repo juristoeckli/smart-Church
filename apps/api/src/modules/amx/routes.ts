@@ -14,13 +14,12 @@ const roomActions: AmxAction[] = [
   { id: "conference-large", name: "Konferenz gross", command: "PULSE[10001:1:0,14]" },
 ];
 const defaultSettings: AmxSettings = { host: "", port: 1319, actions: roomActions };
-const pulseCommand = /^PULSE\s*\[(\d{1,5}):(\d{1,5}):(\d{1,5}),(\d{1,5})\]$/i;
 
-function validPulseCommand(command: string) {
-  const match = pulseCommand.exec(command.trim());
-  if (!match) return false;
-  const [device, port, system, channel] = match.slice(1).map(Number);
-  return device >= 1 && device <= 32767 && port >= 1 && port <= 255 && system <= 65535 && channel >= 1 && channel <= 65535;
+function sanitizeStoredActions(actions: AmxAction[]): AmxAction[] {
+  return roomActions.map((preset) => {
+    const stored = actions.find((action) => action && action.id === preset.id);
+    return stored && stored.command === preset.command ? preset : { ...preset, command: "" };
+  });
 }
 
 function validHost(host: string) {
@@ -31,18 +30,18 @@ function validHost(host: string) {
 
 function cleanSettings(input: AmxSettings): AmxSettings | null {
   const host = input.host.trim();
-  if (!validHost(host) || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535 || input.port === 23 || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
+  if (!validHost(host) || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535 || input.port === 23
+    || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
   const ids = new Set<string>();
   const actions: AmxAction[] = [];
   for (const action of input.actions) {
     const preset = roomActions.find((item) => item.id === action?.id);
-    if (!action || !preset || ids.has(action.id)
-      || action.name !== preset.name
-      || typeof action.command !== "string" || action.command.length > 80
-      || (action.command.trim() && !validPulseCommand(action.command))) return null;
+    if (!action || !preset || ids.has(action.id) || action.name !== preset.name
+      || action.command !== preset.command) return null;
     ids.add(action.id);
-    actions.push({ id: action.id, name: preset.name, command: action.command.trim() });
+    actions.push({ id: action.id, name: preset.name, command: action.command });
   }
+  if (roomActions.some((preset) => !ids.has(preset.id))) return null;
   return { host, port: input.port, actions: roomActions.map((preset) => actions.find((item) => item.id === preset.id)!) };
 }
 
@@ -73,7 +72,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const result = await pool!.query("SELECT host,port,actions FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const row = result.rows[0] as { host: string; port: number; actions: AmxAction[] } | undefined;
-    return row ? { host: row.host, port: row.port === 23 ? 1319 : row.port, actions: row.actions } : defaultSettings;
+    if (!row) return defaultSettings;
+    // Normalize old six-room settings while preserving any added page mappings.
+    const storedActions = Array.isArray(row.actions) ? row.actions : [];
+    return { host: row.host, port: row.port === 23 ? 1319 : row.port, actions: sanitizeStoredActions(storedActions) };
   });
 
   app.put<{ Body: AmxSettings }>("/api/modules/amx/settings", {
@@ -103,16 +105,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const result = await pool!.query<{ host: string; port: number; actions: AmxAction[] }>("SELECT host,port,actions FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const storedSettings = result.rows[0];
-    const settings = storedSettings ? { ...storedSettings, port: storedSettings.port === 23 ? 1319 : storedSettings.port } : defaultSettings;
+    const settings = storedSettings
+      ? { ...storedSettings, actions: sanitizeStoredActions(storedSettings.actions), port: storedSettings.port === 23 ? 1319 : storedSettings.port }
+      : defaultSettings;
     if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
-    const action = settings.actions.find((item) => item.id === request.body.actionId);
-    if (!action) return reply.code(404).send({ error: "The AMX room action was not found." });
-    if (!action.command) return reply.code(409).send({ error: "Add the NetLinx device and channel mapping for this room under AMX module settings first." });
-    if (!validPulseCommand(action.command)) return reply.code(409).send({ error: "This saved room mapping is invalid. Replace it with PULSE[device:port:system,channel] in AMX module settings." });
+    const action = roomActions.find((item) => item.id === request.body.actionId);
+    if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });
+    const storedAction = settings.actions.find((item) => item.id === action.id);
+    if (!storedAction || storedAction.command !== action.command) return reply.code(409).send({ error: "The confirmed AMX room mapping is missing or invalid." });
     try {
-      const match = pulseCommand.exec(action.command.trim())!;
-      const [device, channelPort, system, channel] = match.slice(1).map(Number);
-      await pulseChannel(settings.host, settings.port, { device, port: channelPort, system }, channel);
+      const channel = Number(action.command.match(/,(\d+)\]$/)?.[1]);
+      if (!Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed AMX room mapping is invalid." });
+      await pulseChannel(settings.host, settings.port, { device: 10001, port: 1, system: 0 }, channel);
       return { sent: true, actionId: action.id };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not send the AMX command." });

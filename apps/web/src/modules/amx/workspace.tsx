@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Wifi } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
+import { audioPages } from "./audio-pages";
 import "./amx.css";
 
 type Action = { id: string; name: string; command: string };
@@ -13,6 +14,19 @@ const rooms = [
   { id: "all-autonomous", name: "Alle Räume Autonom" },
   { id: "conference-large", name: "Konferenz gross" },
 ];
+function safeSettings(settings: Settings): Settings {
+  const verifiedCommands: Record<string, string> = {
+    "hall-crosswise": "PULSE[10001:1:0,11]",
+    "hall-lengthwise": "PULSE[10001:1:0,16]",
+    "conference-1": "PULSE[10001:1:0,13]",
+    library: "PULSE[10001:1:0,12]",
+    "all-autonomous": "PULSE[10001:1:0,15]",
+    "conference-large": "PULSE[10001:1:0,14]",
+  };
+  return { ...settings, actions: rooms.map((room) => {
+    return { id: room.id, name: room.name, command: verifiedCommands[room.id] };
+  }) };
+}
 async function readResponse<T>(response: Response): Promise<T & { error?: string }> {
   const data = await response.json() as T & { error?: string };
   if (!response.ok) throw new Error(data.error ?? "The AMX request failed.");
@@ -26,10 +40,11 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
   const [time, setTime] = useState(currentTime);
+  const [selectedPage, setSelectedPage] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/modules/amx/settings", { headers: { "x-department-id": departmentId }, signal: controller.signal })
-      .then((response) => readResponse<Settings>(response)).then(setSettings)
+      .then((response) => readResponse<Settings>(response)).then((loaded) => setSettings(safeSettings(loaded)))
       .catch((error: unknown) => { if (!controller.signal.aborted) { setFeedback(error instanceof Error ? error.message : "Could not load AMX controller settings."); setFailed(true); } });
     return () => controller.abort();
   }, [departmentId]);
@@ -44,17 +59,27 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     finally { setBusy(""); }
   }
 
+  const selectedAudioPage = audioPages.find((page) => page.id === selectedPage);
+  const configured = Boolean(settings?.host);
+
   return <section className="amx-workspace" aria-label="AMX room control">
     <div className="amx-screen">
       <div className="amx-photo-strip" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <span className={`amx-photo-tile amx-photo-tile-${index + 1}`} key={index}><i /></span>)}</div>
       <header className="amx-church-banner"><img src="/gfc-logo.svg" alt="GfC logo" /><div><strong>Gemeinde für Christus</strong><span>Evangelischer Brüderverein</span></div></header>
       <div className="amx-room-grid">{rooms.map((room) => {
         const action = settings?.actions.find((item) => item.id === room.id);
-        return <button className="amx-room-button" type="button" key={room.id} disabled={!action?.command || Boolean(busy)} title={!action?.command ? "Configure this NetLinx channel in AMX module settings" : undefined} onClick={() => action && void send(action)}>{busy === room.id ? "Senden…" : room.name}</button>;
+        return <button className="amx-room-button" type="button" key={room.id} disabled={!configured || !action?.command || Boolean(busy)} title={!configured ? "Enter the NetLinx host in AMX module settings" : !action?.command ? "Configure this NetLinx channel in AMX module settings" : undefined} onClick={() => action && void send(action)}>{busy === room.id ? "Senden…" : room.name}</button>;
       })}</div>
       <footer className="amx-status-bar" aria-label="Panel status"><span className="amx-dsp-label">DSP:</span>{[1, 2, 3, 4].map((number) => <span className="amx-dsp-indicator" key={number}><i aria-hidden="true" />{number}</span>)}<span className="amx-status-divider" /><Wifi className="amx-network-icon" size={18} aria-label="Network" /><time>{time}</time></footer>
       {feedback && <p className={failed ? "amx-toast amx-toast-error" : "amx-toast"} role="status">{feedback}</p>}
     </div>
-    {settings && rooms.some((room) => !settings.actions.find((action) => action.id === room.id)?.command) && <p className="amx-setup-note">Some buttons are disabled until their NetLinx device and channel mappings are configured under Settings → Modules → AMX Control.</p>}
+    {settings && !configured && <p className="amx-setup-note">Enter the NetLinx master IP address or hostname under Settings → Modules → AMX. Controls stay disabled until it is configured.</p>}
+    {settings && <p className="amx-setup-note">Room-selection mappings were verified from the TPDesign Home page. Audio pages remain unavailable until their control behavior is verified.</p>}
+    <section className="amx-pages" aria-label="AMX audio pages">
+      <h3>Audio pages</h3>
+      <p>The original panel also has microphone, speaker, and volume pages. These labels are recreated from the panel project; the AMX channel mappings have not been verified yet, so controls below are intentionally disabled.</p>
+      <div className="amx-page-nav">{audioPages.map((page) => <button key={page.id} type="button" className={selectedPage === page.id ? "amx-page-tab active" : "amx-page-tab"} onClick={() => setSelectedPage((current) => current === page.id ? "" : page.id)} aria-pressed={selectedPage === page.id}>{page.room} · {page.page}</button>)}</div>
+      {selectedAudioPage && <div className="amx-audio-placeholder"><h4>{selectedAudioPage.room} · {selectedAudioPage.page}</h4>{selectedAudioPage.controls.length > 0 && <div className="amx-audio-controls" aria-label="Unavailable audio controls">{selectedAudioPage.controls.map((control) => <div className="amx-audio-control" key={control.id} aria-disabled="true"><span>{control.name}</span><span className="amx-control-unavailable">Unavailable</span></div>)}</div>}<p>{selectedAudioPage.controls.length ? "Audio controls are displayed for reference only. Their interaction semantics, channel mappings, and status feedback have not been verified, so they cannot be operated here." : "This page exists in the panel project, but its control labels have not been read from the project yet. It is unavailable until its controls and interaction semantics are verified."}</p></div>}
+    </section>
   </section>;
 }

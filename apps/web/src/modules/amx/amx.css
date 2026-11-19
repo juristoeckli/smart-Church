@@ -40,4 +40,14 @@
 .amx-action-editor strong{color:var(--ink)}
 .amx-feedback{color:var(--success,#23734d)}
 .amx-error{color:var(--danger,#a83232)}
+.amx-pages{margin-top:1.25rem;padding:1rem;border:1px solid var(--line);border-radius:10px;background:var(--panel)}
+.amx-pages h3,.amx-audio-placeholder h4{margin:.1rem 0 .5rem;color:var(--ink)}
+.amx-pages>p,.amx-audio-placeholder>p{max-width:850px;color:var(--muted);font-size:.9rem}
+.amx-page-nav{display:flex;flex-wrap:wrap;gap:.5rem}
+.amx-page-tab{padding:.55rem .75rem;border:1px solid var(--line);border-radius:7px;background:var(--surface,#fff);color:var(--ink);cursor:pointer}
+.amx-page-tab.active{border-color:var(--accent,#396c9e);box-shadow:inset 0 0 0 1px var(--accent,#396c9e)}
+.amx-audio-placeholder{margin-top:.8rem;padding:.85rem;border:1px dashed var(--line);border-radius:8px}
+.amx-audio-controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.5rem}
+.amx-audio-control{display:grid;gap:.3rem;min-height:52px;align-content:center;padding:.55rem;border:1px solid var(--line);border-radius:7px;background:var(--surface,#fff);color:var(--ink);opacity:.65}
+.amx-control-unavailable{font-size:.75rem;color:var(--muted)}
 @media(max-width:650px){.amx-workspace{padding:4px}.amx-screen{gap:.7%;padding:.8%;border-radius:3px}.amx-church-banner{gap:8px;padding:2%}.amx-church-banner strong{font-size:clamp(.8rem,4vw,1.5rem)}.amx-church-banner span{font-size:clamp(.58rem,2.9vw,1rem)}.amx-room-grid{gap:1%;padding:0 .5%}.amx-room-button{border-width:2px;font-size:clamp(.64rem,3vw,1rem);text-shadow:1px 1px 1px #45443c}.amx-status-bar{gap:4px}.amx-dsp-indicator{gap:2px}.amx-form-grid,.amx-action-editor{grid-template-columns:1fr}}
