@@ -4,7 +4,7 @@ import type { ModuleRegistration } from "../../module-registry";
 
 export const moduleRegistration: ModuleRegistration = {
   id: "amx",
-  name: "AMX control",
+  name: "AMX",
   icon: AudioLines,
   adminOnly: true,
   enabledByDefault: false,

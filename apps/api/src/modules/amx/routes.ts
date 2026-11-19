@@ -1,19 +1,27 @@
 import { isIP } from "node:net";
-import { Socket } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { pulseChannel } from "./icsp.js";
 
 type AmxAction = { id: string; name: string; command: string };
 type AmxSettings = { host: string; port: number; actions: AmxAction[] };
 const roomActions: AmxAction[] = [
-  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "" },
-  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "" },
-  { id: "conference-1", name: "Konferenzsaal 1", command: "" },
-  { id: "library", name: "Bibliothek", command: "" },
-  { id: "all-autonomous", name: "Alle Räume Autonom", command: "" },
-  { id: "conference-large", name: "Konferenz gross", command: "" },
+  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "PULSE[10001:1:0,11]" },
+  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "PULSE[10001:1:0,16]" },
+  { id: "conference-1", name: "Konferenzsaal 1", command: "PULSE[10001:1:0,13]" },
+  { id: "library", name: "Bibliothek", command: "PULSE[10001:1:0,12]" },
+  { id: "all-autonomous", name: "Alle Räume Autonom", command: "PULSE[10001:1:0,15]" },
+  { id: "conference-large", name: "Konferenz gross", command: "PULSE[10001:1:0,14]" },
 ];
-const defaultSettings: AmxSettings = { host: "10.2.14.10", port: 23, actions: roomActions };
+const defaultSettings: AmxSettings = { host: "", port: 1319, actions: roomActions };
+const pulseCommand = /^PULSE\s*\[(\d{1,5}):(\d{1,5}):(\d{1,5}),(\d{1,5})\]$/i;
+
+function validPulseCommand(command: string) {
+  const match = pulseCommand.exec(command.trim());
+  if (!match) return false;
+  const [device, port, system, channel] = match.slice(1).map(Number);
+  return device >= 1 && device <= 32767 && port >= 1 && port <= 255 && system <= 65535 && channel >= 1 && channel <= 65535;
+}
 
 function validHost(host: string) {
   if (!host || host.length > 253 || host.includes("://") || /[\s/@\\]/.test(host)) return false;
@@ -23,49 +31,19 @@ function validHost(host: string) {
 
 function cleanSettings(input: AmxSettings): AmxSettings | null {
   const host = input.host.trim();
-  if (!validHost(host) || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535 || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
+  if (!validHost(host) || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535 || input.port === 23 || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
   const ids = new Set<string>();
   const actions: AmxAction[] = [];
   for (const action of input.actions) {
     const preset = roomActions.find((item) => item.id === action?.id);
     if (!action || !preset || ids.has(action.id)
       || action.name !== preset.name
-      || typeof action.command !== "string" || action.command.length > 512
-      || /[\r\n\u0000]/.test(action.command)) return null;
+      || typeof action.command !== "string" || action.command.length > 80
+      || (action.command.trim() && !validPulseCommand(action.command))) return null;
     ids.add(action.id);
     actions.push({ id: action.id, name: preset.name, command: action.command.trim() });
   }
   return { host, port: input.port, actions: roomActions.map((preset) => actions.find((item) => item.id === preset.id)!) };
-}
-
-function sendCommand(host: string, port: number, command: string) {
-  return new Promise<void>((resolve, reject) => {
-    const socket = new Socket();
-    let settled = false;
-    let sent = false;
-    let received = "";
-    const finish = (error?: Error) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      if (error) reject(error); else resolve();
-    };
-    socket.setTimeout(5000, () => finish(new Error("The AMX controller did not return a Telnet prompt.")));
-    socket.on("data", (chunk) => {
-      received = `${received}${chunk.toString("utf8")}`.slice(-4096);
-      if (!sent && />\s*$/.test(received)) {
-        sent = true;
-        received = "";
-        socket.write(`${command}\r\n`);
-      } else if (sent && />\s*$/.test(received)) {
-        if (/unknown command|invalid command|not authorized|authentication failed/i.test(received)) finish(new Error("The AMX controller rejected the command."));
-        else finish();
-      }
-    });
-    socket.once("error", (error) => finish(new Error(`Could not reach the AMX controller: ${error.message}`)));
-    socket.once("close", () => { if (!settled) finish(new Error("The AMX controller closed the Telnet connection.")); });
-    socket.connect(port, host);
-  });
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
@@ -95,7 +73,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const result = await pool!.query("SELECT host,port,actions FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const row = result.rows[0] as { host: string; port: number; actions: AmxAction[] } | undefined;
-    return row ? { host: row.host, port: row.port, actions: row.actions } : defaultSettings;
+    return row ? { host: row.host, port: row.port === 23 ? 1319 : row.port, actions: row.actions } : defaultSettings;
   });
 
   app.put<{ Body: AmxSettings }>("/api/modules/amx/settings", {
@@ -110,7 +88,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await requireAmxAdmin(request, reply);
     if (!departmentId) return reply;
     const settings = cleanSettings(request.body);
-    if (!settings) return reply.code(400).send({ error: "Enter a valid controller host, port, and up to 40 actions. Commands must be a single line." });
+    if (!settings || settings.port === 23) return reply.code(400).send({ error: "Enter a valid controller host, ICSP TCP port, and room mappings using PULSE[device:port:system,channel]." });
     await pool!.query(`INSERT INTO amx_site_settings(department_id,host,port,actions) VALUES($1,$2,$3,$4::jsonb)
       ON CONFLICT(department_id) DO UPDATE SET host=EXCLUDED.host,port=EXCLUDED.port,actions=EXCLUDED.actions,updated_at=now()`,
     [departmentId, settings.host, settings.port, JSON.stringify(settings.actions)]);
@@ -124,12 +102,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await requireAmxAdmin(request, reply);
     if (!departmentId) return reply;
     const result = await pool!.query<{ host: string; port: number; actions: AmxAction[] }>("SELECT host,port,actions FROM amx_site_settings WHERE department_id=$1", [departmentId]);
-    const settings = result.rows[0];
-    const action = settings?.actions.find((item) => item.id === request.body.actionId);
-    if (!settings || !action) return reply.code(404).send({ error: "The AMX room action was not found." });
-    if (!action.command) return reply.code(409).send({ error: "Add the NetLinx command for this room under AMX module settings first." });
+    const storedSettings = result.rows[0];
+    const settings = storedSettings ? { ...storedSettings, port: storedSettings.port === 23 ? 1319 : storedSettings.port } : defaultSettings;
+    if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+    const action = settings.actions.find((item) => item.id === request.body.actionId);
+    if (!action) return reply.code(404).send({ error: "The AMX room action was not found." });
+    if (!action.command) return reply.code(409).send({ error: "Add the NetLinx device and channel mapping for this room under AMX module settings first." });
+    if (!validPulseCommand(action.command)) return reply.code(409).send({ error: "This saved room mapping is invalid. Replace it with PULSE[device:port:system,channel] in AMX module settings." });
     try {
-      await sendCommand(settings.host, settings.port, action.command);
+      const match = pulseCommand.exec(action.command.trim())!;
+      const [device, channelPort, system, channel] = match.slice(1).map(Number);
+      await pulseChannel(settings.host, settings.port, { device, port: channelPort, system }, channel);
       return { sent: true, actionId: action.id };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not send the AMX command." });
