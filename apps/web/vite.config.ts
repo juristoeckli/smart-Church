@@ -50,6 +50,7 @@ export default defineConfig(({ command }) => {
       emptyOutDir: true,
       rollupOptions: {
         input: resolve(appRoot, `src/modules/${optionalWebModule}/module.tsx`),
+        preserveEntrySignatures: "exports-only",
         external: ["react", "react/jsx-runtime"],
         output: { entryFileNames: "module.js", chunkFileNames: "assets/[name]-[hash].js", assetFileNames: "assets/[name]-[hash][extname]" },
       },
