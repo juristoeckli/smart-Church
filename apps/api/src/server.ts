@@ -153,9 +153,10 @@ async function currentUser(token: string | undefined): Promise<AuthenticatedUser
         WHERE token_hash = $1 AND expires_at > now()
         RETURNING user_id
      )
-     SELECT u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.can_change_password, u.date_time_format, u.language, u.language_is_custom, u.menu_preferences
-       FROM active_session s JOIN app_users u ON u.id = s.user_id
-      WHERE u.is_service_user = false AND u.is_enabled = true`,
+     UPDATE app_users u SET last_active_at = now()
+       FROM active_session s
+      WHERE u.id = s.user_id AND u.is_service_user = false AND u.is_enabled = true
+     RETURNING u.id, u.email, u.username, u.display_name, u.role, u.server_permissions, u.must_change_password, u.can_change_password, u.date_time_format, u.language, u.language_is_custom, u.menu_preferences`,
     [hashToken(token)],
   );
   const row = result.rows[0];
@@ -179,6 +180,7 @@ async function currentApiKeyUser(token: string | undefined, requestPath: string)
   if (row?.signage_display_account && !/^\/api\/signage\/device\//.test(requestPath)) return null;
   if (!row || !row.is_enabled || (!row.is_service_user && row.role !== "server_admin" && !(row.server_permissions ?? []).includes("server_api"))) return null;
   if (row.must_change_password && !row.is_service_user) return null;
+  await pool!.query("UPDATE app_users SET last_active_at = now() WHERE id = $1", [row.id]);
   return {
     id: row.id,
     ...(row.email ? { email: row.email } : {}),
@@ -308,6 +310,7 @@ async function createSession(userId: string, request: FastifyRequest, reply: { h
      VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5, now(), $6)`,
     [sessionId, userId, hashToken(token), sessionLifetimeSeconds, userAgent, clientIp],
   );
+  await pool!.query("UPDATE app_users SET last_active_at = now() WHERE id = $1", [userId]);
   if (clientIp) refreshSessionDnsName(sessionId, clientIp);
   setSessionCookie(reply, token, secure, sessionCookieNameFor(request));
 }
@@ -1527,7 +1530,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const result = await pool.query(
-    `SELECT u.id, u.email, u.username, u.display_name, u.first_name, u.last_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
+    `SELECT u.id, u.last_active_at, u.email, u.username, u.display_name, u.first_name, u.last_name, to_char(u.birthday, 'DD:MM:YYYY') AS birthday,
             u.street, u.street_number, u.postal_code, u.city, u.role AS account_role, u.server_permissions, u.is_service_user,
             u.service_user_owner_id, owner.display_name AS service_user_owner_name,
             u.api_key_hash IS NOT NULL AS api_key_enabled,
@@ -1553,7 +1556,7 @@ app.get("/api/users", async (request, reply): Promise<SiteUser[] | { error: stri
       ORDER BY u.display_name, u.email`,
     [request.authenticatedUser?.role],
   );
-  return result.rows.map((row) => ({ id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.is_service_user ? [] : row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, serviceUserOwnerName: row.service_user_owner_name ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships: row.memberships }));
+  return result.rows.map((row) => ({ id: row.id, lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers: row.phone_numbers, relationships: row.is_service_user ? [] : row.relationships, accountRole: row.account_role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, serviceUserOwnerName: row.service_user_owner_name ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships: row.memberships }));
 });
 
 app.post<{ Params: { id: string }; Body: { enabled: boolean } }>("/api/users/:id/api-key", {
@@ -1945,7 +1948,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
               must_change_password = CASE WHEN $21 THEN must_change_password ELSE false END,
               api_key_hash = CASE WHEN ($17 AND NOT $18) OR ($11 AND ($13 IS DISTINCT FROM is_service_user OR $14::UUID IS DISTINCT FROM service_user_owner_id OR (NOT $13 AND (role = 'server_admin' OR 'server_api' = ANY(server_permissions)) AND NOT ($10 = 'server_admin' OR 'server_api' = ANY($12::TEXT[]))))) THEN NULL ELSE api_key_hash END
         WHERE id = $1
-         RETURNING id, email, username, display_name, first_name, last_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
+         RETURNING id, last_active_at, email, username, display_name, first_name, last_name, to_char(birthday, 'DD:MM:YYYY') AS birthday,
                   street, street_number, postal_code, city, role, server_permissions, is_service_user, service_user_owner_id,
                    api_key_hash IS NOT NULL AS api_key_enabled, admin_note, is_enabled, can_change_password`,
       [request.params.id, email, username, displayName, birthdayToIso(isServiceUser ? undefined : birthday), isServiceUser ? null : street, isServiceUser ? null : streetNumber, isServiceUser ? null : postalCode, isServiceUser ? null : city, accountRole, request.authenticatedUser?.role === "server_admin", accountRole === "user" ? request.body.serverPermissions ?? [] : [], isServiceUser, serviceUserOwnerId, request.body.adminNote !== undefined, request.body.adminNote?.trim() || null, request.body.isEnabled !== undefined, isEnabled, firstName, lastName, canChangePassword],
@@ -1983,7 +1986,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
     if (updated.rows[0].is_service_user || !updated.rows[0].is_enabled) await client.query("DELETE FROM auth_sessions WHERE user_id=$1", [request.params.id]);
     await client.query("COMMIT");
     const row = updated.rows[0];
-    return { id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: row.is_service_user ? [] : await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships };
+    return { id: row.id, lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: row.is_service_user ? [] : await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships };
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An account with this username or email already exists, or the selected person is already linked to another account." });

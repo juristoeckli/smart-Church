@@ -152,6 +152,7 @@
 .settings-page .user-access-item{width:100%;gap:6px;padding:12px;border-radius:10px;text-align:left}
 .settings-page .user-access-item strong{color:var(--ink);font-size:12px}
 .settings-page .user-access-item small,.settings-page .user-access-item span{font-size:10px}
+.settings-page .user-access-item-last-active{color:var(--muted);font-weight:550}
 .settings-page .user-access-item-meta{display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px}
 .settings-page .user-access-item .user-account-state{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;background:var(--green-soft);color:var(--green);font-size:9px;font-weight:750;white-space:nowrap}
 .settings-page .user-access-item .user-account-state:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}

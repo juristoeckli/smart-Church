@@ -284,6 +284,7 @@ export type UserLanguage = "en" | "de" | "fr" | "it";
 
 export interface SiteUser {
   id: string;
+  lastActiveAt: string | null;
   email?: string;
   username?: string;
   displayName: string;
