@@ -96,6 +96,77 @@ manager_version_label() {
   printf 'Installed version: %s | Update branch: %s' "$version" "$branch"
 }
 
+manager_service_health() {
+  local service="$1" container_id state health
+  container_id="$(run_compose ps -q "$service" 2>/dev/null | head -n 1)"
+  if [[ -z "$container_id" ]]; then printf 'not created'; return; fi
+  state="$(docker inspect --format '{{.State.Status}}' "$container_id" 2>/dev/null || printf 'unknown')"
+  if [[ "$state" != running ]]; then printf '%s' "$state"; return; fi
+  health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}' "$container_id" 2>/dev/null || printf 'unknown')"
+  printf '%s' "$health"
+}
+
+manager_health_summary() {
+  printf 'DB %s  |  API %s  |  Web %s' \
+    "$(manager_service_health db)" \
+    "$(manager_service_health api)" \
+    "$(manager_service_health web)"
+}
+
+select_backup_path() {
+  local path choice custom_path index
+  local -a backup_paths=() menu_items=() text_labels=()
+  for path in "$root"/backups/*; do
+    [[ -d "$path" && -f "$path/database.dump" && -f "$path/storage.tar.gz" ]] && backup_paths+=("$path")
+  done
+
+  for ((index=${#backup_paths[@]}-1; index>=0; index--)); do
+    path="${backup_paths[$index]}"
+    menu_items+=("$index" "$(basename -- "$path") · $(du -sh -- "$path" 2>/dev/null | cut -f1)")
+    text_labels+=("$(basename -- "$path")")
+  done
+  menu_items+=(custom "Choose a custom path")
+  text_labels+=("Choose a custom path")
+  menu_items+=(cancel "Cancel")
+  text_labels+=("Cancel")
+
+  if command -v whiptail >/dev/null; then
+    choice="$(whiptail --title "Restore a backup" --menu "Select an available backup or enter a custom path." 22 78 14 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 1
+  elif command -v dialog >/dev/null; then
+    choice="$(dialog --title "Restore a backup" --menu "Select an available backup or enter a custom path." 22 78 14 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 1
+  else
+    printf '\nAvailable backups (newest first):\n' >/dev/tty
+    for ((index=0; index<${#backup_paths[@]}; index++)); do
+      printf '  %d) %s\n' "$((index + 1))" "${text_labels[$index]}" >/dev/tty
+    done
+    printf '  %d) Choose a custom path\n  %d) Cancel\n' \
+      "$(( ${#backup_paths[@]} + 1 ))" "$(( ${#backup_paths[@]} + 2 ))" >/dev/tty
+    read -r -p 'Select a backup: ' choice </dev/tty
+    if [[ "$choice" =~ ^[0-9]+$ ]]; then
+      if (( choice == ${#backup_paths[@]} + 1 )); then choice=custom
+      elif (( choice == ${#backup_paths[@]} + 2 )); then return 1
+      elif (( choice >= 1 && choice <= ${#backup_paths[@]} )); then choice=$(( ${#backup_paths[@]} - choice ))
+      else echo 'Choose a number shown in the list.' >/dev/tty; return 1
+      fi
+    fi
+  fi
+
+  if [[ "$choice" == custom ]]; then
+    if command -v whiptail >/dev/null; then
+      custom_path="$(whiptail --title "Custom backup path" --inputbox "Enter an absolute path or a path relative to the installation directory." 10 78 3>&1 1>&2 2>&3)" || return 1
+    elif command -v dialog >/dev/null; then
+      custom_path="$(dialog --title "Custom backup path" --inputbox "Enter an absolute path or a path relative to the installation directory." 10 78 3>&1 1>&2 2>&3)" || return 1
+    else
+      read -r -p 'Backup directory path: ' custom_path </dev/tty
+    fi
+    [[ -n "$custom_path" ]] || return 1
+    printf '%s' "$custom_path"
+    return 0
+  fi
+  [[ "$choice" != cancel && "$choice" =~ ^[0-9]+$ && -n "${backup_paths[$choice]:-}" ]] || return 1
+  printf '%s' "${backup_paths[$choice]}"
+}
+
 set_env_value() {
   local key="$1" value="$2" tmp
   tmp="$(mktemp .env.XXXXXX)"
@@ -494,52 +565,38 @@ module_manager() {
 }
 
 choose_action() {
-  local action prompt
-  prompt="$(manager_version_label)"
-  prompt+=$'\nChoose an operation'
-  if command -v whiptail >/dev/null; then
-    action="$(whiptail --title "Smart-Church Manager" --menu "$prompt" 24 78 13 \
-      health "Check database, API and web health" \
-      network "Manage listening ports and interface" \
-      branch "Select branch and update" \
-      modules "Install, enable, disable and configure modules" \
-      status "Show service status" \
-      start "Start services" \
-      stop "Stop services" \
-      restart "Restart services" \
-      logs "Follow service logs" \
-      backup "Create a backup" \
-      restore "Restore a backup" \
-      update "Update Smart-Church" \
-      uninstall "Uninstall Smart-Church" \
-      exit "Exit" 3>&1 1>&2 2>&3)" || return 1
-  elif command -v dialog >/dev/null; then
-    action="$(dialog --title "Smart-Church Manager" --menu "$prompt" 24 78 13 \
-      health "Check database, API and web health" \
-      network "Manage listening ports and interface" \
-      branch "Select branch and update" \
-      modules "Install, enable, disable and configure modules" \
-      status "Show service status" \
-      start "Start services" \
-      stop "Stop services" \
-      restart "Restart services" \
-      logs "Follow service logs" \
-      backup "Create a backup" \
-      restore "Restore a backup" \
-      update "Update Smart-Church" \
-      uninstall "Uninstall Smart-Church" \
-      exit "Exit" 3>&1 1>&2 2>&3)" || return 1
-  else
-    echo >/dev/tty
-    echo "Smart-Church Manager" >/dev/tty
-    echo "$prompt" >/dev/tty
-    echo "Install whiptail or dialog for a graphical terminal menu." >/dev/tty
-    select action in health network branch modules status start stop restart logs backup restore update uninstall exit; do
-      [[ -n "${action:-}" ]] && break
-      echo "Choose a number from the menu." >/dev/tty
-    done </dev/tty >/dev/tty
-  fi
-  printf '%s' "$action"
+  local selection="" status action health
+  while true; do
+    health="$(manager_health_summary)"
+    if [[ -n "${TERM:-}" && "$TERM" != dumb ]]; then printf '\033[H\033[2J' >/dev/tty; fi
+    {
+      printf 'Smart-Church Manager\n%s\n\n' "$(manager_version_label)"
+      printf 'Live health · refreshes every 5 seconds\n  %s\n\n' "$health"
+      printf ' 1) Health details          2) Network settings\n'
+      printf ' 3) Select branch           4) Modules\n'
+      printf ' 5) Service status          6) Start services\n'
+      printf ' 7) Stop services           8) Restart services\n'
+      printf ' 9) Follow logs            10) Create backup\n'
+      printf '11) Restore backup         12) Update Smart-Church\n'
+      printf '13) Uninstall              14) Exit\n\n'
+    } >/dev/tty
+    if IFS= read -e -r -t 5 -i "$selection" -p 'Select an operation: ' selection </dev/tty; then
+      case "$selection" in
+        1|health) action=health ;; 2|network) action=network ;; 3|branch) action=branch ;;
+        4|modules) action=modules ;; 5|status) action=status ;; 6|start) action=start ;;
+        7|stop) action=stop ;; 8|restart) action=restart ;; 9|logs) action=logs ;;
+        10|backup) action=backup ;; 11|restore) action=restore ;; 12|update) action=update ;;
+        13|uninstall) action=uninstall ;; 14|exit) action=exit ;;
+        *) printf '\nChoose an operation from 1 to 14.\n' >/dev/tty; selection=""; sleep 1; continue ;;
+      esac
+      printf '%s' "$action"
+      return 0
+    else
+      status=$?
+      if (( status > 128 )); then continue; fi
+      return 1
+    fi
+  done
 }
 
 while true; do
@@ -627,8 +684,8 @@ while true; do
     logs) run_compose logs --tail=200 --follow ;;
     backup) bash ./deploy/backup.sh ;;
     restore)
-      read -r -p "Absolute path to backup directory: " backup_path </dev/tty
-      [[ -n "$backup_path" ]] && bash ./deploy/restore.sh "$backup_path"
+      backup_path="$(select_backup_path)" || continue
+      bash ./deploy/restore.sh "$backup_path"
       ;;
     update)
       read -r -p "Release version to install [latest; current $(env_value SMART_CHURCH_VERSION)]: " version </dev/tty
