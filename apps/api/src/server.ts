@@ -2114,7 +2114,14 @@ app.get("/api/installation/modules", async (request, reply) => {
   if (!databaseReady || !pool || !installationId) return reply.code(503).send({ error: "The installation catalog is unavailable." });
   if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const modules = await pool.query("SELECT module_id AS id,version,enabled,required FROM installation_modules WHERE installation_id=$1 AND client_managed=TRUE ORDER BY module_id", [installationId]);
-  return { modules: modules.rows.filter(module => getRegisteredServerModuleIds().includes(module.id)) };
+  const registered = new Set(getRegisteredServerModuleIds());
+  return {
+    modules: modules.rows.filter(module => registered.has(module.id)),
+    problems: modules.rows.filter(module => !registered.has(module.id)).map(module => ({
+      id: module.id,
+      message: "The module is installed but its API component did not register. Check the API logs and restart the API after resolving the registration error.",
+    })),
+  };
 });
 
 app.put<{ Body: { moduleIds: string[] } }>("/api/installation/modules", {
