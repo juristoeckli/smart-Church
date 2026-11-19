@@ -58,10 +58,10 @@ export default defineConfig(({ command }) => {
       emptyOutDir: true,
       rollupOptions: {
         input: {
-          react: resolve(appRoot, "node_modules/react/index.js"),
-          "jsx-runtime": resolve(appRoot, "node_modules/react/jsx-runtime.js"),
+          react: resolve(appRoot, "src/react-runtime/react.ts"),
+          "jsx-runtime": resolve(appRoot, "src/react-runtime/jsx-runtime.ts"),
         },
-        external: ["react"],
+        preserveEntrySignatures: "exports-only",
         output: { entryFileNames: "[name].js", chunkFileNames: "assets/[name]-[hash].js" },
       },
     } : {
