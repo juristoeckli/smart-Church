@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 import type { LocationPermission } from "@smart-church/contracts";
 import type { ManagedWorkerDiagnostics } from "../runtime-diagnostics.js";
+import { IsolatedModuleProcess } from "./isolated-module-process.js";
 
 export type ModuleReplicationAdapter = {
   moduleId: string;
@@ -91,9 +92,11 @@ export interface ServerModuleManifest {
   };
   runtimeDependencies?: string[];
   serverEntry?: string;
+  workerEntry?: string;
+  accessGrants?: string[];
 }
 
-type DiscoveredModule = { id: string; root: string; manifest: ServerModuleManifest; entry: string };
+type DiscoveredModule = { id: string; root: string; manifest: ServerModuleManifest; entry?: string; workerEntry?: string };
 const requiredServerModuleIds = new Set<string>();
 const registeredServerModuleIds = new Set<string>();
 export function getRegisteredServerModuleIds() { return [...registeredServerModuleIds]; }
@@ -225,6 +228,9 @@ function validateManifest(value: unknown, directoryName: string): ServerModuleMa
   if (manifest.runtimeDependencies !== undefined && (!Array.isArray(manifest.runtimeDependencies) || manifest.runtimeDependencies.some((item) => typeof item !== "string" || !item.trim()))) {
     throw new Error("Runtime dependencies must be non-empty strings.");
   }
+  if (manifest.accessGrants !== undefined && (!Array.isArray(manifest.accessGrants) || manifest.accessGrants.some((item) => typeof item !== "string" || !/^[a-z0-9][a-z0-9_-]{0,79}$/.test(item)) || new Set(manifest.accessGrants).size !== manifest.accessGrants.length)) {
+    throw new Error("Access grants must be a unique list of lowercase grant IDs.");
+  }
   return { ...manifest, dependencies } as ServerModuleManifest;
 }
 
@@ -297,11 +303,20 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
         manifestIds.add(manifest.id);
         if (manifest.required) requiredServerModuleIds.add(manifest.id);
         requiredModuleDependencies.set(manifest.id, manifest.dependencies?.required ?? []);
-        if (!manifest.serverEntry) continue;
-        if (manifest.serverEntry.includes("..") || !/^\.\/[-a-zA-Z0-9._]+\.ts$/.test(manifest.serverEntry)) throw new Error("The server entry must be a module-local TypeScript file.");
-        const entry = resolve(moduleRoot, manifest.serverEntry.slice(2));
-        if (!entry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The server entry must stay inside its module folder.");
-        discovered.push({ id: manifest.id, root: moduleRoot, manifest, entry });
+        let entry: string | undefined;
+        let workerEntry: string | undefined;
+        if (manifest.serverEntry) {
+          if (manifest.serverEntry.includes("..") || !/^\.\/[-a-zA-Z0-9._]+\.ts$/.test(manifest.serverEntry)) throw new Error("The server entry must be a module-local TypeScript file.");
+          entry = resolve(moduleRoot, manifest.serverEntry.slice(2));
+          if (!entry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The server entry must stay inside its module folder.");
+        }
+        if (manifest.workerEntry) {
+          if (manifest.workerEntry.includes("..") || !/^\.\/[-a-zA-Z0-9._]+\.js$/.test(manifest.workerEntry)) throw new Error("The worker entry must be a module-local JavaScript file.");
+          workerEntry = resolve(moduleRoot, manifest.workerEntry.slice(2));
+          if (!workerEntry.startsWith(`${moduleRoot}${sep}`)) throw new Error("The worker entry must stay inside its module folder.");
+        }
+        if (entry && workerEntry) throw new Error("Choose an in-process server entry or an isolated worker entry, not both.");
+        discovered.push({ id: manifest.id, root: moduleRoot, manifest, ...(entry ? { entry } : {}), ...(workerEntry ? { workerEntry } : {}) });
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         invalid.add(directory.name);
@@ -385,7 +400,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
     );
   }
   for (const module of ordered) {
-    const { id: moduleId, root: moduleRoot, manifest, entry } = module;
+    const { id: moduleId, root: moduleRoot, manifest, entry, workerEntry } = module;
     try {
       if (context.pool && context.isDatabaseReady()) {
         const migrationsRoot = join(moduleRoot, "migrations");
@@ -414,6 +429,36 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           } finally { client.release(); }
         }
         await installSiteWriteFenceTriggers(context.pool);
+      }
+      if (!entry) {
+        if (workerEntry) {
+          const worker = new IsolatedModuleProcess(moduleId, moduleRoot, workerEntry.slice(moduleRoot.length + 1), (message) => app.log.error({ module: moduleId, message }, "Isolated module process log."));
+          const alwaysEnabled = manifest.required || manifest.clientManaged === false;
+          const unsubscribe = alwaysEnabled ? () => undefined : onServerModuleActivationChange(moduleId, (enabled) => worker.setEnabled(enabled));
+          worker.setEnabled(alwaysEnabled || isServerModuleEnabled(moduleId));
+          const unregisterWorker = context.workers.register(moduleId, manifest.name ?? moduleId, () => worker.diagnostics, () => worker.restart());
+          app.addHook("onClose", async () => { unsubscribe(); unregisterWorker(); worker.close(); });
+          app.all(`/api/modules/${moduleId}/*`, async (request, reply) => {
+            if (!alwaysEnabled && !isServerModuleEnabled(moduleId)) return reply.code(404).send({ error: "This module is not enabled for this installation." });
+            const method = request.method.toUpperCase();
+            if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return reply.code(405).send({ error: "Method not allowed." });
+            if (method !== "GET" && !context.validateMutation(request, reply)) return reply;
+            const departmentId = await context.resolveDepartmentId(request, reply);
+            if (!departmentId) return reply;
+            const grants = request.activeDepartmentModulePermissions?.[moduleId] ?? [];
+            if (request.activeDepartmentRole !== "site_admin" && manifest.accessGrants?.length && !manifest.accessGrants.some((grant) => grants.includes(grant))) return reply.code(403).send({ error: "You do not have access to this module." });
+            try {
+              const result = await worker.proxy(method, request.url, request.body, departmentId, request.authenticatedUser?.id ?? "", grants);
+              return reply.code(result.status).type(result.contentType).send(result.body);
+            } catch (error) {
+              return reply.code(503).send({ error: error instanceof Error ? error.message : "The module process is unavailable." });
+            }
+          });
+        }
+        registered.add(moduleId);
+        registeredServerModuleIds.add(moduleId);
+        app.log.info({ module: moduleId }, "Module manifest registered without API routes.");
+        continue;
       }
       const loaded = await import(pathToFileURL(entry).href) as { registerModuleRoutes?: (app: FastifyInstance, context: ModuleServerContext) => void };
       if (typeof loaded.registerModuleRoutes !== "function") throw new Error("The server entry must export registerModuleRoutes(app, context).");

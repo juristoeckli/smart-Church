@@ -2086,6 +2086,11 @@ app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?
   }
 });
 
+function availableDepartmentModules(enabledModules: string[] | null | undefined) {
+  const registered = new Set(getRegisteredServerModuleIds());
+  return (enabledModules ?? []).filter((moduleId) => registered.has(moduleId) && isServerModuleEnabled(moduleId));
+}
+
 app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Configure DATABASE_URL to load locations." });
   if (hasServerPermission(request, "server_manage")) {
@@ -2097,7 +2102,7 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
         ORDER BY d.name`,
       [request.authenticatedUser?.id],
     );
-    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions }));
+    return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: availableDepartmentModules(row.enabled_modules), permissions: row.permissions, videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions }));
   }
   const result = await pool.query(
     `SELECT d.id, d.name, d.time_zone, d.enabled_modules, m.role, m.permissions, m.video_permissions, m.presenter_permissions, m.module_permissions
@@ -2107,7 +2112,7 @@ app.get("/api/departments", async (request, reply): Promise<DepartmentProfile[] 
       ORDER BY d.name`,
     [request.authenticatedUser?.id],
   );
-  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
+  return result.rows.map((row) => ({ id: row.id, location: row.name, timeZone: row.time_zone, role: row.role, enabledModules: availableDepartmentModules(row.enabled_modules), permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} }));
 });
 
 app.get("/api/installation/modules", async (request, reply) => {
@@ -2259,7 +2264,7 @@ app.post<{ Body: CreateDepartment }>("/api/departments", {
     );
     await client.query("COMMIT");
     const row = result.rows[0];
-    return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin", enabledModules: row.enabled_modules, videoPermissions: [] });
+    return reply.code(201).send({ id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin", enabledModules: availableDepartmentModules(row.enabled_modules), videoPermissions: [] });
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -2291,7 +2296,7 @@ app.get("/api/department", async (request, reply): Promise<DepartmentProfile | {
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: row.enabled_modules, permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: row.role ?? "unassigned", enabledModules: availableDepartmentModules(row.enabled_modules), permissions: row.permissions ?? [], videoPermissions: row.video_permissions, presenterPermissions: row.presenter_permissions, modulePermissions: row.module_permissions ?? {} };
 });
 
 app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
@@ -2325,7 +2330,7 @@ app.put<{ Body: UpdateDepartmentProfile }>("/api/department", {
   );
   const row = result.rows[0];
   if (!row) return reply.code(404).send({ error: "The configured department could not be found." });
-  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin", enabledModules: row.enabled_modules };
+  return { id: row.id, location: row.name, timeZone: row.time_zone, role: "site_admin", enabledModules: availableDepartmentModules(row.enabled_modules) };
 });
 
 app.get("/api/branding", async (_request, reply): Promise<{ logoDataUrl: string | null } | { error: string }> => {

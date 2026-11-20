@@ -61,6 +61,9 @@ build_compose_args() {
   if [[ -f deploy/compose.remote-desktop.yaml ]] && grep -q '^SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED=1' .env; then
     compose_files+=(-f deploy/compose.remote-desktop.yaml)
   fi
+  if [[ -f deploy/compose.module-packages.yaml ]]; then
+    compose_files+=(-f deploy/compose.module-packages.yaml)
+  fi
   if [[ -f apps/api/src/modules/video-steffisburg/compose.yaml ]] && grep -q '^SMART_CHURCH_STREAMING_CONFIG_PATH=' .env; then
     compose_files+=(-f apps/api/src/modules/video-steffisburg/compose.yaml)
   fi
@@ -415,51 +418,395 @@ configure_module_settings() {
   "$function_name" "$@"
 }
 
+module_package_tool() {
+  local archive="$1" python_script
+  shift
+  python_script="$(cat <<'PY'
+import json
+import fcntl
+import os
+import re
+import shutil
+import sys
+import tarfile
+import tempfile
+from pathlib import Path, PurePosixPath
+
+MODULES = Path('/modules')
+ID_RE = re.compile(r'^[a-z0-9][a-z0-9-]*$')
+SEMVER_RE = re.compile(r'^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$')
+MAX_ARCHIVE = 100 * 1024 * 1024
+MAX_EXPANDED = 512 * 1024 * 1024
+MAX_ENTRIES = 10000
+
+def fail(message):
+    raise SystemExit(message)
+
+def safe_member_name(name):
+    if not name or '\\' in name or name.startswith('/') or '\x00' in name:
+        fail('Archive contains an unsafe path.')
+    trimmed = name[:-1] if name.endswith('/') else name
+    pieces = trimmed.split('/')
+    if not trimmed or any(piece in ('', '.', '..') for piece in pieces):
+        fail('Archive contains an unsafe path.')
+    path = PurePosixPath(trimmed)
+    if path.is_absolute() or any(part == '..' for part in path.parts):
+        fail('Archive contains an unsafe path.')
+    return trimmed
+
+def read_package(archive_path):
+    archive = Path(archive_path)
+    if not archive.is_file() or archive.stat().st_size > MAX_ARCHIVE:
+        fail('Module archive is missing or exceeds the 100 MiB limit.')
+    try:
+        tar = tarfile.open(archive, mode='r:gz')
+    except (tarfile.TarError, OSError) as error:
+        fail('Could not read a gzip tar archive: ' + str(error))
+    members = []
+    names = set()
+    expanded = 0
+    manifest_member = None
+    web_present = False
+    web_entry = False
+    for member in tar:
+        name = safe_member_name(member.name)
+        if name in names:
+            fail('Archive contains duplicate paths.')
+        names.add(name)
+        if len(names) > MAX_ENTRIES:
+            fail('Archive contains too many entries.')
+        if not (member.isdir() or member.isfile()):
+            fail('Archive links and special files are not allowed.')
+        allowed = name == 'manifest.json' or name == 'web' or name.startswith('web/') or '/' not in name
+        if not allowed:
+            fail('Archive paths must be root files or be under web/.')
+        if '/' not in name and name != 'manifest.json' and (member.isdir() or not re.fullmatch(r'[A-Za-z0-9._-]+', name)):
+            fail('Root package entries must be regular files with simple names.')
+        if name == 'web' and not member.isdir():
+            fail('web must be a directory.')
+        if name == 'web' or name.startswith('web/'):
+            web_present = True
+            child = name[4:] if name.startswith('web/') else ''
+            if child and child not in ('module.js', 'module.css', 'assets') and not child.startswith('assets/'):
+                fail('The web/ folder may contain only module.js, module.css, and assets/.')
+            if name == 'web/module.js' and member.isfile():
+                web_entry = True
+        if member.isfile():
+            if member.size < 0:
+                fail('Archive contains an invalid file size.')
+            expanded += member.size
+            if expanded > MAX_EXPANDED:
+                fail('Expanded module package exceeds the 512 MiB limit.')
+        if name == 'manifest.json':
+            if not member.isfile() or member.size > 1024 * 1024:
+                fail('manifest.json must be a regular file no larger than 1 MiB.')
+            manifest_member = member
+        members.append((member, name))
+    if manifest_member is None:
+        fail('Module archive must contain manifest.json at its root.')
+    if not web_present or not web_entry:
+        fail('External module packages must contain web/module.js.')
+    source = tar.extractfile(manifest_member)
+    if source is None:
+        fail('Could not read manifest.json.')
+    try:
+        manifest = json.load(source)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        fail('manifest.json is not valid UTF-8 JSON: ' + str(error))
+    if not isinstance(manifest, dict):
+        fail('manifest.json must contain a JSON object.')
+    module_id = manifest.get('id')
+    version = manifest.get('version')
+    worker_entry = manifest.get('workerEntry')
+    if not isinstance(module_id, str) or not ID_RE.fullmatch(module_id):
+        fail('Module manifest ID must match ^[a-z0-9][a-z0-9-]*$.')
+    if not isinstance(version, str) or not SEMVER_RE.fullmatch(version):
+        fail('Module manifest version must be semantic versioning (for example 1.2.3).')
+    if 'serverEntry' in manifest:
+        fail('serverEntry is not allowed; in-process API modules are not isolated.')
+    if manifest.get('required') is True or manifest.get('enabledByDefault') is True:
+        fail('External packages must remain optional and disabled until a Server Administrator enables them.')
+    if manifest.get('clientManaged') is False:
+        fail('External packages must be client-managed so they can be enabled in Settings → Modules.')
+    if not isinstance(worker_entry, str) or not re.fullmatch(r'\./[A-Za-z0-9._-]+\.js', worker_entry) or '..' in worker_entry:
+        fail('Module manifest must declare a module-local workerEntry such as ./worker.js.')
+    worker_name = worker_entry[2:]
+    if not any(name == worker_name and member.isfile() for member, name in members):
+        fail('The workerEntry file is missing from the archive root.')
+    return tar, members, manifest, module_id, web_present
+
+def inspect():
+    tar, _, manifest, module_id, _ = read_package('/package.tar.gz')
+    tar.close()
+    print(module_id)
+
+def install():
+    tar, members, manifest, module_id, web_present = read_package('/package.tar.gz')
+    web_root = MODULES / '.web'
+    if web_root.exists() and (web_root.is_symlink() or not web_root.is_dir()):
+        fail('The shared module web directory is not a regular directory.')
+    target = MODULES / module_id
+    web_target = web_root / module_id
+    if target.exists() or target.is_symlink() or web_target.exists() or web_target.is_symlink():
+        fail('That module ID is already installed. Uninstall it before replacing it.')
+    MODULES.mkdir(parents=True, exist_ok=True)
+    web_root.mkdir(parents=True, exist_ok=True)
+    stage = Path(tempfile.mkdtemp(prefix='.module-package-', dir=MODULES))
+    stage_module = stage / module_id
+    stage_web = stage / 'web'
+    stage_module.mkdir()
+    if web_present:
+        stage_web.mkdir()
+    try:
+        for member, name in members:
+            if member.isdir():
+                if name == 'manifest.json':
+                    fail('manifest.json must be a regular file.')
+                if name.startswith('web/') and web_present:
+                    relative = name[4:]
+                    if relative:
+                        (stage_web / relative).mkdir(parents=True, exist_ok=True)
+                continue
+            if name == 'manifest.json':
+                destination = stage_module / name
+            elif name.startswith('web/'):
+                destination = stage_web / name[4:]
+            elif '/' not in name:
+                destination = stage_module / name
+            else:
+                fail('Archive contains an unsupported file.')
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            source = tar.extractfile(member)
+            if source is None:
+                fail('Could not read an archive file.')
+            with source, destination.open('xb') as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+        os.chmod(stage_module, 0o755)
+        if web_present:
+            os.chmod(stage_web, 0o755)
+        if web_present:
+            os.replace(stage_web, web_target)
+        try:
+            os.replace(stage_module, target)
+        except Exception:
+            if web_present and web_target.exists():
+                shutil.rmtree(web_target)
+            raise
+        print(module_id)
+    finally:
+        tar.close()
+        shutil.rmtree(stage, ignore_errors=True)
+
+def valid_id(module_id):
+    if not isinstance(module_id, str) or not ID_RE.fullmatch(module_id):
+        fail('Invalid module ID.')
+    return module_id
+
+def uninstall(module_id):
+    module_id = valid_id(module_id)
+    target = MODULES / module_id
+    web_root = MODULES / '.web'
+    web_target = web_root / module_id
+    removed = False
+    for path in (target, web_target):
+        if path.is_symlink():
+            fail('Refusing to remove a symbolic link.')
+        if path.exists():
+            if not path.is_dir():
+                fail('Refusing to remove a non-directory module path.')
+            shutil.rmtree(path)
+            removed = True
+    if not removed:
+        fail('No installed package was found with that exact ID.')
+    print(module_id)
+
+def list_installed():
+    if not MODULES.is_dir():
+        return
+    for path in sorted(MODULES.iterdir()):
+        if not path.is_dir() or path.is_symlink() or not ID_RE.fullmatch(path.name):
+            continue
+        try:
+            manifest = json.loads((path / 'manifest.json').read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(manifest, dict) and manifest.get('id') == path.name and 'serverEntry' not in manifest:
+            print(path.name)
+
+operation = sys.argv[1] if len(sys.argv) > 1 else ''
+if operation in ('install', 'uninstall'):
+    MODULES.mkdir(parents=True, exist_ok=True)
+    lock = open(MODULES / '.module-package.lock', 'a')
+    fcntl.flock(lock, fcntl.LOCK_EX)
+if operation == 'inspect' and len(sys.argv) == 2:
+    inspect()
+elif operation == 'install' and len(sys.argv) == 2:
+    install()
+elif operation == 'uninstall' and len(sys.argv) == 3:
+    uninstall(sys.argv[2])
+elif operation == 'list' and len(sys.argv) == 2:
+    list_installed()
+else:
+    fail('Invalid module package operation.')
+PY
+)"
+  run_compose --profile module-packages run --rm -v "$archive:/package.tar.gz:ro" module-package-tools -c "$python_script" "$@"
+}
+
+install_external_module_package() {
+  local source archive temporary_dir module_id installed catalog_query catalog_count
+  read -r -p "Local .tar.gz path or HTTPS URL: " source </dev/tty
+  [[ -n "$source" ]] || { echo "Package source is required." >&2; return 1; }
+  temporary_dir="$(mktemp -d)"
+  archive="$temporary_dir/package.tar.gz"
+  chmod 700 "$temporary_dir"
+  if [[ "$source" =~ ^https:// ]]; then
+    command -v curl >/dev/null || { rm -rf "$temporary_dir"; echo "curl is required to download module packages." >&2; return 1; }
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 300 --max-filesize 104857600 --retry 3 "$source" -o "$archive"; then
+      rm -rf "$temporary_dir"
+      echo "Could not download the HTTPS module package." >&2
+      return 1
+    fi
+  elif [[ "$source" =~ ^[A-Za-z][A-Za-z0-9+.-]*:// ]]; then
+    rm -rf "$temporary_dir"
+    echo "Module package URLs must use HTTPS." >&2
+    return 1
+  else
+    [[ -f "$source" ]] || { rm -rf "$temporary_dir"; echo "Local module archive was not found." >&2; return 1; }
+    archive="$(realpath -- "$source")"
+  fi
+  if ! module_id="$(module_package_tool "$archive" inspect)"; then
+    rm -rf "$temporary_dir"
+    return 1
+  fi
+  [[ "$module_id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { rm -rf "$temporary_dir"; echo "The package validator returned an invalid ID." >&2; return 1; }
+  run_compose exec -T db sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null || {
+    rm -rf "$temporary_dir"
+    echo "Start the Smart-Church database before installing an external module package so its ID can be checked against the installation catalog." >&2
+    return 1
+  }
+  catalog_query="SELECT CASE WHEN count(*)=0 THEN -1 ELSE count(*) FILTER (WHERE module_id='$module_id') END FROM installation_modules WHERE installation_id=(SELECT id FROM installations WHERE is_current=TRUE)"
+  if ! catalog_count="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$catalog_query" | tr -d '\r')"; then
+    rm -rf "$temporary_dir"
+    return 1
+  fi
+  [[ "$catalog_count" == 0 ]] || {
+    rm -rf "$temporary_dir"
+    if [[ "$catalog_count" == -1 ]]; then
+      echo "Start the API and let it populate the module catalog before installing an external package." >&2
+      return 1
+    fi
+    echo "Module ID $module_id is already registered in this installation. Choose a different ID." >&2
+    return 1
+  }
+  if ! installed="$(module_package_tool "$archive" install)"; then
+    rm -rf "$temporary_dir"
+    return 1
+  fi
+  [[ "$installed" == "$module_id" ]] || { rm -rf "$temporary_dir"; echo "Installed module ID did not match the inspected package." >&2; return 1; }
+  rm -rf "$temporary_dir"
+  run_compose up -d api web || return 1
+  run_compose restart api web || return 1
+  echo "Installed module package $module_id. It remains disabled until a Server Administrator enables it in Settings → Modules."
+  echo "Any database data owned by the module was left untouched."
+}
+
+uninstall_external_module_package() {
+  local installed module_id confirmation archive
+  archive="$(mktemp)"
+  if ! installed="$(module_package_tool "$archive" list)"; then
+    rm -f "$archive"
+    return 1
+  fi
+  rm -f "$archive"
+  [[ -n "$installed" ]] || { echo "No external module packages are installed."; return 0; }
+  if command -v whiptail >/dev/null; then
+    local -a choices=()
+    while IFS= read -r module_id; do [[ -n "$module_id" ]] && choices+=("$module_id" "$module_id"); done <<< "$installed"
+    module_id="$(whiptail --title "Uninstall module package" --menu "Select the exact module ID. Its database data will be kept." 16 72 8 "${choices[@]}" 3>&1 1>&2 2>&3)" || return 0
+  elif command -v dialog >/dev/null; then
+    local -a choices=()
+    while IFS= read -r module_id; do [[ -n "$module_id" ]] && choices+=("$module_id" "$module_id"); done <<< "$installed"
+    module_id="$(dialog --title "Uninstall module package" --menu "Select the exact module ID. Its database data will be kept." 16 72 8 "${choices[@]}" 3>&1 1>&2 2>&3)" || return 0
+  else
+    printf 'Installed external module packages:\n%s\n' "$installed"
+    read -r -p "Exact module ID to uninstall: " module_id </dev/tty
+  fi
+  grep -Fxq -- "$module_id" <<< "$installed" || { echo "Select an installed package ID exactly as listed." >&2; return 1; }
+  read -r -p "Type '$module_id' to remove its package files (database data stays): " confirmation </dev/tty
+  [[ "$confirmation" == "$module_id" ]] || { echo "Uninstall cancelled."; return 0; }
+  run_compose exec -T db sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null || {
+    echo "Start the Smart-Church database before uninstalling an external module package." >&2
+    return 1
+  }
+  local enabled_query enabled_state
+  enabled_query="SELECT enabled FROM installation_modules WHERE installation_id=(SELECT id FROM installations WHERE is_current=TRUE) AND module_id='$module_id' AND client_managed=TRUE"
+  enabled_state="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$enabled_query" | tr -d '\r')"
+  [[ "$enabled_state" == t || "$enabled_state" == f ]] || { echo "The API module catalog has no record for $module_id. Start the API and refresh the package list before uninstalling." >&2; return 1; }
+  [[ "$enabled_state" != t ]] || { echo "Disable $module_id in Settings → Modules before uninstalling its package." >&2; return 1; }
+  archive="$(mktemp)"
+  if ! module_package_tool "$archive" uninstall "$module_id"; then
+    rm -f "$archive"
+    return 1
+  fi
+  rm -f "$archive"
+  run_compose up -d api web || return 1
+  run_compose restart api web || return 1
+  echo "Uninstalled package files for $module_id. Database data was left untouched."
+}
+
 module_manager() {
   local department_id department_name amx_state video_state remote_desktop_state presenter_state action module_id key
   department_id="$(env_value SMART_CHURCH_DEPARTMENT_ID)"
   department_name="$(env_value SMART_CHURCH_DEPARTMENT_NAME)"
-  [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "SMART_CHURCH_DEPARTMENT_ID is missing or invalid in .env." >&2; return 1; }
-  run_compose exec -T db sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null || {
-    echo "Start the Smart-Church database before managing modules." >&2
-    return 1
-  }
-  video_state=disabled
-  remote_desktop_state=not-installed
-  presenter_state=disabled
-  amx_state=not-installed
-  if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
-    amx_state=disabled
-    module_enabled "$department_id" amx && amx_state=enabled
-  fi
-  module_enabled "$department_id" video-steffisburg && video_state=enabled
-  if [[ "$(env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED)" == 1 ]]; then
-    remote_desktop_state=disabled
-    module_enabled "$department_id" remote-desktop && remote_desktop_state=enabled
-  fi
-  module_enabled "$department_id" presenter && presenter_state=enabled
-
   while true; do
     if command -v whiptail >/dev/null; then
-      action="$(whiptail --title "Smart-Church Module Manager" --menu "Primary location: ${department_name:-not configured}. Install downloads and enables a module; disable keeps its settings." 16 78 4 \
+      action="$(whiptail --title "Smart-Church Module Manager" --menu "Install bundled modules or manage an external worker package." 20 78 6 \
         enable "Install / enable module" \
         disable "Disable module" \
         settings "Change module settings" \
+        package-install "Install external package" \
+        package-remove "Uninstall external package" \
         back "Return to manager" 3>&1 1>&2 2>&3)" || return 0
     elif command -v dialog >/dev/null; then
-      action="$(dialog --title "Smart-Church Module Manager" --menu "Primary location: ${department_name:-not configured}. Install downloads and enables a module; disable keeps its settings." 16 78 4 \
+      action="$(dialog --title "Smart-Church Module Manager" --menu "Install bundled modules or manage an external worker package." 20 78 6 \
         enable "Install / enable module" \
         disable "Disable module" \
         settings "Change module settings" \
+        package-install "Install external package" \
+        package-remove "Uninstall external package" \
         back "Return to manager" 3>&1 1>&2 2>&3)" || return 0
     else
-      echo "Primary location: ${department_name:-not configured}; AMX: $amx_state; Video & streaming: $video_state; Remote desktop: $remote_desktop_state; Presenter: $presenter_state" >/dev/tty
-      select action in enable disable settings back; do
+      echo "Primary location: ${department_name:-not configured}" >/dev/tty
+      select action in enable disable settings package-install package-remove back; do
         [[ -n "${action:-}" ]] && break
         echo "Choose a number from the menu." >/dev/tty
       done </dev/tty >/dev/tty
     fi
     [[ "$action" == back ]] && return 0
+    case "$action" in
+      package-install) install_external_module_package || true; continue ;;
+      package-remove) uninstall_external_module_package || true; continue ;;
+    esac
+    [[ "$department_id" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "SMART_CHURCH_DEPARTMENT_ID is missing or invalid in .env." >&2; return 1; }
+    run_compose exec -T db sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"' >/dev/null || {
+      echo "Start the Smart-Church database before managing bundled modules." >&2
+      return 1
+    }
+    video_state=disabled
+    remote_desktop_state=not-installed
+    presenter_state=disabled
+    amx_state=not-installed
+    if [[ "$(env_value SMART_CHURCH_USE_AMX_MODULE)" == 1 ]]; then
+      amx_state=disabled
+      module_enabled "$department_id" amx && amx_state=enabled
+    fi
+    module_enabled "$department_id" video-steffisburg && video_state=enabled
+    if [[ "$(env_value SMART_CHURCH_REMOTE_DESKTOP_MODULE_INSTALLED)" == 1 ]]; then
+      remote_desktop_state=disabled
+      module_enabled "$department_id" remote-desktop && remote_desktop_state=enabled
+    fi
+    module_enabled "$department_id" presenter && presenter_state=enabled
     module_id="$(select_module "$amx_state" "$video_state" "$remote_desktop_state" "$presenter_state")" || continue
     [[ "$module_id" == back ]] && continue
     case "$action:$module_id" in

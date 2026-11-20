@@ -108,6 +108,7 @@
 .service-status-pending{background:#e0b65f;box-shadow:0 0 0 3px rgb(224 182 95 / 13%)}
 .module-site-picker{display:grid;grid-template-columns:90px minmax(0,1fr);align-items:center;gap:10px;max-width:540px;margin:18px 0;color:var(--muted);font-size:11px}
 .module-site-picker select{width:100%;min-height:38px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink)}
+.module-management-help{margin:5px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
 .settings-module-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr));gap:9px;margin:14px 0}
 .settings-module-option{display:flex;align-items:flex-start;gap:10px;min-height:64px;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--panel);cursor:pointer}
 .settings-module-option:has(input:disabled){cursor:default}

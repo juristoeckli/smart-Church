@@ -114,7 +114,6 @@ export function ModuleTranslationHost({ children, translations, language }: { ch
 }
 
 const registrations = import.meta.glob<{ moduleRegistration: ModuleRegistration }>(["./modules/*/module.tsx", "!./modules/amx/module.tsx", "!./modules/remote-desktop/module.tsx"]);
-const separatelyPackagedModules = new Set(["amx", "remote-desktop"]);
 
 export const registeredModules: ModuleRegistration[] = [];
 const loadedModules = new Map<string, Promise<ModuleRegistration | null>>();
@@ -142,7 +141,7 @@ async function loadOptionalModuleStylesheet(moduleId: string) {
 }
 
 export async function loadRegisteredModules(moduleIds: string[]) {
-  const requested = new Set(moduleIds);
+  const requested = new Set(moduleIds.filter((moduleId) => /^[a-z0-9][a-z0-9-]*$/.test(moduleId)));
   const bundledMatches = Object.entries(registrations).filter(([path]) => requested.has(path.split("/").at(-2) ?? ""));
   const bundledIds = new Set(bundledMatches.map(([path]) => path.split("/").at(-2) ?? ""));
   const bundledModules = await Promise.all(bundledMatches.map(async ([path, load]) => {
@@ -154,7 +153,10 @@ export async function loadRegisteredModules(moduleIds: string[]) {
       return [moduleId, null] as const;
     }
   }));
-  const optionalModules = await Promise.all([...requested].filter((id) => separatelyPackagedModules.has(id) && !bundledIds.has(id)).map(async (moduleId) => {
+  // Any installed module absent from the core bundle is loaded from its own web bundle.
+  // This lets a module ship from a separate repository without adding its ID to Core.
+  const externalModuleIds = [...requested].filter((id) => !bundledIds.has(id));
+  const optionalModules = await Promise.all(externalModuleIds.map(async (moduleId) => {
     try {
       await loadOptionalModuleStylesheet(moduleId);
       const { moduleRegistration } = await import(/* @vite-ignore */ `/optional-modules/${moduleId}/module.js`);

@@ -1,7 +1,7 @@
 import { isIP } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { amxAudioActions } from "@smart-church/contracts/amx-audio";
+import { amxAudioActions, amxSystemActions } from "./audio-mappings.js";
 import { pulseChannel } from "./icsp.js";
 
 type AmxAction = { id: string; name: string; command: string };
@@ -108,7 +108,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ? { ...storedSettings, port: storedSettings.port === 23 ? 1319 : storedSettings.port }
       : defaultSettings;
     if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
-    const action = [...roomActions, ...audioActions].find((item) => item.id === request.body.actionId);
+    const systemActions: AmxAction[] = amxSystemActions.map((item) => ({ id: item.id, name: item.name, command: `PULSE[10001:${item.port ?? 1}:0,${item.channel}]` }));
+    const action = [...roomActions, ...systemActions, ...audioActions].find((item) => item.id === request.body.actionId);
     if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });
     try {
       const match = action.command.match(/^PULSE\[10001:(\d+):0,(\d+)\]$/);

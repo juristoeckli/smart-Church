@@ -84,6 +84,7 @@ sync_deployment_files() {
     .env.production.example
     deploy/compose.direct.yaml
     deploy/compose.amx.yaml
+    deploy/compose.module-packages.yaml
     deploy/compose.remote-desktop.yaml
     deploy/README.md
     deploy/Caddyfile

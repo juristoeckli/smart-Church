@@ -1,0 +1,8 @@
+services:
+  module-package-tools:
+    image: python:3.13-alpine
+    profiles: ["module-packages"]
+    restart: "no"
+    entrypoint: ["python3"]
+    volumes:
+      - smart-church-modules:/modules

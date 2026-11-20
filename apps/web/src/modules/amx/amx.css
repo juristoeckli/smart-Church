@@ -53,4 +53,50 @@
 .amx-audio-control-actions{display:flex;gap:.35rem}
 .amx-audio-control-actions button{min-width:40px;min-height:34px;padding:.3rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--surface,#fff);color:var(--ink);cursor:pointer}
 .amx-audio-control-actions button:disabled{cursor:not-allowed;opacity:.55}
+.amx-page-nav{margin:.6rem 0}
+.amx-page-tab{background:#293646;border-color:#607084;color:#f6f8fb}
+.amx-page-tab:hover{background:#35485e}
+.amx-page-tab.active{background:#185e91;border-color:#75baff;color:#fff;box-shadow:inset 0 0 0 1px #75baff}
+.amx-audio-placeholder{background:#1b2430;border-color:#536274}
+.amx-audio-placeholder h4{color:#f6f8fb}
+.amx-audio-controls .amx-audio-control{background:#293646;border-color:#536274;color:#f6f8fb;opacity:1}
+.amx-audio-control-actions button{background:#edf2f7;border-color:#aab8c6;color:#18222e}
+.amx-audio-control-actions button:hover:not(:disabled){background:#d9e9f7;border-color:#5d93c2}
+.amx-audio-control-actions button:disabled{background:#d9dfe6;color:#536171;opacity:1}
+.amx-advanced-pages{display:grid;gap:.5rem;max-width:560px;margin:.75rem 0;color:var(--ink)}
+.amx-advanced-pages summary{width:max-content;cursor:pointer;color:var(--ink);font-weight:600}
+.amx-advanced-pages select{min-height:38px;padding:.4rem .55rem;border:1px solid #718096;border-radius:6px;background:var(--panel);color:var(--ink)}
 @media(max-width:650px){.amx-workspace{padding:4px}.amx-screen{gap:.7%;padding:.8%;border-radius:3px}.amx-church-banner{gap:8px;padding:2%}.amx-church-banner strong{font-size:clamp(.8rem,4vw,1.5rem)}.amx-church-banner span{font-size:clamp(.58rem,2.9vw,1rem)}.amx-room-grid{gap:1%;padding:0 .5%}.amx-room-button{border-width:2px;font-size:clamp(.64rem,3vw,1rem);text-shadow:1px 1px 1px #45443c}.amx-status-bar{gap:4px}.amx-dsp-indicator{gap:2px}.amx-form-grid,.amx-action-editor{grid-template-columns:1fr}}
+
+/* TP4 based 800×600 control surface. */
+.amx-workspace{max-width:1040px;padding:clamp(6px,1vw,16px)}
+.amx-panel-frame{width:100%;padding:clamp(5px,.8vw,10px);border:1px solid #6a6b64;border-radius:12px;background:linear-gradient(145deg,#dad8c8,#aaa99c 26%,#686a68 49%,#c9c8bc 70%,#6d6f6f);box-shadow:0 16px 42px #0004}
+.amx-panel-screen{position:relative;isolation:isolate;width:100%;aspect-ratio:4/3;overflow:hidden;border:1px solid #55564d;background-color:#d8d6b9;background-size:100% 100%;font-family:Arial,Helvetica,sans-serif;color:#121311;touch-action:manipulation}
+.amx-panel-object{position:absolute;box-sizing:border-box;overflow:hidden;display:flex;align-items:center;justify-content:center;margin:0;border:0;border-radius:0;padding:0;text-align:center;white-space:pre-line;line-height:1.05;font-family:Arial,Helvetica,sans-serif;font-weight:600;text-shadow:0 1px 1px #fff8}
+.amx-object-image{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;pointer-events:none}
+.amx-object-label{position:relative;z-index:1;max-width:100%;overflow:hidden;text-overflow:clip}
+.amx-object-general{border:1px solid #88877a;border-radius:4px;box-shadow:inset 0 1px 2px #fff9,inset 0 -2px 3px #4a493b55}
+.amx-panel-button{cursor:pointer;appearance:none;-webkit-appearance:none;background-image:linear-gradient(180deg,#deded9,#a4a49c);border:2px solid #888980;box-shadow:inset 0 2px 2px #fff9,inset 0 -3px 4px #686a60,0 1px 1px #4446;text-shadow:1px 1px 1px #5558,-1px -1px 0 #f2f2ee;color:#f5f4ec;font-weight:700}
+.amx-panel-button:hover:not(:disabled){filter:brightness(1.06)}
+.amx-panel-button:active:not(:disabled),.amx-panel-button.is-active{background-color:#07599e!important;background-image:linear-gradient(180deg,#0a70bd,#004882);box-shadow:inset 0 2px 5px #002b56;color:#fff;transform:translateY(1px)}
+.amx-panel-button:disabled{cursor:wait;filter:saturate(.45);opacity:.74}
+.amx-object-image~.amx-object-label{z-index:2}
+.amx-object-bargraph,.amx-object-multiBargraph{border:1px solid #6a6a61;border-radius:3px;background:linear-gradient(90deg,#777,#b2b2a5 45%,#777);box-shadow:inset 0 0 4px #2228}
+.amx-panel-status{display:flex;align-items:center;gap:clamp(4px,.8vw,10px);min-height:22px;padding:1px 2%;background:#e5e2cc;color:#272722;font:600 clamp(8px,1.15vw,12px) Arial,sans-serif}
+.amx-panel-status>span:first-child{margin-right:2px}
+.amx-panel-status .amx-dsp-indicator{display:flex;align-items:center;gap:2px}
+.amx-panel-status .amx-dsp-indicator i{width:clamp(7px,1vw,11px);height:clamp(7px,1vw,11px);border:1px solid #9a9884;background:#d33428;border-radius:50%}
+.amx-panel-status svg{margin-left:auto;color:#348b50}
+.amx-panel-status time{min-width:34px;text-align:right}
+.amx-panel-back{position:absolute;z-index:1000;left:.5%;bottom:.4%;padding:2px 5px;border:1px solid #8e8b76;border-radius:2px;background:#e1dfc8;color:#282821;font:600 clamp(8px,1.1vw,12px) Arial,sans-serif;cursor:pointer}
+.amx-panel-popup{position:absolute;inset:0;z-index:500;display:grid;place-items:center;background:#0005}
+.amx-panel-popup>div{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;max-width:75%;padding:16px;border:2px solid #8e8d80;border-radius:4px;background:#e4e1c8;box-shadow:0 5px 20px #0005}
+.amx-panel-popup button{min-height:44px;padding:8px 14px;border:2px solid #898879;border-radius:4px;background:linear-gradient(#c4c2ad,#999785);color:#fff;font-weight:700;text-shadow:1px 1px 2px #333;cursor:pointer}
+.amx-button-busy{position:absolute;right:2px;top:2px;width:8px;height:8px;border-radius:50%;background:#2681b9}
+.amx-unmapped-mark{position:absolute;right:2px;top:1px;color:#bd3228;font:bold 9px Arial,sans-serif}
+.amx-panel-map{margin-top:10px;color:var(--muted,#777)}
+.amx-panel-map summary{cursor:pointer}
+.amx-panel-map>div{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.amx-panel-map button{padding:5px 8px;border:1px solid var(--line,#ccd2da);border-radius:5px;background:var(--panel,#fff);color:var(--ink,#222);cursor:pointer}
+.amx-toast{z-index:1200;max-width:90%;overflow-wrap:anywhere}
+@media(max-width:650px){.amx-workspace{padding:3px}.amx-panel-frame{padding:3px;border-radius:6px}.amx-panel-status{min-height:15px}.amx-panel-button{border-width:1px}}

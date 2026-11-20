@@ -1,0 +1,90 @@
+import tp4Layout from "./tp4-layout.json" with { type: "json" };
+
+export type AmxMappedAction = { id: string; name: string; channel: number; port: number };
+export type AmxMappedControl = { id: string; name: string; actions?: AmxMappedAction[] };
+export type AmxMappedPage = { id: string; room: string; page: string; controls: AmxMappedControl[] };
+
+type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; addressPort?: number };
+type Tp4Page = { id: number; name: string; kind: string; objects: Tp4Object[] };
+
+const pages = tp4Layout.pages as Tp4Page[];
+
+function roomForPage(name: string) {
+  if (name === "Home" || name === "Modus" || name.startsWith("PWR_")) return "All rooms";
+  if (name.startsWith("Que_") || name.startsWith("Detail_Gem_") || name.startsWith("Detail_Auton_Gem_")) return "Gemeindesaal quer";
+  if (name.startsWith("Lan_")) return "Gemeindesaal längs";
+  if (name.startsWith("Detail_Kon1_") || name.startsWith("Detail_Auton_Kon1_") || name === "Setup_Kon1_Chor") return "Konferenzsaal 1";
+  if (name.startsWith("Detail_Kon2_") || name.startsWith("Detail_Auton_Kon2_")) return "Konferenzsaal 2";
+  if (name.startsWith("Kon_")) return "Konferenzsaal";
+  if (name.startsWith("Bib_") || name.startsWith("Detail_Bib_") || name.startsWith("Detail_Auton_Bib_")) return "Bibliothek";
+  if (name.startsWith("Detail_Geb_") || name.startsWith("Detail_Auton_Geb_")) return "Gebetsaal";
+  if (name.startsWith("Setup_Gem_Chor")) return "Gemeindesaal";
+  if (name === "Regie") return "Regie";
+  if (name.startsWith("PP_EQ_Gemeinde")) return "Gemeindesaal quer";
+  if (name.startsWith("PP_EQ_Konferenz")) return "Konferenzsaal";
+  if (name.startsWith("PP_EQ_Bibliothek")) return "Bibliothek";
+  if (name.startsWith("PP_EQ_Gebet")) return "Gebetsaal";
+  if (name.startsWith("PP_EQ_Wireless")) return "Allgemein";
+  if (name.startsWith("All_")) return "All rooms";
+  return "AMX";
+}
+
+function pageLabel(name: string) {
+  if (name === "Home") return "Home";
+  if (name === "Modus") return "Mode";
+  if (name.startsWith("PWR_")) return name.replaceAll("_", " ");
+  if (name.startsWith("PP_EQ_")) return `EQ · ${name.slice("PP_EQ_".length).replaceAll("_", " ")}`;
+  const suffix = name.replace(/^(Detail_Auton_|Detail_|Setup_|Que_|Lan_|Kon_|Bib_|All_)/, "");
+  const [first = name, ...rest] = suffix.split("_");
+  const title = [first, ...rest].join(" ").replace("Mik", "Mikrofone").replace("Lautsprecher", "Lautsprecher");
+  return name.startsWith("Detail_") || name.startsWith("Detail_Auton_") ? `Detail · ${title}` : title;
+}
+
+function defaultPort(page: Tp4Page) {
+  return page.kind === "page" || page.name.startsWith("PWR_") ? 1 : 2;
+}
+
+function makeAction(page: Tp4Page, object: Tp4Object): AmxMappedAction | null {
+  if (object.type !== "general" || !Number.isInteger(object.channel) || !object.channel || object.channel < 1 || object.channel > 65535) return null;
+  const port = object.addressPort ?? defaultPort(page);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return {
+    id: `tp4-${page.id}-${object.id}`,
+    name: object.label?.trim() || object.name?.trim() || `Button ${object.id}`,
+    channel: object.channel,
+    port,
+  };
+}
+
+// Build the browser's button list and the API's allowlist from the exact same
+// project objects. This prevents an editable or stale hand-copied channel map.
+export const amxAudioPages: AmxMappedPage[] = pages.map((page) => ({
+  id: page.name,
+  room: roomForPage(page.name),
+  page: pageLabel(page.name),
+  controls: page.objects.flatMap((object) => {
+    const mapped = makeAction(page, object);
+    if (!mapped) return [];
+    return [{ id: mapped.id, name: mapped.name, actions: [mapped] }];
+  }),
+}));
+
+export const amxAudioActions: AmxMappedAction[] = amxAudioPages.flatMap((page) => page.controls.flatMap((control) => control.actions ?? []));
+
+const systemActionDefs = [
+  ["power-confirm-on", "Activate selected room", "PWR_ASK", 4],
+  ["power-cancel", "Cancel room activation", "PWR_ASK", 3],
+  ["power-confirm-off", "Confirm system off", "PWR_OFF_ASK", 3],
+  ["mode-volume", "Open volume", "Modus", 24],
+  ["mode-microphone", "Open microphones", "Modus", 1],
+  ["mode-speakers", "Open speakers", "Modus", 2],
+  ["mode-regie", "Open control room", "Modus", 28],
+] as const;
+
+export const amxSystemActions: AmxMappedAction[] = systemActionDefs.map(([id, name, pageName, objectId]) => {
+  const page = pages.find((item) => item.name === pageName);
+  const object = page?.objects.find((item) => item.id === objectId);
+  const mapped = page && object ? makeAction(page, object) : null;
+  if (!mapped) throw new Error(`The TP4 system action mapping is missing: ${pageName} object ${objectId}.`);
+  return { ...mapped, id, name };
+});
