@@ -1,7 +1,8 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 
-export { createRoot };
+export { createPortal, createRoot };
 
 export const {
   Children,
