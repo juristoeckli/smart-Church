@@ -1324,6 +1324,27 @@ function WorkspaceApp() {
 
   const memberCount = contacts.filter((contact) => contact.status === "member").length;
   const visitorCount = contacts.filter((contact) => contact.status === "visitor").length;
+  const hasServerPermission = (permission: ServerPermission) => authUser?.role === "server_admin" || authUser?.serverPermissions.includes(permission) === true;
+  const moduleManagementModules = useMemo(() => {
+    const installed = installedModuleCatalog ?? [];
+    const ids = hasServerPermission("server_manage") ? installed.map((module) => module.id) : department.enabledModules ?? [];
+    const entries = hasServerPermission("server_manage")
+      ? installed
+      : registeredModules.filter((module) => module.required || ids.includes(module.id)).map((module) => ({ id: module.id, name: module.name, version: "", enabled: ids.includes(module.id), required: Boolean(module.required), enabledByDefault: Boolean(module.enabledByDefault) }));
+    return entries.filter((entry) => hasServerPermission("server_manage") || entry.required || ids.includes(entry.id)).map((entry) => {
+      const registration = registeredModules.find((module) => module.id === entry.id);
+      return {
+        id: entry.id,
+        name: entry.name,
+        version: entry.version,
+        enabled: entry.enabled,
+        required: entry.required,
+        enabledByDefault: entry.enabledByDefault,
+        accessLabel: registration?.accessLabel,
+        registration,
+      };
+    });
+  }, [installedModuleCatalog, moduleRegistryRevision, department.enabledModules, authUser?.role, authUser?.serverPermissions]);
 
   if (window.location.pathname === "/signup" || window.location.pathname === "/signup/") return <SelfSignupPage confirmation={false} />;
   if (window.location.pathname === "/signup/confirm") return <SelfSignupPage confirmation />;
@@ -1339,7 +1360,6 @@ function WorkspaceApp() {
   const canManageGroups = hasLocationPermission("groups_manage");
   const canManageResources = hasLocationPermission("resources_manage");
   const activeLanguage = authUser.languageIsCustom ? authUser.language : browserDefaultLanguage();
-  const hasServerPermission = (permission: ServerPermission) => authUser.role === "server_admin" || authUser.serverPermissions.includes(permission);
   const enabledDynamicModules = registeredModules.filter((module) => !module.hiddenFromNavigation && moduleAvailable(module, department, canManageSite));
   const menuNavigationContext: ModuleContext = { language: activeLanguage, department, departmentId: department.id, csrfToken, realtime: moduleRealtime, canManageSite, state: "", onStateChange: () => {} };
   const coreMenuItems = [
@@ -1496,26 +1516,6 @@ function WorkspaceApp() {
     setMenuSectionNameDraft("");
   };
   const selectedModuleSettings = registeredModules.find((module) => module.id === selectedModuleSettingsId && module.settings);
-  const moduleManagementModules = useMemo(() => {
-    const installed = installedModuleCatalog ?? [];
-    const ids = hasServerPermission("server_manage") ? installed.map((module) => module.id) : department.enabledModules ?? [];
-    const entries = hasServerPermission("server_manage")
-      ? installed
-      : registeredModules.filter((module) => module.required || ids.includes(module.id)).map((module) => ({ id: module.id, name: module.name, version: "", enabled: ids.includes(module.id), required: Boolean(module.required), enabledByDefault: Boolean(module.enabledByDefault) }));
-    return entries.filter((entry) => hasServerPermission("server_manage") || entry.required || ids.includes(entry.id)).map((entry) => {
-      const registration = registeredModules.find((module) => module.id === entry.id);
-      return {
-        id: entry.id,
-        name: entry.name,
-        version: entry.version,
-        enabled: entry.enabled,
-        required: entry.required,
-        enabledByDefault: entry.enabledByDefault,
-        accessLabel: registration?.accessLabel,
-        registration,
-      };
-    });
-  }, [installedModuleCatalog, moduleRegistryRevision, department.enabledModules, activeLanguage, hasServerPermission]);
   const moduleContext = {
     language: activeLanguage,
     department,
