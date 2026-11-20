@@ -39,7 +39,7 @@ async function ensureLocationDatasetDirectory(departmentId: string) {
       const legacyRoot = legacyDatasetDirectory();
       await mkdir(legacyRoot, { recursive: true });
       for (const entry of await readdir(legacyRoot, { withFileTypes: true })) {
-        if (!entry.isDirectory() || !idPattern.test(entry.name)) continue;
+        if (!entry.isDirectory() || entry.name === "locations" || !idPattern.test(entry.name)) continue;
         await cp(resolve(legacyRoot, entry.name), resolve(root, entry.name), { recursive: true, force: true, errorOnExist: false });
       }
       await writeFile(marker, "1\n", { flag: "wx" }).catch((writeError) => {

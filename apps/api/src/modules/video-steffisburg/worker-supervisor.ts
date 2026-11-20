@@ -14,6 +14,23 @@ type WorkerMetrics = { uptimeSeconds: number; memory: WorkerMemory; python: { up
 type PendingRequest = { resolve: (value: unknown) => void; reject: (error: Error & { code?: string }) => void; timer: NodeJS.Timeout };
 type WorkerSocket = { socket: import("node:net").Socket; buffer: Buffer; registered: boolean; closed: boolean; child?: ChildProcess };
 
+const videoWorkerEnvironmentKeys = [
+  "PATH", "SystemRoot", "WINDIR", "HOME", "USERPROFILE", "TMP", "TEMP", "TMPDIR",
+  "PYTHON_BINARY", "PYTHONPATH", "VIRTUAL_ENV", "STREAMING_CONFIG_FILE", "STREAMING_STATE_DIR",
+  "SMART_CHURCH_DEPARTMENT_ID", "SMART_CHURCH_VIDEO_STEFFISBURG_UNIFI_API_KEY",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+];
+
+function videoWorkerEnvironment() {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of videoWorkerEnvironmentKeys) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 function loopback(address: string | undefined) {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
@@ -212,7 +229,7 @@ export class VideoWorkerSupervisor {
     try {
       child = fork(workerPath, [], {
         cwd: resolve(process.cwd()),
-        env: { ...process.env, SMART_CHURCH_CORE_WS_URL: `ws://127.0.0.1:${this.port}/internal/workers/video`, SMART_CHURCH_WORKER_TOKEN: this.token },
+        env: { ...videoWorkerEnvironment(), SMART_CHURCH_CORE_WS_URL: `ws://127.0.0.1:${this.port}/internal/workers/video`, SMART_CHURCH_WORKER_TOKEN: this.token },
         stdio: ["ignore", "inherit", "pipe", "ipc"],
         execArgv: [],
         windowsHide: true,

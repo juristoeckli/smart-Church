@@ -592,6 +592,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
       const tokenHash = outputTokenHash(token);
       let heartbeat: NodeJS.Timeout | undefined;
+      let heartbeatRunning = false;
       const client: OutputClient = {
         response,
         token,
@@ -612,6 +613,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       response.on("error", client.close);
 
       heartbeat = setInterval(async () => {
+        if (heartbeatRunning || response.destroyed || response.writableEnded) return;
+        heartbeatRunning = true;
         try {
           const session = await pool?.query<{ department_id: string }>(`SELECT s.department_id FROM presenter_output_sessions s JOIN departments d ON d.id=s.department_id
             WHERE (s.token_hash=$1 OR s.previous_token_hash=$1) AND d.enabled_modules @> ARRAY['presenter']::text[]`, [tokenHash]);
@@ -631,6 +634,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           if (!touched?.rowCount) return response.end();
           response.write(": keep-alive\n\n");
         } catch { response.end(); }
+        finally { heartbeatRunning = false; }
       }, 5000);
       heartbeat.unref();
 

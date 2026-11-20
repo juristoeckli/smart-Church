@@ -15,8 +15,6 @@ type RemoteDestination = { id: string; departmentId: string; name: string; host:
 type StoredDestination = Omit<RemoteDestination, "password" | "disableDisplayResize" | "vncEncodings" | "vncColorDepth"> & { disable_display_resize: boolean; vnc_encodings: string | null; vnc_color_depth: number | null; password_ciphertext: string; password_iv: string; password_tag: string };
 type ProxyTicket = { authToken: string; connectionId: string; expiresAt: number; active: boolean; role: ProxyRole; shareId: string; departmentId: string; destinationId: string; userId: string; socket?: import("node:stream").Duplex };
 type ControllerLease = { userId: string; departmentId: string; destinationId: string; ticket: string; shareId: string; width: number; height: number; expiresAt: number; active: boolean };
-const proxyTickets = new Map<string, ProxyTicket>();
-let controllerLease: ControllerLease | null = null;
 const guacdLogLevels = ["error", "warning", "info", "debug", "trace"] as const;
 type GuacdLogLevel = typeof guacdLogLevels[number];
 const vncEncodingsSchema = { type: "string", maxLength: 100, pattern: "^(?:(?:tight|zrle|ultra|copyrect|hextile|zlib|corre|rre|raw)(?: (?:tight|zrle|ultra|copyrect|hextile|zlib|corre|rre|raw))*)?$" };
@@ -118,9 +116,25 @@ function encryptedAuthData(settings: ReturnType<typeof gatewaySettings>, destina
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
   const { pool, isDatabaseReady, getDefaultDepartmentId, resolveDepartmentId, validateMutation, realtime } = dependencies;
+  const proxyTickets = new Map<string, ProxyTicket>();
+  const tunnelSockets = new Set<import("node:stream").Duplex>();
+  let controllerLease: ControllerLease | null = null;
   registerRemoteDesktopReplication(dependencies);
   const stopFollowingGuacdLogs = dependencies.followRuntimeLogFile("guacd", process.env.SMART_CHURCH_REMOTE_DESKTOP_GUACD_LOG_PATH);
   app.addHook("onClose", stopFollowingGuacdLogs);
+  const revokeSessions = () => {
+    controllerLease = null;
+    proxyTickets.clear();
+    for (const socket of tunnelSockets) socket.destroy();
+    tunnelSockets.clear();
+  };
+  const unsubscribeActivation = dependencies.activation.onChange((enabled) => {
+    if (!enabled) revokeSessions();
+  });
+  app.addHook("onClose", async () => {
+    unsubscribeActivation();
+    revokeSessions();
+  });
   let cachedClientLibrary: string | null = null;
 
   app.get("/api/modules/remote-desktop/server-settings", async (request, reply) => {
@@ -394,6 +408,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     try { incoming = new URL(request.url ?? "/", "http://localhost"); }
     catch { return; }
     if (incoming.pathname !== "/api/modules/remote-desktop/tunnel") return;
+    if (!dependencies.activation.isEnabled()) return rejectUpgrade(clientSocket, 404, "Remote desktop is disabled.");
 
     const key = request.headers["sec-websocket-key"];
     const originHeader = request.headers.origin;
@@ -442,6 +457,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     incoming.searchParams.delete("SC_PROXY_TICKET");
     target.search = incoming.searchParams.toString();
     const makeRequest = target.protocol === "https:" ? httpsRequest : httpRequest;
+    tunnelSockets.add(clientSocket);
     const outgoing = makeRequest(target, {
       method: "GET",
       headers: {
@@ -454,6 +470,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         ...(request.headers.origin ? { origin: request.headers.origin } : {}),
         ...(request.headers["user-agent"] ? { "user-agent": request.headers["user-agent"] } : {}),
       },
+    });
+    clientSocket.once("close", () => {
+      tunnelSockets.delete(clientSocket);
+      outgoing.destroy();
     });
     const fail = () => rejectUpgrade(clientSocket, 502, "The remote desktop gateway could not open a tunnel.");
     outgoing.setTimeout(10_000, () => outgoing.destroy(new Error("Guacamole tunnel handshake timed out.")));

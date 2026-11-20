@@ -7,10 +7,12 @@ type DeviceAccess = (request:FastifyRequest,reply:FastifyReply,id:string)=>Promi
 export function signageControl(routes:FastifyInstance,context:ModuleServerContext,device:DeviceAccess) {
  const tickets=new Map<string,{id:string;role:string;departmentId:string;expires:number}>();
  const hub=new RealtimeHub(routes.server,async request=>{
+  if(!context.activation.isEnabled())return null;
   const token=new URL(request.url!,'http://localhost').searchParams.get('ticket')||'';
   const ticket=tickets.get(token);tickets.delete(token);
   return ticket&&ticket.expires>Date.now()?ticket:null;
  },async(identity,departmentId)=>{
+  if(!context.activation.isEnabled())return false;
   const result=await context.pool!.query(`SELECT 1 FROM signage_displays d JOIN departments site ON site.id=d.department_id JOIN app_users u ON u.id=d.service_user_id JOIN department_memberships m ON m.user_id=u.id AND m.department_id=d.department_id WHERE u.id=$1 AND d.department_id=$2 AND u.api_key_hash=$3 AND u.is_enabled AND u.is_service_user AND m.module_permissions->'signage' ? 'display' AND site.enabled_modules @> ARRAY['signage']::text[]`,[identity.id,departmentId,identity.role]);
   return !!result.rowCount;
  },(request,origin)=>{

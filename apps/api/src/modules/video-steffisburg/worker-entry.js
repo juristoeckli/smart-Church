@@ -20,11 +20,21 @@ try {
 }
 const pythonCommand = process.env.PYTHON_BINARY || (process.platform === "win32" ? "py" : "python3");
 const pythonArgs = [...(process.platform === "win32" && !process.env.PYTHON_BINARY ? ["-3"] : []), "-u", pythonPath];
+const pythonEnvironmentKeys = [
+  "PATH", "SystemRoot", "WINDIR", "HOME", "USERPROFILE", "TMP", "TEMP", "TMPDIR",
+  "PYTHONPATH", "VIRTUAL_ENV", "STREAMING_CONFIG_FILE", "STREAMING_STATE_DIR",
+  "SMART_CHURCH_DEPARTMENT_ID", "SMART_CHURCH_VIDEO_STEFFISBURG_UNIFI_API_KEY",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE",
+];
+const pythonEnvironment = Object.fromEntries(pythonEnvironmentKeys
+  .filter((key) => process.env[key] !== undefined)
+  .map((key) => [key, process.env[key]]));
 const python = spawn(pythonCommand, pythonArgs, {
   cwd: stateDirectory,
   windowsHide: true,
   stdio: ["pipe", "pipe", "inherit"],
-  env: { ...process.env, STREAMING_STATE_DIR: stateDirectory },
+  env: { ...pythonEnvironment, STREAMING_STATE_DIR: stateDirectory },
 });
 
 const pending = new Set();

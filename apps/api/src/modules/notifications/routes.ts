@@ -67,6 +67,7 @@ const announcementSchema = {
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   let reminderTimer: ReturnType<typeof setInterval> | undefined;
+  let reminderJobRunning = false;
   let storageReady = false;
 
   async function writableDepartmentIds() {
@@ -381,6 +382,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } finally { client.release(); }
   }
 
+  async function runReminderJobs() {
+    if (reminderJobRunning || !storageReady) return;
+    reminderJobRunning = true;
+    try {
+      await createUpcomingReminders();
+      await deliverPendingEmails();
+      await processPendingWebhookEvents();
+    } finally {
+      reminderJobRunning = false;
+    }
+  }
+
   app.register(async (routes) => {
     routes.addHook("preParsing", async (request, _reply, payload) => {
       if (request.url.split("?", 1)[0] !== "/api/webhooks/resend") return payload;
@@ -481,13 +494,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         CREATE TRIGGER module_notifications_queue_email AFTER INSERT ON module_notifications
           FOR EACH ROW EXECUTE FUNCTION queue_module_notification_email();
       `);
-        await createUpcomingReminders();
-        await deliverPendingEmails();
-        await processPendingWebhookEvents();
         storageReady = true;
-        reminderTimer = setInterval(() => { void createUpcomingReminders().then(() => deliverPendingEmails()).then(() => processPendingWebhookEvents()).catch((error) => routes.log.error({ err: error }, "Could not process notification jobs.")); }, 60_000);
+        await runReminderJobs();
+        reminderTimer = setInterval(() => { void runReminderJobs().catch((error) => routes.log.error({ err: error }, "Could not process notification jobs.")); }, 60_000);
         reminderTimer.unref?.();
       } catch (error) {
+        storageReady = false;
         routes.log.error({ err: error }, "Optional Notifications storage could not be initialized; the rest of Smart-Church will continue.");
       }
     });

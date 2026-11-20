@@ -7,6 +7,15 @@ const workerPath = fileURLToPath(new URL("./worker-entry.js", import.meta.url));
 type WorkerStatus = "stopped" | "starting" | "ready" | "backoff" | "failed";
 type PendingTime = { resolve: (value: { utc: string; unixMilliseconds: number }) => void; reject: (error: Error) => void; timer: NodeJS.Timeout };
 
+function workerEnvironment(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV ?? "production" };
+  for (const key of ["PATH", "SystemRoot", "WINDIR"]) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
+}
+
 export class ModuleDemoWorker {
   private child: ChildProcess | null = null;
   private status: WorkerStatus = "stopped";
@@ -83,7 +92,7 @@ export class ModuleDemoWorker {
     this.readyPromise = new Promise<void>((resolve, reject) => { this.readyResolve = resolve; this.readyReject = reject; });
     let child: ChildProcess;
     try {
-      child = fork(workerPath, [], { stdio: ["ignore", "ignore", "pipe", "ipc"], execArgv: [], windowsHide: true });
+      child = fork(workerPath, [], { stdio: ["ignore", "ignore", "pipe", "ipc"], execArgv: [], env: workerEnvironment(), windowsHide: true });
     } catch (reason) {
       this.scheduleRestart(reason instanceof Error ? reason.message : "Could not launch the module worker.");
       return;

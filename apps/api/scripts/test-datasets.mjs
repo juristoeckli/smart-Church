@@ -7,6 +7,7 @@ import { gzipSync, gunzipSync } from "node:zlib";
 const { datasetArchive, installDatasetArchive, listDatasets, readDataset, readDatasetAsset, unpackDatasetArchive } = await import("../src/modules/presenter/datasets.ts");
 const root = await mkdtemp(resolve(tmpdir(), "smart-church-datasets-"));
 process.env.PRESENTER_DATASETS_DIR = root;
+const departmentId = "00000000-0000-4000-8000-000000000001";
 const manifest = {
   format: "smart-church-dataset", version: 1, id: "fixture-dataset", name: "Fixture songs", description: "A small package for tests.",
   songs: [
@@ -16,15 +17,15 @@ const manifest = {
 };
 
 try {
-  const datasetPath = resolve(root, manifest.id);
+  const datasetPath = resolve(root, "locations", departmentId, manifest.id);
   await mkdir(resolve(datasetPath, "pages"), { recursive: true });
   await writeFile(resolve(datasetPath, "manifest.json"), JSON.stringify(manifest));
   const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]);
   await writeFile(resolve(datasetPath, "pages/001-01.png"), png);
-  const listed = await listDatasets();
+  const listed = await listDatasets(departmentId);
   assert.ok(listed.some(({ id, builtIn }) => id === "aktuell" && builtIn), "the built-in Aktuell dataset should be present");
   assert.deepEqual(listed.filter(({ id }) => id === manifest.id).map(({ id, songCount, slideCount }) => ({ id, songCount, slideCount })), [{ id: manifest.id, songCount: 2, slideCount: 2 }]);
-  const archive = await datasetArchive(manifest.id);
+  const archive = await datasetArchive(manifest.id, departmentId);
   assert.ok(archive);
   const chunks = [];
   for await (const chunk of archive.stream) chunks.push(chunk);
@@ -32,11 +33,12 @@ try {
   assert.equal(unpackDatasetArchive(packageBytes).manifest.id, manifest.id);
 
   const destination = await mkdtemp(resolve(tmpdir(), "smart-church-import-"));
+  const destinationDepartmentId = "00000000-0000-4000-8000-000000000002";
   try {
     process.env.PRESENTER_DATASETS_DIR = destination;
-    assert.deepEqual(await installDatasetArchive(packageBytes), { id: manifest.id, name: manifest.name, songCount: 2 });
-    assert.equal((await readDataset(manifest.id))?.songs.length, 2);
-    assert.deepEqual(await readDatasetAsset(manifest.id, "pages/001-01.png"), png);
+    assert.deepEqual(await installDatasetArchive(packageBytes, destinationDepartmentId), { id: manifest.id, name: manifest.name, songCount: 2 });
+    assert.equal((await readDataset(manifest.id, destinationDepartmentId))?.songs.length, 2);
+    assert.deepEqual(await readDatasetAsset(manifest.id, "pages/001-01.png", destinationDepartmentId), png);
   } finally { await rm(destination, { recursive: true, force: true }); }
 
   const header = Buffer.alloc(512);

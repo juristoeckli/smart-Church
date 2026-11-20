@@ -522,15 +522,42 @@ def read_package(archive_path):
         fail('Module manifest ID must match ^[a-z0-9][a-z0-9-]*$.')
     if not isinstance(version, str) or not SEMVER_RE.fullmatch(version):
         fail('Module manifest version must be semantic versioning (for example 1.2.3).')
+    if 'name' in manifest and (not isinstance(manifest['name'], str) or not manifest['name'].strip()):
+        fail('Module manifest name must be a non-empty string.')
+    if 'description' in manifest and (not isinstance(manifest['description'], str) or len(manifest['description']) > 500):
+        fail('Module manifest description must be a string of at most 500 characters.')
+    for flag in ('required', 'enabledByDefault', 'clientManaged'):
+        if flag in manifest and not isinstance(manifest[flag], bool):
+            fail('Module manifest ' + flag + ' must be a boolean.')
     if 'serverEntry' in manifest:
         fail('serverEntry is not allowed; in-process API modules are not isolated.')
     if manifest.get('required') is True or manifest.get('enabledByDefault') is True:
         fail('External packages must remain optional and disabled until a Server Administrator enables them.')
     if manifest.get('clientManaged') is False:
         fail('External packages must be client-managed so they can be enabled in Settings → Modules.')
+    dependencies = manifest.get('dependencies', {})
+    if not isinstance(dependencies, dict):
+        fail('Module manifest dependencies must be an object.')
+    required = dependencies.get('required', [])
+    optional = dependencies.get('optional', [])
+    for kind, values in (('required', required), ('optional', optional)):
+        if not isinstance(values, list) or any(not isinstance(value, str) or not ID_RE.fullmatch(value) for value in values):
+            fail('Module manifest ' + kind + ' dependencies must be module IDs.')
+        if len(set(values)) != len(values) or module_id in values:
+            fail('Module manifest dependencies must be unique and cannot contain the module itself.')
+    if set(required) & set(optional):
+        fail('A module dependency cannot be both required and optional.')
+    runtime_dependencies = manifest.get('runtimeDependencies')
+    if runtime_dependencies is not None and (not isinstance(runtime_dependencies, list) or any(not isinstance(value, str) or not value.strip() for value in runtime_dependencies)):
+        fail('Module manifest runtimeDependencies must be a list of non-empty strings.')
+    access_grants = manifest.get('accessGrants')
+    if access_grants is not None and (not isinstance(access_grants, list) or any(not isinstance(value, str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,79}', value) for value in access_grants) or len(set(access_grants)) != len(access_grants)):
+        fail('Module manifest accessGrants must be unique lowercase grant IDs.')
     if not isinstance(worker_entry, str) or not re.fullmatch(r'\./[A-Za-z0-9._-]+\.js', worker_entry) or '..' in worker_entry:
         fail('Module manifest must declare a module-local workerEntry such as ./worker.js.')
     worker_name = worker_entry[2:]
+    if any('/' not in name and name != 'manifest.json' and name != worker_name for _, name in members):
+        fail('The archive root may contain only manifest.json and the declared workerEntry file.')
     if not any(name == worker_name and member.isfile() for member, name in members):
         fail('The workerEntry file is missing from the archive root.')
     return tar, members, manifest, module_id, web_present
@@ -655,6 +682,7 @@ PY
 
 install_external_module_package() {
   local source archive temporary_dir module_id installed catalog_query catalog_count
+  [[ -f deploy/compose.module-packages.yaml ]] || { echo "The module package helper is missing. Update the Smart-Church deployment package first." >&2; return 1; }
   read -r -p "Local .tar.gz path or HTTPS URL: " source </dev/tty
   [[ -n "$source" ]] || { echo "Package source is required." >&2; return 1; }
   temporary_dir="$(mktemp -d)"
@@ -712,7 +740,8 @@ install_external_module_package() {
 }
 
 uninstall_external_module_package() {
-  local installed module_id confirmation archive
+  local installed module_id confirmation archive enabled_query enabled_state dependent_script dependents dependent_id cleanup_query
+  [[ -f deploy/compose.module-packages.yaml ]] || { echo "The module package helper is missing. Update the Smart-Church deployment package first." >&2; return 1; }
   archive="$(mktemp)"
   if ! installed="$(module_package_tool "$archive" list)"; then
     rm -f "$archive"
@@ -739,14 +768,56 @@ uninstall_external_module_package() {
     echo "Start the Smart-Church database before uninstalling an external module package." >&2
     return 1
   }
-  local enabled_query enabled_state
   enabled_query="SELECT enabled FROM installation_modules WHERE installation_id=(SELECT id FROM installations WHERE is_current=TRUE) AND module_id='$module_id' AND client_managed=TRUE"
   enabled_state="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$enabled_query" | tr -d '\r')"
-  [[ "$enabled_state" == t || "$enabled_state" == f ]] || { echo "The API module catalog has no record for $module_id. Start the API and refresh the package list before uninstalling." >&2; return 1; }
+  [[ -z "$enabled_state" || "$enabled_state" == t || "$enabled_state" == f ]] || { echo "Unexpected module activation state for $module_id." >&2; return 1; }
   [[ "$enabled_state" != t ]] || { echo "Disable $module_id in Settings → Modules before uninstalling its package." >&2; return 1; }
+  run_compose up -d api >/dev/null || return 1
+  enabled_state="$(run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -qAt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$enabled_query" | tr -d '\r')"
+  [[ "$enabled_state" != t ]] || { echo "Disable $module_id in Settings → Modules before uninstalling its package." >&2; return 1; }
+  dependent_script="$(cat <<'NODE'
+const fs = require('node:fs');
+const path = require('node:path');
+const targetId = process.argv[1];
+const roots = ['/workspace/apps/api/src/modules', '/var/lib/smart-church/modules'];
+const found = new Set();
+for (const root of roots) {
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(root, entry.name, 'manifest.json'), 'utf8'));
+      const required = manifest.dependencies?.required;
+      if (manifest.id === entry.name && entry.name !== targetId && Array.isArray(required) && required.includes(targetId)) found.add(entry.name);
+    } catch (error) { if (error.code !== 'ENOENT') continue; }
+  }
+}
+for (const id of [...found].sort()) console.log(id);
+NODE
+)"
+  dependents="$(run_compose exec -T api node -e "$dependent_script" "$module_id")" || return 1
+  while IFS= read -r dependent_id; do
+    [[ -n "$dependent_id" ]] || continue
+    [[ "$dependent_id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "An installed manifest contains an invalid dependent module ID; cannot safely uninstall $module_id." >&2; return 1; }
+    echo "Cannot uninstall $module_id while installed module $dependent_id declares it as a required dependency. Uninstall the dependent module first." >&2
+    return 1
+  done <<< "$dependents"
+  if [[ "$enabled_state" == f ]]; then
+    cleanup_query="DO \$cleanup\$ DECLARE installation_uuid UUID; BEGIN SELECT id INTO installation_uuid FROM installations WHERE is_current=TRUE FOR UPDATE; IF installation_uuid IS NOT NULL THEN IF EXISTS (SELECT 1 FROM installation_modules WHERE installation_id=installation_uuid AND module_id='$module_id' AND client_managed=TRUE AND (enabled=TRUE OR required=TRUE)) THEN RAISE EXCEPTION 'Module $module_id became enabled or required during uninstall'; END IF; DELETE FROM installation_modules WHERE installation_id=installation_uuid AND module_id='$module_id' AND client_managed=TRUE AND required=FALSE AND enabled=FALSE; UPDATE departments SET enabled_modules=array_remove(enabled_modules,'$module_id'),updated_at=now() WHERE installation_id=installation_uuid; END IF; END; \$cleanup\$"
+    if ! run_compose exec -T db sh -ec 'psql -v ON_ERROR_STOP=1 -q -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$cleanup_query"; then
+      echo "The package files are still installed; catalog cleanup did not complete. No module data was changed." >&2
+      return 1
+    fi
+  fi
   archive="$(mktemp)"
   if ! module_package_tool "$archive" uninstall "$module_id"; then
     rm -f "$archive"
+    if [[ "$enabled_state" == f ]]; then
+      run_compose restart api >/dev/null || echo "API restart failed; start the API to rebuild this package's disabled catalog entry." >&2
+    fi
+    echo "Package files remain installed. Module-owned data was not changed." >&2
     return 1
   fi
   rm -f "$archive"

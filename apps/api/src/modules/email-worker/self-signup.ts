@@ -152,6 +152,7 @@ export async function emailModuleInstallationWritable(context: ModuleServerConte
 export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   let confirmationTimer: ReturnType<typeof setInterval> | undefined;
+  let signupLifecycleRunning = false;
 
   async function requestDepartment(request: FastifyRequest, reply: { code: (status: number) => { send: (body: unknown) => unknown } }) {
     const value = request.headers["x-department-id"];
@@ -163,12 +164,17 @@ export function registerSelfSignupRoutes(app: FastifyInstance, context: ModuleSe
   }
 
   const runSignupLifecycle = async () => {
-    if (!pool || !isDatabaseReady()) return;
-    const sites = await pool.query<{ id: string }>("SELECT id FROM departments WHERE installation_id=(SELECT id FROM installations WHERE is_current=true)");
-    for (const site of sites.rows) {
-      if (!await emailModuleInstallationWritable(context, site.id)) continue;
-      await expireOldSignupRequests(pool, isDatabaseReady, context, app.log, site.id);
-      await deliverDueConfirmations(site.id);
+    if (signupLifecycleRunning || !pool || !isDatabaseReady()) return;
+    signupLifecycleRunning = true;
+    try {
+      const sites = await pool.query<{ id: string }>("SELECT id FROM departments WHERE installation_id=(SELECT id FROM installations WHERE is_current=true)");
+      for (const site of sites.rows) {
+        if (!await emailModuleInstallationWritable(context, site.id)) continue;
+        await expireOldSignupRequests(pool, isDatabaseReady, context, app.log, site.id);
+        await deliverDueConfirmations(site.id);
+      }
+    } finally {
+      signupLifecycleRunning = false;
     }
   };
 

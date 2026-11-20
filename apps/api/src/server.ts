@@ -10,7 +10,7 @@ import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafe
 import type { AuthStatus, AuthenticatedUser, Contact, ContactRelationship, CreateAdminAccount, CreateContact, CreateDepartment, CreateServiceEvent, CreateSiteUser, DepartmentProfile, EventRegistration, HttpAccessMode, LocationPermission, LoginCredentials, PublicRegistrationEvent, ServerPermission, ServiceEvent, ServiceEventCheckIn, ServicePlanTemplate, SiteUser, UpdateDepartmentProfile, UserPhoneNumber, UserRelationshipInput, UserRelationshipKind, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { closeDatabase, departmentId, departmentName, initializeDatabase, installationId, pool } from "./database.js";
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
-import { getRegisteredServerModuleIds, getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
+import { getRegisteredServerModuleCatalog, getRegisteredServerModuleIds, getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { followRuntimeLogFile, recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
@@ -2120,8 +2120,9 @@ app.get("/api/installation/modules", async (request, reply) => {
   if (!requireServerPermission(request, reply, "server_manage")) return reply;
   const modules = await pool.query("SELECT module_id AS id,version,enabled,required FROM installation_modules WHERE installation_id=$1 AND client_managed=TRUE ORDER BY module_id", [installationId]);
   const registered = new Set(getRegisteredServerModuleIds());
+  const registeredCatalog = new Map(getRegisteredServerModuleCatalog().map((module) => [module.id, module]));
   return {
-    modules: modules.rows.filter(module => registered.has(module.id)),
+    modules: modules.rows.filter(module => registered.has(module.id)).map((module) => ({ ...module, ...registeredCatalog.get(module.id) })),
     problems: modules.rows.filter(module => !registered.has(module.id)).map(module => ({
       id: module.id,
       message: "The module is installed but its API component did not register. Check the API logs and restart the API after resolving the registration error.",

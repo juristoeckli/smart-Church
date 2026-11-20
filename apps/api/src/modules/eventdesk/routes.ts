@@ -93,8 +93,8 @@ const documentSettingsSchema = { body: { type: "object", additionalProperties: f
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
-  startEventDeskReminderWorker(app, pool, context.isDepartmentWritable);
-  startEventDeskInspectionWorker(app, pool, context.isDepartmentWritable);
+  startEventDeskReminderWorker(app, pool, context.isDepartmentWritable, context.activation);
+  startEventDeskInspectionWorker(app, pool, context.isDepartmentWritable, context.activation);
   registerEventDeskSupplyRoutes(app, context);
   registerEventDeskDataRoutes(app, context);
   const resendApiKey = () => process.env.SMART_CHURCH_RESEND_API_KEY?.trim() || process.env.RESEND_API_KEY?.trim() || "";

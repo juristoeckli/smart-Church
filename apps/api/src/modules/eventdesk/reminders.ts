@@ -9,17 +9,22 @@ const money = (cents: number) => `CHF ${(cents / 100).toFixed(2)}`;
 
 type ReminderSettings = { enabled: boolean; delay_days: number[]; max_attempts: number };
 
-export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | null, isDepartmentWritable: (departmentId: string) => Promise<boolean>) {
+type ModuleActivation = { isEnabled: () => boolean; onChange: (listener: (enabled: boolean) => void) => () => void };
+
+export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | null, isDepartmentWritable: (departmentId: string) => Promise<boolean>, activation: ModuleActivation) {
   if (!pool) return;
   let running = false;
+  let enabled = activation.isEnabled();
+  let timer: NodeJS.Timeout | null = null;
   const tick = async () => {
-    if (running) return;
+    if (!enabled || running) return;
     running = true;
     try {
       const locations = await pool.query<{ id: string; delay_days: number[]; max_attempts: number }>(`SELECT s.department_id AS id,s.delay_days,s.max_attempts
         FROM eventdesk_reminder_settings s JOIN departments d ON d.id=s.department_id
         WHERE s.enabled=true AND 'eventdesk'=ANY(d.enabled_modules)`);
       for (const location of locations.rows) {
+        if (!enabled) break;
         if (!(await isDepartmentWritable(location.id))) continue;
         const delayDays = location.delay_days.slice(0, Math.min(location.max_attempts, 10));
         if (!delayDays.length) continue;
@@ -32,6 +37,7 @@ export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | 
               -coalesce((SELECT sum(c.total_cents) FROM eventdesk_documents c WHERE c.related_document_id=d.id AND c.department_id=d.department_id AND c.kind='credit_note' AND c.status IN ('draft','sent')),0)::int > 0
           ORDER BY d.due_date,d.created_at LIMIT 100`, [location.id]);
         for (const candidate of candidates.rows) {
+          if (!enabled) break;
           if (!(await isDepartmentWritable(location.id))) break;
           const windowIndex = delayDays.reduce((latest, delay, index) => candidate.overdue_days >= delay ? index : latest, -1);
           if (windowIndex < 0) continue;
@@ -42,10 +48,18 @@ export function startEventDeskReminderWorker(app: FastifyInstance, pool: Pool | 
       app.log.error({ err: error, module: "eventdesk-reminders" }, "Scheduled payment reminder cycle failed.");
     } finally { running = false; }
   };
-  const timer = setInterval(() => void tick(), 60_000);
-  timer.unref();
-  app.addHook("onClose", async () => { clearInterval(timer); });
-  void tick();
+  const update = (next: boolean) => {
+    enabled = next;
+    if (timer) clearInterval(timer);
+    timer = null;
+    if (!enabled) return;
+    timer = setInterval(() => void tick(), 60_000);
+    timer.unref();
+    void tick();
+  };
+  const unsubscribe = activation.onChange(update);
+  if (enabled) update(true);
+  app.addHook("onClose", async () => { unsubscribe(); if (timer) clearInterval(timer); timer = null; enabled = false; });
 }
 
 async function sendScheduledReminder(pool: Pool, departmentId: string, documentId: string, attemptNo: number, delayDays: number, maxAttempts: number, isDepartmentWritable: (departmentId: string) => Promise<boolean>) {

@@ -83,6 +83,7 @@ export interface ServerModuleManifest {
   id: string;
   version: string;
   name?: string;
+  description?: string;
   required?: boolean;
   enabledByDefault?: boolean;
   clientManaged?: boolean;
@@ -99,7 +100,9 @@ export interface ServerModuleManifest {
 type DiscoveredModule = { id: string; root: string; manifest: ServerModuleManifest; entry?: string; workerEntry?: string };
 const requiredServerModuleIds = new Set<string>();
 const registeredServerModuleIds = new Set<string>();
+const registeredServerModuleCatalog = new Map<string, { id: string; name: string; description?: string; version: string; required: boolean; enabledByDefault: boolean }>();
 export function getRegisteredServerModuleIds() { return [...registeredServerModuleIds]; }
+export function getRegisteredServerModuleCatalog() { return [...registeredServerModuleCatalog.values()]; }
 const requiredModuleDependencies = new Map<string, string[]>();
 const moduleActivation = new Map<string, boolean>();
 const activationListeners = new Map<string, Set<(enabled: boolean) => void>>();
@@ -215,6 +218,7 @@ function validateManifest(value: unknown, directoryName: string): ServerModuleMa
     throw new Error("The module manifest must declare a semantic version.");
   }
   if (manifest.name !== undefined && (typeof manifest.name !== "string" || !manifest.name.trim())) throw new Error("The module name must be a non-empty string.");
+  if (manifest.description !== undefined && (typeof manifest.description !== "string" || manifest.description.length > 500)) throw new Error("The module description must be a string of at most 500 characters.");
   if (manifest.required !== undefined && typeof manifest.required !== "boolean") throw new Error("The required flag must be a boolean.");
   if (manifest.enabledByDefault !== undefined && typeof manifest.enabledByDefault !== "boolean") throw new Error("The enabledByDefault flag must be a boolean.");
   if (manifest.clientManaged !== undefined && typeof manifest.clientManaged !== "boolean") throw new Error("The clientManaged flag must be a boolean.");
@@ -435,28 +439,40 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           const worker = new IsolatedModuleProcess(moduleId, moduleRoot, workerEntry.slice(moduleRoot.length + 1), (message) => app.log.error({ module: moduleId, message }, "Isolated module process log."));
           const alwaysEnabled = manifest.required || manifest.clientManaged === false;
           const unsubscribe = alwaysEnabled ? () => undefined : onServerModuleActivationChange(moduleId, (enabled) => worker.setEnabled(enabled));
-          worker.setEnabled(alwaysEnabled || isServerModuleEnabled(moduleId));
-          const unregisterWorker = context.workers.register(moduleId, manifest.name ?? moduleId, () => worker.diagnostics, () => worker.restart());
-          app.addHook("onClose", async () => { unsubscribe(); unregisterWorker(); worker.close(); });
-          app.all(`/api/modules/${moduleId}/*`, async (request, reply) => {
-            if (!alwaysEnabled && !isServerModuleEnabled(moduleId)) return reply.code(404).send({ error: "This module is not enabled for this installation." });
-            const method = request.method.toUpperCase();
-            if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return reply.code(405).send({ error: "Method not allowed." });
-            if (method !== "GET" && !context.validateMutation(request, reply)) return reply;
-            const departmentId = await context.resolveDepartmentId(request, reply);
-            if (!departmentId) return reply;
-            const grants = request.activeDepartmentModulePermissions?.[moduleId] ?? [];
-            if (request.activeDepartmentRole !== "site_admin" && manifest.accessGrants?.length && !manifest.accessGrants.some((grant) => grants.includes(grant))) return reply.code(403).send({ error: "You do not have access to this module." });
-            try {
-              const result = await worker.proxy(method, request.url, request.body, departmentId, request.authenticatedUser?.id ?? "", grants);
-              return reply.code(result.status).type(result.contentType).send(result.body);
-            } catch (error) {
-              return reply.code(503).send({ error: error instanceof Error ? error.message : "The module process is unavailable." });
-            }
-          });
+          let unregisterWorker: () => void = () => {};
+          try {
+            unregisterWorker = context.workers.register(moduleId, manifest.name ?? moduleId, () => worker.diagnostics, () => worker.restart());
+            app.addHook("onClose", async () => { unsubscribe(); unregisterWorker(); worker.close(); });
+            app.all(`/api/modules/${moduleId}/*`, async (request, reply) => {
+              if (!alwaysEnabled && !isServerModuleEnabled(moduleId)) return reply.code(404).send({ error: "This module is not enabled for this installation." });
+              const method = request.method.toUpperCase();
+              if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return reply.code(405).send({ error: "Method not allowed." });
+              if (method !== "GET" && !context.validateMutation(request, reply)) return reply;
+              const departmentId = await context.resolveDepartmentId(request, reply);
+              if (!departmentId) return reply;
+              const grants = request.activeDepartmentModulePermissions?.[moduleId] ?? [];
+              if (request.activeDepartmentRole !== "site_admin" && manifest.accessGrants?.length && !manifest.accessGrants.some((grant) => grants.includes(grant))) return reply.code(403).send({ error: "You do not have access to this module." });
+              const actor = request.authenticatedUser?.id;
+              if (!actor) return reply.code(401).send({ error: "Sign in to continue." });
+              try {
+                const result = await worker.proxy(method, request.url, request.body, departmentId, actor, grants);
+                return reply.code(result.status).type(result.contentType).send(result.body);
+              } catch (error) {
+                app.log.error({ err: error, module: moduleId }, "Isolated module request failed.");
+                return reply.code(503).send({ error: `Module ${moduleId} is currently unavailable.` });
+              }
+            });
+            worker.setEnabled(alwaysEnabled || isServerModuleEnabled(moduleId));
+          } catch (error) {
+            unsubscribe();
+            unregisterWorker();
+            worker.close();
+            throw error;
+          }
         }
         registered.add(moduleId);
         registeredServerModuleIds.add(moduleId);
+        registeredServerModuleCatalog.set(moduleId, { id: moduleId, name: manifest.name ?? moduleId, ...(manifest.description ? { description: manifest.description } : {}), version: manifest.version, required: Boolean(manifest.required), enabledByDefault: Boolean(manifest.enabledByDefault) });
         app.log.info({ module: moduleId }, "Module manifest registered without API routes.");
         continue;
       }
@@ -513,6 +529,7 @@ export async function registerServerModules(app: FastifyInstance, context: Modul
           registerModuleRoutes(isolateOptionalModule(scope, manifest.id), moduleContext);
           registered.add(moduleId);
           registeredServerModuleIds.add(moduleId);
+          registeredServerModuleCatalog.set(moduleId, { id: moduleId, name: manifest.name ?? moduleId, ...(manifest.description ? { description: manifest.description } : {}), version: manifest.version, required: Boolean(manifest.required), enabledByDefault: Boolean(manifest.enabledByDefault) });
           scope.log.info({ module: manifest.id }, "Optional server module registered.");
         } catch (error) {
           replicationAdapters.delete(moduleId);
