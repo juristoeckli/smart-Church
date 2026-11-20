@@ -21,8 +21,6 @@ const COMMAND_REQUEST_DYNAMIC_DEVICE = 0x0583;
 const COMMAND_INPUT_CHANNEL_ON = 0x0084;
 const COMMAND_INPUT_CHANNEL_OFF = 0x0085;
 const HOP_COUNT = 0x0f;
-const MASTER_ADDRESS: DeviceAddress = { device: 0, port: 0, system: 0 };
-
 function addressBytes(address: DeviceAddress) {
   const bytes = Buffer.alloc(6);
   bytes.writeUInt16BE(address.system, 0);
@@ -171,7 +169,6 @@ async function waitForReply(
   connection: IcspConnection,
   expected: { messageId?: number; commands: number[]; description?: string },
   timeoutMs: number,
-  deviceInfoSource: DeviceAddress,
 ) {
   const deadline = Date.now() + timeoutMs;
   const observed: string[] = [];
@@ -186,10 +183,11 @@ async function waitForReply(
 
     observed.push(describeFrame(frame));
 
-    // Device information can arrive asynchronously while a request is pending;
-    // acknowledge it without mistaking it for the requested reply.
+    // Device information is broadcast during connection setup. This client has
+    // not been assigned a NetLinx address yet (or the broadcast is for another
+    // device), so replying with an assumed address can create a route back to
+    // the master. Ignore it and keep waiting for the solicited response.
     if (frame.command === COMMAND_DEVICE_INFO) {
-      await ackIncoming(connection, frame, deviceInfoSource);
       continue;
     }
     // Dynamic-address replies are tied to the only 0x0583 request on this new
@@ -236,7 +234,7 @@ async function registerDynamicDevice(connection: IcspConnection, host: string) {
   const frame = await waitForReply(connection, {
     commands: [COMMAND_DYNAMIC_DEVICE_ADDRESS],
     description: "a temporary ICSP device address",
-  }, 5000, { device: 0, port: 1, system: 0 });
+  }, 5000);
   if (frame.data.length < 4) throw new Error("The AMX master returned a truncated dynamic ICSP address.");
   const device = frame.data.readUInt16BE(0);
   const system = frame.data.readUInt16BE(2);
@@ -245,9 +243,11 @@ async function registerDynamicDevice(connection: IcspConnection, host: string) {
   if (device < 32001 || device > 32767 || system === 0) {
     throw new Error(`The AMX master returned an invalid temporary ICSP address (${device}:1:${system}).`);
   }
-  const address = { device, system, port: frame.destination.port || 1 };
-  await ackIncoming(connection, frame, address);
-  return address;
+  // The lease ACK must use the exact assigned destination from the 0x0503
+  // frame (including port 0). Once the lease is acknowledged, ICSP device
+  // traffic uses the temporary device's normal port 1 address.
+  await ackIncoming(connection, frame, frame.destination);
+  return { address: { device, system, port: 1 }, master: frame.source };
 }
 
 export async function pulseChannel(host: string, port: number, address: DeviceAddress, channel: number) {
@@ -260,29 +260,17 @@ export async function pulseChannel(host: string, port: number, address: DeviceAd
   const connection = new IcspConnection();
   try {
     await connection.connect(host, port);
-    const initialAddress: DeviceAddress = { device: 0, port: 1, system: 0 };
-    const startupDeadline = Date.now() + 1200;
-    let receivedStartupFrame = false;
-    while (Date.now() < startupDeadline) {
-      let frame: IcspFrame;
-      try { frame = await connection.nextFrame(receivedStartupFrame ? 150 : startupDeadline - Date.now()); }
-      catch { break; }
-      receivedStartupFrame = true;
-      if (frame.command === COMMAND_DEVICE_INFO) await ackIncoming(connection, frame, initialAddress);
-    }
-
-    const dynamicAddress = await registerDynamicDevice(connection, host);
+    const { address: dynamicAddress, master } = await registerDynamicDevice(connection, host);
     const channelData = Buffer.alloc(8);
     channelData.writeUInt16BE(address.device, 0);
     channelData.writeUInt16BE(address.port, 2);
     channelData.writeUInt16BE(address.system, 4);
     channelData.writeUInt16BE(channel, 6);
-    const master = { device: MASTER_ADDRESS.device, port: MASTER_ADDRESS.port, system: dynamicAddress.system };
     const messageId = 2;
     await connection.send({ flags: 0, destination: master, source: dynamicAddress, messageId, command: COMMAND_INPUT_CHANNEL_ON, data: channelData });
     let onError: unknown;
     try {
-      await waitForReply(connection, { messageId, commands: [COMMAND_ACK] }, 2500, dynamicAddress);
+      await waitForReply(connection, { messageId, commands: [COMMAND_ACK] }, 2500);
       await new Promise((resolve) => setTimeout(resolve, 500));
     } catch (error) {
       onError = error;
@@ -290,7 +278,7 @@ export async function pulseChannel(host: string, port: number, address: DeviceAd
     // Always send RELEASE after PUSH, even if its ACK was lost. That prevents
     // an uncertain network response from leaving the NetLinx input held ON.
     await connection.send({ flags: 0, destination: master, source: dynamicAddress, messageId: messageId + 1, command: COMMAND_INPUT_CHANNEL_OFF, data: channelData });
-    await waitForReply(connection, { messageId: messageId + 1, commands: [COMMAND_ACK] }, 2500, dynamicAddress);
+    await waitForReply(connection, { messageId: messageId + 1, commands: [COMMAND_ACK] }, 2500);
     await new Promise((resolve) => setTimeout(resolve, 100));
     if (onError) throw onError;
   } finally {
