@@ -66,7 +66,7 @@ export default defineConfig(({ command }) => {
         output: { entryFileNames: "[name].js", chunkFileNames: "assets/[name]-[hash].js" },
       },
     } : {
-      rollupOptions: { external: ["react", "react/jsx-runtime"] },
+      rollupOptions: { external: ["react", "react/jsx-runtime", "react-dom/client"] },
     },
     server: {
       proxy: {
