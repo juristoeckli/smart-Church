@@ -247,7 +247,7 @@ async function registerDynamicDevice(connection: IcspConnection, host: string) {
   // frame (including port 0). Once the lease is acknowledged, ICSP device
   // traffic uses the temporary device's normal port 1 address.
   await ackIncoming(connection, frame, frame.destination);
-  return { address: { device, system, port: 1 }, master: frame.source };
+  return { address: { device, system, port: 1 } };
 }
 
 export async function pulseChannel(host: string, port: number, address: DeviceAddress, channel: number) {
@@ -260,7 +260,11 @@ export async function pulseChannel(host: string, port: number, address: DeviceAd
   const connection = new IcspConnection();
   try {
     await connection.connect(host, port);
-    const { address: dynamicAddress, master } = await registerDynamicDevice(connection, host);
+    const { address: dynamicAddress } = await registerDynamicDevice(connection, host);
+    // NetLinx advertises its local master endpoint as 0:1:0 in the
+    // device-info broadcasts. The reply source (0:1:1) is the master on its
+    // concrete system and routing back to it can create a system-1 loop.
+    const master: DeviceAddress = { device: 0, port: 1, system: 0 };
     const channelData = Buffer.alloc(8);
     channelData.writeUInt16BE(address.device, 0);
     channelData.writeUInt16BE(address.port, 2);
