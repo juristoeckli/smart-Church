@@ -30,7 +30,7 @@ function safeHtml(value: string, pageId?: string): string {
     .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|textarea|select|option|meta|link)[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
     .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|textarea|select|option|meta|link)\b[^>]*\/?\s*>/gi, "");
   html = html.replace(/<\/?([a-z0-9-]+)([^>]*)>/gi, (whole, rawTag: string, attributes: string) => {
-    const tag = rawTag.toLowerCase();
+    const tag = rawTag.toLowerCase() === "strike" ? "s" : rawTag.toLowerCase();
     if (!allowedTags.has(tag)) return "";
     if (whole.startsWith("</")) return `</${tag}>`;
     if (tag === "img") {
