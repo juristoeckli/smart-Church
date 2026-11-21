@@ -1105,6 +1105,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return { preview: true, occurrences: starts.length, planned: planned.length, alreadyLinked: starts.filter((start) => Boolean(effectiveLink(start))).length, skippedCancelled: starts.filter((start) => Boolean(byStart.get(start)?.cancelled)).length, throughDate };
       }
       let created = 0;
+      const staffedPositions = [...assignmentsByIndex];
+      const staffedIndexes = staffedPositions.map(([index]) => index);
+      const staffedContacts = staffedPositions.map(([, contactId]) => contactId);
       for (const { original: start, date, startTime, endTime, allDay } of planned) {
         const eventId = randomUUID();
         const eventLocation = (row.place || row.calendar_name || "Church").slice(0, 160);
@@ -1114,6 +1117,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            VALUES($1,$2,$3,$4,$5::date,$6,$7::time,$8::time,$9,$10,'',ARRAY[]::uuid[],$11::jsonb,$12::jsonb,$13,$14,$15,$16)`,
           [eventId, departmentId, row.title, request.body.kind, date, allDay, startTime, endTime, eventLocation, eventDescription, JSON.stringify(positionsWithAssignments), JSON.stringify(items), row.id, registrationEnabled, registrationCapacity, registrationEnabled ? randomUUID() : null],
         );
+        if (staffedPositions.length) {
+          await client.query(
+            `INSERT INTO event_position_responses(event_id,position_index,contact_id,status)
+             SELECT $1, staff.position_index, staff.contact_id, 'pending'
+             FROM unnest($2::integer[], $3::uuid[]) AS staff(position_index, contact_id)`,
+            [eventId, staffedIndexes, staffedContacts],
+          );
+        }
         await client.query(
           `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
            VALUES($1,$2::timestamp,false,jsonb_build_object('linkedEventId',$3::text),$4)
