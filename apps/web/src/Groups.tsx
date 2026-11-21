@@ -22,12 +22,27 @@ const defaultGroupColumns: GroupColumn[] = groupColumns.map(({ key }) => key);
 
 type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sortOrder?: GroupSortOrder; displayMode?: "list" | "table"; visibleColumns?: GroupColumn[]; createdAt: string; updatedAt: string };
 
-function csvCell(value: string) {
-  return `"${value.replace(/"/g, '""')}"`;
+function csvCell(value: string | number) {
+  const text = String(value);
+  const safeText = typeof value === "string" && (/^\s*[=+\-@＝＋－＠]/u.test(text) || /^[\t\r\n]/.test(text)) ? `'${text}` : text;
+  return `"${safeText.replace(/"/g, '""')}"`;
+}
+
+function downloadCsv(rows: (string | number)[][], fileName: string) {
+  const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, createRequestId = 0, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; createRequestId?: number; onNavigationHandled?: (requestId: number) => void }) {
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
+  const [loadedDepartmentId, setLoadedDepartmentId] = useState("");
   const [directorySearch, setDirectorySearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<GroupStatusFilter>("all");
   const [groupTypeFilter, setGroupTypeFilter] = useState("");
@@ -139,7 +154,9 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       const response = await fetch("/api/groups", { headers: { "x-department-id": departmentId }, signal });
       const result = await response.json() as ChurchGroup[] | { error?: string };
       if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? "Could not load groups." : "Could not load groups.");
+      if (signal?.aborted) return;
       setGroups(result);
+      setLoadedDepartmentId(departmentId);
       setSelectedId((current) => result.some((group) => group.id === current) ? current : result[0]?.id ?? "");
     } catch (reason) { if (!signal?.aborted) setError(reason instanceof Error ? reason.message : "Could not load groups."); }
     finally { if (!signal?.aborted) setLoading(false); }
@@ -388,15 +405,15 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       [translate("groups.name"), translate("groups.meeting"), translate("groups.meetingDate"), translate("events.firstName"), translate("events.lastName"), translate("groups.attendance")],
       ...attendance.map((entry) => [selected.name, meeting.title, formatUserDate(meeting.date), entry.firstName, entry.lastName, translate(`groups.${entry.status}` as "groups.present" | "groups.absent" | "groups.excused")]),
     ];
-    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `group-attendance-${meeting.date}.csv`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    downloadCsv(rows, `group-attendance-${meeting.date}.csv`);
+  }
+
+  function downloadGroupDirectory() {
+    if (loading || loadedDepartmentId !== departmentId || visibleGroups.length === 0) return;
+    downloadCsv([
+      [translate("groups.name"), ...displayedColumns.map(({ label }) => label)],
+      ...visibleGroups.map((group) => [group.name, ...displayedColumns.map(({ value }) => value(group) ?? "")]),
+    ], "groups-directory.csv");
   }
 
   async function deleteGroup(group: ChurchGroup) {
@@ -418,6 +435,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
         <div className="community-group-directory-tools"><label className="search-field"><Search size={15} /><input type="search" value={directorySearch} onChange={(event) => { setDirectorySearch(event.target.value); setSelectedSavedViewId(""); }} placeholder="Search groups by name or type" aria-label="Search groups by name or type" /></label><label className="community-group-status-filter">Group status<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as GroupStatusFilter); setSelectedSavedViewId(""); }}><option value="all">All statuses</option>{availableStatuses.map((status) => <option key={status} value={status}>{status[0].toUpperCase() + status.slice(1)}</option>)}</select></label><label className="community-group-status-filter">Group type<select value={groupTypeFilter} onChange={(event) => { setGroupTypeFilter(event.target.value); setSelectedSavedViewId(""); }}><option value="">All types</option>{availableGroupTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label className="community-group-status-filter">Sort groups<select value={sortOrder} onChange={(event) => { setSortOrder(event.target.value as GroupSortOrder); setSelectedSavedViewId(""); }}><option value="name_asc">Name A–Z</option><option value="name_desc">Name Z–A</option><option value="members_desc">Most members</option><option value="start_desc">Newest start date</option></select></label></div>
         <div className="community-saved-group-views"><select aria-label="Load a saved group view" value={selectedSavedViewId} onChange={(event) => applySavedView(event.target.value)}><option value="">Saved views</option>{savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select><input value={savedViewName} maxLength={80} onChange={(event) => setSavedViewName(event.target.value)} placeholder="View name" aria-label="Saved view name" /><button className="button button-secondary" type="button" disabled={saving || !savedViewName.trim()} onClick={() => void saveDirectoryView()}>{saving ? "Saving..." : "Save view"}</button>{selectedSavedViewId && <button className="button button-secondary" type="button" disabled={saving} onClick={() => void deleteSavedView()}>Delete</button>}</div>
         <div className="community-group-directory-tools">
+          <button className="button button-secondary" type="button" disabled={loading || loadedDepartmentId !== departmentId || visibleGroups.length === 0} onClick={downloadGroupDirectory}><Download size={14} />Export directory CSV</button>
           <label className="community-group-status-filter">Layout
             <select value={displayMode} onChange={(event) => { setDisplayMode(event.target.value === "table" ? "table" : "list"); setSelectedSavedViewId(""); }}>
               <option value="list">List</option><option value="table">Table</option>

@@ -24,6 +24,37 @@ function csvCell(value: unknown) {
   return "\"" + safe.replace(/"/g, "\"\"") + "\"";
 }
 
+function printText(value: unknown) {
+  return String(value ?? "—").replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[character] ?? character);
+}
+
+function downloadPrintableReport(result: ReportResult | DesignerResult) {
+  const { title, generatedAt, columns, rows } = result;
+  const summary = "totalRows" in result
+    ? `${result.totalRows} rows · previewing ${rows.length}${result.capped ? " · dataset capped at 5,000 source rows" : ""}`
+    : `${rows.length} rows`;
+  const headings = columns.map((column) => `<th scope="col">${printText(column.label)}</th>`).join("");
+  const body = rows.map((row) => `<tr>${columns.map((column) => `<td>${printText(row[column.key])}</td>`).join("")}</tr>`).join("");
+  const table = rows.length ? `<table><thead><tr>${headings}</tr></thead><tbody>${body}</tbody></table>` : "<p>No rows match this report.</p>";
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <title>${printText(title)}</title><style>
+      @page{size:landscape;margin:12mm}body{font:12px system-ui,sans-serif;color:#101010}
+      h1{margin-bottom:4px}table{width:100%;border-collapse:collapse}thead{display:table-header-group}
+      th,td{text-align:left;vertical-align:top;border:1px solid #aaa;padding:5px;overflow-wrap:anywhere}
+      th{background:#eee}tr{break-inside:avoid}@media print{.print-help{display:none}}
+    </style></head><body><h1>${printText(title)}</h1>
+    <p>${printText(summary)} · generated ${printText(new Date(generatedAt).toLocaleString())}</p>
+    <p class="print-help">Use your browser’s print dialog to print or save as PDF.</p>${table}</body></html>`;
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${"reportKey" in result ? result.reportKey : `ad-hoc-${result.dataset}`}-print.html`;
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 export function ReportsModule({ department, departmentId, csrfToken, canManageSite }: ModuleContext) {
   const [definitions, setDefinitions] = useState<ReportDefinition[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
@@ -323,7 +354,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
         </section>
         <aside className="reports-panel reports-saved"><h2>Saved designs</h2>{savedDesigner.length ? <ul>{savedDesigner.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => loadDesigner(item)}>{item.name}<small>{designerCatalog.find((dataset) => dataset.key === item.definition.dataset)?.title ?? item.definition.dataset} · {item.shareScope === "department" ? "Shared with dataset-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDesignerSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void removeDesigner(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved designs are private to your account unless you choose to share them.</p>}<ScheduleList items={savedDesigner.filter((item) => item.canEdit && (canManageReports || item.scheduleDays))} canManage={canManageReports} onRefresh={refreshDesignerRunStatus} onChange={changeDesignerSchedule} onOpen={openScheduledDesignerResult} /></aside>
       </div>}
-      {designerResult && <section className="reports-results"><div className="reports-results-heading"><div><h2>{designerResult.title}</h2><p>{designerResult.totalRows} rows · previewing {designerResult.rows.length} · generated {new Date(designerResult.generatedAt).toLocaleString()}{designerResult.capped ? " · dataset capped at 5,000 source rows" : ""}</p></div><div className="reports-export-actions"><button className="button button-secondary" type="button" onClick={downloadDesignerCsv}><Download size={16} />Export preview CSV</button><button className="button button-secondary" type="button" disabled={exportingWorkbook} onClick={() => void downloadWorkbook(designerWorkbook.current, "ad-hoc-" + designerResult.dataset)}>Export XLSX</button></div></div>{designerResult.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{designerResult.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{designerResult.rows.map((row, index) => <tr key={index}>{designerResult.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match this report.</p>}</section>}
+      {designerResult && <section className="reports-results"><div className="reports-results-heading"><div><h2>{designerResult.title}</h2><p>{designerResult.totalRows} rows · previewing {designerResult.rows.length} · generated {new Date(designerResult.generatedAt).toLocaleString()}{designerResult.capped ? " · dataset capped at 5,000 source rows" : ""}</p></div><div className="reports-export-actions"><button className="button button-secondary" type="button" onClick={downloadDesignerCsv}><Download size={16} />Export preview CSV</button><button className="button button-secondary" type="button" disabled={exportingWorkbook} onClick={() => void downloadWorkbook(designerWorkbook.current, "ad-hoc-" + designerResult.dataset)}>Export XLSX</button><button className="button button-secondary" type="button" onClick={() => downloadPrintableReport(designerResult)}>Print-ready HTML</button></div></div>{designerResult.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{designerResult.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{designerResult.rows.map((row, index) => <tr key={index}>{designerResult.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match this report.</p>}</section>}
     </> : definitions.length === 0 ? <p className="reports-empty">No reports are available for your permissions. Ask an administrator for Reports access and the relevant People, Groups, Events or Finance permissions.</p> : <div className="reports-layout">
       <section className="reports-panel">
         <h2>Choose a report</h2>
@@ -339,7 +370,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
       </section>
       <aside className="reports-panel reports-saved"><h2>Saved reports</h2>{saved.length ? <ul>{saved.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => { setReportKey(item.reportKey); setFilters(item.filters ?? {}); setResult(null); }}>{item.name}<small>{definitions.find((definition) => definition.key === item.reportKey)?.title} · {item.shareScope === "department" ? "Shared with report-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDefinitionSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void deleteDefinition(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved report definitions will appear here.</p>}<ScheduleList items={saved.filter((item) => item.scheduleDays !== undefined && (canManageReports || item.scheduleDays))} canManage={canManageReports} onRefresh={refreshRunStatus} onChange={changeSchedule} onOpen={openScheduledResult} /></aside>
     </div>}
-    {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><div className="reports-export-actions"><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button><button className="button button-secondary" type="button" disabled={exportingWorkbook} onClick={() => void downloadWorkbook(reportWorkbook.current, result.reportKey)}>Export XLSX</button></div></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
+    {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><div className="reports-export-actions"><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button><button className="button button-secondary" type="button" disabled={exportingWorkbook} onClick={() => void downloadWorkbook(reportWorkbook.current, result.reportKey)}>Export XLSX</button><button className="button button-secondary" type="button" onClick={() => downloadPrintableReport(result)}>Print-ready HTML</button></div></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
   </main>;
 }
 
