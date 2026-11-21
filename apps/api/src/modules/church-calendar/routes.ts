@@ -387,15 +387,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const bookings = await context.pool.query<{ id: string; purpose: string; starts_at: string }>(
       `SELECT id,purpose,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at FROM resource_bookings WHERE department_id=$1 AND status='approved' AND starts_at >= now()-interval '90 days' AND ($3 OR requested_by=$2) ORDER BY starts_at LIMIT 250`, [departmentId, userId(request), canSeeAllBookings]);
     const templatesInstalled = await context.pool.query<{ present: boolean }>("SELECT to_regclass('public.service_plan_templates') IS NOT NULL AS present");
-    const servicePlanTemplates = templatesInstalled.rows[0]?.present
-      ? (await context.pool.query<{ id: string; name: string; positions: Array<{ name: string }> }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
+    const canManageEvents = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+    const servicePlanTemplates = canManageEvents && templatesInstalled.rows[0]?.present
+      ? (await context.pool.query<{ id: string; name: string; positions: Array<{ name: string; category?: string; qualificationIds?: string[] }> }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
       : [];
     const canSelectPeople = canSeePrivatePeople(request);
     return { groups: groups.rows, signupGroups: signupGroups.rows, events: events.rows, resourceBookings: bookings.rows, servicePlanTemplates, canSelectPeople };
   });
 
-  app.get<{ Querystring: { q?: string } }>("/api/modules/church-calendar/people", { schema: {
-    querystring: { type: "object", additionalProperties: false, required: ["q"], properties: { q: { type: "string", minLength: 2, maxLength: 80 } } },
+  app.get<{ Querystring: { q?: string; staffing?: boolean } }>("/api/modules/church-calendar/people", { schema: {
+    querystring: { type: "object", additionalProperties: false, required: ["q"], properties: { q: { type: "string", minLength: 2, maxLength: 80 }, staffing: { type: "boolean" } } },
   } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
@@ -404,6 +405,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!canSelectPeople) return responseError(reply, 403, "Private People access is required to select an appointment contact.");
     const query = (request.query.q ?? "").trim().replace(/[\\%_]/g, "").slice(0, 80);
     if (query.length < 2) return [];
+    if (request.query.staffing) {
+      const canManageEvents = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+      if (!canManageEvents) return responseError(reply, 403, "Event management access is required to search staffing qualifications.");
+      return (await context.pool.query<{ id: string; name: string; qualificationIds: string[] }>(
+        `SELECT person.id,concat_ws(' ',person.first_name,person.last_name) AS name,
+                COALESCE(array_agg(DISTINCT qualification.id::text) FILTER (WHERE qualification.id IS NOT NULL),'{}'::text[]) AS "qualificationIds"
+           FROM contacts person
+           LEFT JOIN contact_service_qualifications assignment ON assignment.department_id=person.department_id AND assignment.contact_id=person.id AND person.status='member'
+           LEFT JOIN service_volunteer_qualifications qualification ON qualification.id=assignment.qualification_id AND qualification.department_id=person.department_id AND qualification.active=true
+          WHERE person.department_id=$1 AND person.archived_at IS NULL
+            AND (person.first_name ILIKE $2 OR person.last_name ILIKE $2 OR concat_ws(' ',person.first_name,person.last_name) ILIKE $2)
+          GROUP BY person.id ORDER BY lower(person.last_name),lower(person.first_name),person.id LIMIT 50`,
+        [departmentId, `%${query}%`],
+      )).rows;
+    }
     return (await context.pool.query<{ id: string; name: string }>(
       `SELECT id,concat_ws(' ',first_name,last_name) AS name FROM contacts
         WHERE department_id=$1 AND (first_name ILIKE $2 OR last_name ILIKE $2 OR concat_ws(' ',first_name,last_name) ILIKE $2)
@@ -937,7 +953,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const templateResult = await client.query<{ positions: unknown; items: unknown }>("SELECT positions,items FROM service_plan_templates WHERE id=$1 AND department_id=$2 AND active=true FOR SHARE", [request.body.templateId, departmentId]);
       const template = templateResult.rows[0];
       if (!template) { await client.query("ROLLBACK"); return responseError(reply, 404, "Active service-plan template not found in this location."); }
-      const validPosition = (item: unknown): item is { name: string } => Boolean(item && typeof item === "object" && !Array.isArray(item) && typeof (item as Record<string, unknown>).name === "string" && ((item as Record<string, unknown>).name as string).trim().length > 0 && ((item as Record<string, unknown>).name as string).length <= 80);
+      const validPosition = (item: unknown): item is { name: string; category?: string; qualificationIds?: string[] } => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const position = item as Record<string, unknown>;
+        return typeof position.name === "string" && Boolean(position.name.trim()) && position.name.length <= 80
+          && (position.category === undefined || (typeof position.category === "string" && position.category.length <= 80))
+          && (position.qualificationIds === undefined || (Array.isArray(position.qualificationIds) && position.qualificationIds.length <= 20
+            && position.qualificationIds.every((value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))));
+      };
       const validItem = (item: unknown): item is Record<string, unknown> => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return false;
         const value = item as Record<string, unknown>;
@@ -955,7 +978,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         || !Array.isArray(template.items) || template.items.length > 100 || !template.items.every(validItem)) {
         await client.query("ROLLBACK"); return responseError(reply, 409, "The selected service-plan template has invalid or unsupported content. Review and save the template before generating events.");
       }
-      const positions = template.positions.map((item) => ({ name: item.name.trim() }));
+      const positions = template.positions.map((item) => ({
+        name: item.name.trim(),
+        ...(item.category?.trim() ? { category: item.category.trim() } : {}),
+        ...(item.qualificationIds?.length ? { qualificationIds: [...new Set(item.qualificationIds.map((id) => id.toLowerCase()))] } : {}),
+      }));
+      const qualificationIds = [...new Set(positions.flatMap((position) => position.qualificationIds ?? []))];
+      if (qualificationIds.length) {
+        const available = await client.query(
+          "SELECT id FROM service_volunteer_qualifications WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[]) FOR SHARE",
+          [departmentId, qualificationIds],
+        );
+        if (available.rowCount !== qualificationIds.length) {
+          await client.query("ROLLBACK"); return responseError(reply, 409, "The template requires a volunteer qualification that is no longer active at this location. Update the template before generating events.");
+        }
+      }
       const items = template.items;
       const positionNames = new Set(positions.map((position) => position.name.trim().toLocaleLowerCase()));
       const requestedAssignments = request.body.staffAssignments ?? [];
@@ -969,12 +1006,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (assignment.positionName.trim().toLocaleLowerCase() !== positions[assignment.positionIndex].name.trim().toLocaleLowerCase()) {
           await client.query("ROLLBACK"); return responseError(reply, 409, "The template roles changed after the assignment form loaded. Refresh the calendar and choose the assignments again.");
         }
-        assignmentsByIndex.set(assignment.positionIndex, assignment.contactId);
+        assignmentsByIndex.set(assignment.positionIndex, assignment.contactId.toLowerCase());
       }
-      const assignedContactIds = [...new Set(requestedAssignments.map((assignment) => assignment.contactId))];
+      const assignedContactIds = [...new Set(requestedAssignments.map((assignment) => assignment.contactId.toLowerCase()))];
       if (assignedContactIds.length) {
-        const contacts = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, assignedContactIds]);
+        const contacts = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND archived_at IS NULL AND id=ANY($2::uuid[]) FOR SHARE", [departmentId, assignedContactIds]);
         if (contacts.rowCount !== assignedContactIds.length) { await client.query("ROLLBACK"); return responseError(reply, 400, "Every assigned volunteer must be a People record in this location."); }
+      }
+      if (assignedContactIds.length && qualificationIds.length) {
+        const { rows } = await client.query<{ contact_id: string; qualification_id: string }>(
+          `SELECT assignment.contact_id,assignment.qualification_id
+             FROM contact_service_qualifications assignment
+             JOIN contacts person ON person.id=assignment.contact_id AND person.department_id=assignment.department_id
+            WHERE assignment.department_id=$1 AND assignment.contact_id=ANY($2::uuid[]) AND assignment.qualification_id=ANY($3::uuid[])
+              AND person.status='member' AND person.archived_at IS NULL FOR SHARE OF assignment`,
+          [departmentId, assignedContactIds, qualificationIds],
+        );
+        const qualified = new Set(rows.map((row) => `${row.contact_id}:${row.qualification_id}`));
+        for (const [index, contactId] of assignmentsByIndex) {
+          const role = positions[index];
+          if (role.qualificationIds?.some((id) => !qualified.has(`${contactId.toLowerCase()}:${id}`))) {
+            await client.query("ROLLBACK"); return responseError(reply, 409, `The assigned volunteer does not have every required qualification for ${role.name}.`);
+          }
+        }
       }
       const positionsWithAssignments = positions.map((position, index) => {
         const contactId = assignmentsByIndex.get(index);
