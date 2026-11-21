@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState, type FormEvent, type ChangeEvent } fr
 
 const fieldTypes = { text: "Text", number: "Number", boolean: "Yes / no", date: "Date", select: "Single choice" } as const;
 type FieldType = keyof typeof fieldTypes;
-type Field = { id: string; label: string; type: FieldType; options: string[]; revision: number; archivedAt: string | null };
+type Field = { id: string; label: string; type: FieldType; options: string[]; revision: number; archivedAt: string | null; defaultValue: Value | null };
 type Value = string | number | boolean;
-type Answers = { values: Record<string, Value>; revision: number };
+type Answers = { values: Record<string, Value>; defaultedFieldIds: string[]; revision: number };
 
 type FieldRequest = <T>(url: string, init?: RequestInit) => Promise<T>;
 type BulkPreview = {
@@ -18,11 +18,15 @@ function fieldValue(field: Field, input: string): Value {
   return input;
 }
 
-function MemberFieldInput({ field, value, disabled, onValue }: {
-  field: Field; value: string; disabled: boolean; onValue: (value: string) => void;
+function valueLabel(value: Value) {
+  return typeof value === "boolean" ? value ? "Yes" : "No" : String(value);
+}
+
+function MemberFieldInput({ field, label = field.label, value, disabled, onValue }: {
+  field: Field; label?: string; value: string; disabled: boolean; onValue: (value: string) => void;
 }) {
   const inputProps = { value, disabled, onChange: (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => onValue(event.target.value) };
-  return <label>{field.label}
+  return <label>{label}
     {field.type === "boolean" || field.type === "select" ? <select {...inputProps}>
       <option value="">Not set</option>
       {field.type === "boolean" ? <><option value="true">Yes</option><option value="false">No</option></> : field.options.map(option => <option key={option}>{option}</option>)}
@@ -86,11 +90,12 @@ function BulkMemberFieldChange({ base, fields, selectedContactIds, request }: {
         {fields.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
       </select></label>
       <label>Action<select value={operation} disabled={busy} onChange={event => { setOperation(event.target.value === "clear" ? "clear" : "set"); setPrepared(null); }}>
-        <option value="set">Set value</option><option value="clear">Clear value</option>
+        <option value="set">Set value</option><option value="clear">Clear stored value</option>
       </select></label>
       {field && operation === "set" && <MemberFieldInput field={field} value={input} disabled={busy} onValue={value => { setInput(value); setPrepared(null); }}/>}
       <button disabled={busy || !field || !contactIds.length || (operation === "set" && !input.trim())}>Preview field update</button>
     </form>
+    {field?.defaultValue != null && operation === "clear" && <p>Members without a stored value will use the group default.</p>}
     {preview && <div>
       <p>{preview.changedCount} of {preview.members.length} selected memberships will change.</p>
       <button type="button" disabled={busy || preview.changedCount === 0} onClick={() => void apply()}>Apply field update</button>
@@ -116,6 +121,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
   const [reload, setReload] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [rename, setRename] = useState<{ field: Field; label: string } | null>(null);
+  const [defaultDraft, setDefaultDraft] = useState<{ field: Field; input: string } | null>(null);
   const activeFields = fields?.filter(field => !field.archivedAt) ?? [];
   const archivedFields = fields?.filter(field => field.archivedAt) ?? [];
   const request = useCallback(async <T,>(url: string, init: RequestInit = {}): Promise<T> => {
@@ -143,6 +149,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
       setAnswers(currentAnswers);
       setDraft({});
       setRename(null);
+      setDefaultDraft(null);
     }).catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
   }, [base, contactId, reload, request]);
@@ -189,7 +196,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     finally { setSaving(false); }
   }
 
-  async function changeField(field: Field, change: { label: string } | { archived: boolean }) {
+  async function changeField(field: Field, change: { label: string } | { archived: boolean } | { defaultValue: Value | null }) {
     if (saving) return;
     setSaving(true);
     setError("");
@@ -200,9 +207,21 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
       });
       setFields(current => current?.map(item => item.id === updated.id ? updated : item) ?? null);
       setRename(null);
-      setMessage("label" in change ? "Membership field renamed." : change.archived ? "Membership field archived." : "Membership field restored.");
+      setDefaultDraft(null);
+      setMessage("label" in change ? "Membership field renamed." : "defaultValue" in change
+        ? "Membership field default saved." : change.archived ? "Membership field archived." : "Membership field restored.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update the membership field."); }
     finally { setSaving(false); }
+  }
+
+  function saveDefault() {
+    if (!defaultDraft) return;
+    const { field, input } = defaultDraft;
+    const defaultValue = input === "" ? null : fieldValue(field, input);
+    if (field.type === "number" && defaultValue !== null && !Number.isFinite(defaultValue)) {
+      setError("Enter a finite number."); return;
+    }
+    void changeField(field, { defaultValue });
   }
 
   async function saveAnswers(event: FormEvent<HTMLFormElement>) {
@@ -238,9 +257,18 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
           <label>Field label<input required maxLength={80} disabled={saving} value={rename.label} onChange={event => setRename({ field: rename.field, label: event.target.value })}/></label>
           <button disabled={saving || !rename.label.trim()}>Save field name</button>
           <button type="button" disabled={saving} onClick={() => setRename(null)}>Cancel</button>
+        </form> : defaultDraft?.field.id === field.id ? <form onSubmit={event => { event.preventDefault(); saveDefault(); }}>
+          <MemberFieldInput field={field} label="Default value" value={defaultDraft.input} disabled={saving}
+            onValue={input => setDefaultDraft({ field: defaultDraft.field, input })}/>
+          <button disabled={saving}>Save default</button>
+          <button type="button" disabled={saving} onClick={() => setDefaultDraft(null)}>Cancel</button>
         </form> : <>
-          <span>{field.label} · {fieldTypes[field.type]}</span>
-          <button type="button" disabled={saving} onClick={() => setRename({ field, label: field.label })}>Rename</button>
+          <span>{field.label} · {fieldTypes[field.type]}{field.defaultValue !== null ? " · Default: " + valueLabel(field.defaultValue) : ""}</span>
+          <button type="button" disabled={saving} onClick={() => { setDefaultDraft(null); setRename({ field, label: field.label }); }}>Rename</button>
+          <button type="button" disabled={saving} onClick={() => {
+            setRename(null);
+            setDefaultDraft({ field, input: field.defaultValue === null ? "" : String(field.defaultValue) });
+          }}>{field.defaultValue === null ? "Set default" : "Edit default"}</button>
           <button type="button" disabled={saving} onClick={() => void changeField(field, { archived: true })}>Archive</button>
         </>}
       </li>)}</ul>}
@@ -263,8 +291,13 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     {contactId && answers && activeFields.length > 0 && <form onSubmit={saveAnswers}>
       {activeFields.map(field => {
         const value = draft[field.id] ?? (answers.values[field.id] === undefined ? "" : String(answers.values[field.id]));
-        return <MemberFieldInput key={field.id} field={field} value={value} disabled={saving}
-          onValue={value => setDraft(current => ({ ...current, [field.id]: value }))}/>;
+        return <div key={field.id}>
+          <MemberFieldInput field={field} value={value} disabled={saving}
+            onValue={value => setDraft(current => ({ ...current, [field.id]: value }))}/>
+          {draft[field.id] === undefined && answers.defaultedFieldIds.includes(field.id) && <small>Using group default</small>}
+          {field.defaultValue !== null && (draft[field.id] !== undefined || !answers.defaultedFieldIds.includes(field.id))
+            && <button type="button" disabled={saving} onClick={() => setDraft(current => ({ ...current, [field.id]: "" }))}>Use group default</button>}
+        </div>;
       })}
       <button disabled={saving || !Object.keys(draft).length}>Save member fields</button>
     </form>}

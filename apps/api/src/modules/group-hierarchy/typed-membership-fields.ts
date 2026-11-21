@@ -10,14 +10,15 @@ const groupParams = { type: "object", required: ["groupId"], additionalPropertie
 const memberParams = { type: "object", required: ["groupId", "contactId"], additionalProperties: false, properties: { groupId: uuid, contactId: uuid } } as const;
 const definitionParams = { type: "object", required: ["groupId", "fieldId"], additionalProperties: false, properties: { groupId: uuid, fieldId: uuid } } as const;
 const labelSchema = { type: "string", minLength: 1, maxLength: 80 } as const;
-const definitionColumns = 'id,label,field_type AS type,options,revision,archived_at AS "archivedAt"';
+const definitionColumns = 'id,label,field_type AS type,options,revision,archived_at AS "archivedAt",default_value AS "defaultValue"';
 const types = ["text", "number", "boolean", "date", "select"] as const;
 type FieldType = typeof types[number];
-type Field = { id: string; label: string; type: FieldType; options: string[]; revision: number; archivedAt: Date | null };
+type Value = string | number | boolean;
+type Field = { id: string; label: string; type: FieldType; options: string[]; revision: number; archivedAt: Date | null; defaultValue: Value | null };
 type Scope = { departmentId: string; groupId: string };
 type ManagerCheck = (request: FastifyRequest, groupId: string, departmentId: string, db?: Pick<PoolClient, "query">) => Promise<boolean>;
 
-function normalizedValue(field: Field, value: unknown) {
+function normalizedValue(field: Pick<Field, "type" | "options">, value: unknown) {
   if (value === null) return null;
   if (field.type === "boolean") return typeof value === "boolean" ? value : undefined;
   if (field.type === "number") return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -101,10 +102,11 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     return reply.header("cache-control", "private, no-store").send(await definitions(pool!, location));
   });
 
-  app.post<{ Params: { groupId: string }; Body: { label: string; type: FieldType; options?: string[] } }>(base, {
+  app.post<{ Params: { groupId: string }; Body: { label: string; type: FieldType; options?: string[]; defaultValue?: unknown } }>(base, {
     schema: { params: groupParams, body: { type: "object", additionalProperties: false, required: ["label", "type"], properties: {
       label: labelSchema,
       type: { type: "string", enum: types },
+      defaultValue: {},
       options: { type: "array", maxItems: 30, items: { type: "string", minLength: 1, maxLength: 80 } },
     } } },
   }, async (request, reply) => change(request, reply, async (client, location) => {
@@ -119,21 +121,23 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     if (previous.length >= 40 || previous.some(field => field.label.toLowerCase() === label.toLowerCase())) {
       reply.code(409).send({ error: "A group can have up to 40 fields with unique labels." }); return null;
     }
-    const field = { id: randomUUID(), label, type, options };
+    const defaultValue = normalizedValue({ type, options }, request.body.defaultValue ?? null);
+    if (defaultValue === undefined) { reply.code(400).send({ error: "Enter a valid default for this field type." }); return null; }
+    const field = { id: randomUUID(), label, type, options, defaultValue };
     await client.query(
-      "INSERT INTO group_member_field_definitions(id,department_id,group_id,label,field_type,options,created_by) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)",
-      [field.id, location.departmentId, location.groupId, label, type, JSON.stringify(options), request.authenticatedUser!.id],
+      "INSERT INTO group_member_field_definitions(id,department_id,group_id,label,field_type,options,created_by,default_value) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb)",
+      [field.id, location.departmentId, location.groupId, label, type, JSON.stringify(options), request.authenticatedUser!.id, defaultValue === null ? null : JSON.stringify(defaultValue)],
     );
     return { ...field, revision: 1, archivedAt: null };
   }, 201));
 
-  app.patch<{ Params: { groupId: string; fieldId: string }; Body: { revision: number; label?: string; archived?: boolean } }>(`${base}/definitions/:fieldId`, {
+  app.patch<{ Params: { groupId: string; fieldId: string }; Body: { revision: number; label?: string; archived?: boolean; defaultValue?: unknown } }>(`${base}/definitions/:fieldId`, {
     schema: {
       params: definitionParams,
       body: {
         type: "object", additionalProperties: false, required: ["revision"],
-        oneOf: [{ required: ["label"] }, { required: ["archived"] }],
-        properties: { revision: { type: "integer", minimum: 1, maximum: 2147483646 }, label: labelSchema, archived: { type: "boolean" } },
+        oneOf: [{ required: ["label"] }, { required: ["archived"] }, { required: ["defaultValue"] }],
+        properties: { revision: { type: "integer", minimum: 1, maximum: 2147483646 }, label: labelSchema, archived: { type: "boolean" }, defaultValue: {} },
       },
     },
   }, async (request, reply) => change(request, reply, async (client, location) => {
@@ -147,22 +151,24 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
 
     const label = request.body.label?.trim() ?? field.label;
     if (!label || label.includes("\u0000")) { reply.code(400).send({ error: "Enter a valid membership field label." }); return null; }
-    if (request.body.label !== undefined && field.archivedAt) {
-      reply.code(409).send({ error: "Restore this membership field before renaming it." }); return null;
+    if ((request.body.label !== undefined || request.body.defaultValue !== undefined) && field.archivedAt) {
+      reply.code(409).send({ error: "Restore this membership field before editing it." }); return null;
     }
     if (fields.some(item => item.id !== field.id && item.label.toLowerCase() === label.toLowerCase())) {
       reply.code(409).send({ error: "This label is already used by a membership field, including archived fields." }); return null;
     }
     const archived = request.body.archived ?? Boolean(field.archivedAt);
-    if (field.label === label && Boolean(field.archivedAt) === archived) return field;
+    const defaultValue = request.body.defaultValue === undefined ? field.defaultValue : normalizedValue(field, request.body.defaultValue);
+    if (defaultValue === undefined) { reply.code(400).send({ error: "Enter a valid default for this field type." }); return null; }
+    if (field.label === label && Boolean(field.archivedAt) === archived && field.defaultValue === defaultValue) return field;
 
     const changed = await client.query<Field>(
       `UPDATE group_member_field_definitions
-          SET label=$4,revision=revision+1,updated_at=now(),updated_by=$6,
+          SET label=$4,revision=revision+1,updated_at=now(),updated_by=$6,default_value=$7::jsonb,
               archived_at=CASE WHEN $5 THEN COALESCE(archived_at,now()) ELSE NULL END
         WHERE department_id=$1 AND group_id=$2 AND id=$3
         RETURNING ${definitionColumns}`,
-      [location.departmentId, location.groupId, field.id, label, archived, request.authenticatedUser!.id],
+      [location.departmentId, location.groupId, field.id, label, archived, request.authenticatedUser!.id, defaultValue === null ? null : JSON.stringify(defaultValue)],
     );
     return changed.rows[0];
   }, 200));
@@ -279,7 +285,7 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     } finally { client.release(); }
     if (members.length > exportLimit) return reply.code(422).send({ error: `This CSV supports groups with up to ${exportLimit} roster members.` });
     const headers = ["First name", "Last name", "Membership role", "Membership status", ...activeFields.map(field => field.label)];
-    const rows = members.map(member => [member.firstName, member.lastName, member.role, member.status, ...activeFields.map(field => member.fieldValues[field.id])]);
+    const rows = members.map(member => [member.firstName, member.lastName, member.role, member.status, ...activeFields.map(field => member.fieldValues[field.id] ?? field.defaultValue)]);
     return reply.header("Cache-Control", "private, no-store")
       .header("Content-Disposition", "attachment; filename=group-membership-fields.csv")
       .type("text/csv; charset=utf-8").send(csvDocument(headers, rows));
@@ -290,13 +296,22 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     if (!location || !await checkGroup(request, reply, location, pool!)) return reply;
     const contactId = request.params.contactId;
     if (!await membership(pool!, location, contactId)) return reply.code(404).send({ error: "Group membership not found." });
-    const result = await pool!.query<{ values: Record<string, unknown>; revision: number }>(
-      `SELECT field_values - ARRAY(
-          SELECT id::text FROM group_member_field_definitions WHERE department_id=$1 AND group_id=$2 AND archived_at IS NOT NULL
-        ) AS "values",revision FROM group_member_field_answers WHERE department_id=$1 AND group_id=$2 AND contact_id=$3`,
+    const result = await pool!.query<{ values: Record<string, unknown>; defaultedFieldIds: string[]; revision: number }>(
+      `WITH current_answers AS (
+          SELECT field_values,revision FROM group_member_field_answers WHERE department_id=$1 AND group_id=$2 AND contact_id=$3
+        ), effective_fields AS (
+          SELECT field.id,field.default_value,NULLIF(answer.field_values->(field.id::text),'null'::jsonb) AS stored
+            FROM group_member_field_definitions field LEFT JOIN current_answers answer ON true
+           WHERE field.department_id=$1 AND field.group_id=$2 AND field.archived_at IS NULL
+        )
+        SELECT COALESCE(jsonb_object_agg(id,COALESCE(stored,default_value))
+                        FILTER (WHERE stored IS NOT NULL OR default_value IS NOT NULL),'{}'::jsonb) AS "values",
+               COALESCE(array_agg(id ORDER BY id) FILTER (WHERE stored IS NULL AND default_value IS NOT NULL),'{}'::uuid[]) AS "defaultedFieldIds",
+               COALESCE((SELECT revision FROM current_answers),0) AS revision
+          FROM effective_fields`,
       [location.departmentId, location.groupId, contactId],
     );
-    return reply.header("cache-control", "private, no-store").send(result.rows[0] ?? { values: {}, revision: 0 });
+    return reply.header("cache-control", "private, no-store").send(result.rows[0]);
   });
 
   app.put<{ Params: { groupId: string; contactId: string }; Body: { values: Record<string, unknown>; revision: number } }>(`${base}/:contactId`, {
