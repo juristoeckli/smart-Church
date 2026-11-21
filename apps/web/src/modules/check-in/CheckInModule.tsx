@@ -26,6 +26,7 @@ export function CheckInModule({ csrfToken, departmentId }: ModuleContext) {
   const [printMode, setPrintMode] = useState<"labels" | "pickup">("labels");
   const printArea = useRef<HTMLDivElement>(null);
   const [loadedScope, setLoadedScope] = useState("");
+  const [stationScope, setStationScope] = useState<string | null>(null);
   const rosterScope = JSON.stringify([departmentId, eventId, groupIds, includeChildGroups]);
   const rosterReady = Boolean(eventId && groupIds.length && loadedScope === rosterScope);
   const [query, setQuery] = useState(""); const [presentOnly, setPresentOnly] = useState(false); const [sort, setSort] = useState<"name" | "group" | "present">("name"); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
@@ -42,7 +43,7 @@ export function CheckInModule({ csrfToken, departmentId }: ModuleContext) {
   }, [eventId, groupIds, includeChildGroups, departmentId, rosterScope]);
   useEffect(() => { reloadBase().catch((e) => setError(e.message)); }, [reloadBase]);
   useEffect(() => { reloadRoster().catch((e) => setError(e.message)); }, [reloadRoster]);
-  useEffect(() => setCodeQuery(""), [rosterScope]);
+  useEffect(() => { setCodeQuery(""); setStationScope(null); }, [rosterScope]);
   const normalizedCode = codeQuery.trim().toUpperCase();
   const shown = useMemo(() => attendees.filter((person) => rosterReady && (!normalizedCode || deskCode(departmentId, eventId, person.id) === normalizedCode) && (!presentOnly || Boolean(person.checkedInAt)) && `${person.firstName} ${person.lastName} ${person.groups.join(" ")}`.toLowerCase().includes(query.toLowerCase())).sort((a,b) => sort === "group" ? a.groups.join().localeCompare(b.groups.join()) || a.lastName.localeCompare(b.lastName) : sort === "present" ? Number(Boolean(b.checkedInAt))-Number(Boolean(a.checkedInAt)) || a.lastName.localeCompare(b.lastName) : a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName)), [attendees, presentOnly, query, sort, rosterReady, normalizedCode, departmentId, eventId]);
   const mark = async (person: Attendee, present: boolean) => {
@@ -136,8 +137,29 @@ export function CheckInModule({ csrfToken, departmentId }: ModuleContext) {
     }
   }
 
+  if (canManage && rosterReady && stationScope === rosterScope) {
+    return <main className="checkin-module">
+      <header className="checkin-heading">
+        <div><h1>Check-in station</h1><p>{selected?.title} · {presentCount} of {attendees.length} present</p></div>
+        <button type="button" className="checkin-print" onClick={() => { setStationScope(null); setQuery(""); }}>Exit station</button>
+      </header>
+      {error && <div className="checkin-error" role="alert">{error}</div>}
+      {complete && <p>Meeting check-in completed.</p>}
+      <label className="checkin-search"><Search size={17}/> Find attendee
+        <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} />
+      </label>
+      {query.trim() && <div className="checkin-roster">
+        {shown.map((person) => <article className="checkin-person" key={person.id}>
+          <div className="checkin-person-info"><strong>{person.firstName} {person.lastName}</strong><small>{person.groups.join(" · ")}</small></div>
+          {person.checkedInAt ? <span>Present</span> : <button type="button" className="checkin-mark" disabled={busy || complete} onClick={() => void mark(person, true)}><Check size={16}/> Check in</button>}
+        </article>)}
+        {!shown.length && <p className="checkin-empty">No attendees match.</p>}
+      </div>}
+    </main>;
+  }
+
   return <main className="checkin-module">
-    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a meeting and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions"><button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup slips</button>}</div></header>
+    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a meeting and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions">{canManage && <button type="button" className="checkin-print" disabled={!rosterReady || busy || visitorBusy} onClick={() => { setQuery(""); setCodeQuery(""); setPresentOnly(false); setStationScope(rosterScope); }}>Open check-in station</button>}<button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup slips</button>}</div></header>
     {error && <div className="checkin-error" role="alert">{error}</div>}
     <section className="checkin-setup"><label>Meeting<select value={eventId} onChange={(e) => setEventId(e.target.value)}><option value="">Select a meeting…</option>{events.map((event) => <option value={event.id} key={event.id}>{event.eventDate} · {event.startTime.slice(0,5)} · {event.title}{event.completedAt ? " · completed" : ""}</option>)}</select></label>
       <fieldset><legend>Groups and age subgroups</legend><div className="checkin-groups">{groups.map((group) => <label key={group.id} className={groupIds.includes(group.id) ? "selected" : ""}><input type="checkbox" checked={groupIds.includes(group.id)} onChange={() => setGroupIds((prev) => prev.includes(group.id) ? prev.filter((id) => id !== group.id) : [...prev, group.id])}/><span>{group.parentGroupId ? "↳ " : ""}{group.name}</span><small>{group.memberCount}</small></label>)}</div>{hierarchyAvailable&&<label className="checkin-descendant-option"><input type="checkbox" checked={includeChildGroups} onChange={e=>setIncludeChildGroups(e.target.checked)}/> Include members of child groups</label>}</fieldset>
