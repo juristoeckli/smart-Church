@@ -23,6 +23,24 @@ type IcspSession = {
   nextFrame: (timeoutMs: number) => Promise<Frame>;
 };
 
+const hostSessionQueues = new Map<string, Promise<void>>();
+
+async function withHostSession<T>(host: string, operation: () => Promise<T>): Promise<T> {
+  const key = host.trim().toLowerCase();
+  const previous = hostSessionQueues.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const queued = previous.then(() => gate);
+  hostSessionQueues.set(key, queued);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (hostSessionQueues.get(key) === queued) hostSessionQueues.delete(key);
+  }
+}
+
 function addressBytes(address: Address) {
   for (const value of [address.device, address.port, address.system]) {
     if (!Number.isInteger(value) || value < 0 || value > 65535) throw new Error("Invalid ICSP device address.");
@@ -159,41 +177,43 @@ function channelData(address: Address, channel: number) {
 /** Sends an ICSP input-channel PUSH followed by RELEASE without changing NetLinx settings. */
 export async function pulseIcspChannel(host: string, address: Address, channel: number) {
   const data = channelData(address, channel);
-  const session = await openIcspSession(host);
-  let pushed = false;
-  let releaseSent = false;
-  const waitForAck = async (messageId: number) => {
-    const deadline = Date.now() + 3000;
-    while (Date.now() < deadline) {
-      const frame = await session.nextFrame(Math.max(1, deadline - Date.now()));
-      if (frame.messageId !== messageId) continue;
-      if (frame.command === COMMAND_ACK) return;
-      if (frame.command === COMMAND_NAK) throw new Error("NetLinx rejected the ICSP channel event.");
-    }
-    throw new Error("NetLinx did not acknowledge the ICSP channel event.");
-  };
-  try {
-    const pushMessageId = await session.sendCommand(COMMAND_CHANNEL_PUSH, data);
-    pushed = true;
-    await waitForAck(pushMessageId);
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const releaseMessageId = await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
-    releaseSent = true;
-    await waitForAck(releaseMessageId);
-  } finally {
-    try {
-      if (pushed && !releaseSent && !session.socket.destroyed) {
-        try {
-          const releaseMessageId = await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
-          await waitForAck(releaseMessageId);
-        } catch {
-          // Best effort: do not leave a held input if the PUSH acknowledgement failed.
-        }
+  return withHostSession(host, async () => {
+    const session = await openIcspSession(host);
+    let pushed = false;
+    let releaseSent = false;
+    const waitForAck = async (messageId: number) => {
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const frame = await session.nextFrame(Math.max(1, deadline - Date.now()));
+        if (frame.messageId !== messageId) continue;
+        if (frame.command === COMMAND_ACK) return;
+        if (frame.command === COMMAND_NAK) throw new Error("NetLinx rejected the ICSP channel event.");
       }
+      throw new Error("NetLinx did not acknowledge the ICSP channel event.");
+    };
+    try {
+      const pushMessageId = await session.sendCommand(COMMAND_CHANNEL_PUSH, data);
+      pushed = true;
+      await waitForAck(pushMessageId);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const releaseMessageId = await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
+      releaseSent = true;
+      await waitForAck(releaseMessageId);
     } finally {
-      session.socket.destroy();
+      try {
+        if (pushed && !releaseSent && !session.socket.destroyed) {
+          try {
+            const releaseMessageId = await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
+            await waitForAck(releaseMessageId);
+          } catch {
+            // Best effort: do not leave a held input if the PUSH acknowledgement failed.
+          }
+        }
+      } finally {
+        session.socket.destroy();
+      }
     }
-  }
+  });
 }
 
 function readNumericValue(type: number, value: Buffer): number | null {
@@ -213,64 +233,68 @@ export async function readIcspDeviceLevels(host: string, target: Address, reques
   if (!requestedLevels.length || requestedLevels.some((level) => !Number.isInteger(level) || level < 1 || level > 65535)) {
     throw new Error("The requested ICSP levels are invalid.");
   }
-  const session = await openIcspSession(host);
-  try {
-    const targetData = Buffer.alloc(6);
-    targetData.writeUInt16BE(target.device, 0);
-    targetData.writeUInt16BE(target.port, 2);
-    targetData.writeUInt16BE(target.system, 4);
-    await session.sendCommand(COMMAND_DEVICE_STATUS, targetData);
+  return withHostSession(host, async () => {
+    const session = await openIcspSession(host);
+    try {
+      const targetData = Buffer.alloc(6);
+      targetData.writeUInt16BE(target.device, 0);
+      targetData.writeUInt16BE(target.port, 2);
+      targetData.writeUInt16BE(target.system, 4);
+      await session.sendCommand(COMMAND_DEVICE_STATUS, targetData);
 
-    const levels: Record<number, number> = {};
-    const deadline = Date.now() + 11000;
-    while (Date.now() < deadline) {
-      const frame = await session.nextFrame(Math.min(3000, Math.max(1, deadline - Date.now())));
-      if (frame.command === COMMAND_LEVEL_VALUE && frame.data.length >= 10) {
-        const deviceId = frame.data.readUInt16BE(0);
-        const port = frame.data.readUInt16BE(2);
-        const systemId = frame.data.readUInt16BE(4);
-        const level = frame.data.readUInt16BE(6);
-        const value = readNumericValue(frame.data[8]!, frame.data.subarray(9));
-        if (deviceId === target.device && port === target.port && systemId === target.system && requestedLevels.includes(level) && value !== null && Number.isFinite(value)) {
-          levels[level] = value;
+      const levels: Record<number, number> = {};
+      const deadline = Date.now() + 11000;
+      while (Date.now() < deadline) {
+        const frame = await session.nextFrame(Math.min(3000, Math.max(1, deadline - Date.now())));
+        if (frame.command === COMMAND_LEVEL_VALUE && frame.data.length >= 10) {
+          const deviceId = frame.data.readUInt16BE(0);
+          const port = frame.data.readUInt16BE(2);
+          const systemId = frame.data.readUInt16BE(4);
+          const level = frame.data.readUInt16BE(6);
+          const value = readNumericValue(frame.data[8]!, frame.data.subarray(9));
+          if (deviceId === target.device && port === target.port && systemId === target.system && requestedLevels.includes(level) && value !== null && Number.isFinite(value)) {
+            levels[level] = value;
+          }
         }
+        if (frame.command === COMMAND_DEVICE_STATUS_END || frame.command === COMMAND_NAK) break;
       }
-      if (frame.command === COMMAND_DEVICE_STATUS_END || frame.command === COMMAND_NAK) break;
+      const missing = requestedLevels.filter((level) => levels[level] === undefined);
+      if (missing.length) throw new Error(`ICSP status did not include level${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
+      return levels;
+    } finally {
+      session.socket.destroy();
     }
-    const missing = requestedLevels.filter((level) => levels[level] === undefined);
-    if (missing.length) throw new Error(`ICSP status did not include level${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
-    return levels;
-  } finally {
-    session.socket.destroy();
-  }
+  });
 }
 
 /** Read channels currently on for an existing device, without changing device state. */
 export async function readIcspDeviceChannels(host: string, target: Address) {
-  const session = await openIcspSession(host);
-  try {
-    const targetData = Buffer.alloc(6);
-    targetData.writeUInt16BE(target.device, 0);
-    targetData.writeUInt16BE(target.port, 2);
-    targetData.writeUInt16BE(target.system, 4);
-    await session.sendCommand(COMMAND_DEVICE_STATUS, targetData);
+  return withHostSession(host, async () => {
+    const session = await openIcspSession(host);
+    try {
+      const targetData = Buffer.alloc(6);
+      targetData.writeUInt16BE(target.device, 0);
+      targetData.writeUInt16BE(target.port, 2);
+      targetData.writeUInt16BE(target.system, 4);
+      await session.sendCommand(COMMAND_DEVICE_STATUS, targetData);
 
-    const channels = new Set<number>();
-    const deadline = Date.now() + 11000;
-    while (Date.now() < deadline) {
-      const frame = await session.nextFrame(Math.min(3000, Math.max(1, deadline - Date.now())));
-      if (CHANNEL_ON_STATUS_COMMANDS.has(frame.command) && frame.data.length >= 8) {
-        const device = frame.data.readUInt16BE(0);
-        const port = frame.data.readUInt16BE(2);
-        const system = frame.data.readUInt16BE(4);
-        const channel = frame.data.readUInt16BE(6);
-        if (device === target.device && port === target.port && system === target.system && channel > 0) channels.add(channel);
+      const channels = new Set<number>();
+      const deadline = Date.now() + 11000;
+      while (Date.now() < deadline) {
+        const frame = await session.nextFrame(Math.min(3000, Math.max(1, deadline - Date.now())));
+        if (CHANNEL_ON_STATUS_COMMANDS.has(frame.command) && frame.data.length >= 8) {
+          const device = frame.data.readUInt16BE(0);
+          const port = frame.data.readUInt16BE(2);
+          const system = frame.data.readUInt16BE(4);
+          const channel = frame.data.readUInt16BE(6);
+          if (device === target.device && port === target.port && system === target.system && channel > 0) channels.add(channel);
+        }
+        if (frame.command === COMMAND_DEVICE_STATUS_END || frame.command === COMMAND_NAK) break;
       }
-      if (frame.command === COMMAND_DEVICE_STATUS_END || frame.command === COMMAND_NAK) break;
+      return [...channels].sort((left, right) => left - right);
+    } finally {
+      session.socket.destroy();
     }
-    return [...channels].sort((left, right) => left - right);
-  } finally {
-    session.socket.destroy();
-  }
+  });
 }
 
