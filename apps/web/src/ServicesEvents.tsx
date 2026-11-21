@@ -11,6 +11,7 @@ import { WorshipPlanning } from "./WorshipPlanning";
 type EventFilter = "upcoming" | "all" | "past";
 type ScheduleView = "list" | "month" | "attendance";
 type ManageableEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };
+type EventPositionSwap = { id: string; event_id: string; event_title: string; event_date: string; from_position_index: number; from_position_name: string; to_position_index: number; to_position_name: string; requester_contact_id: string; requester_name: string; target_contact_id: string; target_name: string; status: "pending" | "accepted" | "declined" | "cancelled"; created_at: string; canRespond: boolean; canCancel: boolean };
 
 const eventKinds: { value: ServiceEventKind; label: TranslationKey }[] = [
   { value: "service", label: "events.kind.service" },
@@ -90,8 +91,116 @@ function eventPayload(form: HTMLFormElement): CreateServiceEvent {
   };
 }
 
+function EventPositionStaffNotes({ event, departmentId, canManage }: { event: ServiceEvent; departmentId: string; canManage: boolean }) {
+  const [notes, setNotes] = useState<Record<number, string>>({});
+  const [savingIndex, setSavingIndex] = useState<number | null>(null);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setNotes({}); setMessage(""); setError("");
+    void fetch(`/api/events/${event.id}/position-notes`, { headers: { "x-department-id": departmentId }, signal: controller.signal })
+      .then(async (response) => ({ response, data: await response.json() as Array<{ positionIndex: number; note: string }> | { error?: string } }))
+      .then(({ response, data }) => {
+        if (!response.ok || !Array.isArray(data)) return;
+        setNotes(Object.fromEntries(data.map((item) => [item.positionIndex, item.note])));
+      }).catch(() => {});
+    return () => controller.abort();
+  }, [departmentId, event.id]);
+
+  async function save(positionIndex: number) {
+    setSavingIndex(positionIndex); setMessage(""); setError("");
+    try {
+      const response = await fetch(`/api/events/${event.id}/positions/${positionIndex}/note`, {
+        method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId },
+        body: JSON.stringify({ note: notes[positionIndex] ?? "" }),
+      });
+      const data = await response.json() as { error?: string; note?: string };
+      if (!response.ok) throw new Error(data.error ?? "Could not save this staff note.");
+      setNotes((current) => ({ ...current, [positionIndex]: data.note ?? "" })); setMessage("Staff note saved.");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save this staff note."); }
+    finally { setSavingIndex(null); }
+  }
+
+  if (!event.positions?.length) return null;
+  const visiblePositions = event.positions.map((position, positionIndex) => ({ position, positionIndex }))
+    .filter(({ positionIndex }) => canManage || Object.prototype.hasOwnProperty.call(notes, positionIndex));
+  if (!canManage && !visiblePositions.length) return null;
+  return <section className="event-details-section event-staff-notes"><h3>Staff-only role notes</h3>
+    {visiblePositions.map(({ position, positionIndex }) => <div className="event-staff-note" key={`${position.name}-${positionIndex}`}>
+      <strong>{position.name}</strong>
+      {canManage ? <><textarea maxLength={500} rows={3} value={notes[positionIndex] ?? ""} onChange={(change) => setNotes((current) => ({ ...current, [positionIndex]: change.target.value }))} placeholder="Visible only to event managers and the assigned volunteer" /><button className="button button-secondary" type="button" disabled={savingIndex !== null} onClick={() => void save(positionIndex)}>{savingIndex === positionIndex ? "Saving…" : "Save note"}</button></> : <p>{notes[positionIndex]}</p>}
+    </div>)}
+    {message && <p role="status">{message}</p>}{error && <p role="alert">{error}</p>}
+  </section>;
+}
+
+function EventPositionSwapControls({ event, contacts, swaps, selectedTargets, onSelectTarget, onRequest, onRespond }: {
+  event: ServiceEvent; contacts: Contact[]; swaps: EventPositionSwap[]; selectedTargets: Record<string, number>;
+  onSelectTarget: (positionIndex: number, targetPositionIndex: number) => void;
+  onRequest: (positionIndex: number, targetPositionIndex: number) => void;
+  onRespond: (swap: EventPositionSwap, decision: "accepted" | "declined" | "cancelled") => void;
+}) {
+  const eventSwaps = swaps.filter((swap) => swap.event_id === event.id);
+  const labelFor = (positionIndex: number) => `${event.positions?.[positionIndex]?.name ?? "Position"}${event.positions?.[positionIndex]?.contactId ? ` · ${contacts.find((person) => person.id === event.positions?.[positionIndex]?.contactId)?.firstName ?? "Assigned"} ${contacts.find((person) => person.id === event.positions?.[positionIndex]?.contactId)?.lastName ?? "volunteer"}` : ""}`;
+  return <div className="event-position-swaps">
+    {event.positions?.map((position, positionIndex) => position.canRespond ? <div className="event-position-swap-request" key={`swap-select-${positionIndex}`}>
+      <select aria-label={`Choose a volunteer to swap ${position.name} with`} value={selectedTargets[`${event.id}:${positionIndex}`] ?? -1} onChange={(change) => onSelectTarget(positionIndex, Number(change.target.value))}>
+        <option value={-1}>Choose a volunteer to swap with</option>
+        {event.positions?.map((target, targetIndex) => target.contactId && targetIndex !== positionIndex ? <option key={targetIndex} value={targetIndex}>{labelFor(targetIndex)}</option> : null)}
+      </select>
+      <button type="button" className="button button-secondary" disabled={(selectedTargets[`${event.id}:${positionIndex}`] ?? -1) < 0} onClick={() => onRequest(positionIndex, selectedTargets[`${event.id}:${positionIndex}`] ?? -1)}>Request swap</button>
+    </div> : null)}
+    {eventSwaps.map((swap) => <div className="event-position-swap-request" key={swap.id}>
+      <span>{swap.requester_name} requests a swap: {swap.from_position_name} ↔ {swap.to_position_name} with {swap.target_name} · {swap.status}</span>
+      {swap.canRespond && <><button type="button" className="button button-primary" onClick={() => onRespond(swap, "accepted")}>Accept swap</button><button type="button" className="button button-secondary" onClick={() => onRespond(swap, "declined")}>Decline</button></>}
+      {swap.canCancel && <button type="button" className="button button-secondary" onClick={() => onRespond(swap, "cancelled")}>Cancel request</button>}
+    </div>)}
+  </div>;
+}
+
+function EventBulkRoleAssignment({ event, contacts, canManage, departmentId, onAssigned }: { event: ServiceEvent; contacts: Contact[]; canManage: boolean; departmentId: string; onAssigned: () => void }) {
+  const [contactId, setContactId] = useState("");
+  const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [error, setError] = useState("");
+  const unfilled = (event.positions ?? []).map((position, positionIndex) => ({ position, positionIndex })).filter(({ position }) => !position.contactId);
+  if (!canManage || event.importedFrom || !unfilled.length) return null;
+
+  async function assign(eventSubmit: FormEvent<HTMLFormElement>) {
+    eventSubmit.preventDefault();
+    setError(""); setFeedback("");
+    if (!contactId || !selectedIndices.length) { setError("Choose a volunteer and at least one unfilled role."); return; }
+    setBusy(true);
+    try {
+      const response = await fetch(`/api/events/${event.id}/positions/bulk-assign`, {
+        method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId },
+        body: JSON.stringify({ contactId, assignments: selectedIndices.map((positionIndex) => ({ positionIndex, positionName: event.positions?.[positionIndex]?.name ?? "" })) }),
+      });
+      const result = await response.json() as ServiceEvent | { error?: string };
+      if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not fill these roles." : "Could not fill these roles.");
+      const count = selectedIndices.length;
+      setSelectedIndices([]); setContactId(""); setFeedback(`Assigned the volunteer to ${count} ${count === 1 ? "role" : "roles"}.`);
+      onAssigned();
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not fill these roles."); }
+    finally { setBusy(false); }
+  }
+
+  return <form className="event-bulk-role-assignment" onSubmit={(eventSubmit) => void assign(eventSubmit)}>
+    <strong>Fill several unassigned roles</strong>
+    <label>Volunteer<select value={contactId} onChange={(change) => setContactId(change.target.value)}><option value="">Choose a volunteer</option>{contacts.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select></label>
+    <fieldset><legend>Select roles</legend>{unfilled.map(({ position, positionIndex }) => <label key={positionIndex}><input type="checkbox" checked={selectedIndices.includes(positionIndex)} onChange={(change) => setSelectedIndices((current) => change.target.checked ? [...current, positionIndex] : current.filter((index) => index !== positionIndex))} />{position.name}</label>)}</fieldset>
+    <button className="button button-secondary" type="submit" disabled={busy || !contactId || !selectedIndices.length}>{busy ? "Assigning…" : "Assign selected roles"}</button>
+    {feedback && <p role="status">{feedback}</p>}{error && <p role="alert">{error}</p>}
+  </form>;
+}
+
 export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, contacts, canManage, onNotice }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; contacts: Contact[]; canManage: boolean; onNotice: (message: string) => void }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
+  const [positionSwaps, setPositionSwaps] = useState<EventPositionSwap[]>([]);
+  const [swapTargetByPosition, setSwapTargetByPosition] = useState<Record<string, number>>({});
   const [resources, setResources] = useState<BookableResource[]>([]);
   const [servicePlanTemplates, setServicePlanTemplates] = useState<ServicePlanTemplate[]>([]);
   const [worshipSongs, setWorshipSongs] = useState<WorshipSong[]>([]);
@@ -139,6 +248,9 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         throw new Error(!Array.isArray(result) ? result.error ?? "Could not load services and events." : "Could not load services and events.");
       }
       setEvents(result);
+      const swapsResponse = await fetch("/api/event-position-swaps", { headers: { "x-department-id": departmentId }, signal });
+      const swapsData = await swapsResponse.json() as EventPositionSwap[] | { error?: string };
+      if (swapsResponse.ok && Array.isArray(swapsData)) setPositionSwaps(swapsData);
       const resourceResponse = await fetch("/api/resources", { headers: { "x-department-id": departmentId }, signal });
       const resourceData = await resourceResponse.json() as BookableResource[];
       if (resourceResponse.ok && Array.isArray(resourceData)) setResources(resourceData.filter((resource) => resource.active));
@@ -326,6 +438,33 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     } catch (error) { onNotice(error instanceof Error ? error.message : "Could not update your response."); }
   }
 
+  async function refreshPositionSwaps() {
+    const response = await fetch("/api/event-position-swaps", { headers: { "x-department-id": departmentId } });
+    const result = await response.json() as EventPositionSwap[] | { error?: string };
+    if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? "Could not load swap requests." : "Could not load swap requests.");
+    setPositionSwaps(result);
+  }
+
+  async function requestPositionSwap(event: ServiceEvent, fromPositionIndex: number, toPositionIndex: number) {
+    try {
+      const response = await fetch(`/api/events/${event.id}/position-swaps`, { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ fromPositionIndex, toPositionIndex }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not request this swap.");
+      await refreshPositionSwaps();
+      onNotice("Swap request sent to the assigned volunteer.");
+    } catch (error) { onNotice(error instanceof Error ? error.message : "Could not request this swap."); }
+  }
+
+  async function respondToPositionSwap(swap: EventPositionSwap, decision: "accepted" | "declined" | "cancelled") {
+    try {
+      const response = await fetch(`/api/event-position-swaps/${swap.id}`, { method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ decision }) });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not update this swap request.");
+      if (decision === "accepted") await loadEvents(); else await refreshPositionSwaps();
+      onNotice(decision === "accepted" ? "The assignments were swapped." : decision === "declined" ? "Swap request declined." : "Swap request cancelled.");
+    } catch (error) { onNotice(error instanceof Error ? error.message : "Could not update this swap request."); }
+  }
+
   function openAttendance(event: ServiceEvent) {
     setAttendanceEvent(event);
     setAttendanceAdults(String(event.attendanceAdults ?? 0));
@@ -361,6 +500,26 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     const link = document.createElement("a");
     link.href = url;
     link.download = "church-attendance.csv";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function downloadStaffingReport() {
+    const rows = [
+      ["Date", "Event", "Type", "Start", "Location", "Role", "Assigned person", "Response"],
+      ...filteredEvents.flatMap((event) => (event.positions ?? []).map((position) => {
+        const person = contacts.find((contact) => contact.id === position.contactId);
+        const response = position.responseStatus === "accepted" ? "Confirmed" : position.responseStatus === "declined" ? "Declined" : position.contactId ? "Requested" : "Unfilled";
+        return [event.eventDate, event.title, eventKindLabel(event.kind), event.isAllDay ? "All day" : event.startTime, event.location, position.name, person ? `${person.firstName} ${person.lastName}` : "", response];
+      })),
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "event-staffing.csv";
     document.body.append(link);
     link.click();
     link.remove();
@@ -552,6 +711,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
             <button className={scheduleView === "month" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "month"} onClick={() => setScheduleView("month")}>{translate("events.monthView")}</button>
             <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => { setFilter("all"); setScheduleView("attendance"); }}>{translate("events.attendanceReport")}</button>
           </div>
+          {canManage && scheduleView === "list" && <button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!filteredEvents.some((event) => event.positions?.length)}><Download size={15} />Export staffing</button>}
         </div>
 
         {scheduleView === "attendance" ? <div className="attendance-report">
@@ -571,7 +731,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         </div> : <div className="table-scroll"><table className="people-table event-table"><thead><tr><th>{translate("events.date")}</th><th>{translate("events.gathering")}</th><th>{translate("events.time")}</th><th>{translate("events.location")}</th><th>{translate("events.type")}</th><th><span className="sr-only">{translate("events.actions")}</span></th></tr></thead><tbody>
           {filteredEvents.map((event) => {
             const date = formatShortDate(event.eventDate);
-            return <tr key={event.id} className="event-clickable-row" onClick={(clickEvent) => { if (clickEvent.target instanceof Element && clickEvent.target.closest("button, a, input, select, textarea")) return; setDetailsEvent(event); }}><td><div className="event-date-badge"><strong>{date.day}</strong><span>{date.month}</span></div></td><td><div className="event-name-cell"><button className="event-name-trigger" type="button" onClick={() => setDetailsEvent(event)}>{event.title}</button>{event.seriesId && <small className="event-series-badge"><Repeat2 size={11} />{translate("events.recurring")}</small>}{event.importedFrom && <small>{translate("events.importedReadOnly")}</small>}{event.description && <small>{event.description}</small>}<small className="event-attendance-summary">{event.attendanceRecordedAt ? translate("events.attendance").replace("{adults}", String(event.attendanceAdults ?? 0)).replace("{children}", String(event.attendanceChildren ?? 0)) : translate("events.attendanceNotRecorded")}</small>{event.registrationEnabled && <small className="event-registration-summary">{translate("events.registration").replace("{count}", String(event.registrationCount ?? 0))}{event.registrationCapacity ? ` / ${event.registrationCapacity}` : ` ${translate("events.registered")}`}{event.registrationCapacity && (event.registrationCount ?? 0) >= event.registrationCapacity ? translate("events.waitlistOpen") : ""}</small>}{Boolean(event.positions?.length) && <div className="event-position-list">{event.positions!.map((position, index) => { const person = contacts.find((contact) => contact.id === position.contactId); const responseLabel = position.responseStatus === "accepted" ? translate("events.accepted") : position.responseStatus === "declined" ? translate("events.declined") : position.contactId ? translate("events.awaitingResponse") : translate("events.unassigned"); return <div className="event-position-row" key={index}><small>{position.name}: {person ? `${person.firstName} ${person.lastName}` : translate("events.unassigned")} · {responseLabel}</small>{position.canRespond && <select aria-label={translate("events.positionResponse").replace("{position}", position.name)} value={position.responseStatus ?? "pending"} onChange={(change) => void respondToPosition(event, index, change.target.value as "pending" | "accepted" | "declined")}><option value="pending">{translate("events.chooseResponse")}</option><option value="accepted">{translate("events.accept")}</option><option value="declined">{translate("events.decline")}</option></select>}</div>; })}</div>}{Boolean(event.timePlan?.length) && <small>{translate("events.timePlan")}: {event.timePlan!.map((item) => (item.startTime ? item.startTime + " " : "") + item.title + (item.position ? ` · ${translate("events.responsiblePosition")}: ${item.position}` : "") + (item.durationMinutes ? ` (${item.durationMinutes} ${translate("events.minuteSuffix")})` : "")).join(" → ")}</small>}{event.timePlan?.map((item, index) => { const song = worshipSongs.find((candidate) => candidate.id === item.songId); if (!song) return null; const arrangement = song.arrangements.find((candidate) => candidate.id === item.arrangementId); return <small className="event-song-links" key={`${event.id}-${item.songId}-${index}`}>{song.title}{arrangement?.name ? ` · ${arrangement.name}` : ""}{arrangement?.chartUrl && <> · <a href={arrangement.chartUrl} target="_blank" rel="noreferrer">{translate("events.chartLink")}</a></>}{arrangement?.audioUrl && <> · <a href={arrangement.audioUrl} target="_blank" rel="noreferrer">{translate("events.audioLink")}</a></>}</small>; })}{Boolean(event.assetIds?.length) && <small>{translate("events.assets").replace("{assets}", resources.filter((resource) => event.assetIds!.includes(resource.id)).map((resource) => resource.name).join(", "))}</small>}</div></td><td className="event-time-cell">{eventTimeLabel(event)}</td><td><span className="event-location-cell"><MapPin size={13} />{event.location}{event.room ? " · " + event.room : ""}</span></td><td><span className={`event-kind event-kind-${event.kind}`}>{eventKindLabel(event.kind)}</span></td><td>{canManage && !event.importedFrom && <div className="event-actions">{event.registrationEnabled && <button className="event-action" type="button" aria-label={`${translate("events.copyRegistration")}: ${event.title}`} title={translate("events.copyRegistration")} onClick={() => void copyRegistrationLink(event)}><Link2 size={15} /></button>}<button className="event-action" type="button" aria-label={`${translate("events.checkIn")}: ${event.title}`} title={translate("events.checkIn")} onClick={() => void openCheckIns(event)}><UserCheck size={15} /></button><button className="event-action" type="button" aria-label={`${translate("events.recordAttendance")}: ${event.title}`} title={translate("events.recordAttendance")} onClick={() => openAttendance(event)}><Users size={15} /></button><button className="event-action" type="button" aria-label={translate("events.editEvent").replace("{title}", event.title)} onClick={() => openEditModal(event)}><Pencil size={15} /></button><button className="event-action event-delete-action" type="button" aria-label={translate("events.deleteEvent").replace("{title}", event.title)} onClick={() => void deleteEvent(event)}><Trash2 size={15} /></button>{event.seriesId && <button className="event-action event-series-delete" type="button" aria-label={translate("events.deleteSeriesFor").replace("{title}", event.title)} title={translate("events.deleteSeries")} onClick={() => void deleteEvent(event, true)}><Repeat2 size={15} /></button>}</div>}</td></tr>;
+            return <tr key={event.id} className="event-clickable-row" onClick={(clickEvent) => { if (clickEvent.target instanceof Element && clickEvent.target.closest("button, a, input, select, textarea")) return; setDetailsEvent(event); }}><td><div className="event-date-badge"><strong>{date.day}</strong><span>{date.month}</span></div></td><td><div className="event-name-cell"><button className="event-name-trigger" type="button" onClick={() => setDetailsEvent(event)}>{event.title}</button>{event.seriesId && <small className="event-series-badge"><Repeat2 size={11} />{translate("events.recurring")}</small>}{event.importedFrom && <small>{translate("events.importedReadOnly")}</small>}{event.description && <small>{event.description}</small>}<small className="event-attendance-summary">{event.attendanceRecordedAt ? translate("events.attendance").replace("{adults}", String(event.attendanceAdults ?? 0)).replace("{children}", String(event.attendanceChildren ?? 0)) : translate("events.attendanceNotRecorded")}</small>{event.registrationEnabled && <small className="event-registration-summary">{translate("events.registration").replace("{count}", String(event.registrationCount ?? 0))}{event.registrationCapacity ? ` / ${event.registrationCapacity}` : ` ${translate("events.registered")}`}{event.registrationCapacity && (event.registrationCount ?? 0) >= event.registrationCapacity ? translate("events.waitlistOpen") : ""}</small>}{Boolean(event.positions?.length) && <div className="event-position-list">{event.positions!.map((position, index) => { const person = contacts.find((contact) => contact.id === position.contactId); const responseLabel = position.responseStatus === "accepted" ? translate("events.accepted") : position.responseStatus === "declined" ? translate("events.declined") : position.contactId ? translate("events.awaitingResponse") : translate("events.unassigned"); return <div className="event-position-row" key={index}><small>{position.name}: {person ? `${person.firstName} ${person.lastName}` : translate("events.unassigned")} · {responseLabel}</small>{position.canRespond && <select aria-label={translate("events.positionResponse").replace("{position}", position.name)} value={position.responseStatus ?? "pending"} onChange={(change) => void respondToPosition(event, index, change.target.value as "pending" | "accepted" | "declined")}><option value="pending">{translate("events.chooseResponse")}</option><option value="accepted">{translate("events.accept")}</option><option value="declined">{translate("events.decline")}</option></select>}</div>; })}</div>}<EventPositionSwapControls event={event} contacts={contacts} swaps={positionSwaps} selectedTargets={swapTargetByPosition} onSelectTarget={(positionIndex, targetIndex) => setSwapTargetByPosition((current) => ({ ...current, [`${event.id}:${positionIndex}`]: targetIndex }))} onRequest={(positionIndex, targetIndex) => void requestPositionSwap(event, positionIndex, targetIndex)} onRespond={(swap, decision) => void respondToPositionSwap(swap, decision)} /><EventBulkRoleAssignment event={event} contacts={contacts} canManage={canManage} departmentId={departmentId} onAssigned={() => void loadEvents()} />{Boolean(event.timePlan?.length) && <small>{translate("events.timePlan")}: {event.timePlan!.map((item) => (item.startTime ? item.startTime + " " : "") + item.title + (item.position ? ` · ${translate("events.responsiblePosition")}: ${item.position}` : "") + (item.durationMinutes ? ` (${item.durationMinutes} ${translate("events.minuteSuffix")})` : "")).join(" → ")}</small>}{event.timePlan?.map((item, index) => { const song = worshipSongs.find((candidate) => candidate.id === item.songId); if (!song) return null; const arrangement = song.arrangements.find((candidate) => candidate.id === item.arrangementId); return <small className="event-song-links" key={`${event.id}-${item.songId}-${index}`}>{song.title}{arrangement?.name ? ` · ${arrangement.name}` : ""}{arrangement?.chartUrl && <> · <a href={arrangement.chartUrl} target="_blank" rel="noreferrer">{translate("events.chartLink")}</a></>}{arrangement?.audioUrl && <> · <a href={arrangement.audioUrl} target="_blank" rel="noreferrer">{translate("events.audioLink")}</a></>}</small>; })}{Boolean(event.assetIds?.length) && <small>{translate("events.assets").replace("{assets}", resources.filter((resource) => event.assetIds!.includes(resource.id)).map((resource) => resource.name).join(", "))}</small>}</div></td><td className="event-time-cell">{eventTimeLabel(event)}</td><td><span className="event-location-cell"><MapPin size={13} />{event.location}{event.room ? " · " + event.room : ""}</span></td><td><span className={`event-kind event-kind-${event.kind}`}>{eventKindLabel(event.kind)}</span></td><td>{canManage && !event.importedFrom && <div className="event-actions">{event.registrationEnabled && <button className="event-action" type="button" aria-label={`${translate("events.copyRegistration")}: ${event.title}`} title={translate("events.copyRegistration")} onClick={() => void copyRegistrationLink(event)}><Link2 size={15} /></button>}<button className="event-action" type="button" aria-label={`${translate("events.checkIn")}: ${event.title}`} title={translate("events.checkIn")} onClick={() => void openCheckIns(event)}><UserCheck size={15} /></button><button className="event-action" type="button" aria-label={`${translate("events.recordAttendance")}: ${event.title}`} title={translate("events.recordAttendance")} onClick={() => openAttendance(event)}><Users size={15} /></button><button className="event-action" type="button" aria-label={translate("events.editEvent").replace("{title}", event.title)} onClick={() => openEditModal(event)}><Pencil size={15} /></button><button className="event-action event-delete-action" type="button" aria-label={translate("events.deleteEvent").replace("{title}", event.title)} onClick={() => void deleteEvent(event)}><Trash2 size={15} /></button>{event.seriesId && <button className="event-action event-series-delete" type="button" aria-label={translate("events.deleteSeriesFor").replace("{title}", event.title)} title={translate("events.deleteSeries")} onClick={() => void deleteEvent(event, true)}><Repeat2 size={15} /></button>}</div>}</td></tr>;
           })}
           {filteredEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? translate("events.loading") : loadError ? translate("events.scheduleLoadFailed") : query ? translate("events.noSearchMatch") : filter === "past" ? translate("events.noPast") : translate("events.noSchedule")}</td></tr>}
         </tbody></table></div>}
@@ -581,7 +741,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>
       {isWorshipLibraryOpen && <WorshipPlanning departmentId={departmentId} canManage={canManage} onClose={() => setIsWorshipLibraryOpen(false)} onChanged={() => void refreshWorshipLibrary()} onNotice={onNotice} />}
 
-      {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{eventKindLabel(detailsEvent.kind)}</span><h2 id="event-details-title">{detailsEvent.title}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatEventDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{eventTimeLabel(detailsEvent)}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div></dl>{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}{detailsEvent.registrationEnabled && <p className="event-details-summary">{translate("events.registration").replace("{count}", String(detailsEvent.registrationCount ?? 0))}{detailsEvent.registrationCapacity ? ` / ${detailsEvent.registrationCapacity}` : ` ${translate("events.registered")}`}{detailsEvent.registrationCapacity && (detailsEvent.registrationCount ?? 0) >= detailsEvent.registrationCapacity ? translate("events.waitlistOpen") : ""}</p>}{detailsEvent.attendanceRecordedAt && <p className="event-details-summary">{translate("events.attendance").replace("{adults}", String(detailsEvent.attendanceAdults ?? 0)).replace("{children}", String(detailsEvent.attendanceChildren ?? 0))}</p>}{Boolean(detailsEvent.positions?.length) && <section className="event-details-section"><h3>{translate("events.positions")}</h3><ul>{detailsEvent.positions!.map((position, index) => { const person = contacts.find((contact) => contact.id === position.contactId); return <li key={`${position.name}-${index}`}><strong>{position.name}</strong><span>{person ? `${person.firstName} ${person.lastName}` : translate("events.unassigned")}</span></li>; })}</ul></section>}{Boolean(detailsEvent.timePlan?.length) && <section className="event-details-section"><h3>{translate("events.timePlan")}</h3><ul>{detailsEvent.timePlan!.map((item, index) => { const song = worshipSongs.find((candidate) => candidate.id === item.songId); const arrangement = song?.arrangements.find((candidate) => candidate.id === item.arrangementId); return <li key={`${item.title}-${index}`}><span className="event-details-plan-time">{item.startTime ?? ""}</span><div><strong>{item.title}</strong>{item.position && <span>{translate("events.responsiblePosition")}: {item.position}</span>}{item.durationMinutes && <span>{item.durationMinutes} {translate("events.minuteSuffix")}</span>}{song && <span>{song.title}{arrangement?.name ? ` · ${arrangement.name}` : ""}</span>}</div></li>; })}</ul></section>}{Boolean(detailsEvent.assetIds?.length) && <p className="event-details-summary">{translate("events.assets").replace("{assets}", resources.filter((resource) => detailsEvent.assetIds!.includes(resource.id)).map((resource) => resource.name).join(", "))}</p>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsEvent(null)}>{translate("events.close")}</button>{canManage && !detailsEvent.importedFrom && <button className="button button-primary" type="button" onClick={() => { const event = detailsEvent; setDetailsEvent(null); openEditModal(event); }}><Pencil size={14} />{translate("events.editEvent").replace("{title}", detailsEvent.title)}</button>}</div></section></div>}      {isModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsModalOpen(false)}><section className="modal event-modal" role="dialog" aria-modal="true" aria-labelledby="event-modal-title"><div className="modal-heading"><div><span className="eyebrow">{translate("events.scheduleFormEyebrow")}</span><h2 id="event-modal-title">{translate(editingEvent ? "events.editGathering" : "events.addGathering")}</h2><p>{translate("events.gatheringFormHelp")}</p></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setIsModalOpen(false)}><X size={19} /></button></div><form key={editingEvent?.id ?? "new-event"} onSubmit={saveEvent}>{servicePlanTemplates.length > 0 && <label className="event-plan-template-select">{translate("events.planTemplate")}<select value={selectedPlanTemplateId} onChange={(event) => applyServicePlanTemplate(event.target.value)}><option value="">{translate("events.chooseTemplate")}</option>{servicePlanTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select><small>{translate("events.selectPlanTemplate")}</small></label>}
+      {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{eventKindLabel(detailsEvent.kind)}</span><h2 id="event-details-title">{detailsEvent.title}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatEventDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{eventTimeLabel(detailsEvent)}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div></dl>{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}{detailsEvent.registrationEnabled && <p className="event-details-summary">{translate("events.registration").replace("{count}", String(detailsEvent.registrationCount ?? 0))}{detailsEvent.registrationCapacity ? ` / ${detailsEvent.registrationCapacity}` : ` ${translate("events.registered")}`}{detailsEvent.registrationCapacity && (detailsEvent.registrationCount ?? 0) >= detailsEvent.registrationCapacity ? translate("events.waitlistOpen") : ""}</p>}{detailsEvent.attendanceRecordedAt && <p className="event-details-summary">{translate("events.attendance").replace("{adults}", String(detailsEvent.attendanceAdults ?? 0)).replace("{children}", String(detailsEvent.attendanceChildren ?? 0))}</p>}{Boolean(detailsEvent.positions?.length) && <section className="event-details-section"><h3>{translate("events.positions")}</h3><ul>{detailsEvent.positions!.map((position, index) => { const person = contacts.find((contact) => contact.id === position.contactId); return <li key={`${position.name}-${index}`}><strong>{position.name}</strong><span>{person ? `${person.firstName} ${person.lastName}` : translate("events.unassigned")}</span></li>; })}</ul></section>}<EventPositionStaffNotes event={detailsEvent} departmentId={departmentId} canManage={canManage} />{Boolean(detailsEvent.timePlan?.length) && <section className="event-details-section"><h3>{translate("events.timePlan")}</h3><ul>{detailsEvent.timePlan!.map((item, index) => { const song = worshipSongs.find((candidate) => candidate.id === item.songId); const arrangement = song?.arrangements.find((candidate) => candidate.id === item.arrangementId); return <li key={`${item.title}-${index}`}><span className="event-details-plan-time">{item.startTime ?? ""}</span><div><strong>{item.title}</strong>{item.position && <span>{translate("events.responsiblePosition")}: {item.position}</span>}{item.durationMinutes && <span>{item.durationMinutes} {translate("events.minuteSuffix")}</span>}{song && <span>{song.title}{arrangement?.name ? ` · ${arrangement.name}` : ""}</span>}</div></li>; })}</ul></section>}{Boolean(detailsEvent.assetIds?.length) && <p className="event-details-summary">{translate("events.assets").replace("{assets}", resources.filter((resource) => detailsEvent.assetIds!.includes(resource.id)).map((resource) => resource.name).join(", "))}</p>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsEvent(null)}>{translate("events.close")}</button>{canManage && !detailsEvent.importedFrom && <button className="button button-primary" type="button" onClick={() => { const event = detailsEvent; setDetailsEvent(null); openEditModal(event); }}><Pencil size={14} />{translate("events.editEvent").replace("{title}", detailsEvent.title)}</button>}</div></section></div>}      {isModalOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setIsModalOpen(false)}><section className="modal event-modal" role="dialog" aria-modal="true" aria-labelledby="event-modal-title"><div className="modal-heading"><div><span className="eyebrow">{translate("events.scheduleFormEyebrow")}</span><h2 id="event-modal-title">{translate(editingEvent ? "events.editGathering" : "events.addGathering")}</h2><p>{translate("events.gatheringFormHelp")}</p></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setIsModalOpen(false)}><X size={19} /></button></div><form key={editingEvent?.id ?? "new-event"} onSubmit={saveEvent}>{servicePlanTemplates.length > 0 && <label className="event-plan-template-select">{translate("events.planTemplate")}<select value={selectedPlanTemplateId} onChange={(event) => applyServicePlanTemplate(event.target.value)}><option value="">{translate("events.chooseTemplate")}</option>{servicePlanTemplates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}</select><small>{translate("events.selectPlanTemplate")}</small></label>}
         <label>{translate("events.titleField")}<input name="title" autoFocus required maxLength={160} defaultValue={editingEvent?.title ?? ""} placeholder={translate("events.titlePlaceholder")} /></label>
         <div className="form-row"><label>{translate("events.typeField")}<select name="kind" defaultValue={editingEvent?.kind ?? "service"}>{eventKinds.map((kind) => <option value={kind.value} key={kind.value}>{translate(kind.label)}</option>)}</select></label><label>{translate("events.locationBuilding")}<input name="location" required maxLength={160} defaultValue={editingEvent?.location ?? departmentLocation} placeholder={translate("events.locationPlaceholder")} /></label><label>{translate("events.roomField")}<input maxLength={160} value={room} onChange={(event) => setRoom(event.target.value)} placeholder={translate("events.roomPlaceholder")} /></label></div>
         <div className="form-row event-time-row"><label>{translate("events.dateField")}<input type="date" name="eventDate" required defaultValue={editingEvent?.eventDate ?? departmentDateString(departmentTimeZone)} /></label>{!isAllDay && <><label>{translate("events.startsAt")}<input type="time" name="startTime" required defaultValue={editingEvent?.startTime ?? "10:00"} /></label><label>{translate("events.endsAt")} <span className="optional-label">{translate("events.optional")}</span><input type="time" name="endTime" defaultValue={editingEvent?.endTime ?? ""} /></label></>}</div>

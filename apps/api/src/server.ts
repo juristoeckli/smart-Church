@@ -473,7 +473,12 @@ app.addHook("preHandler", async (request, reply) => {
       if (!await isDepartmentWritable(writeDepartment)) return reply.code(423).send({ error: "This location is a read-only redundancy standby or its write-fence state could not be verified." });
     }
   }
-  if (request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
+  const publicCalendarSyncRequest = request.method === "GET" && (
+    /^\/api\/public\/calendar-sync\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)
+    || /^\/api\/public\/church-calendar\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)
+    || /^\/api\/modules\/calendar-sync\/oauth\/callback\/(google|microsoft)$/.test(new URL(request.url, "http://localhost").pathname)
+  );
+  if (publicCalendarSyncRequest || request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/") || ["/api/public/signage/pair","/api/public/signage/pairing/start","/api/public/signage/pairing/status"].includes(request.url)) return;
   if (!databaseReady) return;
   const authorization = request.headers.authorization;
@@ -2846,6 +2851,259 @@ app.put<{ Params: { id: string; positionIndex: string }; Body: { status: "pendin
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This position assignment has changed. Refresh the schedule and try again." }); }
     await client.query("COMMIT");
     return { status: result.rows[0].status };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array<{ positionIndex: number; positionName: string }> } }>("/api/events/:id/positions/bulk-assign", {
+  schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: {
+      type: "object", additionalProperties: false, required: ["contactId", "assignments"],
+      properties: {
+        contactId: { type: "string", format: "uuid" },
+        assignments: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false, required: ["positionIndex", "positionName"], properties: { positionIndex: { type: "integer", minimum: 0, maximum: 100 }, positionName: { type: "string", minLength: 1, maxLength: 80 } } } },
+      },
+    },
+  },
+}, async (request, reply): Promise<ServiceEvent | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const departmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!departmentId) return reply;
+  const assignments = request.body.assignments;
+  const indices = assignments.map((item) => item.positionIndex);
+  if (new Set(indices).size !== indices.length || assignments.some((item) => !item.positionName.trim())) return reply.code(400).send({ error: "Choose each role once and include its current name." });
+  const volunteer = await pool.query<{ id: string }>("SELECT id FROM contacts WHERE id=$1 AND department_id=$2", [request.body.contactId, departmentId]);
+  if (!volunteer.rowCount) return reply.code(400).send({ error: "The selected volunteer is not in this location." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const current = await client.query<ServiceEventRow>(
+      `SELECT id,title,kind,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
+              CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
+              location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,
+              attendance_recorded_at,recurrence_id,source_system,registration_enabled,registration_capacity,
+              registration_token,0::int AS registration_count
+         FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE`, [request.params.id, departmentId],
+    );
+    if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    const row = current.rows[0];
+    if (row.source_system === "churchtools" || row.source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
+    const event = mapServiceEvent(row);
+    const nextPositions = [...(event.positions ?? [])];
+    for (const assignment of assignments) {
+      const position = nextPositions[assignment.positionIndex];
+      if (!position || position.name.trim().toLocaleLowerCase() !== assignment.positionName.trim().toLocaleLowerCase()) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A selected role changed. Refresh the event and select the roles again." }); }
+      if (position.contactId) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `The ${position.name} role is no longer unfilled.` }); }
+      nextPositions[assignment.positionIndex] = { ...position, contactId: request.body.contactId };
+    }
+    const nextEvent = { ...event, positions: nextPositions };
+    const assignmentError = await validateServiceAssignments(departmentId, nextEvent);
+    if (assignmentError) { await client.query("ROLLBACK"); return reply.code(400).send({ error: assignmentError }); }
+    const updated = await client.query<ServiceEventRow>(
+      `UPDATE service_events SET positions=$3::jsonb,updated_at=now()
+       WHERE id=$1 AND department_id=$2
+       RETURNING id,title,kind,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
+                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
+                 location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,
+                 attendance_recorded_at,recurrence_id,source_system,registration_enabled,registration_capacity,
+                 registration_token,0::int AS registration_count`,
+      [request.params.id, departmentId, JSON.stringify(nextPositions)],
+    );
+    await syncEventPositionResponses(client, request.params.id, nextPositions, event.positions);
+    await client.query("COMMIT");
+    return mapServiceEvent(updated.rows[0]);
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+type EventPositionSwap = {
+  id: string; event_id: string; event_title: string; event_date: string;
+  from_position_index: number; from_position_name: string; to_position_index: number; to_position_name: string;
+  requester_contact_id: string; requester_name: string; target_contact_id: string; target_name: string;
+  status: "pending" | "accepted" | "declined" | "cancelled"; created_at: Date | string; canRespond?: boolean; canCancel?: boolean;
+};
+
+app.get("/api/event-position-swaps", async (request, reply): Promise<EventPositionSwap[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
+  const contactId = linkedContact.rows[0]?.contact_id;
+  const canManage = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+  if (!contactId && !canManage) return [];
+  const result = await pool.query<EventPositionSwap>(
+    `SELECT swap.id,swap.event_id,event.title AS event_title,to_char(event.event_date,'YYYY-MM-DD') AS event_date,
+       swap.from_position_index,event.positions->swap.from_position_index->>'name' AS from_position_name,
+       swap.to_position_index,event.positions->swap.to_position_index->>'name' AS to_position_name,
+       swap.requester_contact_id,concat_ws(' ',requester.first_name,requester.last_name) AS requester_name,
+       swap.target_contact_id,concat_ws(' ',target.first_name,target.last_name) AS target_name,swap.status,swap.created_at
+     FROM event_position_swap_requests swap
+     JOIN service_events event ON event.id=swap.event_id AND event.department_id=$1
+     JOIN contacts requester ON requester.id=swap.requester_contact_id
+     JOIN contacts target ON target.id=swap.target_contact_id
+     WHERE ($2 OR ($3::uuid IS NOT NULL AND (swap.requester_contact_id=$3 OR swap.target_contact_id=$3)))
+       AND swap.status IN ('pending','accepted','declined')
+     ORDER BY swap.created_at DESC LIMIT 200`, [selectedDepartmentId, canManage, contactId],
+  );
+  return result.rows.map((row) => ({ ...row, canRespond: row.status === "pending" && row.target_contact_id === contactId, canCancel: row.status === "pending" && row.requester_contact_id === contactId }));
+});
+
+app.post<{ Params: { id: string }; Body: { fromPositionIndex: number; toPositionIndex: number } }>("/api/events/:id/position-swaps", {
+  schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["fromPositionIndex", "toPositionIndex"], properties: { fromPositionIndex: { type: "integer", minimum: 0, maximum: 100 }, toPositionIndex: { type: "integer", minimum: 0, maximum: 100 } } },
+  },
+}, async (request, reply): Promise<{ id: string; status: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
+  const contactId = linkedContact.rows[0]?.contact_id;
+  if (!contactId) return reply.code(409).send({ error: "Link your location membership to your person record before requesting a swap." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; event_date: string }>("SELECT positions,source_system,to_char(event_date,'YYYY-MM-DD') AS event_date FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    if (event.rows[0].source_system === "churchtools" || event.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
+    if (event.rows[0].event_date < new Date().toISOString().slice(0, 10)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "You cannot request a swap for a gathering that has already taken place." }); }
+    const positions = event.rows[0].positions ?? [];
+    const from = positions[request.body.fromPositionIndex];
+    const to = positions[request.body.toPositionIndex];
+    if (!from || from.contactId !== contactId) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You may request a swap only for your own assigned position." }); }
+    if (!to?.contactId || to.contactId === contactId) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a different assigned volunteer to request the swap from." }); }
+    const result = await client.query<{ id: string }>(
+      `INSERT INTO event_position_swap_requests(id,event_id,from_position_index,to_position_index,requester_contact_id,target_contact_id)
+       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id`,
+      [randomUUID(), request.params.id, request.body.fromPositionIndex, request.body.toPositionIndex, contactId, to.contactId],
+    );
+    if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A matching swap request is already waiting for a response." }); }
+    await client.query("COMMIT");
+    return reply.code(201).send({ id: result.rows[0].id, status: "pending" });
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.put<{ Params: { id: string }; Body: { decision: "accepted" | "declined" | "cancelled" } }>("/api/event-position-swaps/:id", {
+  schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["decision"], properties: { decision: { type: "string", enum: ["accepted", "declined", "cancelled"] } } },
+  },
+}, async (request, reply): Promise<{ status: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
+  const contactId = linkedContact.rows[0]?.contact_id;
+  if (!contactId) return reply.code(409).send({ error: "Link your location membership to your person record before responding to a swap." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const swap = await client.query<{ event_id: string; from_position_index: number; to_position_index: number; requester_contact_id: string; target_contact_id: string; status: string; department_id: string }>(
+      `SELECT swap.event_id,swap.from_position_index,swap.to_position_index,swap.requester_contact_id,swap.target_contact_id,swap.status,event.department_id
+       FROM event_position_swap_requests swap JOIN service_events event ON event.id=swap.event_id
+       WHERE swap.id=$1 AND event.department_id=$2 FOR UPDATE OF swap,event`, [request.params.id, selectedDepartmentId],
+    );
+    if (!swap.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This swap request could not be found." }); }
+    const row = swap.rows[0];
+    const canManage = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+    const isTarget = row.target_contact_id === contactId;
+    const isRequester = row.requester_contact_id === contactId;
+    if (!canManage && !(request.body.decision === "cancelled" && isRequester) && !(request.body.decision !== "cancelled" && isTarget)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the requested volunteer can respond, and only the requester can cancel." }); }
+    if (row.status !== "pending") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This swap request has already been answered." }); }
+    if (request.body.decision === "accepted") {
+      const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; event_date: string }>("SELECT positions,source_system,to_char(event_date,'YYYY-MM-DD') AS event_date FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [row.event_id, selectedDepartmentId]);
+      const positions = event.rows[0]?.positions ?? [];
+      const from = positions[row.from_position_index]; const to = positions[row.to_position_index];
+      if (!event.rowCount || event.rows[0].source_system || event.rows[0].event_date < new Date().toISOString().slice(0, 10) || from?.contactId !== row.requester_contact_id || to?.contactId !== row.target_contact_id) {
+        await client.query("ROLLBACK"); return reply.code(409).send({ error: "The event assignments changed since this request was made. Refresh the schedule." });
+      }
+      positions[row.from_position_index] = { ...from, contactId: row.target_contact_id };
+      positions[row.to_position_index] = { ...to, contactId: row.requester_contact_id };
+      await client.query("UPDATE service_events SET positions=$2::jsonb,updated_at=now() WHERE id=$1", [row.event_id, JSON.stringify(positions)]);
+      for (const [positionIndex, newContactId] of [[row.from_position_index, row.target_contact_id], [row.to_position_index, row.requester_contact_id]] as const) {
+        await client.query(
+          `INSERT INTO event_position_responses(event_id,position_index,contact_id,status,responded_at)
+           VALUES($1,$2,$3,'pending',NULL)
+           ON CONFLICT(event_id,position_index) DO UPDATE SET contact_id=EXCLUDED.contact_id,status='pending',responded_at=NULL,updated_at=now()`,
+          [row.event_id, positionIndex, newContactId],
+        );
+      }
+    }
+    await client.query("UPDATE event_position_swap_requests SET status=$2,responded_at=now() WHERE id=$1", [request.params.id, request.body.decision]);
+    await client.query("COMMIT");
+    return { status: request.body.decision };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.get<{ Params: { id: string } }>("/api/events/:id/position-notes", {
+  schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<{ positionIndex: number; note: string; updatedAt: string | Date | null }[] | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The service plan is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply);
+  if (!selectedDepartmentId) return reply;
+  const event = await pool.query<{ positions: ServiceEvent["positions"] }>("SELECT positions FROM service_events WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+  if (!event.rowCount) return reply.code(404).send({ error: "This gathering could not be found." });
+  const isManager = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+  let assignedContactId: string | null = null;
+  if (!isManager) {
+    const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
+    assignedContactId = linkedContact.rows[0]?.contact_id ?? null;
+    if (!assignedContactId) return reply.code(403).send({ error: "You do not have access to these staff notes." });
+  }
+  const result = await pool.query<{ position_index: number; position_name: string; note: string; updated_at: Date | string }>(
+    "SELECT position_index,position_name,note,updated_at FROM event_position_staff_notes WHERE event_id=$1 ORDER BY position_index",
+    [request.params.id],
+  );
+  const currentRoleNames = new Map((event.rows[0].positions ?? []).map((position, index) => [index, position.name.trim()]));
+  const matchingRows = result.rows.filter((row) => currentRoleNames.get(row.position_index) === row.position_name);
+  if (isManager) return matchingRows.map((row) => ({ positionIndex: row.position_index, note: row.note, updatedAt: row.updated_at }));
+  const assignedIndexes = new Set((event.rows[0].positions ?? []).flatMap((position, index) => position.contactId === assignedContactId ? [index] : []));
+  return matchingRows.filter((row) => assignedIndexes.has(row.position_index)).map((row) => ({ positionIndex: row.position_index, note: row.note, updatedAt: row.updated_at }));
+});
+
+app.put<{ Params: { id: string; positionIndex: string }; Body: { note: string } }>("/api/events/:id/positions/:positionIndex/note", {
+  schema: {
+    params: { type: "object", additionalProperties: false, required: ["id", "positionIndex"], properties: { id: { type: "string", format: "uuid" }, positionIndex: { type: "string", pattern: "^(0|[1-9]\\d*)$" } } },
+    body: { type: "object", additionalProperties: false, required: ["note"], properties: { note: { type: "string", maxLength: 500 } } },
+  },
+}, async (request, reply): Promise<{ saved: boolean; note: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The service plan is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const positionIndex = Number(request.params.positionIndex);
+  const note = request.body.note.trim();
+  if (note.length > 500) return reply.code(400).send({ error: "Staff notes can contain at most 500 characters." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null }>(
+      "SELECT positions,source_system FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE",
+      [request.params.id, selectedDepartmentId],
+    );
+    if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    if (event.rows[0].source_system === "churchtools" || event.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
+    if (!Number.isInteger(positionIndex) || positionIndex < 0 || positionIndex >= (event.rows[0].positions?.length ?? 0)) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This service role could not be found." }); }
+    const positionName = event.rows[0].positions![positionIndex].name.trim();
+    const previous = await client.query<{ note: string }>("SELECT note FROM event_position_staff_notes WHERE event_id=$1 AND position_index=$2 FOR UPDATE", [request.params.id, positionIndex]);
+    if (!note) {
+      if (previous.rowCount) {
+        await client.query("DELETE FROM event_position_staff_notes WHERE event_id=$1 AND position_index=$2", [request.params.id, positionIndex]);
+        await client.query("INSERT INTO event_position_staff_note_audit(id,event_id,position_index,actor_user_id,action,note_length) VALUES($1,$2,$3,$4,'deleted',0)", [randomUUID(), request.params.id, positionIndex, request.authenticatedUser!.id]);
+      }
+    } else {
+      await client.query(
+        `INSERT INTO event_position_staff_notes(event_id,position_index,position_name,note,updated_by)
+         VALUES($1,$2,$3,$4,$5) ON CONFLICT(event_id,position_index) DO UPDATE SET position_name=EXCLUDED.position_name,note=EXCLUDED.note,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+        [request.params.id, positionIndex, positionName, note, request.authenticatedUser!.id],
+      );
+      await client.query("INSERT INTO event_position_staff_note_audit(id,event_id,position_index,actor_user_id,action,note_length) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), request.params.id, positionIndex, request.authenticatedUser!.id, previous.rowCount ? "updated" : "created", note.length]);
+    }
+    await client.query("COMMIT");
+    realtime.publish("core:data:changed", selectedDepartmentId, { action: "position-staff-note-changed", eventId: request.params.id, positionIndex });
+    return { saved: true, note };
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });

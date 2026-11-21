@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
-import type { BookableResource, ChurchGroup, LocationPermission, ResourceBooking } from "@smart-church/contracts";
+import type { BookableResource, ChurchGroup, GroupLifecycleStatus, LocationPermission, ResourceBooking } from "@smart-church/contracts";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerCommunityReplication } from "./replication.js";
 
@@ -16,9 +16,9 @@ type BookingRow = {
   purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
 };
 
-function mapGroup(row: { id: string; name: string; description: string; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null; public_signup_enabled?: boolean; public_signup_token?: string | null }): ChurchGroup {
+function mapGroup(row: { id: string; name: string; description: string; status?: GroupLifecycleStatus; starts_on?: string | Date | null; ends_on?: string | Date | null; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null; public_signup_enabled?: boolean; public_signup_token?: string | null }): ChurchGroup {
   const memberDetails = (row.member_details ?? []).map((member) => ({ contactId: member.contactId, role: member.role, status: member.status, ...(member.joinedOn ? { joinedOn: String(member.joinedOn).slice(0, 10) } : {}) }));
-  return { id: row.id, name: row.name, description: row.description, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" || row.source_system === "elvanto" ? { importedFrom: row.source_system } : {}) };
+  return { id: row.id, name: row.name, description: row.description, status: row.status ?? "active", startsOn: row.starts_on ? String(row.starts_on).slice(0, 10) : null, endsOn: row.ends_on ? String(row.ends_on).slice(0, 10) : null, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" || row.source_system === "elvanto" ? { importedFrom: row.source_system } : {}) };
 }
 
 function mapBookableResource(row: BookableResourceRow): BookableResource {
@@ -45,7 +45,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT g.id, g.name, g.description, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token,
+        `SELECT g.id, g.name, g.description, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token,
                 count(gm.contact_id)::int AS member_count,
                 COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids,
                 COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on) ORDER BY lower(c.last_name),lower(c.first_name)) FILTER (WHERE gm.contact_id IS NOT NULL), '[]'::json) AS member_details
@@ -60,19 +60,63 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       });
     });
 
-    routes.post<{ Body: { name: string; description?: string } }>("/api/groups", { schema: {
-      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } },
+    routes.get("/api/groups/views", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      return (await pool!.query(
+        `SELECT id,name,search_text AS "searchText",status_filter AS "statusFilter",created_at AS "createdAt",updated_at AS "updatedAt"
+           FROM group_directory_views WHERE department_id=$1 AND user_id=$2 ORDER BY lower(name),created_at`,
+        [departmentId, request.authenticatedUser!.id],
+      )).rows;
+    });
+
+    routes.post<{ Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus } }>("/api/groups/views", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Enter a name for this saved view." });
+      const searchText = (request.body.searchText ?? "").trim().slice(0, 120);
+      const statusFilter = request.body.statusFilter ?? "all";
+      const result = await pool!.query(
+        `INSERT INTO group_directory_views(id,department_id,user_id,name,search_text,status_filter)
+         VALUES($1,$2,$3,$4,$5,$6)
+         ON CONFLICT(department_id,user_id,(lower(name))) DO UPDATE
+           SET name=EXCLUDED.name,search_text=EXCLUDED.search_text,status_filter=EXCLUDED.status_filter,updated_at=now()
+         RETURNING id,name,search_text AS "searchText",status_filter AS "statusFilter",created_at AS "createdAt",updated_at AS "updatedAt"`,
+        [randomUUID(), departmentId, request.authenticatedUser!.id, name, searchText, statusFilter],
+      );
+      return reply.code(200).send(result.rows[0]);
+    });
+
+    routes.delete<{ Params: { id: string } }>("/api/groups/views/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const deleted = await pool!.query("DELETE FROM group_directory_views WHERE id=$1 AND department_id=$2 AND user_id=$3 RETURNING id", [request.params.id, departmentId, request.authenticatedUser!.id]);
+      if (!deleted.rowCount) return reply.code(404).send({ error: "Saved group view not found." });
+      return { deleted: true };
+    });
+
+    routes.post<{ Body: { name: string; description?: string; status?: GroupLifecycleStatus; startsOn?: string | null; endsOn?: string | null } }>("/api/groups", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 }, status: { type: "string", enum: ["active", "draft", "ended", "archived"] }, startsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] }, endsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const name = request.body.name.trim();
       const description = request.body.description?.trim() ?? "";
+      const status = request.body.status ?? "active";
+      const startsOn = request.body.startsOn ?? null;
+      const endsOn = request.body.endsOn ?? null;
       if (!name) return reply.code(400).send({ error: "Enter a group name." });
+      if (startsOn && endsOn && startsOn > endsOn) return reply.code(400).send({ error: "The group end date must be on or after its start date." });
       try {
         const result = await pool!.query(
-          `INSERT INTO church_groups (id, department_id, name, description) VALUES ($1, $2, $3, $4)
-           RETURNING id, name, description, created_at`,
-          [randomUUID(), departmentId, name, description],
+          `INSERT INTO church_groups (id, department_id, name, description,status,starts_on,ends_on) VALUES ($1, $2, $3, $4,$5,$6,$7)
+           RETURNING id, name, description,status,starts_on,ends_on,created_at`,
+          [randomUUID(), departmentId, name, description, status, startsOn, endsOn],
         );
         return reply.code(201).send(mapGroup({ ...result.rows[0], member_count: 0, member_ids: [] }));
       } catch (error) {
@@ -81,25 +125,31 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       }
     });
 
-    routes.put<{ Params: { id: string }; Body: { name: string; description?: string } }>("/api/groups/:id", { schema: {
+    routes.put<{ Params: { id: string }; Body: { name: string; description?: string; status?: GroupLifecycleStatus; startsOn?: string | null; endsOn?: string | null } }>("/api/groups/:id", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } },
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 }, status: { type: "string", enum: ["active", "draft", "ended", "archived"] }, startsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] }, endsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
-      const existing = await pool!.query("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      const existing = await pool!.query<{ source_system: string | null; status: GroupLifecycleStatus; starts_on: string | null; ends_on: string | null }>("SELECT source_system,status,starts_on::text,ends_on::text FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
       if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync. Edit it in the source system and sync again." });
       const name = request.body.name.trim();
       if (!name) return reply.code(400).send({ error: "Enter a group name." });
+      const status = request.body.status ?? existing.rows[0].status;
+      const startsOn = request.body.startsOn === undefined ? existing.rows[0].starts_on : request.body.startsOn;
+      const endsOn = request.body.endsOn === undefined ? existing.rows[0].ends_on : request.body.endsOn;
+      if (startsOn && endsOn && startsOn > endsOn) return reply.code(400).send({ error: "The group end date must be on or after its start date." });
       try {
         const result = await pool!.query(
-          `UPDATE church_groups SET name = $3, description = $4, updated_at = now()
-            WHERE id = $1 AND department_id = $2 RETURNING id, name, description, created_at, source_system, public_signup_enabled, public_signup_token,
+          `UPDATE church_groups SET name=$3,description=$4,status=$5,starts_on=$6,ends_on=$7,
+               public_signup_enabled=CASE WHEN $5='active' THEN public_signup_enabled ELSE false END,
+               public_signup_token=CASE WHEN $5='active' THEN public_signup_token ELSE NULL END,updated_at=now()
+            WHERE id = $1 AND department_id = $2 RETURNING id,name,description,status,starts_on,ends_on,created_at,source_system,public_signup_enabled,public_signup_token,
               (SELECT count(*)::int FROM group_members WHERE group_id = church_groups.id) AS member_count,
               (SELECT COALESCE(array_agg(contact_id), ARRAY[]::uuid[]) FROM group_members WHERE group_id = church_groups.id) AS member_ids,
               (SELECT COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on)), '[]'::json) FROM group_members gm WHERE gm.group_id=church_groups.id) AS member_details`,
-          [request.params.id, departmentId, name, request.body.description?.trim() ?? ""],
+          [request.params.id, departmentId, name, request.body.description?.trim() ?? "", status, startsOn, endsOn],
         );
         if (!result.rowCount) return reply.code(404).send({ error: "Group not found." });
         return mapGroup(result.rows[0]);
@@ -155,9 +205,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       if (!validateMutation(request, reply)) return reply;
-      const existing = await pool!.query<{ source_system: string | null }>("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+      const existing = await pool!.query<{ source_system: string | null; status: GroupLifecycleStatus }>("SELECT source_system,status FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
       if (!existing.rowCount) return reply.code(404).send({ error: "Group not found." });
       if (existing.rows[0].source_system === "churchtools" || existing.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync." });
+      if (request.body.enabled && existing.rows[0].status !== "active") return reply.code(400).send({ error: "Public signup can only be enabled for active groups." });
       const result = await pool!.query<{ public_signup_enabled: boolean; public_signup_token: string | null }>(
         `UPDATE church_groups SET public_signup_enabled=$3,
            public_signup_token=CASE WHEN $3 THEN COALESCE(public_signup_token,$4::uuid) ELSE NULL END, updated_at=now()
@@ -235,7 +286,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
       const result = await pool!.query<{ name: string; description: string }>(
-        "SELECT name,description FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS NULL",
+        "SELECT name,description FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND status='active' AND source_system IS NULL",
         [request.params.token],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "This group registration link is unavailable." });
@@ -256,7 +307,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       let groupDepartmentId = "";
       try {
         await client.query("BEGIN");
-        const group = await client.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND source_system IS NULL FOR SHARE", [request.params.token]);
+        const group = await client.query<{ id: string; department_id: string }>("SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND status='active' AND source_system IS NULL FOR SHARE", [request.params.token]);
         if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this group." }); }
         groupId = group.rows[0].id;
         groupDepartmentId = group.rows[0].department_id;

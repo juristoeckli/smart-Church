@@ -1,0 +1,9 @@
+{
+  "id": "church-calendar",
+  "name": "General Calendar",
+  "version": "1.0.0",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "dependencies": { "required": [], "optional": [] }
+}

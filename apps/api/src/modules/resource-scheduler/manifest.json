@@ -1,0 +1,11 @@
+{
+  "id": "resource-scheduler",
+  "name": "Resource Scheduler",
+  "version": "1.0.0",
+  "description": "Recurring resource bookings, availability, conflict controls, and linked calendar appointments.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "dependencies": { "required": [], "optional": ["church-calendar"] },
+  "accessGrants": ["manage"]
+}

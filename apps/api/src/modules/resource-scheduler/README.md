@@ -1,0 +1,16 @@
+# Resource Scheduler module
+
+This optional module extends the existing `bookable_resources` and `resource_bookings` records. It provides a weekly resource matrix, status filtering, request approval/rejection, unit counts, overlap checks with lead-in and cleanup buffers, recurring booking creation (once/daily/weekly/monthly/yearly), extra dates and skipped dates, series cancellation, and an audit endpoint. It can link bookings to appointments when the Church Calendar module is available.
+
+The migration defaults every existing resource to one available unit and adds quantity and buffer columns to existing bookings. Resource managers can configure units and default buffers. Location scope is resolved through the module SDK; management actions accept the existing `resources_manage` permission or the module `manage` grant. Mutations require the SDK CSRF validation.
+
+## Boundaries
+
+- This slice creates one standard `resource_bookings` row per occurrence, so existing booking consumers can continue to read them. Recurrence metadata, extra/excluded dates, and scheduler audit history live in module-owned tables.
+- Core booking routes can read the new quantity and buffer columns but do not expose recurring-series edits, appointment-link metadata, or this module's audit history. The database trigger enforces capacity and buffered conflicts on writes through the legacy booking route as well.
+- Scheduling uses timestamps and date arithmetic in UTC. It does not yet model per-resource local-time recurrence across daylight-saving transitions.
+- Recurrence expansion is capped at 500 bookings and a 12-month horizon. Owners and resource managers can preview and explicitly apply changes to future series occurrences from a chosen date, including the recurrence rule, purpose, times, quantity, and setup/cleanup buffers. Occurrences before the selected date and earlier bookings on that date remain unchanged. Applying a change updates pending rows, cancels superseded pending rows, creates new rows, checks capacity/conflicts in the same transaction, and records a detailed audit entry. Any future approved occurrence blocks the entire edit; it must be handled individually first. Existing exception dates remain in effect. This does not yet offer per-approved-row choices, local-time recurrence across daylight-saving transitions, or a longer than 12-month edit horizon.
+- Appointment links require the optional Church Calendar schema and are managed from the scheduler. Calendar appointment changes do not automatically reschedule linked resource bookings.
+- The availability configuration rejects reducing capacity below existing peak reservations. Existing resources start with one unit and need manager configuration when they represent multiple identical units.
+- The series history endpoint and UI viewer are available to a series owner or resource manager.
+- Series owners and resource managers can list and remove individual extra dates. Removing a date cancels its pending booking, removes it from recurrence metadata, records an audit row, and publishes a schedule update. An approved extra-date booking must be cancelled individually first; its occurrence history remains visible after the extra-date marker is removed.

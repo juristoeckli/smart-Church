@@ -1,0 +1,9 @@
+{
+  "id": "reports",
+  "name": "Reports",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "accessGrants": ["view", "manage"]
+}

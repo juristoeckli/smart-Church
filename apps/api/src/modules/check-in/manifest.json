@@ -1,0 +1,10 @@
+{
+  "id": "check-in",
+  "name": "Check-in",
+  "version": "1.0.0",
+  "description": "Event and group roster check-in with printable labels.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "accessGrants": ["view", "manage"]
+}

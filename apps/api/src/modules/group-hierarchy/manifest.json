@@ -1,0 +1,9 @@
+{
+  "id": "group-hierarchy",
+  "name": "Group administration",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "accessGrants": ["manage"]
+}

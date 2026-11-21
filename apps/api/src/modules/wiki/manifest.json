@@ -1,0 +1,12 @@
+{
+  "id": "wiki",
+  "name": "Wiki",
+  "version": "0.1.0",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "dependencies": {
+    "required": ["file-storage"],
+    "optional": []
+  }
+}

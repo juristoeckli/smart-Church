@@ -1,0 +1,10 @@
+{
+  "id": "calendar-sync",
+  "name": "Calendar Sync",
+  "version": "0.1.0",
+  "serverEntry": "./index.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "clientManaged": true,
+  "dependencies": { "required": [], "optional": [] }
+}

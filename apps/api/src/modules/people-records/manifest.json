@@ -1,0 +1,12 @@
+{
+  "id": "people-records",
+  "name": "People Records",
+  "version": "1.0.0",
+  "description": "Location-scoped person directory extensions, consent records, relationships, and change history.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "clientManaged": true,
+  "dependencies": { "required": [], "optional": [] },
+  "accessGrants": ["view", "manage"]
+}

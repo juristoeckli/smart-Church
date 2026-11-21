@@ -1,0 +1,9 @@
+{
+  "id": "finance",
+  "name": "Finance & Giving",
+  "version": "1.0.0",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": false,
+  "accessGrants": ["view", "manage"]
+}

@@ -1,0 +1,10 @@
+{
+  "id": "group-operations",
+  "name": "Group operations",
+  "version": "0.1.0",
+  "description": "Location-scoped group follow-ups, routines, certificates, and reviewed membership rules.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "accessGrants": ["manage"]
+}

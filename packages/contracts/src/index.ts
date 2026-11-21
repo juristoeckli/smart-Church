@@ -154,6 +154,9 @@ export interface ChurchGroup {
   id: string;
   name: string;
   description: string;
+  status: GroupLifecycleStatus;
+  startsOn: string | null;
+  endsOn: string | null;
   memberCount: number;
   memberIds: string[];
   memberDetails?: ChurchGroupMembership[];
@@ -162,6 +165,8 @@ export interface ChurchGroup {
   publicSignupToken?: string;
   importedFrom?: "churchtools" | "elvanto";
 }
+
+export type GroupLifecycleStatus = "active" | "draft" | "ended" | "archived";
 
 export interface ChurchGroupMembership {
   contactId: string;
@@ -173,6 +178,9 @@ export interface ChurchGroupMembership {
 export interface CreateChurchGroup {
   name: string;
   description?: string;
+  status?: GroupLifecycleStatus;
+  startsOn?: string | null;
+  endsOn?: string | null;
 }
 
 export interface StoredFile {

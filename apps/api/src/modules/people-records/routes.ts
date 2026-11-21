@@ -1,0 +1,464 @@
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
+import { randomUUID } from "node:crypto";
+import type { ModuleServerContext } from "../module-sdk.js";
+
+const uuid = { type: "string", format: "uuid" } as const;
+type FieldFilterInput={field:string;value:string;operator?:string};
+const coreDirectoryColumns=["id","firstName","lastName","email","phone","status"];
+function parseFieldFilters(raw:string|undefined,field?:string,value?:string):FieldFilterInput[]{
+  if(raw!==undefined&&(field!==undefined||value!==undefined))throw new Error("Use either filters or the legacy field/value pair, not both.");
+  if(raw!==undefined){let parsed:unknown;try{parsed=JSON.parse(raw)}catch{throw new Error("Custom field filters must be a valid filter list.")}
+    if(!Array.isArray(parsed)||parsed.length>10)throw new Error("Choose up to 10 custom field filters.");
+    return parsed.map(item=>{if(!item||typeof item!=="object"||Array.isArray(item))throw new Error("Each custom field filter must include a field and value.");const record=item as Record<string,unknown>;if(Object.keys(record).some(key=>key!=="field"&&key!=="value"&&key!=="operator")||typeof record.field!=="string"||typeof record.value!=="string"||(record.operator!==undefined&&typeof record.operator!=="string"))throw new Error("Each custom field filter must include a field, operator, and value.");return{field:record.field,value:record.value,...(record.operator===undefined?{}:{operator:record.operator as string})}});
+  }
+  if((field===undefined)!==(value===undefined))throw new Error("Select both a custom field and value, or clear both filters.");
+  return field===undefined?[]:[{field,value:value!}];
+}
+function normalizeFieldFilter(fieldType: string, options: unknown, value: string, requestedOperator?:string): {operator:string;value:unknown}|null {
+  if (fieldType === "text") {
+    const operator=requestedOperator??"equals";
+    return value.length > 0 && value.length <= 200 && ["equals","contains"].includes(operator) ? {operator,value} : null;
+  }
+  if (fieldType === "date") {
+    const operator=requestedOperator??"on";
+    const relativeOperators=["last_7_days","last_30_days","last_90_days","next_7_days","next_30_days","next_90_days"];
+    if(relativeOperators.includes(operator))return value===""?{operator,value}:null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const parsed = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0,10) === value && ["on","before","after"].includes(operator) ? {operator,value} : null;
+  }
+  if (fieldType === "boolean") return (requestedOperator===undefined||requestedOperator==="equals")&&(value === "true" || value === "false") ? {operator:"equals",value:value==="true"} : null;
+  if (fieldType === "select") return (requestedOperator===undefined||requestedOperator==="equals")&&Array.isArray(options)&&options.some(option=>option===value) ? {operator:"equals",value} : null;
+  return null;
+}
+export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
+  app.register(async (routes) => {
+    async function department(request: FastifyRequest, reply: FastifyReply, write = false) {
+      if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "People Records are unavailable because the database is not ready." }); return null; }
+      if (!write) {
+        const permissions = request.activeDepartmentPermissions ?? [];
+        if (request.activeDepartmentRole !== "site_admin" && !permissions.includes("people_view_private") && !permissions.includes("people_manage")) { reply.code(403).send({ error: "You need private People access to view records." }); return null; }
+      }
+      return resolveDepartmentId(request, reply, false, false, write ? "people_manage" : undefined);
+    }
+    async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[]):Promise<Array<{field:string;operator:string;value:unknown}>>{
+      if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
+      if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
+      const normalized:Array<{field:string;value:unknown}>=[];
+      for(const item of filters){
+        if(!/^[a-z][a-z0-9_]{0,39}$/.test(item.field))throw new Error("Choose a valid custom field.");
+        const record=await pool!.query<{field_type:string;options:unknown}>("SELECT field_type,options FROM people_record_fields WHERE department_id=$1 AND field_key=$2 AND active=true",[departmentId,item.field]);
+        const filter=record.rowCount?normalizeFieldFilter(record.rows[0].field_type,record.rows[0].options,item.value,item.operator):null;
+        if(filter===null)throw new Error("Choose an active custom field at this location, a supported operator, and a value valid for its type.");
+        normalized.push({field:item.field,...filter});
+      }
+      return normalized;
+    }
+    async function validateDirectoryColumns(departmentId:string,columns:string[]|undefined):Promise<string[]>{
+      if(columns===undefined)return [...coreDirectoryColumns];
+      if(columns.length<1||columns.length>20||new Set(columns).size!==columns.length)throw new Error("Choose between 1 and 20 distinct directory columns.");
+      const fieldKeys=columns.filter(column=>column.startsWith("custom:")).map(column=>column.slice(7));
+      if(columns.some(column=>!coreDirectoryColumns.includes(column)&&!column.startsWith("custom:")))throw new Error("Choose an available directory column.");
+      if(fieldKeys.some(key=>!/^[a-z][a-z0-9_]{0,39}$/.test(key)))throw new Error("Choose a valid custom field column.");
+      if(fieldKeys.length){const found=await pool!.query<{field_key:string}>("SELECT field_key FROM people_record_fields WHERE department_id=$1 AND field_key=ANY($2::text[]) AND active=true",[departmentId,fieldKeys]);if(found.rowCount!==fieldKeys.length)throw new Error("Custom field columns must be active fields at this location.")}
+      return columns;
+    }
+    async function history(departmentId: string, contactId: string, request: FastifyRequest, action: string, subject: string, before?: unknown, after?: unknown) {
+      await pool!.query("INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb)", [randomUUID(), departmentId, contactId, request.authenticatedUser?.id ?? null, action, subject, before === undefined ? null : JSON.stringify(before), after === undefined ? null : JSON.stringify(after)]);
+    }
+    const changed = (departmentId: string, contactId?: string) => realtime.publish("people-records:changed", departmentId, { contactId });
+    async function inspectMerge(departmentId: string, keeperId: string, sourceId: string, db: PoolClient | NonNullable<typeof pool> = pool!) {
+      const found = await db.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; status: string; sourceSystem:string|null; sourceId:string|null; elvantoSourceId:string|null }>(
+        `SELECT id,first_name,last_name,email,phone,status,to_jsonb(contact)->>'source_system' AS "sourceSystem",to_jsonb(contact)->>'source_id' AS "sourceId",to_jsonb(contact)->>'elvanto_source_id' AS "elvantoSourceId" FROM contacts contact WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id`, [departmentId, [keeperId, sourceId]],
+      );
+      if (found.rowCount !== 2) return null;
+      const keeper = found.rows.find((person) => person.id === keeperId)!; const source = found.rows.find((person) => person.id === sourceId)!;
+      const profileConflicts = [["first name","first_name"],["last name","last_name"],["email","email"],["phone","phone"],["status","status"]].flatMap(([label,field]) => {
+        const keepValue = keeper[field as keyof typeof keeper]; const sourceValue = source[field as keyof typeof source];
+        return keepValue && sourceValue && keepValue !== sourceValue ? [{ field:label, keepValue:String(keepValue), sourceValue:String(sourceValue) }] : [];
+      });
+      const customFieldConflicts = (await db.query<{ field: string; keeperValue: unknown; sourceValue: unknown }>(
+        `SELECT field.label AS field,keeper.value AS "keeperValue",source.value AS "sourceValue"
+           FROM people_record_values source JOIN people_record_values keeper
+             ON keeper.department_id=source.department_id AND keeper.field_id=source.field_id AND keeper.contact_id=$2
+           JOIN people_record_fields field ON field.id=source.field_id AND field.department_id=source.department_id
+          WHERE source.department_id=$1 AND source.contact_id=$3 AND source.value IS DISTINCT FROM keeper.value`, [departmentId, keeperId, sourceId],
+      )).rows;
+      const dateConflicts = (await db.query<{ kind: string; keeperValue: string; sourceValue: string }>(
+        `SELECT source.date_kind AS kind,keeper.date_value::text AS "keeperValue",source.date_value::text AS "sourceValue"
+           FROM people_record_person_dates source JOIN people_record_person_dates keeper
+             ON keeper.department_id=source.department_id AND keeper.date_kind=source.date_kind AND keeper.contact_id=$2
+          WHERE source.department_id=$1 AND source.contact_id=$3 AND source.date_value IS DISTINCT FROM keeper.date_value`, [departmentId, keeperId, sourceId],
+      )).rows;
+      const installed = await db.query<{ groups: boolean; groupAutoManaged: boolean; groupCustom: boolean; groupAttendance: boolean; eventCheckins: boolean; positionResponses: boolean; peopleFlows: boolean; memberships: boolean; serviceEvents: boolean; teamMembers: boolean }>(
+        `SELECT to_regclass('public.group_members') IS NOT NULL AS groups,
+                EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='group_members' AND column_name='auto_managed') AS "groupAutoManaged",
+                to_regclass('public.group_membership_custom_fields') IS NOT NULL AS "groupCustom",
+                to_regclass('public.group_meeting_attendance') IS NOT NULL AS "groupAttendance",
+                to_regclass('public.event_attendance_checkins') IS NOT NULL AS "eventCheckins",
+                to_regclass('public.event_position_responses') IS NOT NULL AS "positionResponses",
+                to_regclass('public.people_flow_enrollments') IS NOT NULL AS "peopleFlows",
+                to_regclass('public.department_memberships') IS NOT NULL AS memberships,
+                to_regclass('public.service_events') IS NOT NULL AS "serviceEvents",
+                to_regclass('public.team_members') IS NOT NULL AS "teamMembers"`,
+      );
+      const blockers: string[] = [];
+      if(source.sourceSystem||source.sourceId||source.elvantoSourceId)blockers.push("The source person is linked to a ChurchTools or Elvanto sync identity. Disconnect or reconcile that external identity before merging so the sync does not recreate the source record.");
+      if (installed.rows[0]?.groups) {
+        const automaticStatusDifference=installed.rows[0]?.groupAutoManaged?",CASE WHEN source.auto_managed IS DISTINCT FROM keeper.auto_managed THEN 'automatic status' END":"";
+        const overlaps = await db.query<{ name: string; differences: string[] }>(
+          `SELECT group_row.name,
+                  array_remove(ARRAY[
+                    CASE WHEN source.role IS DISTINCT FROM keeper.role THEN 'role' END,
+                    CASE WHEN source.status IS DISTINCT FROM keeper.status THEN 'status' END,
+                    CASE WHEN source.joined_on IS DISTINCT FROM keeper.joined_on THEN 'join date' END${automaticStatusDifference}
+                  ],NULL) AS differences
+             FROM group_members source JOIN group_members keeper ON keeper.group_id=source.group_id AND keeper.contact_id=$2
+             JOIN church_groups group_row ON group_row.id=source.group_id AND group_row.department_id=$1
+            WHERE source.contact_id=$3 ORDER BY group_row.name`, [departmentId, keeperId, sourceId],
+        );
+        for (const overlap of overlaps.rows) if (overlap.differences.length) blockers.push(`Both people belong to “${overlap.name}” with different ${overlap.differences.join(", ")}. Resolve this membership before merging.`);
+      }
+      if (installed.rows[0]?.teamMembers) {
+        const overlap = await db.query<{ name: string }>(`SELECT team.name FROM team_members source JOIN team_members keeper ON keeper.team_id=source.team_id AND keeper.contact_id=$1 JOIN church_teams team ON team.id=source.team_id WHERE source.contact_id=$2 LIMIT 30`,[keeperId,sourceId]);
+        for(const row of overlap.rows)blockers.push(`Both people belong to team “${row.name}”. Resolve the duplicate team membership before merging.`);
+      }
+      if (installed.rows[0]?.groupCustom) {
+        const overlap = await db.query<{ name: string }>(
+          `SELECT group_row.name FROM group_membership_custom_fields source JOIN group_membership_custom_fields keeper
+             ON keeper.group_id=source.group_id AND keeper.contact_id=$2 AND keeper.department_id=source.department_id
+           JOIN church_groups group_row ON group_row.id=source.group_id
+          WHERE source.department_id=$1 AND source.contact_id=$3 AND source.custom_fields IS DISTINCT FROM keeper.custom_fields LIMIT 30`, [departmentId, keeperId, sourceId],
+        );
+        for (const row of overlap.rows) blockers.push(`Both people have different membership custom fields in “${row.name}”. Resolve these values before merging.`);
+      }
+      if (installed.rows[0]?.groupAttendance) {
+        const overlap = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM group_meeting_attendance source JOIN group_meeting_attendance keeper ON keeper.meeting_id=source.meeting_id AND keeper.contact_id=$2 WHERE source.contact_id=$3", [keeperId, sourceId]);
+        if (overlap.rows[0].count) blockers.push("Both people have attendance records for the same group meeting. Resolve those duplicate attendance entries before merging.");
+      }
+      if (installed.rows[0]?.eventCheckins) {
+        const overlap = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM event_attendance_checkins source JOIN event_attendance_checkins keeper ON keeper.event_id=source.event_id AND keeper.contact_id=$2 WHERE source.contact_id=$3", [keeperId, sourceId]);
+        if (overlap.rows[0].count) blockers.push("Both people have check-in records for the same event. Resolve those duplicate check-ins before merging.");
+      }
+      if (installed.rows[0]?.positionResponses) {
+        const overlap = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM event_position_responses source JOIN event_position_responses keeper ON keeper.event_id=source.event_id AND keeper.position_index=source.position_index AND keeper.contact_id=$2 WHERE source.contact_id=$3", [keeperId, sourceId]);
+        if (overlap.rows[0].count) blockers.push("Both people responded to the same service role. Resolve the duplicate role responses before merging.");
+      }
+      if (installed.rows[0]?.serviceEvents) {
+        const overlap = await db.query<{ count: number }>(
+          `SELECT count(*)::int AS count FROM service_events event
+            WHERE event.department_id=$1 AND (
+              SELECT count(*) FROM jsonb_array_elements(COALESCE(event.positions,'[]'::jsonb)) position(value)
+               WHERE position.value->>'contactId'=ANY($2::text[])
+            )>1`, [departmentId, [keeperId, sourceId]],
+        );
+        if (overlap.rows[0].count) blockers.push("Both people are assigned to multiple positions on the same service. Resolve those duplicate assignments before merging.");
+      }
+      if (installed.rows[0]?.peopleFlows) {
+        const overlap = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM people_flow_enrollments source JOIN people_flow_enrollments keeper ON keeper.department_id=source.department_id AND keeper.flow_id=source.flow_id AND keeper.contact_id=$2 AND keeper.status='active' WHERE source.department_id=$1 AND source.contact_id=$3 AND source.status='active'", [departmentId, keeperId, sourceId]);
+        if (overlap.rows[0].count) blockers.push("Both people are actively enrolled in the same follow-up workflow. Resolve the duplicate enrollment before merging.");
+      }
+      if (installed.rows[0]?.memberships) {
+        const overlap = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM department_memberships source JOIN department_memberships keeper ON keeper.department_id=source.department_id AND keeper.user_id<>source.user_id AND keeper.contact_id=$2 WHERE source.department_id=$1 AND source.contact_id=$3", [departmentId, keeperId, sourceId]);
+        if (overlap.rows[0].count) blockers.push("Both people are linked to different user accounts at this location. Resolve the account links before merging.");
+      }
+      return {
+        keeper: { id: keeper.id, firstName: keeper.first_name, lastName: keeper.last_name, email: keeper.email, phone: keeper.phone, status: keeper.status },
+        source: { id: source.id, firstName: source.first_name, lastName: source.last_name, email: source.email, phone: source.phone, status: source.status },
+        profileConflicts, customFieldConflicts, dateConflicts, blockers,
+      };
+    }
+    routes.get("/api/people-records/fields", async (request, reply) => {
+      const d = await department(request, reply); if (!d) return reply;
+      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position FROM people_record_fields WHERE department_id=$1 ORDER BY position,label", [d]); return result.rows;
+    });
+    routes.post<{ Body: { label: string; fieldKey: string; type: "text"|"date"|"boolean"|"select"; options?: string[]; required?: boolean } }>("/api/people-records/fields", async (request, reply) => {
+      const d = await department(request, reply, true); if (!d) return reply; if (!validateMutation(request, reply)) return reply;
+      const b = request.body; if (!b.label?.trim() || !/^[a-z][a-z0-9_]{0,39}$/.test(b.fieldKey) || !["text","date","boolean","select"].includes(b.type) || (b.type === "select" && (!Array.isArray(b.options) || b.options.length > 100))) return reply.code(400).send({ error: "Provide a valid field label, key, type, and options." });
+      const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0))", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
+      changed(d); return reply.code(201).send({ id });
+    });
+    routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean } }>("/api/people-records/fields/:id", { schema: { params: { type:"object", required:["id"], properties:{id:uuid} } } }, async (request, reply) => {
+      const d=await department(request,reply,true); if(!d)return reply; if(!validateMutation(request,reply))return reply;
+      const r=await pool!.query("UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),required=COALESCE($5,required),active=COALESCE($6,active),updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id",[d,request.params.id,request.body.label?.trim()||null,request.body.options===undefined?null:JSON.stringify(request.body.options),request.body.required??null,request.body.active??null]); if(!r.rowCount)return reply.code(404).send({error:"Custom field not found."}); changed(d); return {ok:true};
+    });
+    routes.get<{ Querystring: { q?: string; status?: string; field?: string; value?: string; filters?:string } }>("/api/people-records/directory",{schema:{querystring:{type:"object",additionalProperties:false,properties:{q:{type:"string",maxLength:120},status:{type:"string",enum:["member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"string",maxLength:3000}}}}}, async (request, reply) => {
+      const d=await department(request,reply); if(!d)return reply; const {q="",status}=request.query;
+      let fieldJson:string|null=null;
+      try{const filters=parseFieldFilters(request.query.filters,request.query.field,request.query.value);if(filters.length)fieldJson=JSON.stringify(await validateFieldFilters(d,filters))}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid custom field filters."})}
+      const r=await pool!.query(`SELECT c.id,c.first_name AS "firstName",c.last_name AS "lastName",c.email,c.phone,c.status,
+        COALESCE((SELECT jsonb_object_agg(f.field_key,v.value) FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.active), '{}'::jsonb) AS fields
+        FROM contacts c WHERE c.department_id=$1 AND ($2='' OR concat_ws(' ',c.first_name,c.last_name,c.email,c.phone) ILIKE '%'||$2||'%') AND ($3::text IS NULL OR c.status=$3)
+        AND ($4::jsonb IS NULL OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements($4::jsonb) requested WHERE NOT EXISTS(SELECT 1 FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.field_key=requested->>'field' AND f.active=true AND CASE WHEN f.field_type='text' AND requested->>'operator'='contains' THEN (v.value #>> '{}') ILIKE '%'||(requested->>'value')||'%' WHEN f.field_type='date' AND requested->>'operator'='before' THEN (v.value #>> '{}') < (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='after' THEN (v.value #>> '{}') > (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='on' THEN (v.value #>> '{}') = (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='last_7_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-6,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='last_30_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-29,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='last_90_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-89,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_7_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+7,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_30_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+30,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_90_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+90,'YYYY-MM-DD') ELSE v.value=requested->'value' END))) ORDER BY c.last_name,c.first_name LIMIT 500`,[d,q,status??null,fieldJson]); return r.rows;
+    });
+    routes.get("/api/people-records/saved-views", async (request, reply) => {
+      const d=await department(request,reply); if(!d)return reply;
+      const rows=await pool!.query(`SELECT id,name,criteria->>'q' AS q,criteria->>'status' AS status,criteria->>'field' AS field,criteria->>'value' AS value,criteria->'filters' AS filters,criteria->'columns' AS columns,created_at AS "createdAt",updated_at AS "updatedAt"
+        FROM people_record_saved_views WHERE department_id=$1 AND user_id=$2 ORDER BY lower(name),id`,[d,request.authenticatedUser!.id]);
+      return rows.rows;
+    });
+    routes.post<{Body:{name:string;q?:string;status?:"member"|"visitor"|"";field?:string;value?:string;filters?:FieldFilterInput[];columns?:string[]}}>("/api/people-records/saved-views",{
+      schema:{body:{type:"object",additionalProperties:false,required:["name"],properties:{name:{type:"string",minLength:1,maxLength:80},q:{type:"string",maxLength:120},status:{type:"string",enum:["","member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"array",maxItems:10,items:{type:"object",additionalProperties:false,required:["field","value"],properties:{field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},operator:{type:"string",enum:["equals","contains","before","after","on","last_7_days","last_30_days","last_90_days","next_7_days","next_30_days","next_90_days"]}}}},columns:{type:"array",minItems:1,maxItems:20,uniqueItems:true,items:{type:"string",maxLength:48}}}}},
+    },async(request,reply)=>{
+      const d=await department(request,reply); if(!d)return reply;
+      if(!validateMutation(request,reply))return reply;
+      const name=request.body.name.trim(); if(!name)return reply.code(400).send({error:"Enter a name for this saved view."});
+      let filters:FieldFilterInput[];let columns:string[];
+      try{filters=parseFieldFilters(request.body.filters===undefined?undefined:JSON.stringify(request.body.filters),request.body.field,request.body.value);const normalized=await validateFieldFilters(d,filters);filters=filters.map((item,index)=>({...item,operator:normalized[index].operator}));columns=await validateDirectoryColumns(d,request.body.columns)}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid saved view options."})}
+      try {
+        const result=await pool!.query(`INSERT INTO people_record_saved_views(id,department_id,user_id,name,criteria)
+          VALUES($1,$2,$3,$4,$5::jsonb) RETURNING id,name,criteria->>'q' AS q,criteria->>'status' AS status,criteria->>'field' AS field,criteria->>'value' AS value,criteria->'filters' AS filters,criteria->'columns' AS columns,created_at AS "createdAt",updated_at AS "updatedAt"`,
+          [randomUUID(),d,request.authenticatedUser!.id,name,JSON.stringify({q:request.body.q?.trim()??"",status:request.body.status??"",field:filters.length===1?filters[0].field:"",value:filters.length===1?filters[0].value:"",filters,columns})]);
+        return reply.code(201).send(result.rows[0]);
+      } catch { return reply.code(409).send({error:"A saved view with that name already exists."}); }
+    });
+    routes.delete<{Params:{id:string}}>("/api/people-records/saved-views/:id",{schema:{params:{type:"object",additionalProperties:false,required:["id"],properties:{id:uuid}}}},async(request,reply)=>{
+      const d=await department(request,reply); if(!d)return reply;
+      if(!validateMutation(request,reply))return reply;
+      const result=await pool!.query("DELETE FROM people_record_saved_views WHERE id=$1 AND department_id=$2 AND user_id=$3 RETURNING id",[request.params.id,d,request.authenticatedUser!.id]);
+      if(!result.rowCount)return reply.code(404).send({error:"Saved view not found."});
+      return {deleted:true};
+    });
+    routes.put<{ Params: { contactId: string }; Body: { firstName: string; lastName: string; email: string | null; phone: string | null; status: "member" | "visitor" } }>("/api/people-records/:contactId/profile", {
+      schema: {
+        params: { type: "object", additionalProperties: false, required: ["contactId"], properties: { contactId: uuid } },
+        body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email", "phone", "status"], properties: {
+          firstName: { type: "string", minLength: 1, maxLength: 100 }, lastName: { type: "string", minLength: 1, maxLength: 100 },
+          email: { anyOf: [{ type: "string", maxLength: 254, format: "email" }, { type: "null" }] },
+          phone: { anyOf: [{ type: "string", maxLength: 60 }, { type: "null" }] }, status: { type: "string", enum: ["member", "visitor"] },
+        } },
+      },
+    }, async (request, reply) => {
+      const d = await department(request, reply, true); if (!d) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const firstName = request.body.firstName.trim(); const lastName = request.body.lastName.trim();
+      const email = request.body.email?.trim() || null; const phone = request.body.phone?.trim() || null;
+      if (!firstName || !lastName) return reply.code(400).send({ error: "Enter both a first and last name." });
+      const before = await pool!.query<{ first_name: string; last_name: string; email: string | null; phone: string | null; status: string }>(
+        "SELECT first_name,last_name,email,phone,status FROM contacts WHERE department_id=$1 AND id=$2", [d, request.params.contactId],
+      );
+      if (!before.rowCount) return reply.code(404).send({ error: "Person not found at this location." });
+      const after = await pool!.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; status: string }>(
+        "UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status=$7 WHERE department_id=$1 AND id=$2 RETURNING id,first_name,last_name,email,phone,status",
+        [d, request.params.contactId, firstName, lastName, email, phone, request.body.status],
+      );
+      await history(d, request.params.contactId, request, "profile_updated", "contact_profile", before.rows[0], after.rows[0]);
+      changed(d, request.params.contactId);
+      return { id: after.rows[0].id, firstName: after.rows[0].first_name, lastName: after.rows[0].last_name, email: after.rows[0].email, phone: after.rows[0].phone, status: after.rows[0].status };
+    });
+    routes.get<{ Params: { contactId: string } }>("/api/people-records/:contactId/vcard", { schema: { params: { type: "object", additionalProperties: false, required: ["contactId"], properties: { contactId: uuid } } } }, async (request, reply) => {
+      const d = await department(request, reply); if (!d) return reply;
+      const result = await pool!.query<{ first_name: string; last_name: string; email: string | null; phone: string | null }>(
+        "SELECT first_name,last_name,email,phone FROM contacts WHERE department_id=$1 AND id=$2", [d, request.params.contactId],
+      );
+      if (!result.rowCount) return reply.code(404).send({ error: "Person not found at this location." });
+      const person = result.rows[0];
+      const escape = (value: string) => value.replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/([,;])/g, "\\$1");
+      const fold = (line: string) => {
+        const chunks: string[] = []; let current = ""; let bytes = 0;
+        for (const character of Array.from(line)) {
+          const size = Buffer.byteLength(character, "utf8");
+          if (bytes + size > 75) { chunks.push(current); current = ` ${character}`; bytes = size + 1; }
+          else { current += character; bytes += size; }
+        }
+        chunks.push(current); return chunks.join("\r\n");
+      };
+      const name = `${person.first_name} ${person.last_name}`.trim();
+      const lines = ["BEGIN:VCARD", "VERSION:4.0", `N:${escape(person.last_name)};${escape(person.first_name)};;;`, `FN:${escape(name)}`];
+      if (person.email) lines.push(`EMAIL;TYPE=work:${escape(person.email)}`);
+      if (person.phone) lines.push(`TEL;TYPE=work:${escape(person.phone)}`);
+      lines.push("END:VCARD");
+      const filename = name.replace(/[^\p{L}\p{N}._ -]/gu, "").trim().replace(/\s+/g, "-").slice(0, 100) || "contact";
+      return reply.header("content-type", "text/vcard; charset=utf-8").header("content-disposition", `attachment; filename="${filename}.vcf"`).send(lines.map(fold).join("\r\n") + "\r\n");
+    });
+    routes.post<{ Body: { contactIds: string[]; status: "member" | "visitor" } }>("/api/people-records/bulk-status", { schema: { body: { type: "object", additionalProperties: false, required: ["contactIds", "status"], properties: { contactIds: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: uuid }, status: { type: "string", enum: ["member", "visitor"] } } } } }, async (request, reply) => {
+      const d = await department(request, reply, true); if (!d) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const client = await pool!.connect();
+      const changedContacts: string[] = [];
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser?.id ?? ""]);
+        const selected = await client.query<{ id: string; first_name: string; last_name: string; email: string | null; phone: string | null; status: string }>(
+          "SELECT id,first_name,last_name,email,phone,status FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[]) FOR UPDATE", [d, request.body.contactIds],
+        );
+        if (selected.rowCount !== request.body.contactIds.length) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "One or more people were not found at this location." }); }
+        for (const person of selected.rows) {
+          if (person.status === request.body.status) continue;
+          const result = await client.query("UPDATE contacts SET status=$3 WHERE department_id=$1 AND id=$2", [d, person.id, request.body.status]);
+          if (result.rowCount) {
+            await client.query("INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,'profile_updated','bulk_status',$5::jsonb,$6::jsonb)", [randomUUID(), d, person.id, request.authenticatedUser?.id ?? null, JSON.stringify({ status: person.status }), JSON.stringify({ status: request.body.status })]);
+            changedContacts.push(person.id);
+          }
+        }
+        await client.query("COMMIT");
+        for (const contactId of changedContacts) changed(d, contactId);
+        return { updated: changedContacts.length, unchanged: selected.rowCount - changedContacts.length };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+    routes.get<{ Querystring: { q?: string; status?: string; field?: string; value?: string;filters?:string;columns?:string } }>("/api/people-records/export.csv",{schema:{querystring:{type:"object",additionalProperties:false,properties:{q:{type:"string",maxLength:120},status:{type:"string",enum:["member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"string",maxLength:3000},columns:{type:"string",maxLength:1200}}}}}, async (request, reply) => {
+      const d=await department(request,reply); if(!d)return reply; const {q="",status,field,value}=request.query;
+      let fieldJson:string|null=null;
+      try{const filters=parseFieldFilters(request.query.filters,field,value);if(filters.length)fieldJson=JSON.stringify(await validateFieldFilters(d,filters))}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid custom field filters."})}
+      let columns:string[];
+      try{
+        if(request.query.columns===undefined){const active=await pool!.query<{field_key:string}>("SELECT field_key FROM people_record_fields WHERE department_id=$1 AND active=true ORDER BY position,label",[d]);columns=[...coreDirectoryColumns,...active.rows.map(row=>`custom:${row.field_key}`)]}
+        else{const parsed=JSON.parse(request.query.columns) as unknown;if(!Array.isArray(parsed)||parsed.some(column=>typeof column!=="string"))throw new Error("Choose a valid list of export columns.");columns=await validateDirectoryColumns(d,parsed)}
+      }catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid export columns."})}
+      const r=await pool!.query(`SELECT c.id,c.first_name,c.last_name,c.email,c.phone,c.status,COALESCE((SELECT jsonb_object_agg(f.field_key,v.value) FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.active),'{}'::jsonb) fields FROM contacts c WHERE c.department_id=$1 AND ($2='' OR concat_ws(' ',c.first_name,c.last_name,c.email,c.phone) ILIKE '%'||$2||'%') AND ($3::text IS NULL OR c.status=$3) AND ($4::jsonb IS NULL OR NOT EXISTS(SELECT 1 FROM jsonb_array_elements($4::jsonb) requested WHERE NOT EXISTS(SELECT 1 FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.field_key=requested->>'field' AND f.active=true AND CASE WHEN f.field_type='text' AND requested->>'operator'='contains' THEN (v.value #>> '{}') ILIKE '%'||(requested->>'value')||'%' WHEN f.field_type='date' AND requested->>'operator'='before' THEN (v.value #>> '{}') < (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='after' THEN (v.value #>> '{}') > (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='on' THEN (v.value #>> '{}') = (requested->>'value') WHEN f.field_type='date' AND requested->>'operator'='last_7_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-6,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='last_30_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-29,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='last_90_days' THEN (v.value #>> '{}') >= to_char(CURRENT_DATE-89,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_7_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+7,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_30_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+30,'YYYY-MM-DD') WHEN f.field_type='date' AND requested->>'operator'='next_90_days' THEN (v.value #>> '{}') > to_char(CURRENT_DATE,'YYYY-MM-DD') AND (v.value #>> '{}') <= to_char(CURRENT_DATE+90,'YYYY-MM-DD') ELSE v.value=requested->'value' END))) ORDER BY c.last_name,c.first_name LIMIT 5000`,[d,q,status??null,fieldJson]);
+      const customKeys=columns.filter(column=>column.startsWith("custom:")).map(column=>column.slice(7));
+      const customLabels=customKeys.length?await pool!.query<{field_key:string;label:string}>("SELECT field_key,label FROM people_record_fields WHERE department_id=$1 AND field_key=ANY($2::text[]) AND active=true",[d,customKeys]):{rows:[] as Array<{field_key:string;label:string}>};
+      const labels=new Map(customLabels.rows.map(row=>[`custom:${row.field_key}`,row.label]));
+      const headers=columns.map(column=>labels.get(column)??({id:"id",firstName:"first_name",lastName:"last_name",email:"email",phone:"phone",status:"status"} as Record<string,string>)[column]??column);
+      const valueFor=(row:any,column:string)=>column.startsWith("custom:")?row.fields?.[column.slice(7)]:row[({firstName:"first_name",lastName:"last_name"} as Record<string,string>)[column]??column];
+      const cell=(v:unknown)=>{let s=String(typeof v==="object"&&v!==null?JSON.stringify(v):v??"");if(/^[=+\-@\t\r]/.test(s))s="'"+s;return `"${s.replaceAll('"','""')}"`}; const csv=[headers.map(cell).join(","),...r.rows.map(row=>columns.map(column=>cell(valueFor(row,column))).join(","))].join("\r\n"); return reply.header("content-type","text/csv; charset=utf-8").header("content-disposition","attachment; filename=people-directory.csv").send("\uFEFF"+csv);
+    });
+    routes.put<{ Params:{contactId:string;fieldId:string}; Body:{value:unknown} }>("/api/people-records/:contactId/fields/:fieldId",{schema:{params:{type:"object",required:["contactId","fieldId"],properties:{contactId:uuid,fieldId:uuid}},body:{type:"object",required:["value"],properties:{value:{}}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const valid=await pool!.query("SELECT f.field_type,f.options,f.required FROM people_record_fields f JOIN contacts c ON c.department_id=f.department_id WHERE f.department_id=$1 AND f.id=$2 AND c.id=$3 AND f.active",[d,request.params.fieldId,request.params.contactId]);if(!valid.rowCount)return reply.code(404).send({error:"Person or active field not found."});const f=valid.rows[0];const v=request.body.value;if(f.required&&(v===null||v===""))return reply.code(400).send({error:"This custom field is required."});if(f.field_type==="select"&&!(f.options as unknown[]).includes(v))return reply.code(400).send({error:"Choose one of the configured field options."});if(f.field_type==="boolean"&&typeof v!=="boolean")return reply.code(400).send({error:"Enter a true or false value."});if(f.field_type==="text"&&(typeof v!=="string"||v.length>2000))return reply.code(400).send({error:"Enter text up to 2000 characters."});if(f.field_type==="date"&&(typeof v!=="string"||!/^\d{4}-\d{2}-\d{2}$/.test(v)||Number.isNaN(Date.parse(v))))return reply.code(400).send({error:"Enter a valid date."});const before=await pool!.query("SELECT value FROM people_record_values WHERE department_id=$1 AND contact_id=$2 AND field_id=$3",[d,request.params.contactId,request.params.fieldId]);await pool!.query("INSERT INTO people_record_values(department_id,contact_id,field_id,value,updated_by) VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT(department_id,contact_id,field_id) DO UPDATE SET value=excluded.value,updated_by=excluded.updated_by,updated_at=now()",[d,request.params.contactId,request.params.fieldId,JSON.stringify(v),request.authenticatedUser?.id??null]);await history(d,request.params.contactId,request,"field_updated",request.params.fieldId,before.rows[0]?.value,v);changed(d,request.params.contactId);return{ok:true};
+    });
+    routes.get("/api/people-records/relationship-types",async(request,reply)=>{
+      const d=await department(request,reply);if(!d)return reply;
+      const result=await pool!.query(`SELECT id,label,"reverse_label" AS "reverseLabel",active FROM people_record_relationship_types WHERE department_id=$1 ORDER BY lower(label),id`,[d]);
+      return result.rows;
+    });
+    routes.post<{Body:{label:string;reverseLabel:string}}>("/api/people-records/relationship-types",{schema:{body:{type:"object",additionalProperties:false,required:["label","reverseLabel"],properties:{label:{type:"string",minLength:1,maxLength:60},reverseLabel:{type:"string",minLength:1,maxLength:60}}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;
+      const label=request.body.label.trim(),reverseLabel=request.body.reverseLabel.trim();if(!label||!reverseLabel)return reply.code(400).send({error:"Enter forward and reverse relationship labels."});
+      try{const result=await pool!.query(`INSERT INTO people_record_relationship_types(id,department_id,label,reverse_label,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id,label,reverse_label AS "reverseLabel",active`,[randomUUID(),d,label,reverseLabel,request.authenticatedUser?.id??null]);return reply.code(201).send(result.rows[0])}
+      catch{return reply.code(409).send({error:"A relationship type with that forward label already exists at this location."})}
+    });
+    routes.patch<{Params:{id:string};Body:{label?:string;reverseLabel?:string;active?:boolean}}>("/api/people-records/relationship-types/:id",{schema:{params:{type:"object",additionalProperties:false,required:["id"],properties:{id:uuid}},body:{type:"object",additionalProperties:false,properties:{label:{type:"string",minLength:1,maxLength:60},reverseLabel:{type:"string",minLength:1,maxLength:60},active:{type:"boolean"}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;
+      const label=request.body.label?.trim(),reverseLabel=request.body.reverseLabel?.trim();if(request.body.label!==undefined&&!label||request.body.reverseLabel!==undefined&&!reverseLabel)return reply.code(400).send({error:"Relationship labels cannot be empty."});
+      try{const result=await pool!.query(`UPDATE people_record_relationship_types SET label=COALESCE($3,label),reverse_label=COALESCE($4,reverse_label),active=COALESCE($5,active),updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id,label,reverse_label AS "reverseLabel",active`,[d,request.params.id,label??null,reverseLabel??null,request.body.active??null]);if(!result.rowCount)return reply.code(404).send({error:"Relationship type not found."});return result.rows[0]}
+      catch{return reply.code(409).send({error:"A relationship type with that forward label already exists at this location."})}
+    });
+    routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/relationships",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{
+      const d=await department(request,reply);if(!d)return reply;
+      const result=await pool!.query(`WITH visible_relationships AS (
+        SELECT relation.id,relation.related_person_id AS related_person_id,COALESCE(kind.label,relation.relationship) AS relationship,kind.id AS "relationshipTypeId",FALSE AS "isReciprocal"
+          FROM people_record_relationships relation LEFT JOIN people_record_relationship_types kind ON kind.id=relation.relationship_type_id AND kind.department_id=relation.department_id
+         WHERE relation.department_id=$1 AND relation.person_id=$2
+        UNION ALL
+        SELECT relation.id,relation.person_id,kind.reverse_label,kind.id,TRUE
+          FROM people_record_relationships relation JOIN people_record_relationship_types kind ON kind.id=relation.relationship_type_id AND kind.department_id=relation.department_id
+         WHERE relation.department_id=$1 AND relation.related_person_id=$2
+      ) SELECT visible.id,visible.relationship,visible."relationshipTypeId",visible."isReciprocal",contact.id AS "relatedPersonId",contact.first_name AS "firstName",contact.last_name AS "lastName"
+          FROM visible_relationships visible JOIN contacts contact ON contact.id=visible.related_person_id AND contact.department_id=$1
+         ORDER BY contact.last_name,contact.first_name,visible.relationship`,[d,request.params.contactId]);
+      return result.rows;
+    });
+    routes.post<{Params:{contactId:string};Body:{relatedPersonId:string;relationship?:string;relationshipTypeId?:string}}>("/api/people-records/:contactId/relationships",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}},body:{type:"object",additionalProperties:false,required:["relatedPersonId"],properties:{relatedPersonId:uuid,relationship:{type:"string",minLength:1,maxLength:60},relationshipTypeId:uuid}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;
+      const usingType=Boolean(request.body.relationshipTypeId),hasLegacyLabel=request.body.relationship!==undefined,legacyLabel=request.body.relationship?.trim();if(usingType===hasLegacyLabel)return reply.code(400).send({error:"Choose one relationship type."});if(hasLegacyLabel&&!legacyLabel)return reply.code(400).send({error:"Enter a relationship label."});
+      const both=await pool!.query("SELECT count(*)::int n FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])",[d,[request.params.contactId,request.body.relatedPersonId]]);if(both.rows[0].n!==2||request.params.contactId===request.body.relatedPersonId)return reply.code(400).send({error:"Select two different people from this location."});
+      let relationship=legacyLabel??"",relationshipTypeId:string|null=null;
+      if(usingType){const type=await pool!.query<{id:string;label:string}>("SELECT id,label FROM people_record_relationship_types WHERE department_id=$1 AND id=$2 AND active=true",[d,request.body.relationshipTypeId]);if(!type.rowCount)return reply.code(400).send({error:"Choose an active relationship type from this location."});relationship=type.rows[0].label;relationshipTypeId=type.rows[0].id}
+      try{const id=randomUUID();await pool!.query("INSERT INTO people_record_relationships(id,department_id,person_id,related_person_id,relationship,created_by,relationship_type_id) VALUES($1,$2,$3,$4,$5,$6,$7)",[id,d,request.params.contactId,request.body.relatedPersonId,relationship,request.authenticatedUser?.id??null,relationshipTypeId]);await history(d,request.params.contactId,request,"relationship_added",relationship,null,{relatedPersonId:request.body.relatedPersonId,relationshipTypeId});changed(d,request.params.contactId);return reply.code(201).send({id})}
+      catch{return reply.code(409).send({error:"That relationship between these people already exists."})}
+    });
+    routes.delete<{Params:{contactId:string;id:string}}>("/api/people-records/:contactId/relationships/:id",{schema:{params:{type:"object",required:["contactId","id"],properties:{contactId:uuid,id:uuid}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;
+      const result=await pool!.query("DELETE FROM people_record_relationships WHERE department_id=$1 AND id=$3 AND (person_id=$2 OR related_person_id=$2) RETURNING relationship,person_id,related_person_id,relationship_type_id",[d,request.params.contactId,request.params.id]);if(!result.rowCount)return reply.code(404).send({error:"Relationship not found."});
+      await history(d,request.params.contactId,request,"relationship_removed",result.rows[0].relationship,result.rows[0],null);changed(d,request.params.contactId);return{ok:true};
+    });
+    routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/consents",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query("SELECT id,purpose,status,captured_at AS \"capturedAt\",expires_at AS \"expiresAt\",notes FROM people_record_consents WHERE department_id=$1 AND contact_id=$2 ORDER BY captured_at DESC",[d,request.params.contactId]);return r.rows;});
+    routes.post<{Params:{contactId:string};Body:{purpose:string;status:"granted"|"withdrawn"|"pending";expiresAt?:string|null;notes?:string}}>("/api/people-records/:contactId/consents",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}},body:{type:"object",required:["purpose","status"],properties:{purpose:{type:"string",minLength:1,maxLength:100},status:{type:"string",enum:["granted","withdrawn","pending"]},expiresAt:{type:["string","null"],format:"date"},notes:{type:"string",maxLength:1000}}}}},async(request,reply)=>{const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const c=await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2",[d,request.params.contactId]);if(!c.rowCount)return reply.code(404).send({error:"Person not found at this location."});const id=randomUUID();await pool!.query("INSERT INTO people_record_consents(id,department_id,contact_id,purpose,status,expires_at,notes,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[id,d,request.params.contactId,request.body.purpose.trim(),request.body.status,request.body.expiresAt??null,request.body.notes??"",request.authenticatedUser?.id??null]);await history(d,request.params.contactId,request,"consent_recorded",request.body.purpose,null,{status:request.body.status,expiresAt:request.body.expiresAt??null});changed(d,request.params.contactId);return reply.code(201).send({id});});
+    routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/history",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query("SELECT id,action,subject,before_value AS \"beforeValue\",after_value AS \"afterValue\",created_at AS \"createdAt\" FROM people_record_history WHERE department_id=$1 AND contact_id=$2 ORDER BY created_at DESC LIMIT 300",[d,request.params.contactId]);return r.rows;});
+    routes.post<{Body:{rows:Array<{firstName:string;lastName:string;email?:string;phone?:string}>}}>("/api/people-records/import-preview",{schema:{body:{type:"object",required:["rows"],properties:{rows:{type:"array",maxItems:500,items:{type:"object",required:["firstName","lastName"],properties:{firstName:{type:"string",maxLength:80},lastName:{type:"string",maxLength:80},email:{type:"string",maxLength:254},phone:{type:"string",maxLength:40}}}}}}}},async(request,reply)=>{const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const existing=await pool!.query("SELECT id,first_name,last_name,email,phone FROM contacts WHERE department_id=$1",[d]);const normalize=(v?:string)=>v?.trim().toLocaleLowerCase()??"";const rows=request.body.rows.map((row,index)=>{const exact=existing.rows.find(c=>(normalize(row.email)&&normalize(c.email)===normalize(row.email))||(normalize(c.first_name)===normalize(row.firstName)&&normalize(c.last_name)===normalize(row.lastName)&&normalize(c.phone)===normalize(row.phone)));return{row:index+1,person:row,match:exact?{id:exact.id,firstName:exact.first_name,lastName:exact.last_name,email:exact.email}:null,decision:exact?"review":"new"};});return{rows,counts:{new:rows.filter(x=>x.decision==="new").length,review:rows.filter(x=>x.decision==="review").length,imported:0},message:"Preview only. No person records were changed."};});
+    routes.post<{Body:{rows:Array<{row:number;firstName:string;lastName:string;email?:string;phone?:string;status?:"member"|"visitor"}>}}>("/api/people-records/import-apply",{schema:{body:{type:"object",required:["rows"],properties:{rows:{type:"array",minItems:1,maxItems:500,items:{type:"object",required:["row","firstName","lastName"],properties:{row:{type:"integer",minimum:1},firstName:{type:"string",maxLength:80},lastName:{type:"string",maxLength:80},email:{type:"string",maxLength:254},phone:{type:"string",maxLength:40},status:{type:"string",enum:["member","visitor"]}}}}}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;
+      const chosen=request.body.rows;if(new Set(chosen.map(r=>r.row)).size!==chosen.length)return reply.code(400).send({error:"Each selected CSV row must be unique."});
+      const client=await pool!.connect();const outcomes:Array<{row:number;outcome:string;contactId?:string;duplicateContactId?:string}>=[];let created=0;
+      try{
+        await client.query("BEGIN");
+        // Serialize contact writes during duplicate recheck and insertion so another importer cannot pass the same check concurrently.
+        await client.query("LOCK TABLE contacts IN SHARE ROW EXCLUSIVE MODE");
+        for(const item of chosen){
+          const firstName=item.firstName.trim(),lastName=item.lastName.trim(),email=item.email?.trim()||null,phone=item.phone?.trim()||null,status=item.status??"visitor";
+          if(!firstName||!lastName||firstName.length>80||lastName.length>80||(email!==null&&(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))||(phone!==null&&phone.length>40)||!['member','visitor'].includes(status)){outcomes.push({row:item.row,outcome:"invalid"});continue;}
+          const duplicate=await client.query<{id:string}>("SELECT id FROM contacts WHERE department_id=$1 AND ((email IS NOT NULL AND $2::text IS NOT NULL AND lower(trim(email))=lower(trim($2))) OR (lower(trim(first_name))=lower(trim($3)) AND lower(trim(last_name))=lower(trim($4)) AND (($5::text IS NULL AND phone IS NULL) OR ($5::text IS NOT NULL AND phone IS NOT NULL AND lower(trim(phone))=lower(trim($5))))) ORDER BY id LIMIT 1",[d,email,firstName,lastName,phone]);
+          if(duplicate.rowCount){outcomes.push({row:item.row,outcome:"duplicate_review",duplicateContactId:duplicate.rows[0].id});continue;}
+          const contactId=randomUUID();await client.query("INSERT INTO contacts(id,department_id,first_name,last_name,email,phone,status) VALUES($1,$2,$3,$4,$5,$6,$7)",[contactId,d,firstName,lastName,email,phone,status]);await client.query("INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,after_value) VALUES($1,$2,$3,$4,'csv_import_created','CSV import',$5::jsonb)",[randomUUID(),d,contactId,request.authenticatedUser?.id??null,JSON.stringify({batchRow:item.row})]);outcomes.push({row:item.row,outcome:"created",contactId});created++;
+        }
+        const auditId=randomUUID();await client.query("INSERT INTO people_record_import_audits(id,department_id,actor_user_id,selected_count,created_count,skipped_count,outcomes) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",[auditId,d,request.authenticatedUser?.id??null,chosen.length,created,chosen.length-created,JSON.stringify(outcomes)]);
+        await client.query("COMMIT");
+      }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+      changed(d);return{auditId,selected:chosen.length,created,skipped:chosen.length-created,outcomes,message:"Selected rows were rechecked. Matches and invalid rows were skipped for review."};
+    });
+    routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/dates",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query("SELECT date_kind AS kind,date_value::text AS value FROM people_record_person_dates WHERE department_id=$1 AND contact_id=$2",[d,request.params.contactId]);return{birthDate:r.rows.find(x=>x.kind==="birth_date")?.value??null,weddingAnniversary:r.rows.find(x=>x.kind==="wedding_anniversary")?.value??null};});
+    routes.put<{Params:{contactId:string};Body:{birthDate?:string|null;weddingAnniversary?:string|null}}>("/api/people-records/:contactId/dates",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}},body:{type:"object",additionalProperties:false,properties:{birthDate:{type:["string","null"],format:"date"},weddingAnniversary:{type:["string","null"],format:"date"}}}}},async(request,reply)=>{const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const exists=await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2",[d,request.params.contactId]);if(!exists.rowCount)return reply.code(404).send({error:"Person not found at this location."});for(const [key,value] of Object.entries(request.body)){if(value!==undefined){const kind=key==="birthDate"?"birth_date":"wedding_anniversary",before=await pool!.query("SELECT date_value::text value FROM people_record_person_dates WHERE department_id=$1 AND contact_id=$2 AND date_kind=$3",[d,request.params.contactId,kind]);if(value===null)await pool!.query("DELETE FROM people_record_person_dates WHERE department_id=$1 AND contact_id=$2 AND date_kind=$3",[d,request.params.contactId,kind]);else await pool!.query("INSERT INTO people_record_person_dates(department_id,contact_id,date_kind,date_value,updated_by) VALUES($1,$2,$3,$4,$5) ON CONFLICT(department_id,contact_id,date_kind) DO UPDATE SET date_value=excluded.date_value,updated_by=excluded.updated_by,updated_at=now()",[d,request.params.contactId,kind,value,request.authenticatedUser?.id??null]);await history(d,request.params.contactId,request,"date_updated",kind,before.rows[0]?.value,value);}}changed(d,request.params.contactId);return{ok:true};});
+    routes.get("/api/people-records/duplicates",async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query(`SELECT a.id AS "personId",a.first_name AS "firstName",a.last_name AS "lastName",a.email,b.id AS "matchId",b.first_name AS "matchFirstName",b.last_name AS "matchLastName",b.email AS "matchEmail",CASE WHEN a.email IS NOT NULL AND lower(a.email)=lower(b.email) THEN 'email' ELSE 'name' END AS reason FROM contacts a JOIN contacts b ON b.department_id=a.department_id AND b.id>a.id AND ((a.email IS NOT NULL AND lower(a.email)=lower(b.email)) OR (lower(a.first_name)=lower(b.first_name) AND lower(a.last_name)=lower(b.last_name))) WHERE a.department_id=$1 ORDER BY reason,a.last_name LIMIT 500`,[d]);return{candidates:r.rows};});
+    routes.post<{Body:{keeperId:string;sourceId:string}}>("/api/people-records/merge-preview",{schema:{body:{type:"object",additionalProperties:false,required:["keeperId","sourceId"],properties:{keeperId:uuid,sourceId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const {keeperId,sourceId}=request.body;if(keeperId===sourceId)return reply.code(400).send({error:"Choose two different people."});const preview=await inspectMerge(d,keeperId,sourceId);if(!preview)return reply.code(404).send({error:"Both people must exist at the active location."});return preview;});
+    routes.post<{Body:{keeperId:string;sourceId:string;confirmProfileConflicts:boolean}}>("/api/people-records/merge",{schema:{body:{type:"object",additionalProperties:false,required:["keeperId","sourceId","confirmProfileConflicts"],properties:{keeperId:uuid,sourceId:uuid,confirmProfileConflicts:{type:"boolean"}}}},async(request,reply)=>{
+      const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;
+      const {keeperId,sourceId,confirmProfileConflicts}=request.body;if(keeperId===sourceId)return reply.code(400).send({error:"Choose two different people."});
+      const client=await pool!.connect();let committed=false;
+      try{
+        await client.query("BEGIN");
+        const locked=await client.query<Record<string,unknown>>("SELECT * FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE",[d,[keeperId,sourceId]]);
+        if(locked.rowCount!==2){await client.query("ROLLBACK");return reply.code(404).send({error:"Both people must exist at the active location."});}
+        const preview=await inspectMerge(d,keeperId,sourceId,client);if(!preview){await client.query("ROLLBACK");return reply.code(404).send({error:"Both people must exist at the active location."});}
+        if(preview.blockers.length){await client.query("ROLLBACK");return reply.code(409).send({error:"Resolve the listed conflicting linked records before merging.",preview});}
+        if(preview.customFieldConflicts.length||preview.dateConflicts.length){await client.query("ROLLBACK");return reply.code(409).send({error:"Custom field and date conflicts must be resolved before merging.",preview});}
+        if(preview.profileConflicts.length&&!confirmProfileConflicts){await client.query("ROLLBACK");return reply.code(409).send({error:"Confirm that the keeper's values will be retained for conflicting profile fields.",preview});}
+        const keeper=locked.rows.find((row)=>row.id===keeperId)!;const source=locked.rows.find((row)=>row.id===sourceId)!;
+        // Preserve every keeper value. Only fill blank email/phone from the source.
+        await client.query("UPDATE contacts SET email=COALESCE(NULLIF(trim(email),''),NULLIF(trim($3::text),'')), phone=COALESCE(NULLIF(trim(phone),''),NULLIF(trim($4::text),'')) WHERE department_id=$1 AND id=$2",[d,keeperId,source.email,source.phone]);
+        // Values and dates have a natural-key uniqueness constraint; retain the keeper row when values match.
+        await client.query("DELETE FROM people_record_values s USING people_record_values k WHERE s.department_id=$1 AND s.contact_id=$2 AND k.department_id=s.department_id AND k.contact_id=$3 AND k.field_id=s.field_id AND k.value=s.value",[d,sourceId,keeperId]);
+        await client.query("DELETE FROM people_record_person_dates s USING people_record_person_dates k WHERE s.department_id=$1 AND s.contact_id=$2 AND k.department_id=s.department_id AND k.contact_id=$3 AND k.date_kind=s.date_kind AND k.date_value=s.date_value",[d,sourceId,keeperId]);
+        const hasGroupMembers=await client.query<{installed:boolean}>("SELECT to_regclass('public.group_members') IS NOT NULL AS installed");
+        if(hasGroupMembers.rows[0]?.installed){const hasAutoManaged=await client.query<{installed:boolean}>("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='group_members' AND column_name='auto_managed') AS installed");await client.query(`DELETE FROM group_members s USING group_members k WHERE s.contact_id=$1 AND k.contact_id=$2 AND k.group_id=s.group_id AND s.role IS NOT DISTINCT FROM k.role AND s.status IS NOT DISTINCT FROM k.status AND s.joined_on IS NOT DISTINCT FROM k.joined_on${hasAutoManaged.rows[0]?.installed?" AND s.auto_managed IS NOT DISTINCT FROM k.auto_managed":""}`,[sourceId,keeperId]);}
+        const hasGroupCustom=await client.query<{installed:boolean}>("SELECT to_regclass('public.group_membership_custom_fields') IS NOT NULL AS installed");
+        if(hasGroupCustom.rows[0]?.installed)await client.query("DELETE FROM group_membership_custom_fields s USING group_membership_custom_fields k WHERE s.department_id=$1 AND s.contact_id=$2 AND k.department_id=s.department_id AND k.contact_id=$3 AND k.group_id=s.group_id AND s.custom_fields=k.custom_fields",[d,sourceId,keeperId]);
+        // Remove self-edges before moving both ends, then deduplicate equivalent edges after reparenting.
+        await client.query("DELETE FROM people_record_relationships WHERE department_id=$1 AND ((person_id=$2 AND related_person_id=$3) OR (person_id=$3 AND related_person_id=$2))",[d,keeperId,sourceId]);
+        // Rewrite embedded service position references (these have no relational FK).
+        const hasServiceEvents=await client.query<{installed:boolean}>("SELECT to_regclass('public.service_events') IS NOT NULL AS installed");
+        if(hasServiceEvents.rows[0]?.installed)await client.query(`UPDATE service_events event SET positions=(SELECT COALESCE(jsonb_agg(CASE WHEN item.value->>'contactId'=$3::text THEN jsonb_set(item.value,'{contactId}',to_jsonb($2::text),true) ELSE item.value END ORDER BY item.ordinality),'[]'::jsonb) FROM jsonb_array_elements(COALESCE(event.positions,'[]'::jsonb)) WITH ORDINALITY item(value,ordinality)) WHERE event.department_id=$1 AND event.positions::text LIKE '%'||$3::text||'%'`,[d,keeperId,sourceId]);
+        // Discover every FK column targeting contacts.id, including optional module tables.
+        const refs=await client.query<{schema_name:string;table_name:string;column_name:string;has_department_id:boolean}>(`SELECT ns.nspname AS schema_name,rel.relname AS table_name,att.attname AS column_name,
+                EXISTS(SELECT 1 FROM pg_attribute department_column WHERE department_column.attrelid=rel.oid AND department_column.attname='department_id' AND NOT department_column.attisdropped) AS has_department_id
+           FROM pg_constraint con JOIN pg_class rel ON rel.oid=con.conrelid JOIN pg_namespace ns ON ns.oid=rel.relnamespace
+           JOIN LATERAL unnest(con.conkey,con.confkey) pair(local_att,remote_att) ON true
+           JOIN pg_attribute att ON att.attrelid=rel.oid AND att.attnum=pair.local_att
+           JOIN pg_attribute remote ON remote.attrelid=con.confrelid AND remote.attnum=pair.remote_att
+          WHERE con.contype='f' AND con.confrelid='public.contacts'::regclass AND remote.attname='id' AND ns.nspname='public'
+            AND NOT (rel.relname='contacts' AND att.attname='id') ORDER BY rel.relname,att.attname`);
+        const qi=(value:string)=>'"'+value.replaceAll('"','""')+'"';
+        for(const ref of refs.rows){
+          const table=`${qi(ref.schema_name)}.${qi(ref.table_name)}`,column=qi(ref.column_name);
+          if(ref.has_department_id){await client.query(`UPDATE ${table} SET ${column}=$1 WHERE ${column}=$2 AND department_id=$3`,[keeperId,sourceId,d]);continue;}
+          // Core tables without department_id derive their location through the owning group/event.
+          const ownerScope:Record<string,string>={
+            group_members:`EXISTS(SELECT 1 FROM church_groups owner WHERE owner.id=target.group_id AND owner.department_id=$3)`,
+            team_members:`EXISTS(SELECT 1 FROM church_teams owner WHERE owner.id=target.team_id AND owner.department_id=$3)`,
+            group_meeting_attendance:`EXISTS(SELECT 1 FROM group_meetings owner WHERE owner.id=target.meeting_id AND owner.department_id=$3)`,
+            event_position_responses:`EXISTS(SELECT 1 FROM service_events owner WHERE owner.id=target.event_id AND owner.department_id=$3)`,
+            event_attendance_checkins:`EXISTS(SELECT 1 FROM service_events owner WHERE owner.id=target.event_id AND owner.department_id=$3)`,
+          };
+          const scope=ownerScope[ref.table_name];
+          if(scope)await client.query(`UPDATE ${table} AS target SET ${column}=$1 WHERE target.${column}=$2 AND ${scope}`,[keeperId,sourceId,d]);
+        }
+        // A remaining reference belongs to another location or to a table whose
+        // ownership cannot be proven. Stop before DELETE so an FK cascade can
+        // never remove records outside the active location.
+        for(const ref of refs.rows){
+          const table=`${qi(ref.schema_name)}.${qi(ref.table_name)}`,column=qi(ref.column_name);
+          const remaining=await client.query(`SELECT 1 FROM ${table} WHERE ${column}=$1 LIMIT 1`,[sourceId]);
+          if(remaining.rowCount){await client.query("ROLLBACK");return reply.code(409).send({error:`A linked record in ${ref.table_name} could not be safely scoped to this location. Resolve that link before merging; no records were changed.`});}
+        }
+        await client.query("DELETE FROM people_record_relationships a USING people_record_relationships b WHERE a.department_id=$1 AND b.department_id=a.department_id AND a.id>b.id AND a.person_id=b.person_id AND a.related_person_id=b.related_person_id AND a.relationship=b.relationship",[d]);
+        await client.query("DELETE FROM contacts WHERE department_id=$1 AND id=$2",[d,sourceId]);
+        const auditId=randomUUID();await client.query("INSERT INTO people_record_merges(id,department_id,keeper_contact_id,merged_contact_id,actor_user_id,source_snapshot,profile_conflicts_confirmed) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7)",[auditId,d,keeperId,sourceId,request.authenticatedUser?.id??null,JSON.stringify(source),confirmProfileConflicts]);
+        await client.query("INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,'person_merged',$5,$6::jsonb,$7::jsonb)",[randomUUID(),d,keeperId,request.authenticatedUser?.id??null,`${source.first_name} ${source.last_name}`,JSON.stringify({mergedContactId:sourceId,source}),JSON.stringify({keeperContactId:keeperId,profileConflictsConfirmed:confirmProfileConflicts})]);
+        await client.query("COMMIT");committed=true;
+      }catch(error){await client.query("ROLLBACK");if((error as {code?:string}).code?.startsWith("23"))return reply.code(409).send({error:"A linked record conflicts with the keeper and prevented the merge. No records were changed; resolve duplicate memberships or linked records and retry."});throw error;}finally{client.release();}
+      if(committed){changed(d,keeperId);changed(d,sourceId);}return{ok:true,keeperId,mergedContactId:sourceId,message:"Source person merged into the selected keeper."};
+    });
+  });
+}

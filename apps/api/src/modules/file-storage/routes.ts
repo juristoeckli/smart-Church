@@ -99,10 +99,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (view !== "active" && view !== "trash") return reply.code(400).send({ error: "Choose a valid file view." });
       const departmentId = await department(request, reply, view === "trash");
       if (!departmentId) return reply;
+      const wikiSchema = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed");
+      const canManageWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
+      const audienceFilter = wikiSchema.rows[0]?.installed ? `AND (
+        NOT EXISTS (SELECT 1 FROM wiki_page_files attachment WHERE attachment.department_id=stored.department_id AND attachment.file_id=stored.id)
+        OR $2::boolean
+        OR EXISTS (
+          SELECT 1 FROM wiki_page_files attachment JOIN wiki_pages page ON page.id=attachment.page_id AND page.department_id=attachment.department_id
+           WHERE attachment.department_id=stored.department_id AND attachment.file_id=stored.id AND page.status='active'
+             AND (page.audience='location' OR (page.audience='group' AND EXISTS (
+               SELECT 1 FROM group_members member JOIN department_memberships membership ON membership.contact_id=member.contact_id AND membership.department_id=stored.department_id
+                WHERE member.group_id=page.audience_group_id AND member.status='active' AND membership.user_id=$3
+             )))
+        ))` : "";
+      const listParameters = wikiSchema.rows[0]?.installed ? [departmentId, canManageWiki, request.authenticatedUser!.id] : [departmentId];
       const result = await pool!.query<ResourceRow>(
-        `SELECT id, title, category, file_name, content_type, file_size, created_at, folder_id FROM stored_files
-          WHERE department_id = $1 AND ${view === "trash" ? "deleted_at IS NOT NULL" : "deleted_at IS NULL"}
-          ORDER BY lower(category), lower(title), created_at DESC`, [departmentId],
+        `SELECT stored.id,stored.title,stored.category,stored.file_name,stored.content_type,stored.file_size,stored.created_at,stored.folder_id FROM stored_files stored
+          WHERE stored.department_id = $1 AND ${view === "trash" ? "stored.deleted_at IS NOT NULL" : "stored.deleted_at IS NULL"} ${audienceFilter}
+          ORDER BY lower(stored.category), lower(stored.title), stored.created_at DESC`, listParameters,
       );
       return result.rows.map(mapResource);
     });
@@ -219,6 +233,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL", [request.params.id, departmentId]);
       const resource = result.rows[0];
       if (!resource) return reply.code(404).send({ error: "Resource not found." });
+      const wikiSchema = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed");
+      if (wikiSchema.rows[0]?.installed) {
+        const canManageWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
+        const wikiAccess = await pool!.query<{ linked: boolean; can_read: boolean }>(
+          `WITH attached_pages AS (
+             SELECT page.id,page.status,page.audience,page.audience_group_id
+               FROM wiki_page_files attachment
+               JOIN wiki_pages page ON page.id=attachment.page_id AND page.department_id=attachment.department_id
+              WHERE attachment.department_id=$1 AND attachment.file_id=$2
+           )
+           SELECT EXISTS(SELECT 1 FROM attached_pages) AS linked,
+                  EXISTS(SELECT 1 FROM attached_pages page WHERE $3::boolean OR (page.status='active' AND (
+                    page.audience='location' OR (page.audience='group' AND EXISTS (
+                      SELECT 1 FROM group_members member
+                      JOIN department_memberships membership ON membership.contact_id=member.contact_id AND membership.department_id=$1
+                      WHERE member.group_id=page.audience_group_id AND member.status='active' AND membership.user_id=$4
+                    ))
+                  ))) AS can_read`,
+          [departmentId, request.params.id, canManageWiki, request.authenticatedUser!.id],
+        );
+        if (wikiAccess.rows[0]?.linked && !wikiAccess.rows[0].can_read) return reply.code(404).send({ error: "Resource not found." });
+      }
       reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
       return resource.file_data as Buffer;
     });

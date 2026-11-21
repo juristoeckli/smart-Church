@@ -1,0 +1,49 @@
+.resource-scheduler-page { display: grid; gap: 1.25rem; min-width: 0; }
+.resource-scheduler-heading { align-items: center; }
+.resource-scheduler-heading > div { min-width: 0; }
+.resource-scheduler-heading .button { display: inline-flex; align-items: center; gap: .45rem; flex: 0 0 auto; }
+.resource-scheduler-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: 1rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; background: var(--surface, #fff); }
+.resource-scheduler-week, .resource-scheduler-filters { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; }
+.resource-scheduler-week strong { min-width: 13rem; text-align: center; }
+.resource-scheduler-filters label, .resource-scheduler-modal label { display: grid; gap: .35rem; color: var(--text-secondary, #64748b); font-size: .82rem; font-weight: 600; }
+.resource-scheduler-filters select, .resource-scheduler-modal input, .resource-scheduler-modal select { min-width: 10rem; padding: .62rem .7rem; border: 1px solid var(--border-color, #cbd5e1); border-radius: 8px; color: var(--text-primary, #1e293b); background: var(--surface, #fff); font: inherit; }
+.resource-scheduler-matrix-wrap { max-width: 100%; overflow: auto; border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; background: var(--surface, #fff); }
+.resource-scheduler-matrix { width: 100%; min-width: 1050px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
+.resource-scheduler-matrix th, .resource-scheduler-matrix td { vertical-align: top; padding: .65rem; border-right: 1px solid var(--border-color, #e2e8f0); border-bottom: 1px solid var(--border-color, #e2e8f0); text-align: left; }
+.resource-scheduler-matrix thead th { position: sticky; top: 0; z-index: 1; background: var(--surface-muted, #f8fafc); font-size: .8rem; }
+.resource-scheduler-matrix th:first-child { width: 190px; }
+.resource-scheduler-matrix tbody th { background: var(--surface-muted, #f8fafc); }
+.resource-scheduler-matrix tbody th > strong, .resource-scheduler-matrix tbody th > small { display: block; }
+.resource-scheduler-matrix tbody th > small { margin-top: .25rem; color: var(--text-secondary, #64748b); font-size: .75rem; font-weight: 400; }
+.resource-scheduler-booking { display: grid; gap: .3rem; margin: 0 0 .55rem; padding: .65rem; border: 1px solid #bfdbfe; border-left: 3px solid #3b82f6; border-radius: 8px; background: #eff6ff; color: #1e3a5f; font-size: .8rem; overflow-wrap: anywhere; }
+.resource-scheduler-booking > strong { font-size: .82rem; }
+.resource-scheduler-booking > small { display: flex; align-items: center; gap: .25rem; color: #475569; }
+.resource-scheduler-booking.status-requested { border-color: #fcd34d; border-left-color: #f59e0b; background: #fffbeb; }
+.resource-scheduler-booking.status-declined, .resource-scheduler-booking.status-cancelled { border-color: #cbd5e1; border-left-color: #94a3b8; background: #f1f5f9; color: #64748b; }
+.resource-booking-actions { display: flex; flex-wrap: wrap; gap: .3rem; }
+.resource-booking-actions button, .resource-settings-button { display: inline-flex; align-items: center; gap: .25rem; padding: .3rem .45rem; border: 1px solid var(--border-color, #cbd5e1); border-radius: 6px; background: #fff; color: var(--text-primary, #334155); font: inherit; font-size: .72rem; cursor: pointer; }
+.resource-settings-button { margin-top: .5rem; }
+.resource-scheduler-empty { padding: 2rem !important; color: var(--text-secondary, #64748b); text-align: center !important; }
+.resource-scheduler-message { margin: 0; padding: .8rem 1rem; border-radius: 8px; }
+.resource-scheduler-message.is-error { color: #991b1b; background: #fef2f2; }
+.resource-scheduler-message.is-success { color: #166534; background: #f0fdf4; }
+.resource-scheduler-modal { width: min(620px, calc(100vw - 2rem)); max-height: min(90vh, 900px); overflow: auto; }
+.resource-scheduler-modal form { display: grid; gap: 1rem; }
+.resource-scheduler-modal .modal-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.resource-scheduler-modal .modal-heading p { margin: .3rem 0 0; color: var(--text-secondary, #64748b); }
+.resource-scheduler-extra-dates { display: grid; gap: .55rem; margin: 1rem 0; padding: 0; list-style: none; }
+.resource-scheduler-extra-dates li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .75rem; border: 1px solid var(--border-color, #cbd5e1); border-radius: 8px; }
+.resource-scheduler-extra-dates li span { display: grid; gap: .2rem; }
+.resource-scheduler-extra-dates li small { color: var(--text-secondary, #64748b); }
+.resource-scheduler-extra-dates li button { border: 1px solid var(--border-color, #cbd5e1); border-radius: 6px; padding: .4rem .65rem; color: var(--text-primary, #1e293b); background: var(--surface, #fff); cursor: pointer; }
+.resource-scheduler-extra-dates li button:disabled { opacity: .55; cursor: not-allowed; }
+.resource-scheduler-history { display: grid; gap: .65rem; padding-left: 1.2rem; }
+.resource-scheduler-history li { padding: .65rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; }
+.resource-scheduler-history li > strong, .resource-scheduler-history li > small { display: block; }
+.resource-scheduler-history li > small { margin-top: .25rem; color: var(--text-secondary, #64748b); }
+.resource-scheduler-history pre { white-space: pre-wrap; overflow-wrap: anywhere; font: .75rem/1.45 ui-monospace, monospace; }
+.resource-series-edit-preview { padding: .8rem 1rem; border: 1px solid #bfdbfe; border-radius: 8px; background: #eff6ff; color: #1e3a5f; }
+.resource-series-edit-preview p { margin: .35rem 0 0; }
+.resource-series-edit-preview.is-blocked { border-color: #fca5a5; background: #fef2f2; color: #991b1b; }
+.resource-scheduler-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
+@media (max-width: 640px) { .resource-scheduler-heading { align-items: flex-start; flex-direction: column; } .resource-scheduler-week { width: 100%; justify-content: space-between; } .resource-scheduler-week strong { min-width: 0; font-size: .85rem; } .resource-scheduler-filters { width: 100%; align-items: stretch; } .resource-scheduler-filters label { flex: 1; } .resource-scheduler-field-grid { grid-template-columns: 1fr; } }

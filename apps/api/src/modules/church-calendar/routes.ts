@@ -1,0 +1,1038 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { ModuleServerContext } from "../module-sdk.js";
+
+type CalendarScope = "community" | "group" | "personal";
+type Frequency = "daily" | "weekly" | "monthly" | "monthly_weekday" | "yearly" | "manual";
+type Recurrence = { frequency: Frequency; interval?: number; weekdays?: number[]; weekday?: number; weekOfMonth?: number; endsOn?: string; count?: number; dates?: string[] };
+type AppointmentInput = {
+  calendarId: string; title: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; allDay?: boolean;
+  place?: string; url?: string; internalOnly?: boolean; tags?: string[]; recurrence?: Recurrence | null; linkedEventId?: string | null;
+  resourceBookingIds?: string[]; signupGroupId?: string | null; responsibleContactId?: string | null;
+};
+type AppointmentRow = {
+  id: string; calendar_id: string; title: string; subtitle: string; description: string; starts_at: string; ends_at: string;
+  all_day: boolean; place: string; url: string; internal_only: boolean; tags: string[]; recurrence: Recurrence | null;
+  linked_event_id: string | null; created_by: string; calendar_scope: CalendarScope; calendar_name: string; responsible_contact_id?: string | null; responsible_name?: string | null;
+  owner_user_id: string | null; group_id: string | null; signup_group_id?: string | null; signup_token?: string | null; signup_group_name?: string | null; has_image?: boolean;
+};
+type Occurrence = Record<string, unknown> & { appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string };
+
+const calendarFields = ["title", "subtitle", "description", "startsAt", "endsAt", "allDay", "place", "url", "internalOnly", "tags", "linkedEventId", "signupGroupId", "responsibleContactId"] as const;
+
+function cleanLocalDateTime(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.trim().replace(" ", "T").slice(0, 19);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(cleaned)) return null;
+  const date = new Date(`${cleaned.length === 16 ? `${cleaned}:00` : cleaned}Z`);
+  if (!Number.isFinite(date.getTime())) return null;
+  return cleaned.length === 16 ? `${cleaned}:00` : cleaned;
+}
+
+function wallDate(value: string) {
+  return new Date(`${value.replace(" ", "T").slice(0, 19)}Z`);
+}
+
+function localDateTime(date: Date) {
+  const p = (value: number) => String(value).padStart(2, "0");
+  return `${date.getUTCFullYear()}-${p(date.getUTCMonth() + 1)}-${p(date.getUTCDate())}T${p(date.getUTCHours())}:${p(date.getUTCMinutes())}:${p(date.getUTCSeconds())}`;
+}
+
+function startOfDay(value: string) {
+  return new Date(`${value.slice(0, 10)}T00:00:00Z`);
+}
+
+function addDays(date: Date, amount: number) {
+  const result = new Date(date);
+  result.setUTCDate(result.getUTCDate() + amount);
+  return result;
+}
+
+function occurrenceStarts(row: AppointmentRow, from: string, to: string, maxOccurrences = 500): Date[] {
+  const start = new Date(`${row.starts_at.replace(" ", "T")}Z`);
+  const fromDate = startOfDay(from);
+  const toDate = startOfDay(to);
+  const rule = row.recurrence;
+  if (!rule) return start >= new Date(`${from.replace(" ", "T")}Z`) && start <= new Date(`${to.replace(" ", "T")}Z`) ? [start] : [];
+  const byManualDate = (date: string) => {
+    const candidate = new Date(`${date.slice(0, 10)}T${row.starts_at.slice(11, 19)}Z`);
+    return Number.isFinite(candidate.getTime()) ? candidate : null;
+  };
+  if (rule.frequency === "manual") return (rule.dates ?? []).map(byManualDate).filter((date): date is Date => Boolean(date && date >= fromDate && date <= toDate && date >= start)).slice(0, maxOccurrences);
+  const dates: Date[] = [];
+  const interval = Math.min(365, Math.max(1, Math.floor(Number(rule.interval) || 1)));
+  const endsOn = rule.endsOn ? startOfDay(rule.endsOn) : toDate;
+  const last = new Date(Math.min(toDate.getTime(), endsOn.getTime()));
+  let occurrenceCount = 0;
+  for (let day = startOfDay(row.starts_at); day <= last && dates.length < maxOccurrences; day = addDays(day, 1)) {
+    if (day < startOfDay(row.starts_at)) continue;
+    const delta = Math.round((startOfDay(localDateTime(day).slice(0, 10)).getTime() - startOfDay(row.starts_at.slice(0, 10)).getTime()) / 86_400_000);
+    const weeks = Math.floor(delta / 7);
+    const months = (day.getUTCFullYear() - start.getUTCFullYear()) * 12 + day.getUTCMonth() - start.getUTCMonth();
+    let matches = false;
+    if (rule.frequency === "daily") matches = delta % interval === 0;
+    else if (rule.frequency === "weekly") {
+      const monday = (value: Date) => { const copy = startOfDay(localDateTime(value)); copy.setUTCDate(copy.getUTCDate() - ((copy.getUTCDay() + 6) % 7)); return copy; };
+      const weekDelta = Math.round((monday(day).getTime() - monday(start).getTime()) / (7 * 86_400_000));
+      matches = weekDelta % interval === 0 && (rule.weekdays?.length ? rule.weekdays.includes(day.getUTCDay()) : day.getUTCDay() === start.getUTCDay());
+    } else if (rule.frequency === "monthly") matches = months >= 0 && months % interval === 0 && day.getUTCDate() === start.getUTCDate();
+    else if (rule.frequency === "monthly_weekday") {
+      const ordinal = rule.weekOfMonth;
+      const weekday = rule.weekday;
+      const ordinalMatches = ordinal === -1
+        ? addDays(day, 7).getUTCMonth() !== day.getUTCMonth()
+        : Math.floor((day.getUTCDate() - 1) / 7) + 1 === ordinal;
+      matches = months >= 0 && months % interval === 0 && weekday !== undefined && day.getUTCDay() === weekday && ordinalMatches;
+    }
+    else if (rule.frequency === "yearly") matches = day.getUTCMonth() === start.getUTCMonth() && day.getUTCDate() === start.getUTCDate() && (day.getUTCFullYear() - start.getUTCFullYear()) % interval === 0;
+    if (!matches || day < startOfDay(row.starts_at)) continue;
+    occurrenceCount += 1;
+    if (rule.count && occurrenceCount > rule.count) break;
+    if (day >= fromDate) {
+      const occurrence = new Date(day);
+      occurrence.setUTCHours(start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds(), 0);
+      dates.push(occurrence);
+    }
+  }
+  return dates;
+}
+
+function normalizeInput(input: AppointmentInput): AppointmentInput | string {
+  const title = typeof input.title === "string" ? input.title.trim() : "";
+  const startsAt = cleanLocalDateTime(input.startsAt);
+  const endsAt = cleanLocalDateTime(input.endsAt);
+  if (!title || title.length > 160) return "Enter an appointment title up to 160 characters.";
+  if (!startsAt || !endsAt || endsAt < startsAt) return "Choose valid start and end times.";
+  if (typeof input.calendarId !== "string") return "Choose a calendar.";
+  if (input.signupGroupId != null && (typeof input.signupGroupId !== "string" || !/^[0-9a-f-]{36}$/i.test(input.signupGroupId))) return "Choose a valid public-signup group.";
+  if (input.responsibleContactId != null && (typeof input.responsibleContactId !== "string" || !/^[0-9a-f-]{36}$/i.test(input.responsibleContactId))) return "Choose a valid responsible person.";
+  const recurrence = input.recurrence ?? null;
+  if (recurrence) {
+    if (!["daily", "weekly", "monthly", "monthly_weekday", "yearly", "manual"].includes(recurrence.frequency)) return "Choose a supported repeat pattern.";
+    if (recurrence.endsOn && !/^\d{4}-\d{2}-\d{2}$/.test(recurrence.endsOn)) return "Choose a valid recurrence end date.";
+    if (recurrence.count !== undefined && (!Number.isInteger(recurrence.count) || recurrence.count < 1 || recurrence.count > 500)) return "Repeat count must be between 1 and 500.";
+    if (recurrence.frequency === "manual" && (!Array.isArray(recurrence.dates) || recurrence.dates.length > 100 || recurrence.dates.some((date) => !/^\d{4}-\d{2}-\d{2}$/.test(date)))) return "Add up to 100 valid dates for a manual repeat.";
+    if (recurrence.frequency === "monthly_weekday" && (!Number.isInteger(recurrence.weekday) || recurrence.weekday! < 0 || recurrence.weekday! > 6 || ![-1, 1, 2, 3, 4].includes(Number(recurrence.weekOfMonth)))) return "Choose a valid weekday and week of the month, including last.";
+    if (recurrence.frequency === "monthly_weekday") {
+      const initial = new Date(`${startsAt.slice(0, 10)}T00:00:00Z`);
+      const ordinalMatches = recurrence.weekOfMonth === -1
+        ? addDays(initial, 7).getUTCMonth() !== initial.getUTCMonth()
+        : Math.floor((initial.getUTCDate() - 1) / 7) + 1 === recurrence.weekOfMonth;
+      if (initial.getUTCDay() !== recurrence.weekday || !ordinalMatches) return "The appointment start date must match the selected monthly weekday.";
+    }
+  }
+  const tags = Array.isArray(input.tags) ? [...new Set(input.tags.map((tag) => String(tag).trim().slice(0, 40)).filter(Boolean))].slice(0, 30) : [];
+  return {
+    ...input, title, startsAt, endsAt, subtitle: String(input.subtitle ?? "").trim().slice(0, 240), description: String(input.description ?? "").trim().slice(0, 8000),
+    place: String(input.place ?? "").trim().slice(0, 200), url: String(input.url ?? "").trim().slice(0, 1000), tags,
+    recurrence: recurrence ? { frequency: recurrence.frequency, interval: Math.min(365, Math.max(1, Math.floor(Number(recurrence.interval) || 1))), weekdays: [...new Set((recurrence.weekdays ?? []).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))], ...(recurrence.frequency === "monthly_weekday" ? { weekday: recurrence.weekday, weekOfMonth: recurrence.weekOfMonth } : {}), endsOn: recurrence.endsOn, count: recurrence.count, dates: recurrence.dates } : null,
+  };
+}
+
+function canManageCalendar(request: FastifyRequest, scope: CalendarScope, ownerId: string | null) {
+  if (request.activeDepartmentRole === "site_admin") return true;
+  if ((request.activeDepartmentModulePermissions?.["church-calendar"] ?? []).includes("manage")) return true;
+  if (scope === "personal") return ownerId === request.authenticatedUser?.id;
+  const permissions = request.activeDepartmentPermissions ?? [];
+  return scope === "group" ? permissions.includes("groups_manage") || permissions.includes("events_manage") : permissions.includes("events_manage");
+}
+
+function canSeePrivatePeople(request: FastifyRequest) {
+  return request.activeDepartmentRole === "site_admin"
+    || (request.activeDepartmentPermissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
+}
+
+function hasGroupVisibility(request: FastifyRequest) {
+  return request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.["church-calendar"] ?? []).includes("manage") || (request.activeDepartmentPermissions ?? []).some((permission) => permission === "groups_manage" || permission === "events_manage");
+}
+
+function responseError(reply: { code: (status: number) => { send: (body: object) => unknown } }, status: number, message: string) {
+  return reply.code(status).send({ error: message });
+}
+
+function icsEscape(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/\r?\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
+}
+function icsDateTime(value: string) { return value.replace(/[-:]/g, "").replace(/\.\d+$/, ""); }
+function hashFeedToken(value: string) { return createHash("sha256").update(value).digest("hex"); }
+
+export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
+  const userId = (request: FastifyRequest) => request.authenticatedUser!.id;
+
+  app.post<{ Params: { id: string } }>("/api/modules/church-calendar/calendars/:id/public-feed", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const calendar = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>("SELECT scope,owner_user_id FROM church_calendar_calendars WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [request.params.id, departmentId]);
+    const row = calendar.rows[0];
+    if (!row) return responseError(reply, 404, "Calendar not found.");
+    if (row.scope !== "community") return responseError(reply, 400, "Only community calendars can have a public feed.");
+    if (!canManageCalendar(request, row.scope, row.owner_user_id)) return responseError(reply, 403, "You cannot manage this calendar feed.");
+    const token = randomBytes(32).toString("base64url");
+    await context.pool.query(
+      `INSERT INTO church_calendar_public_feeds(calendar_id,department_id,token_hash,created_by,revoked_at)
+       VALUES($1,$2,$3,$4,NULL) ON CONFLICT(calendar_id) DO UPDATE SET department_id=EXCLUDED.department_id,token_hash=EXCLUDED.token_hash,created_by=EXCLUDED.created_by,created_at=now(),revoked_at=NULL`,
+      [request.params.id, departmentId, hashFeedToken(token), userId(request)],
+    );
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "public-feed-rotated", calendarId: request.params.id });
+    return { url: `/api/public/church-calendar/feed/${token}.ics` };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/modules/church-calendar/calendars/:id/public-feed", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const calendar = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>("SELECT scope,owner_user_id FROM church_calendar_calendars WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [request.params.id, departmentId]);
+    const row = calendar.rows[0];
+    if (!row) return responseError(reply, 404, "Calendar not found.");
+    if (row.scope !== "community" || !canManageCalendar(request, row.scope, row.owner_user_id)) return responseError(reply, 403, "You cannot manage this calendar feed.");
+    await context.pool.query("UPDATE church_calendar_public_feeds SET revoked_at=now() WHERE calendar_id=$1 AND department_id=$2 AND revoked_at IS NULL", [request.params.id, departmentId]);
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "public-feed-revoked", calendarId: request.params.id });
+    return { revoked: true };
+  });
+
+  app.get<{ Params: { token: string } }>("/api/public/church-calendar/feed/:token.ics", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const feed = await context.pool.query<{ department_id: string; calendar_id: string; calendar_name: string }>(
+      `SELECT feed.department_id,feed.calendar_id,calendar.name AS calendar_name FROM church_calendar_public_feeds feed
+        JOIN church_calendar_calendars calendar ON calendar.id=feed.calendar_id AND calendar.department_id=feed.department_id
+       WHERE feed.token_hash=$1 AND feed.revoked_at IS NULL AND calendar.scope='community' AND calendar.archived_at IS NULL`, [hashFeedToken(request.params.token)]);
+    const source = feed.rows[0];
+    if (!source) return reply.code(404).send({ error: "Public calendar feed not found." });
+    const from = localDateTime(new Date()).slice(0, 10);
+    const toDate = new Date(); toDate.setUTCDate(toDate.getUTCDate() + 366);
+    const to = localDateTime(toDate).slice(0, 10);
+    const events = await context.pool.query<AppointmentRow>(
+      `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
+              to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
+              appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,
+              appointment.linked_event_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
+              calendar.owner_user_id,calendar.group_id
+         FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+        WHERE appointment.department_id=$1 AND appointment.calendar_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+          AND calendar.scope='community' AND appointment.internal_only=false AND appointment.starts_at <= $4::timestamp
+          AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $3::timestamp) OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $3::date))
+        ORDER BY appointment.starts_at,appointment.title LIMIT 2000`, [source.department_id, source.calendar_id, `${from}T00:00:00`, `${to}T23:59:59`]);
+    const ids = events.rows.map((item) => item.id);
+    const exceptionRows = ids.length ? await context.pool.query<{ appointment_id: string; original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
+      `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids]) : { rows: [] };
+    const extraRows = ids.length ? await context.pool.query<{ appointment_id: string; starts_at: string; ends_at: string }>(
+      `SELECT appointment_id,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at FROM church_calendar_extra_dates WHERE appointment_id=ANY($1::uuid[]) AND starts_at >= $2::timestamp AND starts_at <= $3::timestamp`, [ids, `${from}T00:00:00`, `${to}T23:59:59`]) : { rows: [] };
+    const exceptions = new Map(exceptionRows.rows.map((item) => [`${item.appointment_id}:${item.original_start.replace(" ", "T")}`, item]));
+    const extraOccurrences = new Map<string, Map<string, string>>();
+    for (const item of extraRows.rows) {
+      const dates = extraOccurrences.get(item.appointment_id) ?? new Map<string, string>();
+      dates.set(item.starts_at.replace(" ", "T"), item.ends_at.replace(" ", "T"));
+      extraOccurrences.set(item.appointment_id, dates);
+    }
+    const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Smart-Church//Calendar//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", `X-WR-CALNAME:${icsEscape(source.calendar_name)}`];
+    const stamp = icsDateTime(`${localDateTime(new Date())}Z`);
+    for (const row of events.rows) {
+      const start = wallDate(row.starts_at);
+      const duration = Math.max(0, wallDate(row.ends_at).getTime() - start.getTime());
+      const additionalDates = [...(extraOccurrences.get(row.id)?.keys() ?? [])].map(wallDate);
+      const starts = [...new Map([...occurrenceStarts(row, `${from}T00:00`, `${to}T23:59`), ...additionalDates].map((date) => [localDateTime(date), date])).values()];
+      for (const occurrence of starts) {
+        const original = localDateTime(occurrence);
+        const exception = exceptions.get(`${row.id}:${original}`);
+        if (exception?.cancelled) continue;
+        const override = exception?.overrides ?? {};
+        const startsAt = cleanLocalDateTime(override.startsAt) ?? original;
+        const endsAt = cleanLocalDateTime(override.endsAt) ?? extraOccurrences.get(row.id)?.get(original) ?? localDateTime(new Date(occurrence.getTime() + duration));
+        const title = String(override.title ?? row.title);
+        const description = String(override.description ?? row.description);
+        const place = String(override.place ?? row.place);
+        const url = String(override.url ?? row.url);
+        lines.push("BEGIN:VEVENT", `UID:${row.id}-${icsDateTime(original)}@smart-church`, `DTSTAMP:${stamp}`);
+        if (row.all_day) {
+          const dayAfter = localDateTime(new Date(wallDate(startsAt).getTime() + 86_400_000)).slice(0, 10).replaceAll("-", "");
+          lines.push(`DTSTART;VALUE=DATE:${startsAt.slice(0, 10).replaceAll("-", "")}`, `DTEND;VALUE=DATE:${dayAfter}`);
+        } else lines.push(`DTSTART:${icsDateTime(startsAt)}`, `DTEND:${icsDateTime(endsAt)}`);
+        lines.push(`SUMMARY:${icsEscape(title)}`);
+        if (description) lines.push(`DESCRIPTION:${icsEscape(description)}`);
+        if (place) lines.push(`LOCATION:${icsEscape(place)}`);
+        if (/^https:\/\/[^\u0000-\u001f\u007f]+$/i.test(url)) lines.push(`URL:${url}`);
+        lines.push("END:VEVENT");
+      }
+    }
+    lines.push("END:VCALENDAR");
+    return reply.type("text/calendar; charset=utf-8").header("Content-Disposition", `inline; filename="${source.calendar_name.replace(/[\/"\\\r\n]/g, "_")}.ics"`).header("Cache-Control", "private, no-store").send(lines.join("\r\n") + "\r\n");
+  });
+
+  app.get("/api/modules/church-calendar/choices", async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const canSeeAllGroups = hasGroupVisibility(request);
+    const groups = await context.pool.query(
+      `SELECT church_group.id,church_group.name FROM church_groups church_group
+        WHERE church_group.department_id=$1 AND church_group.status='active' AND ($3 OR EXISTS (SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=church_group.id))
+        ORDER BY church_group.name LIMIT 500`, [departmentId, userId(request), canSeeAllGroups]);
+    const signupGroups = await context.pool.query(
+      `SELECT church_group.id,church_group.name,church_group.public_signup_token AS token FROM church_groups church_group
+        WHERE church_group.department_id=$1 AND church_group.status='active' AND church_group.public_signup_enabled=true AND church_group.public_signup_token IS NOT NULL AND church_group.source_system IS NULL
+        ORDER BY church_group.name LIMIT 500`, [departmentId]);
+    const events = await context.pool.query<{ id: string; title: string; event_date: string }>(
+      "SELECT id,title,event_date::text FROM service_events WHERE department_id=$1 ORDER BY event_date DESC,title LIMIT 250", [departmentId]);
+    const canSeeAllBookings = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
+    const bookings = await context.pool.query<{ id: string; purpose: string; starts_at: string }>(
+      `SELECT id,purpose,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at FROM resource_bookings WHERE department_id=$1 AND status='approved' AND starts_at >= now()-interval '90 days' AND ($3 OR requested_by=$2) ORDER BY starts_at LIMIT 250`, [departmentId, userId(request), canSeeAllBookings]);
+    const templatesInstalled = await context.pool.query<{ present: boolean }>("SELECT to_regclass('public.service_plan_templates') IS NOT NULL AS present");
+    const servicePlanTemplates = templatesInstalled.rows[0]?.present
+      ? (await context.pool.query<{ id: string; name: string; positions: Array<{ name: string }> }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
+      : [];
+    const canSelectPeople = canSeePrivatePeople(request);
+    return { groups: groups.rows, signupGroups: signupGroups.rows, events: events.rows, resourceBookings: bookings.rows, servicePlanTemplates, canSelectPeople };
+  });
+
+  app.get<{ Querystring: { q?: string } }>("/api/modules/church-calendar/people", { schema: {
+    querystring: { type: "object", additionalProperties: false, required: ["q"], properties: { q: { type: "string", minLength: 2, maxLength: 80 } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const canSelectPeople = canSeePrivatePeople(request);
+    if (!canSelectPeople) return responseError(reply, 403, "Private People access is required to select an appointment contact.");
+    const query = request.query.q.trim().replace(/[\\%_]/g, "").slice(0, 80);
+    if (query.length < 2) return [];
+    return (await context.pool.query<{ id: string; name: string }>(
+      `SELECT id,concat_ws(' ',first_name,last_name) AS name FROM contacts
+        WHERE department_id=$1 AND (first_name ILIKE $2 OR last_name ILIKE $2 OR concat_ws(' ',first_name,last_name) ILIKE $2)
+        ORDER BY lower(last_name),lower(first_name),id LIMIT 50`, [departmentId, `%${query}%`],
+    )).rows;
+  });
+
+  app.get("/api/modules/church-calendar/calendars", async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query(
+      `SELECT calendar.id,calendar.name,calendar.scope,calendar.group_id AS "groupId",calendar.owner_user_id AS "ownerUserId",calendar.color,
+              EXISTS(SELECT 1 FROM church_calendar_public_feeds feed WHERE feed.calendar_id=calendar.id AND feed.department_id=calendar.department_id AND feed.revoked_at IS NULL) AS "hasPublicFeed",
+              church_group.name AS "groupName",(calendar.owner_user_id=$2) AS "isOwner"
+         FROM church_calendar_calendars calendar
+         LEFT JOIN church_groups church_group ON church_group.id=calendar.group_id AND church_group.department_id=calendar.department_id
+        WHERE calendar.department_id=$1 AND calendar.archived_at IS NULL
+          AND (calendar.scope='community' OR calendar.owner_user_id=$2 OR $3 OR EXISTS (
+            SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
+             WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=calendar.group_id))
+        ORDER BY CASE calendar.scope WHEN 'community' THEN 0 WHEN 'group' THEN 1 ELSE 2 END,calendar.name`,
+      [departmentId, userId(request), hasGroupVisibility(request)],
+    );
+    return result.rows;
+  });
+
+  app.post<{ Body: { name: string; scope: CalendarScope; groupId?: string; color?: string } }>("/api/modules/church-calendar/calendars", { schema: {
+    body: { type: "object", additionalProperties: false, required: ["name", "scope"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, scope: { type: "string", enum: ["community", "group", "personal"] }, groupId: { type: "string", format: "uuid" }, color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const scope = request.body.scope;
+    const name = request.body.name.trim();
+    if (!name) return responseError(reply, 400, "Enter a calendar name.");
+    const ownerId = scope === "personal" ? userId(request) : null;
+    if (scope !== "personal" && !canManageCalendar(request, scope, ownerId)) return responseError(reply, 403, "You do not have permission to create a shared calendar.");
+    if (scope === "group") {
+      if (!request.body.groupId) return responseError(reply, 400, "Choose a group for this calendar.");
+      const group = await context.pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2", [request.body.groupId, departmentId]);
+      if (!group.rowCount) return responseError(reply, 404, "The selected group was not found.");
+    }
+    const id = randomUUID();
+    const result = await context.pool.query(
+      `INSERT INTO church_calendar_calendars(id,department_id,name,scope,group_id,owner_user_id,color,created_by)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,name,scope,group_id AS "groupId",owner_user_id AS "ownerUserId",color`,
+      [id, departmentId, name, scope, scope === "group" ? request.body.groupId : null, ownerId, request.body.color ?? "#3b82f6", userId(request)],
+    );
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "calendar-created", calendarId: id });
+    return reply.code(201).send(result.rows[0]);
+  });
+
+  app.get<{ Querystring: { from?: string; to?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const from = cleanLocalDateTime(request.query.from ?? `${localDateTime(new Date()).slice(0, 10)}T00:00`);
+    const to = cleanLocalDateTime(request.query.to ?? `${localDateTime(new Date(Date.now() + 31 * 86400_000)).slice(0, 10)}T23:59`);
+    if (!from || !to || to < from) return responseError(reply, 400, "Choose a valid calendar date range.");
+    const result = await context.pool.query<AppointmentRow>(
+      `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
+              to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+              to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
+              appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,
+              appointment.linked_event_id,appointment.responsible_contact_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
+              calendar.owner_user_id,calendar.group_id,appointment.signup_group_id,CASE WHEN signup_group.public_signup_enabled THEN signup_group.public_signup_token END AS signup_token,signup_group.name AS signup_group_name,
+              EXISTS(SELECT 1 FROM church_calendar_appointment_images image WHERE image.appointment_id=appointment.id AND image.department_id=appointment.department_id) AS has_image
+         FROM church_calendar_appointments appointment
+         JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+         LEFT JOIN church_groups signup_group ON signup_group.id=appointment.signup_group_id AND signup_group.department_id=appointment.department_id
+        WHERE appointment.department_id=$1 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+          AND appointment.starts_at <= $3::timestamp
+          AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $2::timestamp)
+            OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $2::timestamp::date))
+          AND (calendar.scope='community' OR calendar.owner_user_id=$4 OR $5 OR EXISTS (
+            SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
+             WHERE membership.user_id=$4 AND membership.department_id=$1 AND member.group_id=calendar.group_id))
+        ORDER BY appointment.starts_at,appointment.title LIMIT 2000`,
+      [departmentId, from, to, userId(request), hasGroupVisibility(request)],
+    );
+    const appointments = result.rows;
+    if (!appointments.length) return [];
+    const ids = appointments.map((row) => row.id);
+    const exceptions = await context.pool.query<{ appointment_id: string; original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
+      `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides
+         FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids],
+    );
+    const extraDates = await context.pool.query<{ appointment_id: string; starts_at: string; ends_at: string }>(
+      `SELECT appointment_id,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
+         FROM church_calendar_extra_dates WHERE appointment_id=ANY($1::uuid[]) AND starts_at <= $3::timestamp AND ends_at >= $2::timestamp`, [ids, from, to],
+    );
+    const resourceLinks = await context.pool.query<{ appointment_id: string; resource_booking_id: string }>(
+      "SELECT appointment_id,resource_booking_id FROM church_calendar_resource_links WHERE appointment_id=ANY($1::uuid[])", [ids],
+    );
+    const exceptionMap = new Map(exceptions.rows.map((row) => [`${row.appointment_id}:${row.original_start.replace(" ", "T")}`, row]));
+    const canViewResponsiblePeople = canSeePrivatePeople(request);
+    const responsibleIds = [...new Set([
+      ...appointments.map((row) => row.responsible_contact_id).filter((id): id is string => Boolean(id && /^[0-9a-f-]{36}$/i.test(id))),
+      ...exceptions.rows.map((row) => typeof row.overrides?.responsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(row.overrides.responsibleContactId) ? row.overrides.responsibleContactId : null).filter((id): id is string => Boolean(id)),
+    ])];
+    const responsiblePeople = canViewResponsiblePeople && responsibleIds.length
+      ? await context.pool.query<{ id: string; name: string }>("SELECT id,concat_ws(' ',first_name,last_name) AS name FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, responsibleIds])
+      : { rows: [] as Array<{ id: string; name: string }> };
+    const responsibleNames = new Map(responsiblePeople.rows.map((person) => [person.id, person.name]));
+    const signupGroupIds = [...new Set([
+      ...appointments.map((row) => row.signup_group_id).filter((id): id is string => Boolean(id)),
+      ...exceptions.rows.map((row) => typeof row.overrides?.signupGroupId === "string" ? row.overrides.signupGroupId : null).filter((id): id is string => Boolean(id)),
+    ])];
+    const signupGroups = signupGroupIds.length ? await context.pool.query<{ id: string; name: string; public_signup_enabled: boolean; public_signup_token: string | null }>(
+      "SELECT id,name,public_signup_enabled,public_signup_token FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, signupGroupIds],
+    ) : { rows: [] as Array<{ id: string; name: string; public_signup_enabled: boolean; public_signup_token: string | null }> };
+    const signupGroupsById = new Map(signupGroups.rows.map((group) => [group.id, group]));
+    const extraMap = new Map<string, Array<{ startsAt: string; endsAt: string }>>();
+    for (const row of extraDates.rows) extraMap.set(row.appointment_id, [...(extraMap.get(row.appointment_id) ?? []), { startsAt: row.starts_at.replace(" ", "T"), endsAt: row.ends_at.replace(" ", "T") }]);
+    const links = new Map<string, string[]>();
+    for (const row of resourceLinks.rows) links.set(row.appointment_id, [...(links.get(row.appointment_id) ?? []), row.resource_booking_id]);
+    const output: Occurrence[] = [];
+    for (const row of appointments) {
+      const baseStart = wallDate(row.starts_at);
+      const baseEnd = wallDate(row.ends_at);
+      const duration = Math.max(0, baseEnd.getTime() - baseStart.getTime());
+      const starts = occurrenceStarts(row, from, to);
+      const extras = (extraMap.get(row.id) ?? []).map((extra) => wallDate(extra.startsAt));
+      const deduplicatedStarts = [...new Map([...starts, ...extras].map((start) => [localDateTime(start), start])).values()];
+      for (const start of deduplicatedStarts) {
+        const original = localDateTime(start);
+        const exception = exceptionMap.get(`${row.id}:${original}`);
+        if (exception?.cancelled) continue;
+        const override = exception?.overrides ?? {};
+        const signupGroupId = Object.prototype.hasOwnProperty.call(override, "signupGroupId") ? override.signupGroupId as string | null : row.signup_group_id;
+        const rawResponsibleContactId = Object.prototype.hasOwnProperty.call(override, "responsibleContactId") ? override.responsibleContactId : row.responsible_contact_id;
+        const responsibleContactId = typeof rawResponsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(rawResponsibleContactId) ? rawResponsibleContactId : null;
+        const signupGroup = signupGroupId ? signupGroupsById.get(signupGroupId) : undefined;
+        const startAt = cleanLocalDateTime(override.startsAt) ?? original;
+        const endAt = cleanLocalDateTime(override.endsAt) ?? (extras.some((date) => localDateTime(date) === original)
+          ? (extraMap.get(row.id)?.find((extra) => extra.startsAt === original)?.endsAt ?? localDateTime(new Date(start.getTime() + duration)))
+          : localDateTime(new Date(start.getTime() + duration)));
+        const end = wallDate(endAt);
+        if (end < wallDate(from) || startAt > to) continue;
+        output.push({
+          appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
+          calendarName: row.calendar_name, calendarScope: row.calendar_scope, groupId: row.group_id,
+          title: override.title ?? row.title, subtitle: override.subtitle ?? row.subtitle, description: override.description ?? row.description,
+          allDay: override.allDay ?? row.all_day, place: override.place ?? row.place, url: override.url ?? row.url,
+          internalOnly: override.internalOnly ?? row.internal_only, tags: override.tags ?? row.tags,
+          recurrence: row.recurrence, linkedEventId: Object.prototype.hasOwnProperty.call(override, "linkedEventId") ? override.linkedEventId as string | null : row.linked_event_id, resourceBookingIds: links.get(row.id) ?? [],
+          signupGroupId, signupGroupName: signupGroup?.name ?? row.signup_group_name ?? null,
+          signupToken: signupGroup?.public_signup_enabled ? signupGroup.public_signup_token : null,
+          responsibleContactId: canViewResponsiblePeople && responsibleContactId && responsibleNames.has(responsibleContactId) ? responsibleContactId : null,
+          responsiblePersonName: canViewResponsiblePeople && responsibleContactId ? responsibleNames.get(responsibleContactId) ?? null : null,
+          imageUrl: row.has_image ? `/api/modules/church-calendar/appointments/${row.id}/image` : null,
+          canManage: canManageCalendar(request, row.calendar_scope, row.owner_user_id),
+        });
+      }
+    }
+    return output.sort((left, right) => left.occurrenceStartAt.localeCompare(right.occurrenceStartAt)).slice(0, 2500);
+  });
+
+  app.post<{ Params: { id: string }; Body: { throughDate: string } }>("/api/modules/church-calendar/appointments/:id/registration-groups", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["throughDate"], properties: { throughDate: { type: "string", format: "date" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
+    if (!canManageGroups) return responseError(reply, 403, "Group management access is required to create registration groups.");
+    const client = await context.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const found = await client.query<AppointmentRow>(
+        `SELECT appointment.id,appointment.title,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+                appointment.ends_at::text AS ends_at,appointment.recurrence,appointment.all_day,appointment.subtitle,appointment.description,
+                appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.linked_event_id,appointment.created_by,
+                appointment.signup_group_id,calendar.scope AS calendar_scope,calendar.name AS calendar_name,calendar.owner_user_id,calendar.group_id
+           FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+          WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL FOR UPDATE OF appointment`,
+        [request.params.id, departmentId],
+      );
+      const row = found.rows[0];
+      if (!row) { await client.query("ROLLBACK"); return responseError(reply, 404, "Appointment not found."); }
+      if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) { await client.query("ROLLBACK"); return responseError(reply, 403, "You cannot change this appointment."); }
+      if (!row.recurrence) { await client.query("ROLLBACK"); return responseError(reply, 400, "Registration groups can be generated only for a recurring appointment."); }
+      const startDate = row.starts_at.slice(0, 10);
+      const throughDate = request.body.throughDate;
+      const maximum = new Date(`${startDate}T00:00:00Z`); maximum.setUTCFullYear(maximum.getUTCFullYear() + 5);
+      if (throughDate < startDate || throughDate > maximum.toISOString().slice(0, 10)) { await client.query("ROLLBACK"); return responseError(reply, 400, "Choose an end date from the series start through five years ahead."); }
+      const recurrenceStarts = occurrenceStarts(row, `${startDate}T00:00`, `${throughDate}T23:59`, 501).map(localDateTime);
+      const extraDates = await client.query<{ starts_at: string }>(
+        "SELECT to_char(starts_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS starts_at FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp AND starts_at < ($3::date + 1)::timestamp ORDER BY starts_at LIMIT 501",
+        [row.id, `${startDate}T00:00:00`, throughDate],
+      );
+      const starts = [...new Set([...recurrenceStarts, ...extraDates.rows.map((extra) => extra.starts_at.replace(" ", "T"))])].sort();
+      if (starts.length > 500) { await client.query("ROLLBACK"); return responseError(reply, 400, "That date range contains more than 500 occurrences. Choose an earlier end date."); }
+      if (!starts.length) { await client.query("ROLLBACK"); return responseError(reply, 400, "No generated occurrences fall within that date range."); }
+      const existing = await client.query<{ original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
+        `SELECT to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides
+           FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start >= $2::timestamp AND original_start < ($3::date + 1)::timestamp FOR UPDATE`,
+        [row.id, `${startDate}T00:00:00`, throughDate],
+      );
+      const byStart = new Map(existing.rows.map((item) => [item.original_start.replace(" ", "T"), item]));
+      const pending = starts.filter((start) => !byStart.get(start)?.cancelled && !byStart.get(start)?.overrides?.signupGroupId);
+      await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [userId(request)]);
+      let created = 0;
+      for (const start of pending) {
+        const groupId = randomUUID();
+        const occurrenceDate = start.slice(0, 10);
+        const occurrenceTime = start.slice(11, 19).replace(/:/g, "");
+        const name = `Reg ${occurrenceDate}-${occurrenceTime} ${row.title.slice(0, 70)} ${row.id.slice(0, 8)}`.slice(0, 120);
+        const description = `Registration group for “${row.title.slice(0, 150)}” on ${occurrenceDate}. Public signup is disabled until a manager enables it.`;
+        try {
+          await client.query("INSERT INTO church_groups(id,department_id,name,description,status,starts_on,ends_on) VALUES($1,$2,$3,$4,'draft',$5,$5)", [groupId, departmentId, name, description, occurrenceDate]);
+        } catch {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, `A group named “${name}” already exists. Rename or remove it before generating registration groups.`);
+        }
+        await client.query(
+          `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
+           VALUES($1,$2::timestamp,false,jsonb_build_object('signupGroupId',$3::text),$4)
+           ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=false,overrides=church_calendar_appointment_exceptions.overrides || EXCLUDED.overrides,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+          [row.id, start, groupId, userId(request)],
+        );
+        created += 1;
+      }
+      await client.query("COMMIT");
+      context.realtime.publish("module:church-calendar:changed", departmentId, { action: "registration-groups-generated", appointmentId: row.id, created });
+      return { created, alreadyLinked: starts.filter((start) => Boolean(byStart.get(start)?.overrides?.signupGroupId)).length, skippedCancelled: starts.filter((start) => byStart.get(start)?.cancelled).length, throughDate };
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  });
+
+  app.post<{ Params: { id: string }; Body: { throughDate: string; templateId: string; kind: "service" | "meeting" | "community" | "other"; preview?: boolean; staffAssignments?: Array<{ positionIndex: number; positionName: string; contactId: string }> } }>("/api/modules/church-calendar/appointments/:id/service-events", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["throughDate", "templateId", "kind"], properties: { throughDate: { type: "string", format: "date" }, templateId: { type: "string", format: "uuid" }, kind: { type: "string", enum: ["service", "meeting", "community", "other"] }, preview: { type: "boolean" }, staffAssignments: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["positionIndex", "positionName", "contactId"], properties: { positionIndex: { type: "integer", minimum: 0, maximum: 39 }, positionName: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const canManageEvents = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+    if (!canManageEvents) return responseError(reply, 403, "Event management access is required to generate service events.");
+    const client = await context.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const found = await client.query<AppointmentRow>(
+        `SELECT appointment.id,appointment.title,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+                to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,appointment.recurrence,appointment.all_day,
+                appointment.subtitle,appointment.description,appointment.place,appointment.url,appointment.internal_only,appointment.tags,
+                appointment.linked_event_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
+                calendar.owner_user_id,calendar.group_id
+           FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+          WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL FOR UPDATE OF appointment`,
+        [request.params.id, departmentId],
+      );
+      const row = found.rows[0];
+      if (!row) { await client.query("ROLLBACK"); return responseError(reply, 404, "Appointment not found."); }
+      if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) { await client.query("ROLLBACK"); return responseError(reply, 403, "You cannot change this appointment."); }
+      if (!row.recurrence) { await client.query("ROLLBACK"); return responseError(reply, 400, "Service events can be generated only for a recurring appointment."); }
+      const startDate = row.starts_at.slice(0, 10);
+      const throughDate = request.body.throughDate;
+      const maximum = new Date(`${startDate}T00:00:00Z`); maximum.setUTCFullYear(maximum.getUTCFullYear() + 5);
+      if (throughDate < startDate || throughDate > maximum.toISOString().slice(0, 10)) { await client.query("ROLLBACK"); return responseError(reply, 400, "Choose an end date from the series start through five years ahead."); }
+      const templateResult = await client.query<{ positions: unknown; items: unknown }>("SELECT positions,items FROM service_plan_templates WHERE id=$1 AND department_id=$2 AND active=true FOR SHARE", [request.body.templateId, departmentId]);
+      const template = templateResult.rows[0];
+      if (!template) { await client.query("ROLLBACK"); return responseError(reply, 404, "Active service-plan template not found in this location."); }
+      const validPosition = (item: unknown): item is { name: string } => Boolean(item && typeof item === "object" && !Array.isArray(item) && typeof (item as Record<string, unknown>).name === "string" && ((item as Record<string, unknown>).name as string).trim().length > 0 && ((item as Record<string, unknown>).name as string).length <= 80);
+      const validItem = (item: unknown): item is Record<string, unknown> => {
+        if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+        const value = item as Record<string, unknown>;
+        const allowed = new Set(["title", "startTime", "durationMinutes", "notes", "songId", "arrangementId", "position"]);
+        if (Object.keys(value).some((key) => !allowed.has(key))) return false;
+        return typeof value.title === "string" && value.title.trim().length > 0 && value.title.length <= 160
+          && (value.startTime === undefined || (typeof value.startTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.startTime)))
+          && (value.durationMinutes === undefined || (Number.isInteger(value.durationMinutes) && Number(value.durationMinutes) >= 1 && Number(value.durationMinutes) <= 1440))
+          && (value.notes === undefined || (typeof value.notes === "string" && value.notes.length <= 500))
+          && (value.songId === undefined || (typeof value.songId === "string" && /^[0-9a-f-]{36}$/i.test(value.songId)))
+          && (value.arrangementId === undefined || (typeof value.arrangementId === "string" && /^[0-9a-f-]{36}$/i.test(value.arrangementId)))
+          && (value.position === undefined || (typeof value.position === "string" && value.position.length <= 80));
+      };
+      if (!Array.isArray(template.positions) || template.positions.length > 40 || !template.positions.every(validPosition)
+        || !Array.isArray(template.items) || template.items.length > 100 || !template.items.every(validItem)) {
+        await client.query("ROLLBACK"); return responseError(reply, 409, "The selected service-plan template has invalid or unsupported content. Review and save the template before generating events.");
+      }
+      const positions = template.positions.map((item) => ({ name: item.name.trim() }));
+      const items = template.items;
+      const positionNames = new Set(positions.map((position) => position.name.trim().toLocaleLowerCase()));
+      const requestedAssignments = request.body.staffAssignments ?? [];
+      if (requestedAssignments.length && !canSeePrivatePeople(request)) { await client.query("ROLLBACK"); return responseError(reply, 403, "Private People access is required to assign volunteers during generation."); }
+      const assignmentsByIndex = new Map<number, string>();
+      for (const assignment of requestedAssignments) {
+        if (!Number.isInteger(assignment.positionIndex) || assignment.positionIndex < 0 || assignment.positionIndex >= positions.length
+          || assignmentsByIndex.has(assignment.positionIndex)) {
+          await client.query("ROLLBACK"); return responseError(reply, 400, "Choose each template role at most once for staff assignments.");
+        }
+        if (assignment.positionName.trim().toLocaleLowerCase() !== positions[assignment.positionIndex].name.trim().toLocaleLowerCase()) {
+          await client.query("ROLLBACK"); return responseError(reply, 409, "The template roles changed after the assignment form loaded. Refresh the calendar and choose the assignments again.");
+        }
+        assignmentsByIndex.set(assignment.positionIndex, assignment.contactId);
+      }
+      const assignedContactIds = [...new Set(requestedAssignments.map((assignment) => assignment.contactId))];
+      if (assignedContactIds.length) {
+        const contacts = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, assignedContactIds]);
+        if (contacts.rowCount !== assignedContactIds.length) { await client.query("ROLLBACK"); return responseError(reply, 400, "Every assigned volunteer must be a People record in this location."); }
+      }
+      const positionsWithAssignments = positions.map((position, index) => {
+        const contactId = assignmentsByIndex.get(index);
+        return contactId ? { ...position, contactId } : position;
+      });
+      if (items.some((item) => typeof item.position === "string" && item.position.trim() && !positionNames.has(item.position.trim().toLocaleLowerCase()))) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template has plan items assigned to a role that is not present in the template."); }
+      const songIds = [...new Set(items.flatMap((item) => typeof item.songId === "string" && /^[0-9a-f-]{36}$/i.test(item.songId) ? [item.songId] : []))];
+      const arrangementRows = items.flatMap((item) => typeof item.songId === "string" && typeof item.arrangementId === "string" ? [{ songId: item.songId, arrangementId: item.arrangementId }] : []);
+      if (items.some((item) => item.arrangementId && !item.songId)) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template has an arrangement without a song."); }
+      if (songIds.length) {
+        const songs = await client.query("SELECT id FROM worship_songs WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, songIds]);
+        if (songs.rowCount !== songIds.length) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template contains a song outside this location."); }
+      }
+      if (arrangementRows.length) {
+        const arrangements = await client.query(`SELECT selected."arrangementId" FROM jsonb_to_recordset($2::jsonb) AS selected("songId" uuid,"arrangementId" uuid)
+          JOIN worship_songs song ON song.id=selected."songId" AND song.department_id=$1
+          JOIN worship_song_arrangements arrangement ON arrangement.id=selected."arrangementId" AND arrangement.song_id=song.id`, [departmentId, JSON.stringify(arrangementRows)]);
+        if (arrangements.rowCount !== arrangementRows.length) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template contains an arrangement that does not belong to its song."); }
+      }
+      const recurrenceStarts = occurrenceStarts(row, `${startDate}T00:00`, `${throughDate}T23:59`, 501).map(localDateTime);
+      const extraDates = await client.query<{ starts_at: string }>("SELECT to_char(starts_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS starts_at FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp AND starts_at < ($3::date + 1)::timestamp ORDER BY starts_at LIMIT 501", [row.id, `${startDate}T00:00:00`, throughDate]);
+      const starts = [...new Set([...recurrenceStarts, ...extraDates.rows.map((extra) => extra.starts_at.replace(" ", "T"))])].sort();
+      if (starts.length > 500) { await client.query("ROLLBACK"); return responseError(reply, 400, "That date range contains more than 500 occurrences. Choose an earlier end date."); }
+      if (!starts.length) { await client.query("ROLLBACK"); return responseError(reply, 400, "No generated occurrences fall within that date range."); }
+      const exceptions = await client.query<{ original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
+        `SELECT to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides FROM church_calendar_appointment_exceptions
+          WHERE appointment_id=$1 AND original_start >= $2::timestamp AND original_start < ($3::date + 1)::timestamp FOR UPDATE`,
+        [row.id, `${startDate}T00:00:00`, throughDate],
+      );
+      const byStart = new Map(exceptions.rows.map((item) => [item.original_start.replace(" ", "T"), item]));
+      const effectiveLink = (start: string) => {
+        const override = byStart.get(start)?.overrides ?? {};
+        return Object.prototype.hasOwnProperty.call(override, "linkedEventId") ? override.linkedEventId : row.linked_event_id;
+      };
+      const pending = starts.filter((start) => !byStart.get(start)?.cancelled && !effectiveLink(start));
+      if (request.body.preview) {
+        await client.query("ROLLBACK");
+        return { preview: true, occurrences: starts.length, planned: pending.length, alreadyLinked: starts.filter((start) => Boolean(effectiveLink(start))).length, skippedCancelled: starts.filter((start) => Boolean(byStart.get(start)?.cancelled)).length, throughDate };
+      }
+      const startClock = row.all_day ? "00:00" : row.starts_at.slice(11, 16);
+      let durationMs = row.all_day || !row.ends_at ? 0 : wallDate(row.ends_at).getTime() - wallDate(row.starts_at).getTime();
+      if (durationMs < 0 || durationMs > 86_400_000) { await client.query("ROLLBACK"); return responseError(reply, 400, "Appointments crossing more than one day cannot be converted into service events."); }
+      let created = 0;
+      for (const start of pending) {
+        const startDateTime = new Date(`${start}Z`);
+        const endDateTime = new Date(startDateTime.getTime() + durationMs);
+        const endDate = localDateTime(endDateTime).slice(0, 10);
+        if (endDate !== start.slice(0, 10)) { await client.query("ROLLBACK"); return responseError(reply, 400, "An appointment occurrence crosses midnight and cannot be converted into a service event."); }
+        const startTime = row.all_day ? "00:00" : start.slice(11, 16);
+        const endTime = row.all_day || !row.ends_at ? null : localDateTime(endDateTime).slice(11, 16);
+        if (endTime && endTime <= startTime) { await client.query("ROLLBACK"); return responseError(reply, 400, "The appointment duration is not valid for a service event."); }
+        const eventId = randomUUID();
+        const eventLocation = (row.place || row.calendar_name || "Church").slice(0, 160);
+        const eventDescription = row.description.slice(0, 2000) || null;
+        await client.query(
+          `INSERT INTO service_events(id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,asset_ids,positions,time_plan,recurrence_id,registration_enabled,registration_capacity,registration_token)
+           VALUES($1,$2,$3,$4,$5::date,$6,$7::time,$8::time,$9,$10,'',ARRAY[]::uuid[],$11::jsonb,$12::jsonb,$13,false,NULL,NULL)`,
+          [eventId, departmentId, row.title, request.body.kind, start.slice(0, 10), Boolean(row.all_day), startTime, endTime, eventLocation, eventDescription, JSON.stringify(positionsWithAssignments), JSON.stringify(items), row.id],
+        );
+        await client.query(
+          `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
+           VALUES($1,$2::timestamp,false,jsonb_build_object('linkedEventId',$3::text),$4)
+           ON CONFLICT(appointment_id,original_start) DO UPDATE SET overrides=church_calendar_appointment_exceptions.overrides || EXCLUDED.overrides,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+          [row.id, start, eventId, userId(request)],
+        );
+        await client.query(
+          "INSERT INTO church_calendar_event_generations(id,department_id,appointment_id,occurrence_start,service_event_id,template_id,actor_user_id) VALUES($1,$2,$3,$4::timestamp,$5,$6,$7)",
+          [randomUUID(), departmentId, row.id, start, eventId, request.body.templateId, userId(request)],
+        );
+        created += 1;
+      }
+      await client.query("COMMIT");
+      context.realtime.publish("module:church-calendar:changed", departmentId, { action: "service-events-generated", appointmentId: row.id, created });
+      return { preview: false, created, alreadyLinked: starts.filter((start) => Boolean(effectiveLink(start))).length, skippedCancelled: starts.filter((start) => Boolean(byStart.get(start)?.cancelled)).length, throughDate };
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  });
+
+  app.put<{ Params: { id: string }; Body: { filename: string; contentType: string; data: string } }>("/api/modules/church-calendar/appointments/:id/image", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["filename", "contentType", "data"], properties: { filename: { type: "string", minLength: 1, maxLength: 180 }, contentType: { type: "string", enum: ["image/jpeg", "image/png", "image/gif", "image/webp"] }, data: { type: "string", minLength: 4, maxLength: 1398104 } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const appointment = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id
+        WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL`, [request.params.id, departmentId]);
+    const row = appointment.rows[0];
+    if (!row) return responseError(reply, 404, "Appointment not found.");
+    if (!canManageCalendar(request, row.scope, row.owner_user_id)) return responseError(reply, 403, "You cannot change this appointment image.");
+    const cleanName = request.body.filename.replace(/[\\/\u0000-\u001f\u007f]/g, "_").trim().slice(0, 180) || "appointment-image";
+    const data = request.body.data;
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(data) || data.length % 4 !== 0) return responseError(reply, 400, "The image data is invalid.");
+    const bytes = Buffer.from(data, "base64");
+    if (!bytes.length || bytes.length > 1_048_576) return responseError(reply, 400, "Appointment images must be 1 MiB or smaller.");
+    const validSignature = request.body.contentType === "image/jpeg" ? bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+      : request.body.contentType === "image/png" ? bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))
+      : request.body.contentType === "image/gif" ? bytes.subarray(0, 3).toString("ascii") === "GIF"
+      : bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+    if (!validSignature) return responseError(reply, 400, "The file contents do not match the selected image type.");
+    await context.pool.query(
+      `INSERT INTO church_calendar_appointment_images(appointment_id,department_id,content_type,filename,content,uploaded_by)
+       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(appointment_id) DO UPDATE SET department_id=EXCLUDED.department_id,content_type=EXCLUDED.content_type,filename=EXCLUDED.filename,content=EXCLUDED.content,uploaded_by=EXCLUDED.uploaded_by,updated_at=now()`,
+      [request.params.id, departmentId, request.body.contentType, cleanName, bytes, userId(request)],
+    );
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-image-updated", appointmentId: request.params.id });
+    return { imageUrl: `/api/modules/church-calendar/appointments/${request.params.id}/image` };
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/image", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const appointment = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
+    if (!appointment.rows[0]) return responseError(reply, 404, "Appointment not found.");
+    if (!canManageCalendar(request, appointment.rows[0].scope, appointment.rows[0].owner_user_id)) return responseError(reply, 403, "You cannot change this appointment image.");
+    await context.pool.query("DELETE FROM church_calendar_appointment_images WHERE appointment_id=$1 AND department_id=$2", [request.params.id, departmentId]);
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-image-removed", appointmentId: request.params.id });
+    return { removed: true };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/image", async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const image = await context.pool.query<{ content: Buffer; content_type: string; filename: string }>(
+      `SELECT image.content,image.content_type,image.filename FROM church_calendar_appointment_images image
+        JOIN church_calendar_appointments appointment ON appointment.id=image.appointment_id AND appointment.department_id=image.department_id
+        JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+       WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+         AND (calendar.scope='community' OR calendar.owner_user_id=$3 OR $4 OR EXISTS(
+           SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
+            WHERE membership.user_id=$3 AND membership.department_id=$2 AND member.group_id=calendar.group_id))`,
+      [request.params.id, departmentId, userId(request), hasGroupVisibility(request)]);
+    const file = image.rows[0];
+    if (!file) return responseError(reply, 404, "Appointment image not found.");
+    return reply.type(file.content_type).header("Content-Disposition", `inline; filename="${file.filename.replace(/["\\\r\n]/g, "_")}"`).header("Cache-Control", "private, no-store").send(file.content);
+  });
+
+  app.post<{ Body: AppointmentInput }>("/api/modules/church-calendar/appointments", { schema: { body: {
+    type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
+    properties: { calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" } },
+  } } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const normalized = normalizeInput(request.body);
+    if (typeof normalized === "string") return responseError(reply, 400, normalized);
+    if ("responsibleContactId" in request.body) {
+      if (!canSeePrivatePeople(request)) return responseError(reply, 403, "Private People access is required to set an appointment contact.");
+      if (normalized.responsibleContactId) {
+        const person = await context.pool.query("SELECT 1 FROM contacts WHERE id=$1 AND department_id=$2", [normalized.responsibleContactId, departmentId]);
+        if (!person.rowCount) return responseError(reply, 400, "Choose a People record from this location.");
+      }
+    }
+    const calendarResult = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>("SELECT scope,owner_user_id FROM church_calendar_calendars WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [normalized.calendarId, departmentId]);
+    const calendar = calendarResult.rows[0];
+    if (!calendar) return responseError(reply, 404, "The calendar was not found.");
+    if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to add appointments to this calendar.");
+    if (normalized.linkedEventId) {
+      const event = await context.pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2", [normalized.linkedEventId, departmentId]);
+      if (!event.rowCount) return responseError(reply, 400, "The linked event does not belong to this location.");
+    }
+    if (normalized.signupGroupId) {
+      const group = await context.pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status='active' AND public_signup_enabled=true AND public_signup_token IS NOT NULL AND source_system IS NULL", [normalized.signupGroupId, departmentId]);
+      if (!group.rowCount) return responseError(reply, 400, "Choose an active public-signup group in this location.");
+    }
+    const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
+    if (resourceIds.length) {
+      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
+      const found = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
+      if (found.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
+    }
+    const id = randomUUID();
+    const client = await context.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by)
+         VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18)`,
+        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, normalized.linkedEventId ?? null, normalized.signupGroupId ?? null, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request)],
+      );
+      for (const resourceId of resourceIds) await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3)", [id, resourceId, userId(request)]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-created", appointmentId: id });
+    return reply.code(201).send({ id });
+  });
+
+  app.get("/api/modules/church-calendar/archive", async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query(
+      `SELECT appointment.id AS "appointmentId",appointment.title,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS "startsAt",
+              calendar.id AS "calendarId",calendar.name AS "calendarName",calendar.scope AS "calendarScope",calendar.owner_user_id AS "ownerUserId"
+         FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id
+        WHERE appointment.department_id=$1 AND appointment.archived_at IS NOT NULL AND calendar.archived_at IS NULL
+          AND (calendar.scope='community' OR calendar.owner_user_id=$2 OR $3 OR EXISTS (
+            SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
+             WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=calendar.group_id))
+        ORDER BY appointment.archived_at DESC LIMIT 250`, [departmentId, userId(request), hasGroupVisibility(request)]);
+    return result.rows.filter((row) => canManageCalendar(request, row.calendarScope, row.ownerUserId));
+  });
+
+  app.post<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/restore", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query<{ calendar_scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT calendar.scope AS calendar_scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id
+        WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NOT NULL`, [request.params.id, departmentId]);
+    const row = result.rows[0];
+    if (!row) return responseError(reply, 404, "The archived appointment was not found.");
+    if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) return responseError(reply, 403, "You do not have permission to restore this appointment.");
+    await context.pool.query("UPDATE church_calendar_appointments SET archived_at=NULL,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-restored", appointmentId: request.params.id });
+    return { restored: true };
+  });
+
+  app.put<{ Params: { id: string }; Querystring: { scope?: "occurrence" | "future" | "series" }; Body: AppointmentInput & { occurrenceStartAt?: string } }>("/api/modules/church-calendar/appointments/:id", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["occurrence", "future", "series"] } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const normalized = normalizeInput(request.body);
+    if (typeof normalized === "string") return responseError(reply, 400, normalized);
+    const found = await context.pool.query<AppointmentRow>(
+      `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,appointment.linked_event_id,appointment.signup_group_id,appointment.responsible_contact_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,calendar.owner_user_id,calendar.group_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL`, [request.params.id, departmentId]);
+    const row = found.rows[0];
+    if (!row) return responseError(reply, 404, "The appointment was not found.");
+    if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) return responseError(reply, 403, "You do not have permission to edit this appointment.");
+    if ("responsibleContactId" in request.body) {
+      if (!canSeePrivatePeople(request)) return responseError(reply, 403, "Private People access is required to set an appointment contact.");
+      if (normalized.responsibleContactId) {
+        const person = await context.pool.query("SELECT 1 FROM contacts WHERE id=$1 AND department_id=$2", [normalized.responsibleContactId, departmentId]);
+        if (!person.rowCount) return responseError(reply, 400, "Choose a People record from this location.");
+      }
+    }
+    if (normalized.linkedEventId) {
+      const event = await context.pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2", [normalized.linkedEventId, departmentId]);
+      if (!event.rowCount) return responseError(reply, 400, "The linked event does not belong to this location.");
+    }
+    if (normalized.signupGroupId) {
+      const group = await context.pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status='active' AND source_system IS NULL", [normalized.signupGroupId, departmentId]);
+      if (!group.rowCount) return responseError(reply, 400, "Choose a local group in this location.");
+    }
+    const values = normalized;
+    const scope = request.query.scope ?? "series";
+    let resourceTargetId = row.id;
+    const occurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
+    const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
+    if (resourceIds.length) {
+      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
+      const resourceRows = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
+      if (resourceRows.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
+    }
+    if (scope === "occurrence" && row.recurrence) {
+      if (!occurrenceStart) return responseError(reply, 400, "Choose which occurrence to edit.");
+      const overrides = Object.fromEntries(calendarFields.filter((field) => field in values).map((field) => [field, values[field]]));
+      if (!canSeePrivatePeople(request) && !("responsibleContactId" in request.body)) {
+        const existing = await context.pool.query<{ overrides: Record<string, unknown> }>(
+          "SELECT overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp",
+          [row.id, occurrenceStart],
+        );
+        if (existing.rows[0]?.overrides && Object.prototype.hasOwnProperty.call(existing.rows[0].overrides, "responsibleContactId")) {
+          overrides.responsibleContactId = existing.rows[0].overrides.responsibleContactId;
+        }
+      }
+      await context.pool.query(
+        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by) VALUES($1,$2::timestamp,false,$3::jsonb,$4)
+         ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=false,overrides=EXCLUDED.overrides,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+        [row.id, occurrenceStart, JSON.stringify(overrides), userId(request)],
+      );
+    } else if (scope === "future" && row.recurrence) {
+      if (!occurrenceStart || occurrenceStart <= row.starts_at) return responseError(reply, 400, "Choose an occurrence after the first appointment to split the series.");
+      const previousDay = addDays(startOfDay(occurrenceStart), -1).toISOString().slice(0, 10);
+      const nextStart = cleanLocalDateTime(normalized.startsAt)!;
+      const nextEnd = cleanLocalDateTime(normalized.endsAt)!;
+      const client = await context.pool.connect();
+      const newId = randomUUID();
+      resourceTargetId = newId;
+      try {
+        await client.query("BEGIN");
+        const shortened = { ...row.recurrence, endsOn: previousDay, count: undefined };
+        await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(shortened)]);
+        await client.query(
+          `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by)
+           VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18)`,
+          [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, nextStart, nextEnd, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(normalized.recurrence ?? row.recurrence), values.linkedEventId ?? row.linked_event_id, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, userId(request)],
+        );
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    } else {
+      const currentOccurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
+      const seriesStart = currentOccurrenceStart ? new Date(wallDate(row.starts_at).getTime() + wallDate(normalized.startsAt).getTime() - wallDate(currentOccurrenceStart).getTime()) : wallDate(normalized.startsAt);
+      const seriesStartAt = localDateTime(seriesStart);
+      const seriesDuration = Math.max(0, wallDate(normalized.endsAt).getTime() - wallDate(normalized.startsAt).getTime());
+      const seriesEndAt = localDateTime(new Date(seriesStart.getTime() + seriesDuration));
+      await context.pool.query(
+        `UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,updated_at=now() WHERE id=$1 AND department_id=$2`,
+        [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null],
+      );
+    }
+    await context.pool.query("DELETE FROM church_calendar_resource_links WHERE appointment_id=$1", [resourceTargetId]);
+    for (const resourceId of resourceIds) await context.pool.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3)", [resourceTargetId, resourceId, userId(request)]);
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, scope });
+    return { updated: true };
+  });
+
+  app.delete<{ Params: { id: string }; Querystring: { scope?: "occurrence" | "future" | "series"; occurrenceStartAt?: string } }>("/api/modules/church-calendar/appointments/:id", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["occurrence", "future", "series"] }, occurrenceStartAt: { type: "string", maxLength: 25 } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const found = await context.pool.query<{ id: string; recurrence: Recurrence | null; calendar_scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT appointment.id,appointment.recurrence,calendar.scope AS calendar_scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
+    const row = found.rows[0];
+    if (!row) return responseError(reply, 404, "The appointment was not found.");
+    if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) return responseError(reply, 403, "You do not have permission to delete this appointment.");
+    const scope = request.query.scope ?? "series";
+    const occurrence = cleanLocalDateTime(request.query.occurrenceStartAt);
+    if (scope !== "series" && !occurrence) return responseError(reply, 400, "Choose which occurrence to remove.");
+    if (scope === "occurrence" && row.recurrence) {
+      await context.pool.query(
+        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by) VALUES($1,$2::timestamp,true,'{}',$3)
+         ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=true,overrides='{}',updated_by=EXCLUDED.updated_by,updated_at=now()`, [row.id, occurrence, userId(request)],
+      );
+    } else if (scope === "future" && row.recurrence) {
+      const previousDay = addDays(startOfDay(occurrence!), -1).toISOString().slice(0, 10);
+      await context.pool.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify({ ...row.recurrence, endsOn: previousDay, count: undefined })]);
+    } else {
+      await context.pool.query("UPDATE church_calendar_appointments SET archived_at=now(),updated_at=now() WHERE id=$1 AND department_id=$2", [row.id, departmentId]);
+    }
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-removed", appointmentId: row.id, scope });
+    return { deleted: true };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/modules/church-calendar/appointments/:id/extra-dates", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
+    const calendar = result.rows[0];
+    if (!calendar) return responseError(reply, 404, "The appointment was not found.");
+    if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to view extra dates for this appointment.");
+    const dates = await context.pool.query<{ startsAt: string; endsAt: string }>(
+      `SELECT to_char(starts_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS "startsAt",to_char(ends_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS "endsAt" FROM church_calendar_extra_dates WHERE appointment_id=$1 ORDER BY starts_at LIMIT 501`, [request.params.id]);
+    return dates.rows;
+  });
+
+  app.post<{ Params: { id: string }; Body: { startsAt: string; endsAt: string } }>("/api/modules/church-calendar/appointments/:id/extra-dates", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["startsAt", "endsAt"], properties: { startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
+    const calendar = result.rows[0];
+    if (!calendar) return responseError(reply, 404, "The appointment was not found.");
+    if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to edit this appointment.");
+    const startsAt = cleanLocalDateTime(request.body.startsAt);
+    const endsAt = cleanLocalDateTime(request.body.endsAt);
+    if (!startsAt || !endsAt || endsAt < startsAt) return responseError(reply, 400, "Choose valid start and end times.");
+    await context.pool.query("INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by) VALUES($1,$2::timestamp,$3::timestamp,$4) ON CONFLICT(appointment_id,starts_at) DO UPDATE SET ends_at=EXCLUDED.ends_at", [request.params.id, startsAt, endsAt, userId(request)]);
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "extra-date-added", appointmentId: request.params.id });
+    return reply.code(201).send({ added: true });
+  });
+
+  app.delete<{ Params: { id: string }; Querystring: { startsAt: string } }>("/api/modules/church-calendar/appointments/:id/extra-dates", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    querystring: { type: "object", additionalProperties: false, required: ["startsAt"], properties: { startsAt: { type: "string", minLength: 16, maxLength: 25 } } },
+  } }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+      `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
+    const calendar = result.rows[0];
+    if (!calendar) return responseError(reply, 404, "The appointment was not found.");
+    if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to edit extra dates for this appointment.");
+    const startsAt = cleanLocalDateTime(request.query.startsAt);
+    if (!startsAt) return responseError(reply, 400, "Choose a valid extra-date start time.");
+    const client = await context.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const deleted = await client.query("DELETE FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp RETURNING starts_at", [request.params.id, startsAt]);
+      if (!deleted.rowCount) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 404, "The extra date was not found.");
+      }
+      await client.query("DELETE FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp", [request.params.id, startsAt]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "extra-date-removed", appointmentId: request.params.id });
+    return { deleted: true };
+  });
+}

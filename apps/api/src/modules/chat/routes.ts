@@ -70,20 +70,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   let storageReady = false;
 
   context.replication.register({
-    schemaVersion: "9",
+    schemaVersion: "10",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Chat storage is unavailable."], recordCount: 0 };
       try {
         const result = await pool.query<{ schema: number | null }>("SELECT version AS schema FROM module_chat_schema_version WHERE singleton=true");
-        const counts = await pool.query<{ conversations: string; members: string; messages: string; receipts: string }>(
+        const counts = await pool.query<{ conversations: string; members: string; messages: string; receipts: string; groupLinks: string }>(
           `SELECT (SELECT count(*) FROM module_chat_conversations WHERE department_id=$1)::text conversations,
                   (SELECT count(*) FROM module_chat_conversation_members WHERE department_id=$1)::text members,
                   (SELECT count(*) FROM module_chat_conversation_messages WHERE department_id=$1)::text messages,
-                  (SELECT count(*) FROM module_chat_read_receipts WHERE department_id=$1)::text receipts`, [departmentId]);
+                  (SELECT count(*) FROM module_chat_read_receipts WHERE department_id=$1)::text receipts,
+                  (SELECT count(*) FROM module_chat_group_links WHERE department_id=$1)::text "groupLinks"`, [departmentId]);
         const version = result.rows[0]?.schema;
         const row = counts.rows[0];
-        const recordCount = row ? Number(row.conversations) + Number(row.members) + Number(row.messages) + Number(row.receipts) : 0;
-        return { ready: version === 9, blockers: version === 9 ? [] : ["Chat database schema must be at version 9 on both servers."], recordCount };
+        const recordCount = row ? Number(row.conversations) + Number(row.members) + Number(row.messages) + Number(row.receipts) + Number(row.groupLinks) : 0;
+        return { ready: version === 10, blockers: version === 10 ? [] : ["Chat database schema must be at version 10 on both servers."], recordCount };
       } catch {
         return { ready: false, blockers: ["Chat storage is not initialized on this server."], recordCount: 0 };
       }
@@ -93,11 +94,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const members = await client.query("SELECT conversation_id,user_id,member_role,name_suffix,joined_at FROM module_chat_conversation_members WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId]);
       const messages = await client.query("SELECT id,conversation_id,user_id,body,created_at FROM module_chat_conversation_messages WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
       const receipts = await client.query("SELECT conversation_id,user_id,last_read_message_id,last_read_at FROM module_chat_read_receipts WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId]);
-      return { version: 9, conversations: conversations.rows, members: members.rows, messages: messages.rows, receipts: receipts.rows };
+      const groupLinks = await client.query("SELECT conversation_id,group_id,created_at FROM module_chat_group_links WHERE department_id=$1 ORDER BY conversation_id", [departmentId]);
+      return { version: 10, conversations: conversations.rows, members: members.rows, messages: messages.rows, receipts: receipts.rows, groupLinks: groupLinks.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      const snapshot = input as { version?: unknown; conversations?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>>; messages?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>> };
-      if (!snapshot || snapshot.version !== 9 || !Array.isArray(snapshot.conversations) || !Array.isArray(snapshot.members) || !Array.isArray(snapshot.messages) || !Array.isArray(snapshot.receipts)) throw new Error("The Chat snapshot is invalid or uses an unsupported schema.");
+      const snapshot = input as { version?: unknown; conversations?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>>; messages?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>>; groupLinks?: Array<Record<string, unknown>> };
+      if (!snapshot || snapshot.version !== 10 || !Array.isArray(snapshot.conversations) || !Array.isArray(snapshot.members) || !Array.isArray(snapshot.messages) || !Array.isArray(snapshot.receipts) || !Array.isArray(snapshot.groupLinks)) throw new Error("The Chat snapshot is invalid or uses an unsupported schema.");
       await client.query("DELETE FROM module_chat_conversations WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM module_chat_presence WHERE department_id=$1", [departmentId]);
       for (const row of snapshot.conversations) {
@@ -122,15 +124,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!userId) throw new Error("A Chat read receipt has no matching account on the standby server.");
         await client.query("INSERT INTO module_chat_read_receipts(conversation_id,department_id,user_id,last_read_message_id,last_read_at) VALUES($1,$2,$3,$4,$5)", [row.conversation_id, departmentId, userId, row.last_read_message_id, row.last_read_at]);
       }
-      return { recordCount: snapshot.conversations.length + snapshot.members.length + snapshot.messages.length + snapshot.receipts.length };
+      for (const row of snapshot.groupLinks) await client.query("INSERT INTO module_chat_group_links(conversation_id,department_id,group_id,created_at) VALUES($1,$2,$3,$4)", [row.conversation_id, departmentId, row.group_id, row.created_at]);
+      return { recordCount: snapshot.conversations.length + snapshot.members.length + snapshot.messages.length + snapshot.receipts.length + snapshot.groupLinks.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      const snapshot = input as { version?: unknown; conversations?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>>; messages?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>> };
-      if (!snapshot || snapshot.version !== 9 || !snapshot.conversations || !snapshot.members || !snapshot.messages || !snapshot.receipts) return { ready: false, blockers: ["No supported Chat snapshot is available."] };
+      const snapshot = input as { version?: unknown; conversations?: Array<Record<string, unknown>>; members?: Array<Record<string, unknown>>; messages?: Array<Record<string, unknown>>; receipts?: Array<Record<string, unknown>>; groupLinks?: Array<Record<string, unknown>> };
+      if (!snapshot || snapshot.version !== 10 || !snapshot.conversations || !snapshot.members || !snapshot.messages || !snapshot.receipts || !snapshot.groupLinks) return { ready: false, blockers: ["No supported Chat snapshot is available."] };
       const actualConversations = (await client.query("SELECT id,kind,name,title_suffix,direct_key,created_by,created_at FROM module_chat_conversations WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualMembers = (await client.query("SELECT conversation_id,user_id,member_role,name_suffix,joined_at FROM module_chat_conversation_members WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualMessages = (await client.query("SELECT id,conversation_id,user_id,body,created_at FROM module_chat_conversation_messages WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualReceipts = (await client.query("SELECT conversation_id,user_id,last_read_message_id,last_read_at FROM module_chat_read_receipts WHERE department_id=$1 ORDER BY conversation_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualGroupLinks = (await client.query("SELECT conversation_id,group_id,created_at FROM module_chat_group_links WHERE department_id=$1 ORDER BY conversation_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const mapping = restoreContext?.userIdMap ?? new Map<string, string>();
       const snapshotMembers = snapshot.members;
       const mapped = (rows: Array<Record<string, unknown>>, fields: string[]) => rows.map((source) => {
@@ -155,7 +159,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!same(expectedConversations, actualConversations)
         || !same(mapped(snapshot.members, ["user_id"]), actualMembers)
         || !same(mapped(snapshot.messages, ["user_id"]), actualMessages)
-        || !same(mapped(snapshot.receipts, ["user_id"]), actualReceipts)) return { ready: false, blockers: ["Chat records differ from the source snapshot after restore."] };
+        || !same(mapped(snapshot.receipts, ["user_id"]), actualReceipts)
+        || !same(snapshot.groupLinks, actualGroupLinks)) return { ready: false, blockers: ["Chat records differ from the source snapshot after restore."] };
       return { ready: true, blockers: [] };
     },
   });
@@ -254,6 +259,32 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         CREATE INDEX IF NOT EXISTS module_chat_typing_conversation_idx
           ON module_chat_typing (conversation_id, department_id, typing_at DESC);
+        CREATE TABLE IF NOT EXISTS module_chat_group_links (
+          conversation_id UUID PRIMARY KEY,
+          department_id UUID NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+          group_id UUID NOT NULL REFERENCES church_groups(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (department_id, group_id),
+          FOREIGN KEY (conversation_id, department_id) REFERENCES module_chat_conversations(id, department_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS module_chat_group_links_group_idx
+          ON module_chat_group_links (department_id, group_id);
+        CREATE OR REPLACE FUNCTION module_chat_purge_linked_group_chat() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          DELETE FROM module_chat_conversations conversation
+           USING module_chat_group_links link
+           WHERE link.group_id = OLD.id
+             AND link.department_id = OLD.department_id
+             AND conversation.id = link.conversation_id
+             AND conversation.department_id = link.department_id;
+          RETURN OLD;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS module_chat_group_chat_cleanup ON church_groups;
+        CREATE TRIGGER module_chat_group_chat_cleanup
+          BEFORE DELETE ON church_groups
+          FOR EACH ROW EXECUTE FUNCTION module_chat_purge_linked_group_chat();
       `);
         if ((schema.rows[0]?.version ?? 0) < 5) {
           await client.query(`
@@ -297,7 +328,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           `);
         }
         await client.query(`
-          INSERT INTO module_chat_schema_version (singleton, version) VALUES (true, 9)
+          INSERT INTO module_chat_schema_version (singleton, version) VALUES (true, 10)
           ON CONFLICT (singleton) DO UPDATE SET version = EXCLUDED.version
         `);
         await client.query("COMMIT");
@@ -318,10 +349,46 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return resolveDepartmentId(request, reply);
     }
 
+    function canManageChurchGroups(request: FastifyRequest) {
+      return request.activeDepartmentRole === "site_admin"
+        || (request.activeDepartmentPermissions ?? []).includes("groups_manage")
+        || (request.activeDepartmentModulePermissions?.["group-hierarchy"] ?? []).includes("manage");
+    }
+
+    async function syncGroupConversationMembers(departmentId: string, db: PoolClient | NonNullable<typeof pool> = pool!) {
+      await db.query(`
+        INSERT INTO module_chat_conversation_members(conversation_id,department_id,user_id,member_role)
+        SELECT link.conversation_id,link.department_id,membership.user_id,
+               CASE WHEN conversation.created_by=membership.user_id THEN 'owner'
+                    WHEN lower(regexp_replace(group_member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager') THEN 'admin'
+                    ELSE 'member' END
+          FROM module_chat_group_links link
+          JOIN module_chat_conversations conversation ON conversation.id=link.conversation_id AND conversation.department_id=link.department_id
+          JOIN group_members group_member ON group_member.group_id=link.group_id AND group_member.status='active'
+          JOIN department_memberships membership ON membership.department_id=link.department_id AND membership.contact_id=group_member.contact_id
+         WHERE link.department_id=$1
+        ON CONFLICT(conversation_id,user_id) DO UPDATE SET member_role=
+          CASE WHEN module_chat_conversation_members.member_role='owner' THEN 'owner' ELSE EXCLUDED.member_role END`, [departmentId]);
+      await db.query(`
+        DELETE FROM module_chat_conversation_members chat_member USING module_chat_group_links link
+         WHERE chat_member.conversation_id=link.conversation_id AND chat_member.department_id=link.department_id
+           AND link.department_id=$1
+           AND NOT EXISTS (
+             SELECT 1 FROM group_members group_member
+             JOIN department_memberships membership ON membership.department_id=link.department_id AND membership.contact_id=group_member.contact_id
+              WHERE group_member.group_id=link.group_id AND group_member.status='active' AND membership.user_id=chat_member.user_id
+           )`, [departmentId]);
+    }
+
     async function isConversationMember(conversationId: string, departmentId: string, userId: string) {
       const result = await pool!.query(
-        `SELECT 1 FROM module_chat_conversation_members
-          WHERE conversation_id = $1 AND department_id = $2 AND user_id = $3`,
+        `SELECT 1 FROM module_chat_conversation_members chat_member
+          WHERE chat_member.conversation_id = $1 AND chat_member.department_id = $2 AND chat_member.user_id = $3
+            AND (NOT EXISTS (SELECT 1 FROM module_chat_group_links link WHERE link.conversation_id=chat_member.conversation_id AND link.department_id=chat_member.department_id)
+              OR EXISTS (SELECT 1 FROM module_chat_group_links link
+                JOIN group_members group_member ON group_member.group_id=link.group_id AND group_member.status='active'
+                JOIN department_memberships membership ON membership.department_id=link.department_id AND membership.contact_id=group_member.contact_id
+                WHERE link.conversation_id=chat_member.conversation_id AND link.department_id=chat_member.department_id AND membership.user_id=chat_member.user_id))`,
         [conversationId, departmentId, userId],
       );
       return (result.rowCount ?? 0) > 0;
@@ -329,14 +396,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
     async function getConversationAccess(conversationId: string, departmentId: string, userId: string) {
       const result = await pool!.query(
-        `SELECT c.id, c.kind, c.created_by, member.member_role
+        `SELECT c.id, c.kind, c.created_by, member.member_role, group_link.group_id AS group_id
            FROM module_chat_conversations c
+           LEFT JOIN module_chat_group_links group_link ON group_link.conversation_id=c.id AND group_link.department_id=c.department_id
            JOIN module_chat_conversation_members member
              ON member.conversation_id = c.id AND member.department_id = c.department_id
-          WHERE c.id = $1 AND c.department_id = $2 AND member.user_id = $3`,
+          WHERE c.id = $1 AND c.department_id = $2 AND member.user_id = $3
+            AND (NOT EXISTS (SELECT 1 FROM module_chat_group_links link WHERE link.conversation_id=c.id AND link.department_id=c.department_id)
+              OR EXISTS (SELECT 1 FROM module_chat_group_links link
+                JOIN group_members group_member ON group_member.group_id=link.group_id AND group_member.status='active'
+                JOIN department_memberships membership ON membership.department_id=link.department_id AND membership.contact_id=group_member.contact_id
+                WHERE link.conversation_id=c.id AND link.department_id=c.department_id AND membership.user_id=member.user_id))`,
         [conversationId, departmentId, userId],
       );
-      return result.rows[0] as { id: string; kind: "direct" | "group"; created_by: string; member_role: "owner" | "admin" | "member" } | undefined;
+      return result.rows[0] as { id: string; kind: "direct" | "group"; created_by: string; member_role: "owner" | "admin" | "member"; group_id: string | null } | undefined;
     }
 
     const stopPresenceMessages = realtime.onMessage("module:chat:presence", async ({ userId, departmentId }, payload) => {
@@ -402,6 +475,58 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         [departmentId, request.authenticatedUser!.id],
       );
       return { contacts: result.rows.map((row) => ({ id: row.id, displayName: row.display_name, online: row.online, presenceStatus: row.presence_status, isAdmin: row.is_admin })) };
+    });
+
+    routes.get("/api/modules/chat/group-options", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await pool!.query(`
+        SELECT church_group.id,church_group.name,group_member.role,
+               EXISTS(SELECT 1 FROM module_chat_group_links link WHERE link.group_id=church_group.id AND link.department_id=church_group.department_id) AS "hasChat",
+               ($3::boolean OR lower(regexp_replace(group_member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager')) AS "canCreate"
+          FROM group_members group_member
+          JOIN contacts person ON person.id=group_member.contact_id AND person.department_id=$1
+          JOIN church_groups church_group ON church_group.id=group_member.group_id AND church_group.department_id=$1 AND church_group.source_system IS NULL
+          JOIN department_memberships membership ON membership.department_id=$1 AND membership.user_id=$2 AND membership.contact_id=person.id
+         WHERE group_member.status='active'
+         ORDER BY lower(church_group.name),church_group.id LIMIT 1000`, [departmentId, request.authenticatedUser!.id, canManageChurchGroups(request)]);
+      return { groups: result.rows };
+    });
+
+    routes.post<{ Params: { groupId: string } }>("/api/modules/chat/groups/:groupId/conversation", {
+      schema: { params: { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: { type: "string", format: "uuid" } } } },
+    }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const currentUserId = request.authenticatedUser!.id;
+      const client = await pool!.connect();
+      let conversationId = "";
+      let created = false;
+      try {
+        await client.query("BEGIN");
+        const group = await client.query<{ id: string; name: string; source_system: string | null }>("SELECT id,name,source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.groupId, departmentId]);
+        if (!group.rowCount || group.rows[0].source_system) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "A locally managed group was not found." }); }
+        const member = await client.query<{ role: string }>(`SELECT group_member.role FROM group_members group_member
+          JOIN department_memberships membership ON membership.department_id=$2 AND membership.contact_id=group_member.contact_id AND membership.user_id=$3
+          WHERE group_member.group_id=$1 AND group_member.status='active' LIMIT 1`, [request.params.groupId, departmentId, currentUserId]);
+        if (!member.rowCount) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You must be an active member of this group to use its chat." }); }
+        const role = member.rows[0].role.toLowerCase().replace(/[^a-z]/g, "");
+        const canCreate = canManageChurchGroups(request) || ["leader", "coleader", "groupowner", "groupmanager"].includes(role);
+        const linked = await client.query<{ conversation_id: string }>("SELECT conversation_id FROM module_chat_group_links WHERE department_id=$1 AND group_id=$2 FOR UPDATE", [departmentId, request.params.groupId]);
+        if (linked.rowCount) conversationId = linked.rows[0].conversation_id;
+        else {
+          if (!canCreate) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "A group leader or group manager must enable this group chat first." }); }
+          conversationId = randomUUID(); created = true;
+          await client.query("INSERT INTO module_chat_conversations(id,department_id,kind,name,created_by) VALUES($1,$2,'group',$3,$4)", [conversationId, departmentId, group.rows[0].name.slice(0, 80), currentUserId]);
+          await client.query("INSERT INTO module_chat_group_links(conversation_id,department_id,group_id) VALUES($1,$2,$3)", [conversationId, departmentId, request.params.groupId]);
+        }
+        await syncGroupConversationMembers(departmentId, client);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+      realtime.publish("module:chat:changed", departmentId, { action: created ? "group-chat-created" : "group-chat-members-synced", conversationId, groupId: request.params.groupId });
+      return reply.code(created ? 201 : 200).send({ id: conversationId, created });
     });
 
     routes.post<{ Body: { sessionId: string; focused: boolean; notificationsEnabled: boolean } }>("/api/modules/chat/presence", { schema: presenceSchema }, async (request, reply) => {
@@ -488,8 +613,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get("/api/modules/chat/conversations", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
+      await syncGroupConversationMembers(departmentId);
       const result = await pool!.query(
-        `SELECT c.id, c.kind, c.name, c.title_suffix, c.created_by, c.created_at,
+        `SELECT c.id, c.kind, c.name, c.title_suffix, c.created_by, c.created_at, group_link.group_id AS "groupId",
                 COALESCE(json_agg(json_build_object('id', m.user_id, 'displayName', u.display_name, 'role', m.member_role,
                   'online', presence.active,
                   'presenceStatus', CASE WHEN NOT presence.active THEN 'offline' WHEN presence.green THEN 'online' ELSE 'away' END) ORDER BY u.display_name)
@@ -501,6 +627,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                 unread_latest.body AS unread_message_body,
                 unread_latest.author AS unread_message_author
            FROM module_chat_conversations c
+           LEFT JOIN module_chat_group_links group_link ON group_link.conversation_id=c.id AND group_link.department_id=c.department_id
            JOIN module_chat_conversation_members mine
              ON mine.conversation_id = c.id AND mine.department_id = c.department_id AND mine.user_id = $2
            LEFT JOIN module_chat_conversation_members m
@@ -542,7 +669,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               ORDER BY unread_message.created_at DESC, unread_message.id DESC LIMIT 1
            ) unread_latest ON true
           WHERE c.department_id = $1
-          GROUP BY c.id, latest.body, latest.created_at, unread.count,
+          GROUP BY c.id, group_link.group_id, latest.body, latest.created_at, unread.count,
                    unread_latest.id, unread_latest.body, unread_latest.author
           ORDER BY COALESCE(latest.created_at, c.created_at) DESC, c.id DESC`,
         [departmentId, request.authenticatedUser!.id],
@@ -551,6 +678,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         conversations: result.rows.map((row) => ({
           id: row.id,
           kind: row.kind,
+          groupId: row.groupId,
           name: row.name,
           titleSuffix: row.title_suffix,
           createdBy: row.created_by,
@@ -624,6 +752,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const userId = request.authenticatedUser!.id;
       const access = await getConversationAccess(request.params.id, departmentId, userId);
       if (!access) return reply.code(404).send({ error: "Conversation not found." });
+      if (access.group_id) return reply.code(409).send({ error: "The conversation name is managed by its linked Church group." });
       let updated = true;
       if (access.kind === "group") {
         if (request.body.name === undefined || request.body.titleSuffix !== undefined || request.body.onlyIfEmpty !== undefined) return reply.code(400).send({ error: "Set a group name to edit this conversation." });
@@ -657,6 +786,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const userId = request.authenticatedUser!.id;
       const access = await getConversationAccess(request.params.id, departmentId, userId);
       if (!access || access.kind !== "group") return reply.code(404).send({ error: "Group chat not found." });
+      if (access.group_id) return reply.code(409).send({ error: "Members follow the linked Church group. Change group membership instead." });
       if (access.member_role !== "owner" && access.member_role !== "admin") return reply.code(403).send({ error: "Only group admins can add people." });
       const contact = await pool!.query(
         `SELECT u.id FROM app_users u
@@ -685,6 +815,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const userId = request.authenticatedUser!.id;
       const access = await getConversationAccess(request.params.id, departmentId, userId);
       if (!access || access.kind !== "group") return reply.code(404).send({ error: "Group chat not found." });
+      if (access.group_id) return reply.code(409).send({ error: "Admins follow leader roles in the linked Church group." });
       if (access.created_by !== userId) return reply.code(403).send({ error: "Only the group creator can change admin roles." });
       const result = await pool!.query(
         `UPDATE module_chat_conversation_members
@@ -706,6 +837,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const userId = request.authenticatedUser!.id;
       const access = await getConversationAccess(request.params.id, departmentId, userId);
       if (!access || access.kind !== "group") return reply.code(404).send({ error: "Group chat not found." });
+      if (access.group_id) return reply.code(409).send({ error: "Members follow the linked Church group. Change group membership instead." });
       if (access.member_role !== "owner" && access.member_role !== "admin") return reply.code(403).send({ error: "Only group admins can remove people." });
       const removed = await pool!.query(
         `DELETE FROM module_chat_conversation_members target
@@ -725,6 +857,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
+      const access = await getConversationAccess(request.params.id, departmentId, request.authenticatedUser!.id);
+      if (!access) return reply.code(404).send({ error: "Conversation not found." });
+      if (access.group_id) return reply.code(409).send({ error: "This conversation is managed by its Church group." });
       const result = await pool!.query(
         `DELETE FROM module_chat_conversations conversation
           WHERE conversation.id = $1 AND conversation.department_id = $2

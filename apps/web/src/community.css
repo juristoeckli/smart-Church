@@ -45,7 +45,8 @@
 .button-danger:hover{background:#fff0f1;border-color:#e4b8bc}
 .community-group-form{padding:16px 20px;border-top:1px solid var(--line);display:grid;grid-template-columns:1fr 1.3fr auto;align-items:end;gap:10px}
 .community-group-form label,.community-new-group label{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:10px}
-.community-group-form input,.community-group-form textarea,.community-new-group input,.community-new-group textarea{width:100%;min-height:35px;padding:8px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px;resize:vertical}
+.community-group-form input,.community-group-form textarea,.community-group-form select,.community-new-group input,.community-new-group textarea,.community-new-group select{width:100%;min-height:35px;padding:8px 9px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:10px;resize:vertical}
+.community-group-lifecycle{display:block;margin-top:5px;color:var(--muted);font-size:10px}
 .community-group-form .button{height:35px}
 .community-members-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 20px;border-top:1px solid var(--line)}
 .community-members-heading h3{font-size:12px;color:var(--ink);font-weight:700}
@@ -129,8 +130,10 @@
 @media(max-width:700px){.service-timeplan-row{grid-template-columns:repeat(2,minmax(0,1fr))}.service-timeplan-order{justify-content:flex-end}.service-timeplan-row .service-timeplan-notes{grid-column:1/-1}}
 :root[data-theme="dark"] .community-group-form input,
 :root[data-theme="dark"] .community-group-form textarea,
+:root[data-theme="dark"] .community-group-form select,
 :root[data-theme="dark"] .community-new-group input,
 :root[data-theme="dark"] .community-new-group textarea,
+:root[data-theme="dark"] .community-new-group select,
 :root[data-theme="dark"] .community-bookable-form input,:root[data-theme="dark"] .community-bookable-form select,:root[data-theme="dark"] .community-booking-form input{color-scheme:dark}
 :root[data-theme="dark"] .button-danger{border-color:#593b46;background:#2d222b;color:#f0a1aa}
 :root[data-theme="dark"] .button-danger:hover{background:#38252e;border-color:#70434c}
@@ -149,3 +152,4 @@
 @media (max-width: 720px) { .group-join-request { grid-template-columns: 1fr; } .group-join-request-actions { justify-content: flex-start; } }
 
 .sync-song-json{max-width:100%;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0;padding:10px;border-radius:6px;background:var(--surface,#191b22);color:var(--text-color,#e9e9ef);font-size:.78rem}
+.community-group-directory-tools,.community-saved-group-views{display:grid;gap:7px;margin:0 10px 9px}.community-group-directory-tools .search-field{min-width:0}.community-group-status-filter{display:grid;grid-template-columns:90px minmax(0,1fr);align-items:center;gap:7px;color:var(--muted);font-size:9px}.community-group-status-filter select,.community-saved-group-views select,.community-saved-group-views input{min-width:0;height:32px;padding:0 8px;border:1px solid var(--line);border-radius:7px;background:var(--panel);color:var(--ink);font:inherit;font-size:9px}.community-saved-group-views{grid-template-columns:minmax(0,1fr) minmax(80px,1fr) auto auto}.community-saved-group-views .button{height:32px;padding:0 8px;font-size:8px}@media(max-width:520px){.community-saved-group-views{grid-template-columns:1fr 1fr}.community-group-directory-tools .search-field{width:auto}}

@@ -1,0 +1,10 @@
+{
+  "id": "event-absences",
+  "name": "Volunteer absences",
+  "version": "0.1.0",
+  "description": "Member-managed availability and event staffing conflict views.",
+  "serverEntry": "./routes.ts",
+  "required": false,
+  "enabledByDefault": true,
+  "accessGrants": ["view", "manage"]
+}
