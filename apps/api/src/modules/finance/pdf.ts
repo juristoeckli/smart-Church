@@ -25,18 +25,26 @@ function wrap(value: string, width: number) {
   return lines;
 }
 
-export function financePdf(title: string, header: string[], rows: unknown[][]) {
+export function financePdf(title: string, header: string[], rows: unknown[][], integerColumns: readonly number[] = []) {
   const available = columnLimit - (header.length - 1) * 3;
   const widths = header.map((label) => Math.min(24, printable(label).length));
   const cells = rows.map((row) => header.map((_, index) => {
     const value = printable(row[index]);
-    widths[index] = Math.max(widths[index], Math.min(24, value.length));
+    const exactInteger = integerColumns.includes(index) && /^-?\d+$/.test(value);
+    widths[index] = Math.max(widths[index], exactInteger ? value.length : Math.min(24, value.length));
     return value;
   }));
   while (widths.reduce((sum, width) => sum + width, 0) > available) {
-    const index = widths.indexOf(Math.max(...widths));
-    widths[index]--;
+    let widest = -1;
+    for (const [index, width] of widths.entries()) {
+      if (!integerColumns.includes(index) && width > 1 && (widest < 0 || width > widths[widest])) widest = index;
+    }
+    if (widest < 0) break;
+    widths[widest]--;
   }
+  const tableWidth = widths.reduce((sum, width) => sum + width, 0) + (header.length - 1) * 3;
+  // Courier uses 0.6 em for each character. Preserve integer cells even if the table needs a smaller font.
+  const fontSize = Math.min(10, (842 - 96) / (tableWidth * 0.6)).toFixed(2);
   const tableLines = (row: string[]) => {
     const columns = row.map((value, index) => wrap(value, widths[index]));
     return Array.from({ length: Math.max(...columns.map((column) => column.length)) }, (_, line) =>
@@ -68,7 +76,7 @@ export function financePdf(title: string, header: string[], rows: unknown[][]) {
     const pageObject = objects.length + 1;
     pageRefs.push(pageObject);
     const lines = [...page, "", `Page ${index + 1} of ${pages.length}`];
-    const commands = ["BT", "/F1 10 Tf", "48 562 Td", "10 TL",
+    const commands = ["BT", "/F1 " + fontSize + " Tf", "48 562 Td", "10 TL",
       ...lines.map((line) => `<${Buffer.from(line, "latin1").toString("hex")}> Tj T*`), "ET"].join("\n");
     objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Resources << /Font << /F1 3 0 R >> >> /Contents ${pageObject + 1} 0 R >>`);
     objects.push(`<< /Length ${commands.length} >>\nstream\n${commands}\nendstream`);

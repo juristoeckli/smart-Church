@@ -38,7 +38,7 @@ function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filenam
       .header("Cache-Control", "private, no-store")
       .header("X-Content-Type-Options", "nosniff")
       .header("Content-Disposition", `attachment; filename=${filename}.pdf`)
-      .send(financePdf(filename.replace(/-/g, " "), header, rows));
+      .send(financePdf(filename.replace(/-/g, " "), header, rows, integerColumns));
   }
   if ((request.params as { format?: string }).format === "xlsx") {
     return reply.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -848,7 +848,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const maximumRows = 25_000;
     const result = await pool!.query(periodTurnoverSql, [departmentId, year, interval, accountType ?? null, maximumRows + 1, 0]);
     if (result.rows.length > maximumRows) return reply.code(413).send({ error: "Choose an account type to narrow the turnover export." });
-    const header = ["accounting_year", "interval", "period_start", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
+    const header = request.params.format === "pdf"
+      ? ["Year", "Interval", "Period start", "Account", "Account name", "Type", "Debit cents", "Credit cents", "Net cents"]
+      : ["accounting_year", "interval", "period_start", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
     const rows = result.rows.map((row) => [year, interval, row.periodStart, row.code, row.name, row.accountType,
       turnoverCell(row.debitCents), turnoverCell(row.creditCents), turnoverCell(row.netCents)]);
     return sendFinanceExport(request, reply.header("Cache-Control", "private, no-store"), "finance-period-turnover-" + year + "-" + interval, header, rows, [6, 7, 8]);
