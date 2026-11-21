@@ -1,3 +1,4 @@
+import { registerGroupMembershipImport } from "./group-membership-import.js";
 import { registerPrivatePersonNotes } from "./private-person-notes.js";
 import { registerPersonServiceWorkload } from "./person-service-workload.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -296,6 +297,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       );
       return groups.rows;
     });
+    registerGroupMembershipImport(routes, context, department, activeDirectoryGroup);
     type MembershipStatus = "active" | "paused" | "waitlist";
     routes.post<{ Body: { groupId: string; contactIds: string[]; role: string; status: MembershipStatus; operation?: "add" | "update" } }>("/api/people-records/bulk-group-membership", {
       schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "contactIds", "role", "status"], properties: {
