@@ -8,7 +8,8 @@ type FieldType = "text" | "number" | "date";
 type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance" | "resourceBookings";
 type Field = { key: string; label: string; type: FieldType };
 type Filter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string | number };
-type Definition = { dataset: DatasetKey; columns: string[]; filters: Filter[]; sortBy: string; direction: "asc" | "desc"; groupBy?: string; pivotBy?: string; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
+type ChartType = "table" | "column" | "line";
+type Definition = { dataset: DatasetKey; columns: string[]; filters: Filter[]; sortBy: string; direction: "asc" | "desc"; groupBy?: string; pivotBy?: string; chartType?: ChartType; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
 type DataSet = { key: DatasetKey; title: string; permission: "people" | "groups" | "events" | "finance" | "resources"; description: string; fields: Field[]; sql: string };
 const MAX_ROWS = 5000;
 const MAX_PREVIEW = 500;
@@ -64,7 +65,7 @@ function permitted(request: DesignerAccess, permission: DataSet["permission"]) {
 function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return "Choose a report definition.";
   const value = input as Record<string, unknown>;
-  if (Object.keys(value).some((key) => !["dataset", "columns", "filters", "sortBy", "direction", "groupBy", "pivotBy", "aggregate"].includes(key))) return "The report definition contains an unsupported option.";
+  if (Object.keys(value).some((key) => !["dataset", "columns", "filters", "sortBy", "direction", "groupBy", "pivotBy", "chartType", "aggregate"].includes(key))) return "The report definition contains an unsupported option.";
   const fieldByKey = new Map(fields.map((field) => [field.key, field]));
   const dataset = value.dataset;
   if (typeof dataset !== "string" || !datasetDefinitions.some((item) => item.key === dataset)) return "Choose an available dataset.";
@@ -99,6 +100,9 @@ function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
   const groupBy = typeof value.groupBy === "string" && value.groupBy ? value.groupBy : undefined;
   if (value.pivotBy !== undefined && value.pivotBy !== "" && (typeof value.pivotBy !== "string" || !groupBy || value.pivotBy === groupBy || !fieldByKey.has(value.pivotBy))) return "Choose a different available field for the pivot columns.";
   const pivotBy = typeof value.pivotBy === "string" && value.pivotBy ? value.pivotBy : undefined;
+  const chartType = value.chartType;
+  if (chartType !== undefined && chartType !== "table" && chartType !== "column" && chartType !== "line") return "Choose a supported report presentation.";
+  if (!groupBy && (chartType === "column" || chartType === "line")) return "Group report rows to use a chart.";
   let aggregate: Definition["aggregate"];
   if (value.aggregate !== undefined && value.aggregate !== null) {
     if (!value.aggregate || typeof value.aggregate !== "object" || Array.isArray(value.aggregate)) return "Choose a supported aggregate.";
@@ -110,7 +114,7 @@ function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
     aggregate = { operation: raw.operation as "count" | "sum" | "average", ...(raw.operation === "count" ? {} : { field: numeric!.key }) };
   }
   if (groupBy && !aggregate) aggregate = { operation: "count" };
-  return { dataset: dataset as DatasetKey, columns: value.columns as string[], filters, sortBy, direction, ...(groupBy ? { groupBy } : {}), ...(pivotBy ? { pivotBy } : {}), ...(aggregate ? { aggregate } : {}) };
+  return { dataset: dataset as DatasetKey, columns: value.columns as string[], filters, sortBy, direction, ...(groupBy ? { groupBy } : {}), ...(pivotBy ? { pivotBy } : {}), ...(chartType ? { chartType } : {}), ...(aggregate ? { aggregate } : {}) };
 }
 function compare(a: unknown, b: unknown, type: FieldType) {
   if (type === "number") {
@@ -186,13 +190,14 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
   if (definition.groupBy && definition.aggregate) {
     const groupField = byKey.get(definition.groupBy)!;
     const aggregateField = definition.aggregate.field ? byKey.get(definition.aggregate.field) : undefined;
-    if (definition.pivotBy) return { ...pivotReport(filtered, definition, groupField, byKey.get(definition.pivotBy)!, aggregateField, maxOutputRows), capped: inputRows.length === MAX_ROWS };
+    const chartType = definition.chartType ?? "table";
+    if (definition.pivotBy) return { ...pivotReport(filtered, definition, groupField, byKey.get(definition.pivotBy)!, aggregateField, maxOutputRows), capped: inputRows.length === MAX_ROWS, chartType };
     const groups = new Map<string, Array<Record<string, unknown>>>();
     for (const row of filtered) { const value = row[definition.groupBy] ?? ""; const key = String(value); const items = groups.get(key) ?? []; items.push(row); groups.set(key, items); }
     const grouped = [...groups.entries()].map(([key, records]) => ({ [groupField.key]: key, aggregate: aggregateRecords(records, definition.aggregate!.operation, aggregateField) }));
     grouped.sort((a, b) => compare(a[definition.groupBy!], b[definition.groupBy!], groupField.type) * (definition.direction === "desc" ? -1 : 1));
     const columns = [{ key: groupField.key, label: groupField.label }, { key: "aggregate", label: aggregateLabel(definition.aggregate.operation, aggregateField) }];
-    return { columns, rows: grouped.slice(0, maxOutputRows), totalRows: grouped.length, capped: inputRows.length === MAX_ROWS };
+    return { columns, rows: grouped.slice(0, maxOutputRows), totalRows: grouped.length, capped: inputRows.length === MAX_ROWS, chartType };
   }
   filtered.sort((a, b) => compare(a[definition.sortBy], b[definition.sortBy], sortField.type) * (definition.direction === "desc" ? -1 : 1));
   const columns = definition.columns.map((key) => ({ key, label: byKey.get(key)!.label }));
@@ -376,11 +381,13 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     );
     const saved = query.rows[0];
     const dataset = available.find(({ key }) => key === saved?.definition?.dataset);
-    if (!saved?.scheduled_result || !dataset || typeof cleanDefinition(saved.definition, dataset.fields) === "string") {
+    const definition = dataset && saved ? cleanDefinition(saved.definition, dataset.fields) : null;
+    if (!saved?.scheduled_result || !dataset || !definition || typeof definition === "string") {
       return reply.code(404).send({ error: "No scheduled result is available." });
     }
     if (request.query.format === "xlsx") return sendReportWorkbook(reply, saved.scheduled_result, "ad-hoc-" + dataset.key);
-    return reply.header("cache-control", "private, no-store").send(saved.scheduled_result);
+    const report = definition.groupBy ? { ...saved.scheduled_result, chartType: definition.chartType ?? "table" } : saved.scheduled_result;
+    return reply.header("cache-control", "private, no-store").send(report);
   });
   return { runSavedDesign };
 }

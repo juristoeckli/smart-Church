@@ -24,7 +24,20 @@
 .reports-table-wrap table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 .reports-table-wrap th, .reports-table-wrap td { padding: 0.65rem 0.75rem; border-bottom: 1px solid var(--border); text-align: left; }
 .reports-table-wrap th { position: sticky; top: 0; background: var(--surface-muted, #f5f7f5); font-size: 0.82rem; }
+.reports-table-wrap th[scope="row"] { position: static; background: transparent; font-size: 0.86rem; }
 .reports-table-wrap td { font-size: 0.86rem; }
+.reports-chart-view { display: grid; gap: 0.75rem; min-width: 0; }
+.reports-chart-view > label { display: flex; align-items: center; flex-wrap: wrap; gap: 0.65rem; font-size: 0.88rem; }
+.reports-chart { margin: 0; padding: 0.85rem; border: 1px solid var(--border); border-radius: 9px; }
+.reports-chart figcaption { font-size: 0.84rem; color: var(--muted-foreground); }
+.reports-chart-legend { display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; margin: 0.45rem 0; padding: 0; list-style: none; }
+.reports-chart-legend li { display: flex; gap: 0.28rem; align-items: center; font-size: 0.82rem; overflow-wrap: anywhere; }
+.reports-chart-legend svg { flex: 0 0 1.25rem; width: 1.25rem; }
+.reports-chart-scroll { overflow-x: auto; }
+.reports-chart-scroll > svg { display: block; width: 100%; min-width: 40rem; }
+.reports-chart-scroll text { fill: var(--foreground); font-size: 11px; }
+.reports-chart-grid { stroke: var(--border); }
+.reports-chart-axis { stroke: var(--muted-foreground); }
 .reports-message { margin: 0; padding: 0.8rem 1rem; border-radius: 9px; }
 .reports-error { color: #8f2626; background: #fff1f1; }
 .reports-success { color: #17683e; background: #edf8f0; }
