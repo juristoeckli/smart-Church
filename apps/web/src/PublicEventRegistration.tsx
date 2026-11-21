@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { CalendarDays, Check, Clock3, MapPin } from "lucide-react";
-import type { PublicRegistrationEvent } from "@smart-church/contracts";
+import type { AuthStatus, PublicRegistrationEvent } from "@smart-church/contracts";
 import { publicErrorText, publicLanguage, publicText } from "./public-translations";
 
 export function PublicEventRegistration({ token }: { token: string }) {
@@ -13,13 +13,16 @@ export function PublicEventRegistration({ token }: { token: string }) {
   const [cancellationToken, setCancellationToken] = useState("");
   const [guests, setGuests] = useState<Array<{ firstName: string; lastName: string }>>([]);
   const [attendees, setAttendees] = useState<Array<{ firstName: string; lastName: string; cancellationToken: string }>>([]);
+  const [waitlistToken] = useState(() => /^#waitlist=([0-9a-f]{64})$/.exec(window.location.hash)?.[1] ?? "");
+  const [waitlistCsrf, setWaitlistCsrf] = useState<string | null>(null);
+  const [waitlistUpdated, setWaitlistUpdated] = useState<boolean | null>(null);
   const [linkToken] = useState(() => /^#cancel=([0-9a-f]{64})$/.exec(window.location.hash)?.[1] ?? "");
   const [cancelled, setCancelled] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
 
   useEffect(() => {
     document.documentElement.lang = language;
-    if (linkToken) return;
+    if (linkToken || waitlistToken) return;
     let active = true;
     fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`)
       .then(async (response) => {
@@ -30,7 +33,32 @@ export function PublicEventRegistration({ token }: { token: string }) {
       .catch((reason) => { if (active) setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not load this event.")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [token, language, linkToken]);
+  }, [token, language, linkToken, waitlistToken]);
+
+  useEffect(() => {
+    if (!waitlistToken) return;
+    const controller = new AbortController();
+    fetch("/api/auth/status", { cache: "no-store", signal: controller.signal })
+      .then((response) => response.json() as Promise<AuthStatus>)
+      .then((status) => { if (!controller.signal.aborted) setWaitlistCsrf(status.authenticated ? status.csrfToken ?? "" : ""); })
+      .catch(() => { if (!controller.signal.aborted) setWaitlistCsrf(""); });
+    return () => controller.abort();
+  }, [waitlistToken]);
+
+  async function updateWaitlistNotice(enabled: boolean) {
+    if (!waitlistCsrf || sending) return;
+    setSending(true);
+    setError("");
+    try {
+      const response = await fetch("/api/events/registration-waitlist-notices", {
+        method: "PUT", headers: { "content-type": "application/json", "x-csrf-token": waitlistCsrf },
+        body: JSON.stringify({ receiptToken: waitlistToken, enabled }),
+      });
+      if (!response.ok) throw new Error();
+      setWaitlistUpdated(enabled);
+    } catch { setError(publicText(language, "waitlistNoticeFailed")); }
+    finally { setSending(false); }
+  }
 
   async function register(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
@@ -70,6 +98,21 @@ export function PublicEventRegistration({ token }: { token: string }) {
       setSending(false);
     }
   }
+
+  if (waitlistToken) return <main className="public-registration-page"><section className="public-registration-card">
+    <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
+    <h1>{publicText(language, "waitlistNotices")}</h1>
+    <p>{publicText(language, "waitlistNoticeHelp")}</p>
+    {waitlistCsrf === null ? <p>{publicText(language, "eventLoading")}</p> : waitlistCsrf
+      ? <div className="public-registration-form">
+        <button className="button button-primary" type="button" disabled={sending} onClick={() => void updateWaitlistNotice(true)}>{publicText(language, "enableWaitlistNotice")}</button>
+        <button className="button button-secondary" type="button" disabled={sending} onClick={() => void updateWaitlistNotice(false)}>{publicText(language, "disableWaitlistNotice")}</button>
+      </div>
+      : <p><a href="/" target="_blank" rel="noreferrer">{publicText(language, "signInForWaitlist")}</a> {publicText(language, "waitlistRefresh")}</p>}
+    {waitlistUpdated !== null && <p role="status">{publicText(language, waitlistUpdated ? "waitlistEnabled" : "waitlistDisabled")}</p>}
+    {error && <p className="public-registration-error" role="alert">{error}</p>}
+    <footer>{publicText(language, "smartChurch")}</footer>
+  </section></main>;
 
   if (linkToken) return <main className="public-registration-page"><section className="public-registration-card">
     <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
@@ -112,6 +155,9 @@ export function PublicEventRegistration({ token }: { token: string }) {
           </>}
     </>}
     {attendees.length > 0 && <ul>{attendees.map((person) => <li key={person.cancellationToken}>{person.firstName} {person.lastName} · <a href={window.location.pathname + "#cancel=" + person.cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a></li>)}</ul>}
+    {submitted === "waitlisted" && cancellationToken && <p>
+      <a href={window.location.pathname + "#waitlist=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "waitlistNotices")}</a>
+    </p>}
     {!attendees.length && cancellationToken && <p><a href={window.location.pathname + "#cancel=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a> · {publicText(language, "saveCancelLink")}</p>}
     <footer>{publicText(language, "smartChurch")}</footer>
   </section></main>;

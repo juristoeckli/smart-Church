@@ -1,3 +1,4 @@
+import { registerRegistrationNoticeRoutes } from "./event-registration-notices.js";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
 import { readFile, stat, statfs } from "node:fs/promises";
@@ -50,7 +51,7 @@ const runtimeLogStream = {
 };
 const app = Fastify({
   logger: {
-    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken", "req.body.apiKey"],
+    redact: ["req.headers.cookie", "req.headers.authorization", "req.body.password", "req.body.setupCode", "req.body.loginToken", "req.body.apiKey", "req.body.receiptToken"],
     stream: runtimeLogStream,
   },
   bodyLimit: 3 * 1024 * 1024,
@@ -3579,6 +3580,9 @@ app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registratio
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
+
+registerRegistrationNoticeRoutes(app, { pool: pool ?? null, isDatabaseReady: () => databaseReady,
+  validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 type ManagedEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };
 
