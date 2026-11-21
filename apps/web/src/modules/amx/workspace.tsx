@@ -324,9 +324,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       backgroundImage: object.type === "general" && typeof object.channel === "number" && object.channel > 0
         ? activeRoomState || activeModeState
           ? "linear-gradient(180deg,#0a70bd,#004882)"
-          : background === "#d9d9d9"
+          : ["Grey2", "Grey3", "Grey5", "Grey7", "Grey9", "Grey10", "Grey12"].includes(state?.backgroundColor ?? "")
             ? "linear-gradient(180deg,#eeeeea,#c5c5bd)"
-            : background === "#e4e1c1"
+            : state?.backgroundColor === "VeryLightYellow"
               ? "linear-gradient(180deg,#fffbd9,#f2efc9)"
               : undefined
         : undefined,
