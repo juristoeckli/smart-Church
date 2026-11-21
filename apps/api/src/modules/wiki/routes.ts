@@ -420,11 +420,70 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { updated: changedIds.length };
   });
 
+  app.post<{ Body: { pageIds: string[]; categoryId: string } }>("/api/modules/wiki/pages/bulk-category", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["pageIds", "categoryId"], properties: {
+      pageIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },
+      categoryId: { type: "string", format: "uuid" },
+    } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await site(request, reply, true);
+    if (!departmentId) return reply;
+    const { pageIds, categoryId } = request.body;
+    const actorId = request.authenticatedUser!.id;
+    const client = await pool!.connect();
+    let updated = 0;
+    try {
+      await client.query("BEGIN");
+      const target = await client.query<{ name: string }>(
+        "SELECT name FROM wiki_categories WHERE department_id=$1 AND id=$2 AND archived_at IS NULL FOR SHARE",
+        [departmentId, categoryId],
+      );
+      if (!target.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose an active category in this location." });
+      }
+      const pages = await client.query<WikiPageRow & { category_name: string }>(
+        `SELECT page.id,page.title,page.content_html,page.category_id,category.name AS category_name
+         FROM wiki_pages page JOIN wiki_categories category ON category.id=page.category_id AND category.department_id=page.department_id
+         WHERE page.department_id=$1 AND page.id=ANY($2::uuid[]) AND page.status='active' ORDER BY page.id FOR UPDATE OF page`,
+        [departmentId, pageIds],
+      );
+      if (pages.rowCount !== pageIds.length) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "One or more selected pages are no longer active in this location." });
+      }
+      const changes = pages.rows.filter((page) => page.category_id !== categoryId);
+      for (const page of changes) {
+        await client.query(
+          "INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id,category_change) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",
+          [randomUUID(), departmentId, page.id, page.title, page.content_html, actorId, JSON.stringify({
+            from: { id: page.category_id, name: page.category_name },
+            to: { id: categoryId, name: target.rows[0].name },
+          })],
+        );
+      }
+      if (changes.length) {
+        await client.query(
+          "UPDATE wiki_pages SET category_id=$3,updated_by=$4,updated_at=now() WHERE department_id=$1 AND id=ANY($2::uuid[])",
+          [departmentId, changes.map((page) => page.id), categoryId, actorId],
+        );
+      }
+      await client.query("COMMIT");
+      updated = changes.length;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+    if (updated) changed(departmentId, { action: "pages-category-updated" });
+    return { updated };
+  });
+
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/versions", async (request, reply) => {
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki page not found." });
-    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\",CASE WHEN $3::boolean THEN version.audience_change END AS \"audienceChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id, isWikiManager(request)]);
+    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\",CASE WHEN $3::boolean THEN version.audience_change END AS \"audienceChange\",CASE WHEN $3::boolean THEN version.category_change END AS \"categoryChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id, isWikiManager(request)]);
     return Promise.all(result.rows.map(async (version) => ({ ...version, contentHtml: await hideUnreadableWikiEntityLinks(version.contentHtml, request, departmentId) })));
   });
 

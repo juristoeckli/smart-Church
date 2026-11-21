@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import type { Pool, PoolClient } from "pg";
 import { registerReportDesigner } from "./designer.js";
 
 type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
 type ReportRow = Record<string, string | number | boolean | null>;
-type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null };
+type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null };
 
 const catalog = [
   { key: "people-directory" as const, title: "People directory", description: "Contact list with status and contact details.", permission: "people" as const },
@@ -530,9 +530,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/reports/saved", async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,schedule_days,next_run_at,last_run_at,last_run_status,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
+    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,schedule_days,notify_when_ready,next_run_at,last_run_at,last_run_status,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
     const availableKeys = new Set((await installedReports(request)).map((item) => item.key));
-    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit, ...(saved.owner_user_id === request.authenticatedUser!.id ? { scheduleDays: saved.schedule_days, nextRunAt: saved.next_run_at, lastRunAt: saved.last_run_at, lastRunStatus: saved.last_run_status } : {}) }));
+    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit, ...(saved.owner_user_id === request.authenticatedUser!.id ? { scheduleDays: saved.schedule_days, notifyWhenReady: saved.notify_when_ready, nextRunAt: saved.next_run_at, lastRunAt: saved.last_run_at, lastRunStatus: saved.last_run_status } : {}) }));
   });
   app.post<{ Body: { reportKey: ReportKey; name: string; filters: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/saved", {
     schema: { body: { type: "object", additionalProperties: false, required: ["reportKey", "name", "filters"], properties: { reportKey: { type: "string", enum: catalog.map((item) => item.key) }, name: { type: "string", minLength: 1, maxLength: 120 }, filters: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } },
@@ -572,10 +572,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Saved report not found or you cannot delete it." });
     return { deleted: true };
   });
-  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null } }>("/api/modules/reports/saved/:id/schedule", {
+  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null; notifyWhenReady?: boolean } }>("/api/modules/reports/saved/:id/schedule", {
     schema: {
       params: { type: "object", required: ["id"], properties: { id: uuid } },
-      body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { anyOf: [{ type: "integer", enum: [1, 7] }, { type: "null" }] } } },
+      body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { anyOf: [{ type: "integer", enum: [1, 7] }, { type: "null" }] }, notifyWhenReady: { type: "boolean" } } },
     },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
@@ -591,10 +591,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(423).send({ error: "This location is read-only." });
       }
       const result = await client.query(
-        `UPDATE saved_report_definitions SET schedule_days=$4, next_run_at=CASE WHEN $4::int IS NULL THEN NULL ELSE now() END,
-           scheduled_result=NULL, last_run_at=NULL, last_run_status=NULL
+        `UPDATE saved_report_definitions SET schedule_days=$4, notify_when_ready=COALESCE($6,notify_when_ready), next_run_at=CASE WHEN $4::int IS NULL THEN NULL WHEN $4=schedule_days THEN next_run_at ELSE now() END,
+           scheduled_result=CASE WHEN $4=schedule_days THEN scheduled_result END, last_run_at=CASE WHEN $4=schedule_days THEN last_run_at END, last_run_status=CASE WHEN $4=schedule_days THEN last_run_status END
          WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND ($4::int IS NULL OR report_key=ANY($5::text[])) RETURNING id`,
-        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys],
+        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys, request.body.notifyWhenReady ?? null],
       );
       await client.query("COMMIT");
       if (!result.rowCount) return reply.code(404).send({ error: "No accessible saved report owned by your account." });
@@ -706,6 +706,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               next_run_at=now()+schedule_days*interval '24 hours' WHERE id=$1`,
             [saved.id, status, output],
           );
+          if (status === "ready" && saved.notify_when_ready && isServerModuleEnabled("notifications")) {
+            await client.query("SAVEPOINT notify_report_owner");
+            try {
+              const readiness = await client.query<{ ready: boolean }>(
+                "SELECT to_regclass('public.module_notifications') IS NOT NULL AS ready",
+              );
+              if (readiness.rows[0]?.ready) {
+                await client.query(
+                  "INSERT INTO module_notifications(id,department_id,recipient_user_id,kind,title,body,in_app_enabled,email_enabled) VALUES($1,$2,$3,'report_ready',$4,$5,true,false)",
+                  [randomUUID(), candidate.department_id, saved.owner_user_id, "Scheduled report ready", "Open Reports to view your latest scheduled result."],
+                );
+              }
+            } catch (error) {
+              await client.query("ROLLBACK TO SAVEPOINT notify_report_owner");
+              app.log.warn({ err: error, savedReportId: saved.id }, "Could not create scheduled report notification.");
+            }
+            await client.query("RELEASE SAVEPOINT notify_report_owner");
+          }
           await client.query("COMMIT");
         } catch (error) {
           await client.query("ROLLBACK");

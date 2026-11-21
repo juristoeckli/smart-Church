@@ -210,7 +210,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   app.get("/api/modules/reports/designer/saved", async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     const keys = (await datasets(request, departmentId)).map((item) => item.key);
-    const result = await pool!.query("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\", CASE WHEN owner_user_id=$2 THEN schedule_days END AS \"scheduleDays\", CASE WHEN owner_user_id=$2 THEN next_run_at END AS \"nextRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_at END AS \"lastRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_status END AS \"lastRunStatus\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
+    const result = await pool!.query("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\", CASE WHEN owner_user_id=$2 THEN schedule_days END AS \"scheduleDays\", CASE WHEN owner_user_id=$2 THEN notify_when_ready END AS \"notifyWhenReady\", CASE WHEN owner_user_id=$2 THEN next_run_at END AS \"nextRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_at END AS \"lastRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_status END AS \"lastRunStatus\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
     return result.rows;
   });
   app.post<{ Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
@@ -262,8 +262,8 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   });
   const savedIdSchema = { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } as const;
   const schedulePath = "/api/modules/reports/designer/saved/:id";
-  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null } }>(`${schedulePath}/schedule`, {
-    schema: { params: savedIdSchema, body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { enum: [1, 7, null] } } } },
+  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null; notifyWhenReady?: boolean } }>(`${schedulePath}/schedule`, {
+    schema: { params: savedIdSchema, body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { enum: [1, 7, null] }, notifyWhenReady: { type: "boolean" } } } },
   }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
@@ -279,10 +279,10 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       }
       const keys = (await datasets(request, departmentId, client)).map(({ key }) => key);
       const updated = await client.query(
-        `UPDATE saved_designer_reports SET schedule_days=$4, next_run_at=CASE WHEN $4::int IS NULL THEN NULL ELSE now() END,
-          scheduled_result=NULL, last_run_at=NULL, last_run_status=NULL
+        `UPDATE saved_designer_reports SET schedule_days=$4, notify_when_ready=COALESCE($6,notify_when_ready), next_run_at=CASE WHEN $4::int IS NULL THEN NULL WHEN $4=schedule_days THEN next_run_at ELSE now() END,
+          scheduled_result=CASE WHEN $4=schedule_days THEN scheduled_result END, last_run_at=CASE WHEN $4=schedule_days THEN last_run_at END, last_run_status=CASE WHEN $4=schedule_days THEN last_run_status END
          WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND definition->>'dataset'=ANY($5::text[])`,
-        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys],
+        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys, request.body.notifyWhenReady ?? null],
       );
       await client.query("COMMIT");
       if (!updated.rowCount) return reply.code(404).send({ error: "Personal report not found." });

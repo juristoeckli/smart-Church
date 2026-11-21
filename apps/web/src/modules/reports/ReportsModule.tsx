@@ -9,7 +9,7 @@ type ReportColumn = { key: string; label: string };
 type ReportResult = { reportKey: ReportKey; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>> };
 type GroupOption = { id: string; name: string };
 type Filters = { from?: string; to?: string; groupId?: string; status?: string; followUpStatus?: string; accountingYear?: string };
-type ScheduleFields = { scheduleDays?: 1 | 7 | null; nextRunAt?: string | null; lastRunAt?: string | null; lastRunStatus?: "ready" | "unavailable" | "failed" | "too_large" | null };
+type ScheduleFields = { notifyWhenReady?: boolean | null; scheduleDays?: 1 | 7 | null; nextRunAt?: string | null; lastRunAt?: string | null; lastRunStatus?: "ready" | "unavailable" | "failed" | "too_large" | null };
 type SavedReport = { id: string; reportKey: ReportKey; name: string; filters: Filters; ownerId: string; shareScope: "private" | "department"; canEdit: boolean } & ScheduleFields;
 type DesignerField = { key: string; label: string; type: "text" | "number" | "date" };
 type DesignerDataset = { key: "people" | "groups" | "memberships" | "events" | "finance"; title: string; description: string; fields: DesignerField[] };
@@ -118,11 +118,11 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     URL.revokeObjectURL(link.href);
   }
 
-  async function changeSchedule(item: SavedReport, days: 1 | 7 | null) {
+  async function changeSchedule(item: SavedReport, days: 1 | 7 | null, notifyWhenReady?: boolean) {
     setError("");
     setMessage("");
     try {
-      await request(`/api/modules/reports/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days }) });
+      await request(`/api/modules/reports/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days, notifyWhenReady }) });
       setSaved(await request<SavedReport[]>("/api/modules/reports/saved"));
       setMessage(days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
     } catch (reason) {
@@ -226,10 +226,10 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not refresh report schedules."); }
   }
 
-  async function changeDesignerSchedule(item: SavedDesignerReport, days: 1 | 7 | null) {
+  async function changeDesignerSchedule(item: SavedDesignerReport, days: 1 | 7 | null, notifyWhenReady?: boolean) {
     setError("");
     try {
-      await request(`/api/modules/reports/designer/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days }) });
+      await request(`/api/modules/reports/designer/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days, notifyWhenReady }) });
       await refreshDesignerRunStatus();
       setMessage(days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not change the report schedule."); }
@@ -306,7 +306,7 @@ function ScheduleList<T extends ScheduleFields & { id: string; name: string }>({
   items: T[];
   canManage: boolean;
   onRefresh: () => Promise<void>;
-  onChange: (item: T, days: 1 | 7 | null) => Promise<void>;
+  onChange: (item: T, days: 1 | 7 | null, notifyWhenReady?: boolean) => Promise<void>;
   onOpen: (item: T) => Promise<void>;
 }) {
   return <>{items.length > 0 && <section className="reports-schedules">
@@ -320,6 +320,9 @@ function ScheduleList<T extends ScheduleFields & { id: string; name: string }>({
           }}>
             <option value="">Off</option><option value="1">Every 24 hours</option><option value="7">Every 7 days</option>
           </select></label>}
+          {canManage && item.scheduleDays && <label><input type="checkbox" checked={item.notifyWhenReady ?? false} onChange={(event) => {
+            void onChange(item, item.scheduleDays ?? null, event.target.checked);
+          }} /> Notify me in the inbox when a result is ready</label>}
           {item.nextRunAt && <small>Next run {new Date(item.nextRunAt).toLocaleString()}</small>}
           {item.lastRunAt && <small>Last attempt {new Date(item.lastRunAt).toLocaleString()} · {item.lastRunStatus === "ready" ? "Ready" : item.lastRunStatus === "too_large" ? "Result too large" : item.lastRunStatus === "unavailable" ? "Report unavailable" : "Failed"}</small>}
           {item.lastRunStatus === "ready" && <button className="button button-secondary" type="button" onClick={() => void onOpen(item)}>Open scheduled result</button>}
