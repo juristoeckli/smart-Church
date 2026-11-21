@@ -93,6 +93,16 @@ function localDateTimeToUtc(parts: ZonedParts, timeZone: string) {
   if (chosen === undefined) throw new Error(`Could not resolve local time in ${timeZone}.`);
   return new Date(chosen);
 }
+function fullDayBounds(date: string, timeZone: string) {
+  const day = new Date(`${date}T00:00:00Z`);
+  const midnight = () => localDateTimeToUtc({
+    year: day.getUTCFullYear(), month: day.getUTCMonth() + 1, day: day.getUTCDate(), hour: 0, minute: 0, second: 0,
+  }, timeZone);
+  const startsAt = midnight();
+  day.setUTCDate(day.getUTCDate() + 1);
+  return { startsAt, endsAt: midnight() };
+}
+
 function seriesDates(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[], timeZone: string | null = null) {
   if (timeZone) return seriesDatesInTimeZone(startsAt, endsAt, rule, extras, excluded, timeZone);
   const interval = Math.max(1, Math.min(366, Math.floor(Number(rule.interval) || 1)));
@@ -137,7 +147,7 @@ function seriesDates(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: str
   return [...unique.values()].sort((a, b) => a.getTime() - b.getTime()).slice(0, 500).map((start) => ({ startsAt: start, endsAt: new Date(start.getTime() + duration), localDate: start.toISOString().slice(0,10) }));
 }
 
-function seriesDatesInTimeZone(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[], timeZone: string) {
+function seriesDatesInTimeZone(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[], timeZone: string, allDay = false) {
   const startParts = partsInTimeZone(startsAt, timeZone);
   const endParts = partsInTimeZone(endsAt, timeZone);
   const startDay = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
@@ -168,6 +178,11 @@ function seriesDatesInTimeZone(startsAt: Date, endsAt: Date, rule: RepeatRule, e
       count++;
       if (rule.count && count > rule.count) break;
       if (excludedSet.has(localDay)) continue;
+      if (allDay) {
+        const window = fullDayBounds(localDay, timeZone);
+        if (window.endsAt > window.startsAt) occurrences.set(localDay, { ...window, localDate: localDay });
+        continue;
+      }
       const occurrenceStart = localDay === localDate(startParts)
         ? new Date(startsAt)
         : localDateTimeToUtc({ year, month, day: dayOfMonth, hour: startParts.hour, minute: startParts.minute, second: startParts.second }, timeZone);
@@ -183,6 +198,11 @@ function seriesDatesInTimeZone(startsAt: Date, endsAt: Date, rule: RepeatRule, e
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || excludedSet.has(day)) continue;
     const cursor = new Date(`${day}T00:00:00Z`).getTime();
     if (!Number.isFinite(cursor) || cursor < startDay || cursor > lastDay) continue;
+    if (allDay) {
+      const window = fullDayBounds(day, timeZone);
+      if (window.endsAt > window.startsAt) occurrences.set(day, { ...window, localDate: day });
+      continue;
+    }
     const date = new Date(cursor);
     const dateParts = { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
     const start = day === localDate(startParts) ? new Date(startsAt) : localDateTimeToUtc({ ...dateParts, hour: startParts.hour, minute: startParts.minute, second: startParts.second }, timeZone);
@@ -306,7 +326,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const seriesResult = await queryable.query("SELECT * FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [seriesId, departmentId]);
     const series = seriesResult.rows[0];
     if (!series) return { error: "Booking series not found in this location." } as const;
-    if (series.all_day_date) return { error: "This full-day booking is not recurring. Cancel it and create a new request to change the date." } as const;
+    if (series.all_day_date) return { error: "To change a full-day schedule, cancel the affected bookings and create a new request." } as const;
     const startsAt = new Date(input.startsAt); const endsAt = new Date(input.endsAt);
     if (!isoDate(input.fromDate) || !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) return { error: "Choose a valid date range and start/end time." } as const;
     if (occurrenceDateKey(startsAt, series.time_zone ?? null) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
@@ -361,9 +381,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",occurrence.is_extra_date AS "isExtraDate",
-          series.all_day_date::text AS "allDayDate",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
+          CASE WHEN series.all_day_date IS NOT NULL THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
-          (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND series.all_day_date IS NULL AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
+          (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
           booking.created_at AS "createdAt",booking.updated_at AS "updatedAt"
         FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
         JOIN app_users requester ON requester.id=booking.requested_by
@@ -730,17 +750,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
     const { allDayDate } = request.body;
     if (allDayDate !== undefined) {
-      if (!isoDate(allDayDate) || repeat.frequency !== "once" || repeat.endsOn || repeat.count || repeat.weekdays?.length || extraDates.length || excludedDates.length || occurrenceStart) {
-        return reply.code(400).send({ error: "Choose one valid date for a full-day booking." });
+      if (!isoDate(allDayDate) || occurrenceStart || (repeat.frequency === "once" && (repeat.endsOn || repeat.count || repeat.weekdays?.length || extraDates.length || excludedDates.length))) {
+        return reply.code(400).send({ error: "Choose a valid start date and repeat rule for the full-day booking." });
       }
       try {
-        const date = new Date(`${allDayDate}T00:00:00Z`);
-        const midnight = () => localDateTimeToUtc({
-          year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate(), hour: 0, minute: 0, second: 0,
-        }, timeZone);
-        const expectedStart = midnight();
-        date.setUTCDate(date.getUTCDate() + 1);
-        const expectedEnd = midnight();
+        const { startsAt: expectedStart, endsAt: expectedEnd } = fullDayBounds(allDayDate, timeZone);
         if (+expectedStart !== +startsAt || +expectedEnd !== +endsAt) {
           return reply.code(400).send({ error: "Full-day bookings must match the location's full calendar day." });
         }
@@ -748,9 +762,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(400).send({ error: "Could not resolve the full-day booking date in this location." });
       }
     }
-    const instances = occurrenceStart
-      ? [{ startsAt, endsAt, localDate: occurrenceDateKey(startsAt, timeZone) }]
-      : seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
+    let instances: ReturnType<typeof seriesDates>;
+    if (allDayDate) {
+      try {
+        instances = seriesDatesInTimeZone(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone, true);
+      } catch {
+        return reply.code(400).send({ error: "A full-day booking date could not be resolved in this location." });
+      }
+    } else {
+      instances = occurrenceStart
+        ? [{ startsAt, endsAt, localDate: occurrenceDateKey(startsAt, timeZone) }]
+        : seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
+    }
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
     const client = await context.pool!.connect();
     let created: Awaited<ReturnType<typeof insertBookingSeries>>;

@@ -55,7 +55,7 @@ export function registerMyResourceBookings(app: FastifyInstance, context: Module
       context.pool!.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query<{ id: string; cursorStart: string }>(
         `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,booking.quantity,
-                booking.status,series.all_day_date::text AS "allDayDate",booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
+                booking.status,CASE WHEN series.all_day_date IS NOT NULL THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
                 to_char(booking.starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorStart"
            FROM resource_bookings booking JOIN bookable_resources resource
              ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
