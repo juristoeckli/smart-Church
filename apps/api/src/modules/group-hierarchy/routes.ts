@@ -168,6 +168,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return result.rows;
   });
 
+  const noteAudiences = ["group_leaders", "group_managers"] as const;
+  const noteAudienceSchema = { type: "string", enum: noteAudiences } as const;
+  type NoteAudience = typeof noteAudiences[number];
   const noteRevision = `to_char(note.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
   app.get<{ Params: { id: string } }>("/api/modules/group-hierarchy/groups/:id/notes", {
     schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
@@ -177,54 +180,81 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const group = await pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
     if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
-    const canManageNotes = managerGrant(request) || await canManageGroup(request, request.params.id, departmentId);
+    const canManageAudience = managerGrant(request);
+    const canManageNotes = canManageAudience || await canManageGroup(request, request.params.id, departmentId);
     reply.header("Cache-Control", "private, no-store");
-    if (!canManageNotes) return { notes: [], canManage: false };
+    if (!canManageNotes) return { notes: [], canManage: false, canManageAudience: false };
     const result = await pool.query(
-      `SELECT note.id,note.title,note.body,note.created_at AS "createdAt",note.updated_at AS "updatedAt",${noteRevision} AS revision,
+      `SELECT note.id,note.title,note.body,note.audience,note.created_at AS "createdAt",note.updated_at AS "updatedAt",${noteRevision} AS revision,
               COALESCE(actor.display_name,'Former user') AS "authorName",note.created_by AS "createdBy"
          FROM group_notes note LEFT JOIN app_users actor ON actor.id=note.created_by
-        WHERE note.department_id=$1 AND note.group_id=$2 AND note.archived_at IS NULL
+        WHERE note.department_id=$1 AND note.group_id=$2 AND note.archived_at IS NULL AND (note.audience='group_leaders' OR $3::boolean)
         ORDER BY note.created_at DESC,note.id DESC LIMIT 200`,
-      [departmentId, request.params.id],
+      [departmentId, request.params.id, canManageAudience],
     );
     return { notes: result.rows.map(row => {
-      const canChange = managerGrant(request) || row.createdBy === request.authenticatedUser?.id;
+      const canChange = canManageAudience || row.createdBy === request.authenticatedUser?.id;
       return { ...row, canEdit: canChange, canArchive: canChange };
-    }), canManage: true };
+    }), canManage: true, canManageAudience };
   });
 
-  app.post<{ Params: { id: string }; Body: { title: string; body: string } }>("/api/modules/group-hierarchy/groups/:id/notes", {
+  app.post<{ Params: { id: string }; Body: { title: string; body: string; audience?: NoteAudience } }>("/api/modules/group-hierarchy/groups/:id/notes", {
     schema: {
       params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["title", "body"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, body: { type: "string", minLength: 1, maxLength: 10000 } } },
+      body: { type: "object", additionalProperties: false, required: ["title", "body"], properties: {
+        title: { type: "string", minLength: 1, maxLength: 160 }, body: { type: "string", minLength: 1, maxLength: 10000 }, audience: noteAudienceSchema,
+      } },
     },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const group = await pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
-    if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
-    if (!managerGrant(request) && !(await canManageGroup(request, request.params.id, departmentId))) return reply.code(403).send({ error: "Group leader access is required to add group notes." });
-    const title = request.body.title.trim();
-    const body = request.body.body.trim();
-    if (!title || !body) return reply.code(400).send({ error: "Enter a title and note." });
-    const result = await pool.query(
-      `INSERT INTO group_notes(id,department_id,group_id,title,body,created_by)
-       VALUES($1,$2,$3,$4,$5,$6)
-       RETURNING id,title,body,created_at AS "createdAt",updated_at AS "updatedAt"`,
-      [randomUUID(), departmentId, request.params.id, title, body, request.authenticatedUser!.id],
-    );
-    realtime.publish("core:groups:changed", departmentId, { groupId: request.params.id, action: "note-created" });
-    return reply.code(201).send({ ...result.rows[0], authorName: request.authenticatedUser?.displayName ?? "You", canArchive: true });
+    const { id: groupId } = request.params;
+    const { audience = "group_leaders" } = request.body;
+    const title = request.body.title.trim(), body = request.body.body.trim();
+    if (!title || !body || title.includes("\u0000") || body.includes("\u0000")) return reply.code(400).send({ error: "Enter a valid title and note." });
+    if (audience === "group_managers" && !managerGrant(request)) {
+      return reply.code(403).send({ error: "Only group managers can set a manager-only audience." });
+    }
+    const client = await pool.connect();
+    let note;
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const group = await client.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 FOR SHARE", [groupId, departmentId]);
+      if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+      if (!await canManageGroup(request, groupId, departmentId, client)) {
+        await client.query("ROLLBACK");
+        return reply.code(403).send({ error: "Group leader access is required to add group notes." });
+      }
+      const result = await client.query(
+        `INSERT INTO group_notes AS note(id,department_id,group_id,title,body,created_by,audience)
+         VALUES($1,$2,$3,$4,$5,$6,$7)
+         RETURNING id,title,body,audience,created_at AS "createdAt",updated_at AS "updatedAt",${noteRevision} AS revision`,
+        [randomUUID(), departmentId, groupId, title, body, request.authenticatedUser!.id, audience],
+      );
+      note = result.rows[0];
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+    if (audience === "group_leaders") {
+      realtime.publish("core:groups:changed", departmentId, { groupId, action: "note-created" });
+    }
+    return reply.header("Cache-Control", "private, no-store").code(201)
+      .send({ ...note, authorName: request.authenticatedUser?.displayName ?? "You", canEdit: true, canArchive: true });
   });
 
   const noteEditParams = { type: "object", additionalProperties: false, required: ["id", "noteId"],
     properties: { id: { type: "string", format: "uuid" }, noteId: { type: "string", format: "uuid" } },
   } as const;
   type NoteParams = { id: string; noteId: string };
-  type NoteEdit = { title: string; body: string; revision: string };
+  type NoteEdit = { title: string; body: string; revision: string; audience?: NoteAudience };
 
   async function changeGroupNote(request: FastifyRequest<{ Params: NoteParams }>, reply: FastifyReply, edit?: NoteEdit) {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
@@ -233,11 +263,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const { id: groupId, noteId } = request.params;
     const actorId = request.authenticatedUser!.id;
+    const isManager = managerGrant(request);
     const title = edit?.title.trim(), body = edit?.body.trim();
     if (edit && (!title || !body || title.includes("\u0000") || body.includes("\u0000"))) {
       return reply.code(400).send({ error: "Enter a valid title and note." });
     }
+    if (edit?.audience === "group_managers" && !isManager) {
+      return reply.code(403).send({ error: "Only group managers can set a manager-only audience." });
+    }
     const client = await pool.connect();
+    let notifyLeaders = false;
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -250,10 +285,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(403).send({ error: "Group leader access is required to change group notes." });
       }
-      const values = [noteId, groupId, departmentId, actorId, managerGrant(request)];
-      const note = await client.query<{ revision: string }>(
-        `SELECT ${noteRevision} AS revision FROM group_notes note
+      const values = [noteId, groupId, departmentId, actorId, isManager];
+      const note = await client.query<{ revision: string; audience: NoteAudience }>(
+        `SELECT ${noteRevision} AS revision,note.audience FROM group_notes note
           WHERE note.id=$1 AND note.group_id=$2 AND note.department_id=$3 AND note.archived_at IS NULL
+            AND (note.audience='group_leaders' OR $5::boolean)
             AND (note.created_by=$4 OR $5::boolean) FOR UPDATE`,
         values,
       );
@@ -265,11 +301,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "This note changed. Reload it and try your edit again." });
       }
+      const previousAudience = note.rows[0].audience;
+      const audience = edit?.audience ?? previousAudience;
+      notifyLeaders = previousAudience === "group_leaders" || audience === "group_leaders";
       if (edit) {
         await client.query(
-          `UPDATE group_notes SET title=$4,body=$5,updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond')
+          `UPDATE group_notes SET title=$4,body=$5,audience=$6,updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond')
             WHERE id=$1 AND group_id=$2 AND department_id=$3`,
-          [noteId, groupId, departmentId, title, body],
+          [noteId, groupId, departmentId, title, body, audience],
         );
       } else {
         await client.query(
@@ -282,7 +321,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
     } finally { client.release(); }
-    realtime.publish("core:groups:changed", departmentId, { groupId, action: edit ? "note-edited" : "note-archived" });
+    if (notifyLeaders) realtime.publish("core:groups:changed", departmentId, { groupId, action: edit ? "note-edited" : "note-archived" });
     return edit ? { edited: true } : { archived: true };
   }
 
@@ -291,6 +330,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       type: "object", additionalProperties: false, required: ["title", "body", "revision"],
       properties: {
         title: { type: "string", minLength: 1, maxLength: 160 }, body: { type: "string", minLength: 1, maxLength: 10000 },
+        audience: noteAudienceSchema,
         revision: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$" },
       },
     } },
