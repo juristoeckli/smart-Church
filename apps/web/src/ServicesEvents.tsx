@@ -10,6 +10,7 @@ import { WorshipPlanning } from "./WorshipPlanning";
 import { EventVolunteerAvailabilityWarning, VolunteerAvailability } from "./VolunteerAvailability";
 import { buildStaffingMatrix, StaffingRosterMatrix } from "./StaffingRosterMatrix";
 import { csvCell, printHtml } from "./service-exports";
+import { buildOwnDutyRows, OwnDutyExports } from "./OwnDutyExports";
 
 type EventFilter = "upcoming" | "all" | "past";
 type ScheduleView = "list" | "month" | "attendance" | "workload" | "roster";
@@ -512,6 +513,9 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const dutyRosterEvents = roleCategoryFilter || showUnfilledRoles || showMyDuties
     ? matchingResponsibleEvents.filter((event) => (!(showUnfilledRoles || showMyRequests) || !event.cancelledAt) && event.positions?.some(dutyPositionMatches))
     : matchingResponsibleEvents;
+  const ownDutyRows = scheduleView === "list" && showMyDuties && !isLoading && !loadError && eventsDepartmentId === departmentId
+    ? buildOwnDutyRows(dutyRosterEvents, dutyPositionMatches, showMyRequests, eventTimeLabel)
+    : [];
   const staffingMatrix = canManage && scheduleView === "roster" && eventsDepartmentId === departmentId
     ? buildStaffingMatrix(dutyRosterEvents, contacts, dutyPositionMatches, formatEventDate, eventTimeLabel) : null;
   const attendanceDatesInvalid = Boolean(attendanceFrom && attendanceTo && attendanceFrom > attendanceTo);
@@ -1029,6 +1033,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           </div>
           {(scheduleView === "list" || scheduleView === "roster") && <label className="event-role-category-filter">Staffing<select value={!canManage && staffingFilter === "unfilled" ? "all" : staffingFilter} onChange={(event) => setStaffingFilter(event.target.value as typeof staffingFilter)}><option value="all">All roles</option><option value="mine">My assignments</option><option value="requested">My pending requests</option>{canManage && <option value="unfilled">Unfilled roles only</option>}</select></label>}
           {canManage && (scheduleView === "list" || scheduleView === "workload" || scheduleView === "roster") && <label className="event-role-category-filter">Responsible person<select value={responsibleFilter} onChange={(change) => setResponsibleFilter(change.target.value)}><option value="">Anyone</option><option value="unassigned">No responsible person</option>{responsibleContacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.firstName} {contact.lastName}</option>)}</select></label>}
+          {showMyDuties && scheduleView === "list" && <OwnDutyExports rows={ownDutyRows} departmentLocation={departmentLocation} pendingOnly={showMyRequests} onNotice={onNotice} />}
           {canManage && scheduleView === "list" && <><button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(dutyPositionMatches))}><Download size={15} />Export staffing</button><button className="button button-secondary" type="button" onClick={printStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(dutyPositionMatches))}><Printer size={15} />Print staffing</button></>}
         </div>
 
