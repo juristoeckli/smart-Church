@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
 import { registeredModules } from "./module-registry";
 
-type Preview = {
+export type LocationGrantPreview = {
   displayName: string;
   role: "site_admin" | "member";
   status: "enabled" | "disabled" | "service" | "password_required";
@@ -11,7 +11,7 @@ type Preview = {
   modulePermissions: Record<string, string[]>;
 };
 
-const statusLabels = {
+export const locationGrantStatusLabels = {
   enabled: "Enabled",
   disabled: "Disabled",
   service: "API-only account",
@@ -41,7 +41,7 @@ function AccountPreview({ department, userId, permissionLabels }: {
   userId: string;
   permissionLabels: Record<string, string>;
 }) {
-  const [preview, setPreview] = useState<Preview>();
+  const [preview, setPreview] = useState<LocationGrantPreview>();
   const [error, setError] = useState("");
   const [refresh, setRefresh] = useState(0);
   useEffect(() => {
@@ -51,7 +51,7 @@ function AccountPreview({ department, userId, permissionLabels }: {
     void fetch(`/api/location-access/${encodeURIComponent(userId)}/preview`, {
       headers: { "x-department-id": department.id }, signal: controller.signal,
     }).then(async (response) => {
-      const result = await response.json() as Preview | { error: string };
+      const result = await response.json() as LocationGrantPreview | { error: string };
       if (!response.ok || "error" in result) throw new Error("error" in result ? result.error : "Could not load effective access.");
       if (!controller.signal.aborted) setPreview(result);
     }).catch((reason: unknown) => {
@@ -73,7 +73,7 @@ function AccountPreview({ department, userId, permissionLabels }: {
     {!preview && !error && <p role="status">Checking saved access…</p>}
     {preview && <>
       <h3>{preview.displayName}</h3>
-      <p>{preview.role === "site_admin" ? "Site administrator" : "Member"} · {statusLabels[preview.status]}</p>
+      <p>{preview.role === "site_admin" ? "Site administrator" : "Member"} · {locationGrantStatusLabels[preview.status]}</p>
       <div className="location-access-history-scroll"><table className="location-access-history-table">
         <caption>Location permissions</caption>
         <thead><tr><th scope="col">Permission</th><th scope="col">Source</th></tr></thead>

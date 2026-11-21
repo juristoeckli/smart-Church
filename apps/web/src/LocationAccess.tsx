@@ -3,6 +3,7 @@ import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
 import { ApiKeySettings } from "./ApiKeySettings";
 import { LocationAccessHistory } from "./LocationAccessHistory";
+import { LocationAccessMatrix } from "./LocationAccessMatrix";
 import { LocationAccessPreview } from "./LocationAccessPreview";
 import { ModuleTranslationHost, registeredModules, translateModuleText } from "./module-registry";
 import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overrides";
@@ -34,7 +35,7 @@ const locationRights: Array<{ value: LocationPermission; label: string; descript
   { value: "resources_manage", label: "Manage resources", description: "Manage rooms, equipment and booking approvals." },
 ];
 export function LocationAccess({ department, csrfToken, onClose, embedded = false }: { department: DepartmentProfile; csrfToken: string; onClose: () => void; embedded?: boolean }) {
-  const [section, setSection] = useState<"members" | "history" | "preview">("members");
+  const [section, setSection] = useState<"members" | "history" | "preview" | "matrix">("members");
   const [members, setMembers] = useState<LocationMember[]>([]);
   const [availableUsers, setAvailableUsers] = useState<LocationAccessData["availableUsers"]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
@@ -139,10 +140,12 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
       <div className="modal-heading"><div><span className="eyebrow">LOCATION MANAGEMENT</span><h2 id="location-access-title">People &amp; access</h2><p>Manage who can use {department.location} and what each person can do.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><X size={19} /></button></div>
       <nav className="module-tabs" aria-label="Location access views">
         <button type="button" aria-current={section === "members" ? "page" : undefined} onClick={() => setSection("members")}>Members</button>
+        <button type="button" aria-current={section === "matrix" ? "page" : undefined} onClick={() => setSection("matrix")}>Permission matrix</button>
         <button type="button" aria-current={section === "preview" ? "page" : undefined} onClick={() => setSection("preview")}>Effective access</button>
         <button type="button" aria-current={section === "history" ? "page" : undefined} onClick={() => setSection("history")}>Access history</button>
       </nav>
       {section === "history" && <LocationAccessHistory key={department.id} departmentId={department.id} permissionLabels={Object.fromEntries(locationRights.map(({ value, label }) => [value, label]))} />}
+      {section === "matrix" && <LocationAccessMatrix key={department.id} department={department} permissionLabels={Object.fromEntries(locationRights.map(({ value, label }) => [value, label]))} onOpenAccount={(id) => { setSelectedId(id); setSection("preview"); }} />}
       {section === "preview" && <LocationAccessPreview key={department.id} department={department} members={members} userId={selectedId} selectUser={setSelectedId} permissionLabels={Object.fromEntries(locationRights.map(({ value, label }) => [value, label]))} />}
       {section === "members" && <div className="location-access-layout">
         <aside className="location-access-list" aria-label={`${department.location} members`}>
