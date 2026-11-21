@@ -4,7 +4,7 @@ import { audioPages } from "./audio-pages";
 import "./amx.css";
 
 type Action = { id: string; name: string; command: string };
-type Settings = { host: string; actions: Action[] };
+type Settings = { host: string; port: number; username: string; password: string; clearPassword: boolean; passwordConfigured?: boolean; actions: Action[] };
 const roomActions: Action[] = [
   { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[34001:1:1,11]" },
   { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[34001:1:1,16]" },
@@ -13,10 +13,10 @@ const roomActions: Action[] = [
   { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[34001:1:1,15]" },
   { id: "conference-large", name: "Konferenz gross", command: "ICSP[34001:1:1,14]" },
 ];
-const initialSettings: Settings = { host: "", actions: roomActions };
+const initialSettings: Settings = { host: "", port: 23, username: "", password: "", clearPassword: false, actions: roomActions };
 
-function completeSettings(settings: Settings): Settings {
-  return { ...settings, actions: roomActions };
+function completeSettings(settings: Partial<Settings>): Settings {
+  return { ...initialSettings, ...settings, actions: roomActions, password: "", clearPassword: false };
 }
 
 async function readResponse<T>(response: Response): Promise<T & { error?: string }> {
@@ -53,15 +53,19 @@ export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) 
   }
 
   return <section className="amx-panel" aria-labelledby="amx-settings-title">
-    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Control pulses target NetLinx device 34001; the physical touchpanel is 10001. The NetLinx program must handle device 34001. Level feedback reads device 10001 only. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
+    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Control events target NetLinx device 34001; the physical touchpanel is 10001. The NetLinx program must handle device 34001. Read-only room, level, and progress feedback reads device 10001. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
     {loading ? <p>Loading AMX settings…</p> : <form className="amx-form" onSubmit={(event) => void save(event)}>
       <label>NetLinx master IP address or hostname<input value={settings.host} onChange={(event) => setSettings((current) => ({ ...current, host: event.target.value }))} placeholder="Enter the controller IP address or hostname" required maxLength={253} /></label>
-      <p>Connection uses ICSP on TCP 1319. No NetLinx username or password is required.</p>
+      <label>Telnet port<input type="number" min={1} max={65535} value={settings.port} onChange={(event) => setSettings((current) => ({ ...current, port: Number(event.target.value) }))} required /></label>
+      <p>AMX terminal control and feedback use Telnet (default port 23). Leave the login empty unless the controller already prompts for one. This module never enables or changes authentication.</p>
+      <label>Existing NetLinx username<input autoComplete="username" value={settings.username} onChange={(event) => setSettings((current) => ({ ...current, username: event.target.value }))} maxLength={64} /></label>
+      <label>Existing NetLinx password<input type="password" autoComplete="current-password" value={settings.password} onChange={(event) => setSettings((current) => ({ ...current, password: event.target.value, clearPassword: false }))} maxLength={256} placeholder={settings.passwordConfigured ? "Saved password is retained if left blank" : "Leave empty if Telnet has no login"} /></label>
+      {settings.passwordConfigured && <label className="amx-password-clear"><input type="checkbox" checked={settings.clearPassword} onChange={(event) => setSettings((current) => ({ ...current, clearPassword: event.target.checked, password: "" }))} />Clear the saved Telnet password</label>}
       <h4>Room channel mappings</h4>
-      {roomActions.map((action) => <div className="amx-action-editor" key={action.id}><strong>{action.name}</strong><label>Verified ICSP event<input aria-label={`${action.name} verified ICSP event`} value={action.command} readOnly /></label></div>)}
-      <p>All six room channel mappings were verified from the TPDesign Home page and are read-only.</p>
+      {roomActions.map((action) => <div className="amx-action-editor" key={action.id}><strong>{action.name}</strong><label>Controller event<input aria-label={`${action.name} controller event`} value={action.command} readOnly /></label></div>)}
+      <p>These fixed mappings come from the Steffisburg TP4 project and cannot be edited here.</p>
       <h4>Audio pages</h4>
-      <p>Audio and system controls use fixed mappings from the panel project. Meter graphics show live level values read from the NetLinx device status.</p>
+      <p>Audio and system controls use fixed mappings from the panel project. Meter graphics show read-only level values from NetLinx device status.</p>
       <button className="button button-primary" type="submit" disabled={saving || !departmentId}>{saving ? "Saving…" : "Save AMX settings"}</button>
       {feedback && <p className={failed ? "amx-error" : "amx-feedback"} role="status">{feedback}</p>}
     </form>}
