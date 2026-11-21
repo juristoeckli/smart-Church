@@ -9,7 +9,7 @@ import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overri
 import { WorshipPlanning } from "./WorshipPlanning";
 
 type EventFilter = "upcoming" | "all" | "past";
-type ScheduleView = "list" | "month" | "attendance";
+type ScheduleView = "list" | "month" | "attendance" | "workload";
 const UNCATEGORIZED_ROLE_FILTER = "__uncategorized_roles__";
 type ManageableEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };
 type EventPositionSwap = { id: string; event_id: string; event_title: string; event_date: string; from_position_index: number; from_position_name: string; to_position_index: number; to_position_name: string; requester_contact_id: string; requester_name: string; target_contact_id: string; target_name: string; status: "pending" | "accepted" | "declined" | "cancelled"; created_at: string; canRespond: boolean; canCancel: boolean };
@@ -110,6 +110,44 @@ function preservePositionResponses(event: ServiceEvent, previous?: ServiceEvent)
       };
     }),
   };
+}
+
+function VolunteerWorkload({ events, contacts, matchesCategory, onOpenEvent }: {
+  events: ServiceEvent[];
+  contacts: Contact[];
+  matchesCategory: (position: ServicePosition) => boolean;
+  onOpenEvent: (event: ServiceEvent) => void;
+}) {
+  type Assignment = { event: ServiceEvent; role: string; status: "Confirmed" | "Requested" | "Declined"; index: number };
+  const names = new Map(contacts.map((contact) => [contact.id, `${contact.firstName} ${contact.lastName}`]));
+  const assignments = new Map<string, Assignment[]>();
+  for (const event of events) {
+    if (event.cancelledAt) continue;
+    for (const [index, position] of (event.positions ?? []).entries()) {
+      if (!position.contactId || !matchesCategory(position)) continue;
+      const status = position.responseStatus === "accepted" ? "Confirmed" : position.responseStatus === "declined" ? "Declined" : "Requested";
+      const rows = assignments.get(position.contactId) ?? [];
+      rows.push({ event, role: position.name, status, index });
+      assignments.set(position.contactId, rows);
+    }
+  }
+  const people = Array.from(assignments, ([id, rows]) => ({
+    id, name: names.get(id) ?? "Unknown volunteer", rows,
+    confirmed: rows.filter((row) => row.status === "Confirmed").length,
+    requested: rows.filter((row) => row.status === "Requested").length,
+    declined: rows.filter((row) => row.status === "Declined").length,
+  })).sort((a, b) => (b.confirmed + b.requested) - (a.confirmed + a.requested) || a.name.localeCompare(b.name));
+
+  return <section className="event-workload" aria-label="Volunteer workload">
+    <p>Assignments for the current event filters. Cancelled events are excluded. Expand a volunteer to open an event.</p>
+    {!people.length ? <p className="empty-state">No volunteer assignments match these filters.</p> : people.map((person) => <details key={person.id}>
+      <summary><strong>{person.name}</strong><span>{person.confirmed} confirmed · {person.requested} requested · {person.declined} declined</span></summary>
+      <ul>{person.rows.map(({ event, role, status, index }) => <li key={`${event.id}:${index}`}>
+        <button type="button" className="button button-secondary" onClick={() => onOpenEvent(event)}>{event.title}</button>
+        <span>{formatEventDate(event.eventDate)} · {role} · {status}</span>
+      </li>)}</ul>
+    </details>)}
+  </section>;
 }
 
 function csvCell(value: string | number) {
@@ -825,7 +863,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       <section className="directory-card">
         <div className="directory-heading"><div><h2>{translate("events.schedule")}</h2><p>{translate("events.scheduleDescription")}</p></div></div>
         <div className="directory-toolbar event-toolbar">
-          <div className="search-field"><Search size={17} /><input aria-label={translate("events.searchLabel")} placeholder={translate("events.searchPlaceholder")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>{canManage && scheduleView === "list" && <label className="event-role-category-filter">Role category<select aria-label="Filter duty roster by role category" value={roleCategoryFilter} onChange={(event) => setRoleCategoryFilter(event.target.value)}><option value="">All role categories</option>{roleCategoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}{hasUncategorizedRoles && <option value={UNCATEGORIZED_ROLE_FILTER}>Uncategorized</option>}</select></label>}
+          <div className="search-field"><Search size={17} /><input aria-label={translate("events.searchLabel")} placeholder={translate("events.searchPlaceholder")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>{canManage && (scheduleView === "list" || scheduleView === "workload") && <label className="event-role-category-filter">Role category<select aria-label="Filter duty roster by role category" value={roleCategoryFilter} onChange={(event) => setRoleCategoryFilter(event.target.value)}><option value="">All role categories</option>{roleCategoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}{hasUncategorizedRoles && <option value={UNCATEGORIZED_ROLE_FILTER}>Uncategorized</option>}</select></label>}
           <div className="filter-tabs" role="tablist" aria-label={translate("events.filterSchedule")}>
             <button className={filter === "upcoming" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "upcoming"} onClick={() => setFilter("upcoming")}>{translate("events.upcomingTab")} <span>{upcomingEvents.length}</span></button>
             <button className={filter === "all" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "all"} onClick={() => setFilter("all")}>{translate("events.allTab")} <span>{events.length}</span></button>
@@ -835,11 +873,12 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
             <button className={scheduleView === "list" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "list"} onClick={() => setScheduleView("list")}>{translate("events.listView")}</button>
             <button className={scheduleView === "month" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "month"} onClick={() => setScheduleView("month")}>{translate("events.monthView")}</button>
             <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => { setFilter("all"); setScheduleView("attendance"); }}>{translate("events.attendanceReport")}</button>
+            {canManage && <button className={scheduleView === "workload" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "workload"} onClick={() => setScheduleView("workload")}>Workload</button>}
           </div>
           {canManage && scheduleView === "list" && <><button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(roleCategoryMatches))}><Download size={15} />Export staffing</button><button className="button button-secondary" type="button" onClick={printStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(roleCategoryMatches))}><Printer size={15} />Print staffing</button></>}
         </div>
 
-        {scheduleView === "attendance" ? <div className="attendance-report">
+        {scheduleView === "workload" && canManage ? (isLoading || loadError ? <p className="empty-state">{isLoading ? translate("events.loading") : translate("events.scheduleLoadFailed")}</p> : <VolunteerWorkload events={filteredEvents} contacts={contacts} matchesCategory={roleCategoryMatches} onOpenEvent={setDetailsEvent} />) : scheduleView === "attendance" ? <div className="attendance-report">
           <div className="attendance-report-heading"><p>{translate("events.attendanceReportSummary").replace("{gatherings}", String(attendanceEvents.length)).replace("{visits}", String(attendanceTotal))}</p><button className="button button-secondary" type="button" onClick={downloadAttendanceReport} disabled={attendanceEvents.length === 0}><Download size={15} />{translate("events.exportAttendance")}</button></div>
           <div className="table-scroll"><table className="people-table event-table attendance-report-table"><thead><tr><th>{translate("events.date")}</th><th>{translate("events.gathering")}</th><th>{translate("events.type")}</th><th>{translate("events.adults")}</th><th>{translate("events.children")}</th><th>{translate("events.total")}</th><th>{translate("events.recordedAt")}</th></tr></thead><tbody>
             {attendanceEvents.map((event) => <tr key={event.id}><td>{formatEventDate(event.eventDate)}</td><td>{event.title}</td><td>{eventKindLabel(event.kind)}</td><td>{event.attendanceAdults ?? 0}</td><td>{event.attendanceChildren ?? 0}</td><td>{(event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0)}</td><td>{event.attendanceRecordedAt ? formatUserDate(event.attendanceRecordedAt, true) : "—"}</td></tr>)}
@@ -861,7 +900,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           })}
           {dutyRosterEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? translate("events.loading") : loadError ? translate("events.scheduleLoadFailed") : roleCategoryFilter ? "No events match this role category." : query ? translate("events.noSearchMatch") : filter === "past" ? translate("events.noPast") : translate("events.noSchedule")}</td></tr>}
         </tbody></table></div>}
-        {scheduleView !== "attendance" && <footer className="table-footer"><span>{translate("events.showing").replace("{shown}", String(scheduleView === "list" ? dutyRosterEvents.length : filteredEvents.length)).replace("{total}", String(events.length))}</span><span className="event-footer-note">{translate("events.timeZone").replace("{timeZone}", departmentTimeZone)}</span></footer>}
+        {scheduleView !== "attendance" && scheduleView !== "workload" && <footer className="table-footer"><span>{translate("events.showing").replace("{shown}", String(scheduleView === "list" ? dutyRosterEvents.length : filteredEvents.length)).replace("{total}", String(events.length))}</span><span className="event-footer-note">{translate("events.timeZone").replace("{timeZone}", departmentTimeZone)}</span></footer>}
       </section>
 
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>

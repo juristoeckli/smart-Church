@@ -80,3 +80,10 @@
 
 .event-cancelled-badge{display:inline-flex;align-items:center;width:max-content;margin-top:.25rem;padding:.2rem .5rem;border-radius:999px;background:var(--danger-soft,#fce8e6);color:var(--danger,#a32626);font-size:.75rem;font-weight:700}.event-details-modal .event-cancelled-badge{margin-top:.6rem}
 
+.event-workload { padding: 14px 20px; }
+.event-workload > p { color: var(--muted); }
+.event-workload details { border-top: 1px solid var(--line); }
+.event-workload summary { padding: 12px 0; cursor: pointer; }
+.event-workload summary span { display: inline-block; margin-inline-start: 12px; color: var(--muted); }
+.event-workload li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
+
