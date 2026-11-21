@@ -36,3 +36,5 @@ This optional location-scoped module provides the initial general-ledger workflo
 Donation receipts are operational documents, not jurisdiction-certified tax forms. The module does not collect postal addresses, statutory declarations or signatures; it does not email receipts or generate a legally certified PDF. Configure the wording and numbering with the organization’s accountant before issuing official documents.
 
 Finance is financial data. Configure module permissions deliberately, use production backups, and reconcile the books with the organization’s accountant before relying on generated figures. This module has not been verified against a live financial institution or tax jurisdiction.
+
+Finance exports support CSV and Excel (.xlsx) for transactions, donor statements, account statements, cost-center statements, and the trial balance, balance sheet, and profit/loss reports. Both formats use the same filters and location permissions. Excel includes numeric amount cells when they fit its 15-digit precision, keeps longer amounts as exact text, and writes labels and notes as text cells.

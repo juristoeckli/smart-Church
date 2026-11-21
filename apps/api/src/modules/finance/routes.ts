@@ -1,3 +1,4 @@
+import { financeWorkbook } from "./workbook.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -28,6 +29,15 @@ function csvCell(value: unknown) {
   const text = String(value ?? "");
   const safeText = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
   return `"${safeText.replace(/"/g, '""')}"`;
+}
+function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filename: string, header: string[], rows: unknown[][]) {
+  if ((request.params as { format?: string }).format === "xlsx") {
+    return reply.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+      .header("Content-Disposition", `attachment; filename=${filename}.xlsx`)
+      .send(financeWorkbook(header, rows));
+  }
+  const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+  return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename=${filename}.csv`).send(`\uFEFF${csv}`);
 }
 function asMoney(value: string | number) { const number = Number(value); return Number.isSafeInteger(number) ? number : 0; }
 
@@ -486,7 +496,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Donor not found." }); publish(departmentId, "donor-updated", request.params.id); return { updated: true };
   });
 
-  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>("/api/modules/finance/donors/:id/statement.csv", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, querystring: { type: "object", additionalProperties: false, properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
+  app.get<{ Params: { id: string; format: string }; Querystring: { from?: string; to?: string } }>("/api/modules/finance/donors/:id/statement.:format", { schema: { params: { type: "object", additionalProperties: false, required: ["id", "format"], properties: { id: uuid, format: { enum: ["csv", "xlsx"] } } }, querystring: { type: "object", additionalProperties: false, properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
+    if (!["csv", "xlsx"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid donor-statement date range." });
     const donor = await pool!.query("SELECT 1 FROM finance_donors WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
@@ -502,8 +513,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($3::date IS NULL OR t.booking_date >= $3) AND ($4::date IS NULL OR t.booking_date <= $4)
         ORDER BY t.booking_date,t.created_at,t.id,l.line_number`, [departmentId, request.params.id, request.query.from ?? null, request.query.to ?? null]);
     const header = ["booking_date", "accounting_year", "receipt_number", "donor_name", "booking_text", "account_code", "account_name", "cost_center_code", "line_text", "gift_amount_cents", "currency"];
-    const csv = [header, ...result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.donor_name, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.line_text, row.amount_cents, row.currency_code])].map((row) => row.map(csvCell).join(",")).join("\r\n");
-    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename=finance-donor-statement-${request.params.id}.csv`).send(`\uFEFF${csv}`);
+    return sendFinanceExport(request, reply, `finance-donor-statement-${request.params.id}`, header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.donor_name, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.line_text, row.amount_cents, row.currency_code]));
   });
 
   app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; page?: string; pageSize?: string } }>("/api/modules/finance/transactions", async (request, reply) => {
@@ -660,7 +670,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { accountingYear: year, costCenters: result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) })) };
   });
 
-  app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement.csv", { schema: { querystring: { type: "object", additionalProperties: false, required: ["accountId"], properties: { accountId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
+  app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement.:format", { schema: { querystring: { type: "object", additionalProperties: false, required: ["accountId"], properties: { accountId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
+    if (!["csv", "xlsx"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid account-statement date range." });
     const result = await pool!.query(`WITH entries AS (
@@ -673,11 +684,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         FROM entries WHERE ($3::date IS NULL OR booking_date >= $3) AND ($4::date IS NULL OR booking_date <= $4)
        ORDER BY booking_date,created_at,id,line_number`, [departmentId, request.query.accountId, request.query.from ?? null, request.query.to ?? null]);
     const header = ["booking_date", "accounting_year", "receipt_number", "booking_text", "line_text", "debit_cents", "credit_cents", "running_balance_cents"];
-    const csv = [header, ...result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.line_text, row.debit_cents, row.credit_cents, row.running_balance_cents])].map((row) => row.map(csvCell).join(",")).join("\r\n");
-    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", "attachment; filename=finance-account-statement.csv").send(`\uFEFF${csv}`);
+    return sendFinanceExport(request, reply, "finance-account-statement", header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.line_text, row.debit_cents, row.credit_cents, row.running_balance_cents]));
   });
 
-  app.get<{ Querystring: { year?: string } }>("/api/modules/finance/reports/cost-center-statement.csv", async (request, reply) => {
+  app.get<{ Querystring: { year?: string } }>("/api/modules/finance/reports/cost-center-statement.:format", async (request, reply) => {
+    if (!["csv", "xlsx"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
     const result = await pool!.query(`SELECT c.code,c.name,COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents ELSE 0 END),0) AS debit_cents,
@@ -686,11 +697,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2
         WHERE c.department_id=$1 GROUP BY c.id ORDER BY c.code`, [departmentId, year]);
     const header = ["accounting_year", "cost_center_code", "cost_center_name", "debit_cents", "credit_cents", "transaction_count"];
-    const csv = [header, ...result.rows.map((row) => [year, row.code, row.name, row.debit_cents, row.credit_cents, row.transaction_count])].map((row) => row.map(csvCell).join(",")).join("\r\n");
-    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename=finance-cost-centers-${year}.csv`).send(`\uFEFF${csv}`);
+    return sendFinanceExport(request, reply, `finance-cost-centers-${year}`, header, result.rows.map((row) => [year, row.code, row.name, row.debit_cents, row.credit_cents, row.transaction_count]));
   });
 
-  app.get<{ Querystring: { year?: string; report?: string } }>("/api/modules/finance/reports/turnover.csv", async (request, reply) => {
+  app.get<{ Querystring: { year?: string; report?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
+    if (!["csv", "xlsx"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
     const report = request.query.report ?? "trial-balance";
@@ -704,17 +715,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE a.department_id=$1 GROUP BY a.id ORDER BY a.code`, [departmentId, year]);
     const rows = report === "balance-sheet" ? result.rows.filter((row) => ["asset", "liability", "equity"].includes(row.account_type)) : report === "profit-loss" ? result.rows.filter((row) => ["income", "expense"].includes(row.account_type)) : result.rows;
     const header = ["accounting_year", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
-    const csv = [header, ...rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents])].map((row) => row.map(csvCell).join(",")).join("\r\n");
-    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename=finance-turnover-${report}-${year}.csv`).send(`\uFEFF${csv}`);
+    return sendFinanceExport(request, reply, `finance-turnover-${report}-${year}`, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string } }>("/api/modules/finance/transactions/export.csv", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string } }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {
+    if (!["csv", "xlsx"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid date range." });
     const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,a.code AS account_code,a.name AS account_name,c.code AS cost_center_code,d.display_name AS donor_name,l.debit_cents,l.credit_cents,l.line_text FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id LEFT JOIN finance_cost_centers c ON c.department_id=l.department_id AND c.id=l.cost_center_id LEFT JOIN finance_donors d ON d.department_id=l.department_id AND d.id=l.donor_id WHERE t.department_id=$1 AND t.status='posted' AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ORDER BY t.booking_date,t.created_at,l.line_number`, [departmentId, request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null, request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null, request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null, cleanText(request.query.q ?? "").slice(0, 100)]);
     const header = ["booking_date", "accounting_year", "receipt_number", "booking_text", "account_code", "account_name", "cost_center_code", "donor_name", "debit_cents", "credit_cents", "line_text"];
-    const csv = [header, ...result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.donor_name, row.debit_cents, row.credit_cents, row.line_text])].map((row) => row.map(csvCell).join(",")).join("\r\n");
-    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", "attachment; filename=finance-transactions.csv").send(`\uFEFF${csv}`);
+    return sendFinanceExport(request, reply, "finance-transactions", header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.donor_name, row.debit_cents, row.credit_cents, row.line_text]));
   });
 
   const statementUploadSchema = {
