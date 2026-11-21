@@ -8,9 +8,11 @@ import { translationsForModule } from "./modules/translations";
 import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overrides";
 import { WorshipPlanning } from "./WorshipPlanning";
 import { EventVolunteerAvailabilityWarning, VolunteerAvailability } from "./VolunteerAvailability";
+import { buildStaffingMatrix, StaffingRosterMatrix } from "./StaffingRosterMatrix";
+import { csvCell, printHtml } from "./service-exports";
 
 type EventFilter = "upcoming" | "all" | "past";
-type ScheduleView = "list" | "month" | "attendance" | "workload";
+type ScheduleView = "list" | "month" | "attendance" | "workload" | "roster";
 const UNCATEGORIZED_ROLE_FILTER = "__uncategorized_roles__";
 type ManageableEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };
 type EventPositionSwap = { id: string; event_id: string; event_title: string; event_date: string; from_position_index: number; from_position_name: string; to_position_index: number; to_position_name: string; requester_contact_id: string; requester_name: string; target_contact_id: string; target_name: string; status: "pending" | "accepted" | "declined" | "cancelled"; created_at: string; canRespond: boolean; canCancel: boolean };
@@ -215,16 +217,6 @@ function sumAttendance(events: ServiceEvent[]) {
   }), { adults: 0, children: 0 });
 }
 
-function csvCell(value: string | number) {
-  const cell = String(value);
-  const safeCell = typeof value === "string" && /^[\s\u0000-\u001f]*[=+\-@\uFF1D\uFF0B\uFF0D\uFF20]|^[\t\r\n]/u.test(cell) ? "'" + cell : cell;
-  return `"${safeCell.replace(/"/g, '""')}"`;
-}
-
-function printHtml(value: string | number) {
-  return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
-}
-
 function eventPayload(form: HTMLFormElement): CreateServiceEvent {
   const values = new FormData(form);
   const isAllDay = values.get("isAllDay") === "on";
@@ -369,6 +361,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const [servicePlanTemplates, setServicePlanTemplates] = useState<ServicePlanTemplate[]>([]);
   const [worshipSongs, setWorshipSongs] = useState<WorshipSong[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [eventsDepartmentId, setEventsDepartmentId] = useState("");
   const [loadError, setLoadError] = useState("");
   const [filter, setFilter] = useState<EventFilter>("upcoming");
   const [attendanceFrom, setAttendanceFrom] = useState("");
@@ -434,7 +427,9 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       if (!response.ok || !Array.isArray(result)) {
         throw new Error(!Array.isArray(result) ? result.error ?? "Could not load services and events." : "Could not load services and events.");
       }
+      if (signal?.aborted) return;
       setEvents(result);
+      setEventsDepartmentId(departmentId);
       const swapsResponse = await fetch("/api/event-position-swaps", { headers: { "x-department-id": departmentId }, signal });
       const swapsData = await swapsResponse.json() as EventPositionSwap[] | { error?: string };
       if (swapsResponse.ok && Array.isArray(swapsData)) setPositionSwaps(swapsData);
@@ -517,6 +512,8 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const dutyRosterEvents = roleCategoryFilter || showUnfilledRoles || showMyDuties
     ? matchingResponsibleEvents.filter((event) => (!(showUnfilledRoles || showMyRequests) || !event.cancelledAt) && event.positions?.some(dutyPositionMatches))
     : matchingResponsibleEvents;
+  const staffingMatrix = canManage && scheduleView === "roster" && eventsDepartmentId === departmentId
+    ? buildStaffingMatrix(dutyRosterEvents, contacts, dutyPositionMatches, formatEventDate, eventTimeLabel) : null;
   const attendanceDatesInvalid = Boolean(attendanceFrom && attendanceTo && attendanceFrom > attendanceTo);
   const attendanceEvents = attendanceDatesInvalid ? [] : filterAttendanceDates(filteredEvents, attendanceFrom, attendanceTo);
   const attendanceCounts = sumAttendance(attendanceEvents);
@@ -1017,7 +1014,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       <section className="directory-card">
         <div className="directory-heading"><div><h2>{translate("events.schedule")}</h2><p>{translate("events.scheduleDescription")}</p></div></div>
         <div className="directory-toolbar event-toolbar">
-          <div className="search-field"><Search size={17} /><input aria-label={translate("events.searchLabel")} placeholder={translate("events.searchPlaceholder")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>{canManage && (scheduleView === "list" || scheduleView === "workload") && <label className="event-role-category-filter">Role category<select aria-label="Filter duty roster by role category" value={roleCategoryFilter} onChange={(event) => setRoleCategoryFilter(event.target.value)}><option value="">All role categories</option>{roleCategoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}{hasUncategorizedRoles && <option value={UNCATEGORIZED_ROLE_FILTER}>Uncategorized</option>}</select></label>}
+          <div className="search-field"><Search size={17} /><input aria-label={translate("events.searchLabel")} placeholder={translate("events.searchPlaceholder")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>{canManage && (scheduleView === "list" || scheduleView === "workload" || scheduleView === "roster") && <label className="event-role-category-filter">Role category<select aria-label="Filter duty roster by role category" value={roleCategoryFilter} onChange={(event) => setRoleCategoryFilter(event.target.value)}><option value="">All role categories</option>{roleCategoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}{hasUncategorizedRoles && <option value={UNCATEGORIZED_ROLE_FILTER}>Uncategorized</option>}</select></label>}
           {scheduleView !== "attendance" && <div className="filter-tabs" role="tablist" aria-label={translate("events.filterSchedule")}>
             <button className={filter === "upcoming" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "upcoming"} onClick={() => setFilter("upcoming")}>{translate("events.upcomingTab")} <span>{upcomingEvents.length}</span></button>
             <button className={filter === "all" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "all"} onClick={() => setFilter("all")}>{translate("events.allTab")} <span>{events.length}</span></button>
@@ -1027,14 +1024,15 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
             <button className={scheduleView === "list" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "list"} onClick={() => setScheduleView("list")}>{translate("events.listView")}</button>
             <button className={scheduleView === "month" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "month"} onClick={() => setScheduleView("month")}>{translate("events.monthView")}</button>
             <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => setScheduleView("attendance")}>{translate("events.attendanceReport")}</button>
+            {canManage && <button className={scheduleView === "roster" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "roster"} onClick={() => setScheduleView("roster")}>Roster matrix</button>}
             {canManage && <button className={scheduleView === "workload" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "workload"} onClick={() => setScheduleView("workload")}>Workload</button>}
           </div>
-          {scheduleView === "list" && <label className="event-role-category-filter">Staffing<select value={!canManage && staffingFilter === "unfilled" ? "all" : staffingFilter} onChange={(event) => setStaffingFilter(event.target.value as typeof staffingFilter)}><option value="all">All roles</option><option value="mine">My assignments</option><option value="requested">My pending requests</option>{canManage && <option value="unfilled">Unfilled roles only</option>}</select></label>}
-          {canManage && (scheduleView === "list" || scheduleView === "workload") && <label className="event-role-category-filter">Responsible person<select value={responsibleFilter} onChange={(change) => setResponsibleFilter(change.target.value)}><option value="">Anyone</option><option value="unassigned">No responsible person</option>{responsibleContacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.firstName} {contact.lastName}</option>)}</select></label>}
+          {(scheduleView === "list" || scheduleView === "roster") && <label className="event-role-category-filter">Staffing<select value={!canManage && staffingFilter === "unfilled" ? "all" : staffingFilter} onChange={(event) => setStaffingFilter(event.target.value as typeof staffingFilter)}><option value="all">All roles</option><option value="mine">My assignments</option><option value="requested">My pending requests</option>{canManage && <option value="unfilled">Unfilled roles only</option>}</select></label>}
+          {canManage && (scheduleView === "list" || scheduleView === "workload" || scheduleView === "roster") && <label className="event-role-category-filter">Responsible person<select value={responsibleFilter} onChange={(change) => setResponsibleFilter(change.target.value)}><option value="">Anyone</option><option value="unassigned">No responsible person</option>{responsibleContacts.map((contact) => <option key={contact.id} value={contact.id}>{contact.firstName} {contact.lastName}</option>)}</select></label>}
           {canManage && scheduleView === "list" && <><button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(dutyPositionMatches))}><Download size={15} />Export staffing</button><button className="button button-secondary" type="button" onClick={printStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(dutyPositionMatches))}><Printer size={15} />Print staffing</button></>}
         </div>
 
-        {scheduleView === "workload" && canManage ? (isLoading || loadError ? <p className="empty-state">{isLoading ? translate("events.loading") : translate("events.scheduleLoadFailed")}</p> : <VolunteerWorkload events={matchingResponsibleEvents} contacts={contacts} matchesCategory={roleCategoryMatches} onOpenEvent={setDetailsEvent} />) : scheduleView === "attendance" ? <div className="attendance-report">
+        {scheduleView === "roster" && canManage ? (!staffingMatrix || isLoading || loadError ? <p className="empty-state">{loadError ? translate("events.scheduleLoadFailed") : translate("events.loading")}</p> : <StaffingRosterMatrix matrix={staffingMatrix} location={departmentLocation} onOpenEvent={setDetailsEvent} onNotice={onNotice} />) : scheduleView === "workload" && canManage ? (isLoading || loadError ? <p className="empty-state">{isLoading ? translate("events.loading") : translate("events.scheduleLoadFailed")}</p> : <VolunteerWorkload events={matchingResponsibleEvents} contacts={contacts} matchesCategory={roleCategoryMatches} onOpenEvent={setDetailsEvent} />) : scheduleView === "attendance" ? <div className="attendance-report">
           <div className="attendance-report-heading">
             <div>
               <div className="form-row">
@@ -1072,7 +1070,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           })}
           {dutyRosterEvents.length === 0 && <tr><td colSpan={6} className="empty-state">{isLoading ? translate("events.loading") : loadError ? translate("events.scheduleLoadFailed") : showUnfilledRoles ? "No unfilled roles match these filters." : roleCategoryFilter || responsibleFilter ? "No events match these staffing filters." : query ? translate("events.noSearchMatch") : filter === "past" ? translate("events.noPast") : translate("events.noSchedule")}</td></tr>}
         </tbody></table></div>}
-        {scheduleView !== "attendance" && scheduleView !== "workload" && <footer className="table-footer"><span>{translate("events.showing").replace("{shown}", String(scheduleView === "list" ? dutyRosterEvents.length : filteredEvents.length)).replace("{total}", String(events.length))}</span><span className="event-footer-note">{translate("events.timeZone").replace("{timeZone}", departmentTimeZone)}</span></footer>}
+        {scheduleView !== "attendance" && scheduleView !== "workload" && scheduleView !== "roster" && <footer className="table-footer"><span>{translate("events.showing").replace("{shown}", String(scheduleView === "list" ? dutyRosterEvents.length : filteredEvents.length)).replace("{total}", String(events.length))}</span><span className="event-footer-note">{translate("events.timeZone").replace("{timeZone}", departmentTimeZone)}</span></footer>}
       </section>
 
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>

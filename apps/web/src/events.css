@@ -87,3 +87,10 @@
 .event-workload summary span { display: inline-block; margin-inline-start: 12px; color: var(--muted); }
 .event-workload li { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
 
+.staffing-roster-matrix{display:grid;gap:8px}
+.staffing-roster-tools{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;padding:8px 14px}
+.staffing-roster-table{width:max-content;min-width:100%}
+.staffing-roster-table caption{padding:8px 14px;text-align:start;font-weight:650}
+.staffing-roster-table th,.staffing-roster-table td{min-width:145px;max-width:280px;vertical-align:top;text-align:start;white-space:normal;overflow-wrap:anywhere}
+.staffing-roster-table ul{padding:0;margin:0;list-style:none;display:grid;gap:8px}
+.staffing-roster-table small{display:block;margin-top:3px}
