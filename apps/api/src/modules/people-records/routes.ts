@@ -254,7 +254,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       );
       return groups.rows;
     });
-    routes.get<{ Querystring: { q?: string; status?: string; field?: string; value?: string; filters?:string;relationshipFilters?:string;groupRole?:string;groupType?:string;groupId?:string;sort?:DirectorySort;archived?:boolean;includeStatistics?:boolean } }>("/api/people-records/directory",{schema:{querystring:{type:"object",additionalProperties:false,properties:{q:{type:"string",maxLength:120},status:{type:"string",enum:["member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"string",maxLength:3000},relationshipFilters:{type:"string",maxLength:2000},groupRole:{type:"string",minLength:1,maxLength:80},groupType:{type:"string",minLength:1,maxLength:120},groupId:uuid,sort:directorySortSchema,archived:{type:"boolean"},includeStatistics:{type:"boolean"}}}}}, async (request, reply) => {
+    routes.get<{ Querystring: { q?: string; status?: string; field?: string; value?: string; filters?:string;relationshipFilters?:string;groupRole?:string;groupType?:string;groupId?:string;sort?:DirectorySort;archived?:boolean;includeStatistics?:boolean;page?:number;pageSize?:number } }>("/api/people-records/directory",{schema:{querystring:{type:"object",additionalProperties:false,properties:{q:{type:"string",maxLength:120},status:{type:"string",enum:["member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"string",maxLength:3000},relationshipFilters:{type:"string",maxLength:2000},groupRole:{type:"string",minLength:1,maxLength:80},groupType:{type:"string",minLength:1,maxLength:120},groupId:uuid,sort:directorySortSchema,archived:{type:"boolean"},includeStatistics:{type:"boolean"},page:{type:"integer",minimum:1,maximum:2147483647},pageSize:{type:"integer",minimum:1,maximum:500}}}}}, async (request, reply) => {
       const d=await department(request,reply); if(!d)return reply; const {q="",status}=request.query;
       let fieldJson:string|null=null;
       try{const filters=parseFieldFilters(request.query.filters,request.query.field,request.query.value);if(filters.length)fieldJson=JSON.stringify(await validateFieldFilters(d,filters))}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid custom field filters."})} let relationshipJson:string|null=null;try{const filters=await validateRelationshipFilters(d,parseRelationshipFilters(request.query.relationshipFilters));if(filters.length)relationshipJson=JSON.stringify(filters)}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid relationship filters."})}
@@ -264,20 +264,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const selection = `SELECT c.id,c.first_name AS "firstName",c.last_name AS "lastName",c.email,c.phone,c.status,c.postal_address AS "postalAddress",c.archived_at AS "archivedAt",
         COALESCE((SELECT jsonb_object_agg(f.field_key,v.value) FROM people_record_values v JOIN people_record_fields f ON f.id=v.field_id AND f.department_id=v.department_id WHERE v.department_id=c.department_id AND v.contact_id=c.id AND f.active), '{}'::jsonb) AS fields`;
       const order = directoryOrder(request.query.sort);
+      const page = request.query.page ?? 1;
+      const pageSize = request.query.pageSize ?? 500;
+      const pageValues = [...values, pageSize, (page - 1) * pageSize];
       if (request.query.includeStatistics) {
-        // Count the same filtered contacts before applying the display limit.
+        // The aggregate and page use the same filtered contacts in a single snapshot.
+        const outputOrder = order.replaceAll("c.first_name", 'people."firstName"').replaceAll("c.last_name", 'people."lastName"').replaceAll("c.", "people.");
         const result = await pool!.query(`WITH matched AS (SELECT c.* FROM contacts c WHERE ${match})
-          SELECT (SELECT COALESCE(jsonb_agg(to_jsonb(people)), '[]'::jsonb)
-                  FROM (${selection} FROM matched c ORDER BY ${order} LIMIT 500) people) AS people,
+          SELECT (SELECT COALESCE(jsonb_agg(to_jsonb(people) ORDER BY ${outputOrder}), '[]'::jsonb)
+                  FROM (${selection} FROM matched c ORDER BY ${order} LIMIT $10 OFFSET $11) people) AS people,
                  (SELECT jsonb_build_object('total',count(*),
                     'members',count(*) FILTER (WHERE status='member'),
                     'visitors',count(*) FILTER (WHERE status='visitor'),
                     'withEmail',count(*) FILTER (WHERE NULLIF(btrim(email),'') IS NOT NULL),
                     'withPhone',count(*) FILTER (WHERE NULLIF(btrim(phone),'') IS NOT NULL))
-                  FROM matched) AS statistics`, values);
+                  FROM matched) AS statistics`, pageValues);
         return result.rows[0];
       }
-      const result = await pool!.query(`${selection} FROM contacts c WHERE ${match} ORDER BY ${order} LIMIT 500`, values);
+      const result = await pool!.query(`${selection} FROM contacts c WHERE ${match} ORDER BY ${order} LIMIT $10 OFFSET $11`, pageValues);
       return result.rows;
     });
     async function updateArchiveState(departmentId: string, contactIds: string[], archived: boolean, actorId: string | null) {
