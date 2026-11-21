@@ -16,6 +16,7 @@ import { csvCell, printHtml } from "./service-exports";
 import { openServicePlanPrint, servicePlanSectionHeading } from "./service-plan-print";
 import { LiveRunSheet } from "./LiveRunSheet";
 import { OwnCalendarDuty } from "./OwnCalendarDuty";
+import { ownCalendarAbsenceForDate, useOwnCalendarAbsences } from "./own-calendar-absences";
 import { servicePlanLinkUrl } from "./service-plan-link";
 import { buildOwnDutyRows, OwnDutyExports } from "./OwnDutyExports";
 
@@ -646,6 +647,8 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       return { date: date.toISOString().slice(0, 10), inMonth: date.getUTCMonth() === month - 1 };
     });
   }, [calendarMonth]);
+  const [absenceRevision, setAbsenceRevision] = useState(0);
+  const monthAbsences = useOwnCalendarAbsences(departmentId, scheduleView === "month", absenceRevision);
   const filteredCheckInContacts = contacts.filter((person) => `${person.firstName} ${person.lastName}`.toLocaleLowerCase().includes(checkInQuery.trim().toLocaleLowerCase()));
 
   function moveCalendarMonth(amount: number) {
@@ -1091,6 +1094,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         <div className="event-heading-actions"><button className="button button-secondary" type="button" onClick={() => setIsWorshipLibraryOpen(true)}><Music2 size={16} /> {translate("events.worshipLibrary")}</button>{canManage && <><button className="button button-secondary" type="button" onClick={() => void openVisitorFollowUps()}><ClipboardList size={17} /> {translate("events.visitorFollowups")}</button><button className="button button-secondary" type="button" onClick={() => setQualificationManagerOpen(true)}><Users size={16} /> Volunteer qualifications</button><button className="button button-primary" type="button" onClick={openCreateModal}><Plus size={18} /> {translate("events.addEvent")}</button></>}</div>
       </section>
       <VolunteerAvailability key={departmentId} departmentId={departmentId} csrfToken={csrfToken}
+        onChanged={() => setAbsenceRevision((current) => current + 1)}
         t={(message) => translateModuleText(message, eventTranslations, getActiveLanguage())} />
 
       <section className="stat-grid event-stat-grid" aria-label={translate("events.summaryLabel")}>
@@ -1148,11 +1152,15 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           <div className="schedule-calendar-toolbar"><div><strong>{new Intl.DateTimeFormat(document.documentElement.lang || "en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${calendarMonth}-01T12:00:00Z`))}</strong><span>{translate("events.gatheringCount").replace("{count}", String(filteredEvents.filter((event) => event.eventDate.startsWith(calendarMonth)).length))}</span></div><div><button className="community-row-action" type="button" aria-label={translate("events.previousMonth")} onClick={() => moveCalendarMonth(-1)}><ArrowLeft size={16} /></button><button className="button button-secondary" type="button" onClick={() => { setCalendarMonth(today.slice(0, 7)); }}>{translate("events.today")}</button><button className="community-row-action" type="button" aria-label={translate("events.nextMonth")} onClick={() => moveCalendarMonth(1)}><ArrowRight size={16} /></button></div></div>
           <div className="schedule-calendar-grid" role="grid" aria-label={translate("events.calendarDates")}><div className="schedule-calendar-weekdays" role="row">{["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-01-07"].map((date) => { const day = new Intl.DateTimeFormat(document.documentElement.lang || "en", { weekday: "short", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`)); return <span role="columnheader" key={date}>{day}</span>; })}</div><div className="schedule-calendar-days">{calendarDays.map((day) => {
             const dayEvents = filteredEvents.filter((event) => event.eventDate === day.date);
-            return <article className={`schedule-calendar-day${day.inMonth ? "" : " is-outside"}${day.date === today ? " is-today" : ""}`} role="gridcell" key={day.date}><time dateTime={day.date}>{Number(day.date.slice(-2))}</time>{dayEvents.map((event) => <button className={`schedule-calendar-event event-kind-${event.kind}`} type="button" key={event.id} onClick={() => setDetailsEvent(event)} title={`${eventTimeLabel(event)} · ${event.title}`}>{eventTimeLabel(event)} {event.title}
+            const absence = ownCalendarAbsenceForDate(monthAbsences.rows, day.date);
+            return <article className={`schedule-calendar-day${day.inMonth ? "" : " is-outside"}${day.date === today ? " is-today" : ""}`} role="gridcell" key={day.date}><time dateTime={day.date}>{Number(day.date.slice(-2))}</time>
+              {absence && <span className="schedule-calendar-absence">{translate(absence === "timed" ? "events.ownTimedAbsence" : "events.ownAllDayAbsence")}</span>}
+              {dayEvents.map((event) => <button className={`schedule-calendar-event event-kind-${event.kind}`} type="button" key={event.id} onClick={() => setDetailsEvent(event)} title={`${eventTimeLabel(event)} · ${event.title}`}>{eventTimeLabel(event)} {event.title}
               {eventsDepartmentId === departmentId && <OwnCalendarDuty event={event} />}
             </button>)}</article>;
           })}</div></div>
 
+          {monthAbsences.failed && <p role="status">{translate("events.ownAbsencesUnavailable")}</p>}
           {filteredEvents.filter((event) => event.eventDate.startsWith(calendarMonth)).length === 0 && <p className="empty-state schedule-calendar-empty">{translate("events.emptyMonth")}</p>}
         </div> : <div className="table-scroll"><table className="people-table event-table"><thead><tr><th>{translate("events.date")}</th><th>{translate("events.gathering")}</th><th>{translate("events.time")}</th><th>{translate("events.location")}</th><th>{translate("events.type")}</th><th><span className="sr-only">{translate("events.actions")}</span></th></tr></thead><tbody>
           {dutyRosterEvents.map((event) => {

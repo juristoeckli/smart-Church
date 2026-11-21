@@ -73,8 +73,8 @@ function ChurchToolsAbsenceConsent({ departmentId, csrfToken, t }: { departmentI
   </section>;
 }
 
-export function VolunteerAvailability({ departmentId, csrfToken, t }: {
-  departmentId: string; csrfToken: string; t: Translate;
+export function VolunteerAvailability({ departmentId, csrfToken, t, onChanged }: {
+  departmentId: string; csrfToken: string; t: Translate; onChanged?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [linked, setLinked] = useState<boolean | null>(null);
@@ -116,6 +116,7 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
       setRows((current) => method === "DELETE" ? current.filter((row) => row.id !== id)
         : [...current.filter((row) => row.id !== result.id), result].sort((a, b) => a.startsOn.localeCompare(b.startsOn)));
       stopEditing();
+      onChanged?.();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not save volunteer availability."); }
     finally { setBusy(false); }
   }
