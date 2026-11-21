@@ -56,9 +56,8 @@ async function readResponse<T>(response: Response): Promise<T & { error?: string
   return data;
 }
 
-function stateFor(object: PanelObject) { return object.states?.find((state) => state.number === 1) ?? object.states?.[0]; }
-function labelFor(object: PanelObject) {
-  const state = stateFor(object);
+function stateFor(object: PanelObject, active = false) { return object.states?.find((state) => state.number === (active ? 2 : 1)) ?? object.states?.[0]; }
+function labelFor(object: PanelObject, state = stateFor(object)) {
   if (typeof state?.text === "string") return state.text;
   if (state?.bitmap || (object.type === "general" && typeof object.channel === "number")) return "";
   const label = object.label ?? object.name;
@@ -76,6 +75,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [failed, setFailed] = useState(false);
   const [time, setTime] = useState(() => new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date()));
   const currentPage = findPage(overlayPages.at(-1) ?? basePageName) ?? findPage("Home")!;
+  const visibleModePage = [...overlayPages].reverse().find((name) => name === "Regie" || /_(Volume|Mik|Lautsprecher)$/.test(name));
+  const selectedModeChannel = visibleModePage === "Regie" ? 8 : visibleModePage?.endsWith("_Volume") ? 5 : visibleModePage?.endsWith("_Mik") ? 6 : visibleModePage?.endsWith("_Lautsprecher") ? 7 : undefined;
   const visiblePages = [findPage(basePageName) ?? findPage("Home")!, ...overlayPages.flatMap((name) => {
     const page = findPage(name);
     return page ? [page] : [];
@@ -268,8 +269,10 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   }
 
   const renderObject = (page: PanelPage, object: PanelObject, layer: number): ReactNode => {
-    const state = stateFor(object);
-    const baseText = labelFor(object);
+    const activeRoomState = typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
+    const activeModeState = page.name === "Modus" && selectedModeChannel === object.channel;
+    const state = stateFor(object, activeRoomState || activeModeState);
+    const baseText = labelFor(object, state);
     const levelValue = object.type === "bargraph" && typeof object.level === "number" ? levelValues[String(object.level)] : undefined;
     const low = object.rangeLow ?? 0;
     const high = object.rangeHigh ?? 100;
