@@ -144,3 +144,48 @@ export async function pulseChannel(settings: TelnetSettings, address: { device: 
     connection.close();
   }
 }
+
+export async function readDeviceLevels(settings: TelnetSettings, address: { device: number; port: number; system: number }, requestedLevels: number[]) {
+  if (!Number.isInteger(settings.port) || settings.port < 1 || settings.port > 65535
+    || !Number.isInteger(address.device) || address.device < 1 || address.device > 65535
+    || !Number.isInteger(address.port) || address.port < 1 || address.port > 65535
+    || !Number.isInteger(address.system) || address.system < 0 || address.system > 65535
+    || requestedLevels.some((level) => !Number.isInteger(level) || level < 1 || level > 65535)) {
+    throw new Error("The requested NetLinx device address or level is invalid.");
+  }
+  const connection = new NetLinxTerminal();
+  try {
+    await connection.connect(settings.host, settings.port);
+    const loginPrompt = await connection.waitFor(/(?:login\s*:|password\s*:|(?:^|\n)\s*>\s*$)/i);
+    let responseText = loginPrompt;
+    if (/login\s*:/i.test(loginPrompt)) {
+      if (!settings.username) throw new Error("The NetLinx Telnet terminal requires a username. Enter the existing controller login in AMX settings.");
+      await connection.sendLine(settings.username);
+      const passwordPrompt = await connection.waitFor(/(?:password\s*:|(?:^|\n)\s*>\s*$)/i);
+      if (/password\s*:/i.test(passwordPrompt)) {
+        if (!settings.password) throw new Error("The NetLinx Telnet terminal requires a password. Enter the existing controller login in AMX settings.");
+        await connection.sendLine(settings.password);
+        responseText = await connection.waitFor(/(?:^|\n)\s*>\s*$/i);
+      }
+    } else if (/password\s*:/i.test(loginPrompt)) {
+      if (!settings.password) throw new Error("The NetLinx Telnet terminal requires a password. Enter the existing controller login in AMX settings.");
+      await connection.sendLine(settings.password);
+      responseText = await connection.waitFor(/(?:^|\n)\s*>\s*$/i);
+    }
+    if (/login|password|invalid|denied/i.test(responseText)) throw new Error("The NetLinx Telnet login was rejected. Check the existing controller credentials in AMX settings.");
+
+    await connection.sendLine(`DEVICE STATUS ${address.device}:${address.port}:${address.system}`);
+    const result = await connection.waitFor(/(?:^|\n)\s*>\s*$/i, 15000);
+    const levels = new Map<number, number>();
+    const pattern = /(?:^|\n)\s*Level\s+(\d+)\s*=\s*(-?\d+(?:\.\d+)?)/gi;
+    for (const match of result.matchAll(pattern)) {
+      const level = Number(match[1]);
+      if (requestedLevels.includes(level)) levels.set(level, Number(match[2]));
+    }
+    const missing = requestedLevels.filter((level) => !levels.has(level));
+    if (missing.length) throw new Error(`The NetLinx status response did not include level${missing.length === 1 ? "" : "s"} ${missing.join(", ")}.`);
+    return Object.fromEntries(levels);
+  } finally {
+    connection.close();
+  }
+}

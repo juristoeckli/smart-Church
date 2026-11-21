@@ -1,9 +1,9 @@
 import { isIP } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { amxAudioActions, amxSystemActions } from "./audio-mappings.js";
+import { amxAudioActions, amxAudioLevels, amxAudioPages, amxSystemActions } from "./audio-mappings.js";
 import { decryptTelnetPassword, encryptTelnetPassword } from "./credentials.js";
-import { pulseChannel } from "./telnet.js";
+import { pulseChannel, readDeviceLevels } from "./telnet.js";
 
 type AmxAction = { id: string; name: string; command: string };
 type AmxSettings = { host: string; port: number; username: string; password: string; clearPassword: boolean; actions: AmxAction[] };
@@ -86,6 +86,32 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     return { configured: Boolean(result.rows[0]?.host) };
+  });
+
+  app.get<{ Querystring: { page?: string } }>("/api/modules/amx/levels", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const page = amxAudioPages.find((item) => item.id === request.query.page);
+    if (!page) return reply.code(400).send({ error: "Choose a known AMX audio page to read its levels." });
+    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>("SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const storedSettings = result.rows[0];
+    const settings = storedSettings ? { ...storedSettings, port: storedSettings.port === 1319 ? 23 : storedSettings.port } : defaultSettings;
+    if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+    const pageLevels = amxAudioLevels.filter((item) => item.page === page.id);
+    const ports = [...new Set(pageLevels.map((item) => item.port))];
+    if (!pageLevels.length || !ports.length) return { page: page.id, values: {} };
+    try {
+      const values: Record<string, number> = {};
+      for (const port of ports) {
+        const requested = [...new Set(pageLevels.filter((item) => item.port === port).map((item) => item.level))];
+        const passwordCiphertext = storedSettings?.password_ciphertext ?? "";
+        const levels = await readDeviceLevels({ host: settings.host, port: settings.port, username: settings.username ?? "", password: passwordCiphertext ? decryptTelnetPassword(passwordCiphertext) : "" }, { device: 10001, port, system: 1 }, requested);
+        Object.assign(values, levels);
+      }
+      return { page: page.id, values, updatedAt: new Date().toISOString() };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read AMX level feedback." });
+    }
   });
 
   app.get("/api/modules/amx/settings", async (request, reply) => {

@@ -6,11 +6,12 @@ import layoutJson from "../../../../api/src/modules/amx/tp4-layout.json";
 import "./amx.css";
 
 type PanelState = { number: number; style?: string; backgroundColor?: string; fontColor?: string; textColor?: string; fontId?: number; text?: string; bitmap?: string; bitmapX?: number; bitmapY?: number; textX?: number; textY?: number; iconX?: number; iconY?: number; justification?: number; textEffect?: number };
-type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; pageFlip?: string | null; label?: string; states?: PanelState[] };
+type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[] };
 type PanelPage = { id: number; name: string; kind: string; group?: string | null; canvas: { x?: number | null; y?: number | null; width: number; height: number }; objects: PanelObject[] };
 type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }> };
 type Action = { id: string; name: string; channel: number; port?: number };
 type Status = { configured: boolean };
+type LevelFeedback = { page: string; values: Record<string, number>; updatedAt: string };
 const panel = layoutJson as unknown as PanelLayout;
 const assets = import.meta.glob<string>("../../../../api/src/modules/amx/assets/*", { eager: true, query: "?url", import: "default" });
 const imageUrl = (name?: string) => name ? assets[`../../../../api/src/modules/amx/assets/${name}`] : undefined;
@@ -65,6 +66,7 @@ function labelFor(object: PanelObject) {
 
 export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [status, setStatus] = useState<Status | null>(null);
+  const [levelValues, setLevelValues] = useState<Record<string, number>>({});
   const [pageName, setPageName] = useState("Home");
   const [selectedRoom, setSelectedRoom] = useState("");
   const [backStack, setBackStack] = useState<string[]>([]);
@@ -85,6 +87,29 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     return () => controller.abort();
   }, [departmentId]);
   useEffect(() => { const timer = window.setInterval(() => setTime(new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date())), 30_000); return () => window.clearInterval(timer); }, []);
+
+  useEffect(() => {
+    if (!configured || !currentPage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number")) return;
+    let timer = 0;
+    let active = true;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/modules/amx/levels?page=${encodeURIComponent(currentPage.name)}`, { headers: { "x-department-id": departmentId }, signal: controller.signal });
+        const result = await readResponse<LevelFeedback>(response);
+        if (active) setLevelValues((current) => ({ ...current, ...result.values }));
+      } catch (error) {
+        if (active && !controller.signal.aborted) {
+          setFeedback(error instanceof Error ? `Live level feedback: ${error.message}` : "Live level feedback could not be read.");
+          setFailed(true);
+        }
+      } finally {
+        if (active) timer = window.setTimeout(() => void poll(), 15_000);
+      }
+    };
+    void poll();
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [configured, currentPage, departmentId]);
 
   function navigate(next: string, push = true) {
     const page = findPage(next);
@@ -160,7 +185,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const renderObject = (object: PanelObject): ReactNode => {
     const state = stateFor(object);
     const baseText = labelFor(object);
-    const text = /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
+    const levelValue = object.type === "bargraph" && typeof object.level === "number" ? levelValues[String(object.level)] : undefined;
+    const text = levelValue !== undefined ? `${Math.round(levelValue)}%` : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
@@ -178,8 +204,16 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     };
     const inner = <>
       {bitmap && <img className="amx-object-image" src={bitmap} alt="" />}
-      {text && text !== "header" && text !== "StatusBar" && <span className="amx-object-label">{text}</span>}
+      {text && text !== "header" && text !== "StatusBar" && <span className={`amx-object-label${levelValue !== undefined ? " amx-level-value" : ""}`}>{text}</span>}
     </>;
+    if (!button && object.type === "bargraph") {
+      const low = object.rangeLow ?? 0;
+      const high = object.rangeHigh ?? 100;
+      const percent = levelValue === undefined || high <= low ? 0 : Math.max(0, Math.min(100, (levelValue - low) / (high - low) * 100));
+      return <div key={`${currentPage.id}-${object.id}`} className="amx-panel-object amx-object-bargraph" style={style} aria-label={levelValue === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelValue)} percent`}>
+        {levelValue !== undefined && <span className="amx-level-fill" style={{ height: `${percent}%` }} />}{inner}
+      </div>;
+    }
     if (!button) return <div key={`${currentPage.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
     const mapped = actionIndex.has(`${port}:${object.channel}`);
     const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip));

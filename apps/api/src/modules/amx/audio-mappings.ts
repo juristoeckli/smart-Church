@@ -4,7 +4,7 @@ export type AmxMappedAction = { id: string; name: string; channel: number; port:
 export type AmxMappedControl = { id: string; name: string; actions?: AmxMappedAction[] };
 export type AmxMappedPage = { id: string; room: string; page: string; controls: AmxMappedControl[] };
 
-type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; channelPort?: number; states?: Array<{ style?: string }> };
+type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; channelPort?: number; level?: number; levelPort?: number; rangeLow?: number; rangeHigh?: number; states?: Array<{ style?: string }> };
 type Tp4Page = { id: number; name: string; kind: string; objects: Tp4Object[] };
 
 const pages = tp4Layout.pages as Tp4Page[];
@@ -73,6 +73,19 @@ export const amxAudioPages: AmxMappedPage[] = pages.map((page) => ({
 }));
 
 export const amxAudioActions: AmxMappedAction[] = amxAudioPages.flatMap((page) => page.controls.flatMap((control) => control.actions ?? []));
+
+export type AmxMappedLevel = { id: string; page: string; level: number; port: number; rangeLow: number; rangeHigh: number };
+export const amxAudioLevels: AmxMappedLevel[] = pages.flatMap((page) => page.objects.flatMap((object) => {
+  if (object.type !== "bargraph" || !Number.isInteger(object.level) || !object.level || !Number.isInteger(object.levelPort) || !object.levelPort) return [];
+  return [{
+    id: `tp4-level-${page.id}-${object.id}`,
+    page: page.name,
+    level: object.level,
+    port: object.levelPort,
+    rangeLow: object.rangeLow ?? 0,
+    rangeHigh: object.rangeHigh ?? 100,
+  }];
+}));
 
 const systemActionDefs = [
   ["power-confirm-on", "Activate selected room", "PWR_ASK", 4],
