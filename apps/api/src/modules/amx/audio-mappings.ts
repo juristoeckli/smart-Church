@@ -4,7 +4,7 @@ export type AmxMappedAction = { id: string; name: string; channel: number; port:
 export type AmxMappedControl = { id: string; name: string; actions?: AmxMappedAction[] };
 export type AmxMappedPage = { id: string; room: string; page: string; controls: AmxMappedControl[] };
 
-type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; channelPort?: number; level?: number; levelPort?: number; rangeLow?: number; rangeHigh?: number; states?: Array<{ style?: string }> };
+type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; channelPort?: number; hitStyle?: string; level?: number; levelPort?: number; rangeLow?: number; rangeHigh?: number; states?: Array<{ style?: string }> };
 type Tp4Page = { id: number; name: string; kind: string; objects: Tp4Object[] };
 
 const pages = tp4Layout.pages as Tp4Page[];
@@ -43,7 +43,7 @@ function pageLabel(name: string) {
 function makeAction(page: Tp4Page, object: Tp4Object): AmxMappedAction | null {
   // TP4 stores status LEDs as general objects with a channel too. Only objects
   // that have a button style should send input-channel pulses.
-  if (object.type !== "general" || !object.states?.some((state) => Boolean(state.style?.trim()))
+  if (object.type !== "general" || object.hitStyle === "passThru" || !object.states?.some((state) => Boolean(state.style?.trim()))
     || !Number.isInteger(object.channel) || !object.channel || object.channel < 1 || object.channel > 65535) return null;
   // TP4 channelPort describes the panel endpoint. Smart-Church targets the
   // dedicated NetLinx device 34001, which exposes control channels on port 1.
