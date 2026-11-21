@@ -323,7 +323,18 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const eventsForDay = (day: Date) => visibleAppointments.filter((event) => event.occurrenceStartAt.slice(0,10) === dateInput(day));
   const monthGridStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1); monthGridStart.setDate(monthGridStart.getDate()-((monthGridStart.getDay()+6)%7));
   const locale = language;
-  function appointmentButton(item: Appointment) { return <div key={`${item.appointmentId}:${item.occurrenceStartAt}`} className="church-calendar-appointment-entry"><button type="button" className="church-calendar-event" style={{ "--calendar-accent": calendars.find((calendar) => calendar.id === item.calendarId)?.color ?? "#3b82f6" } as CSSProperties} onClick={() => openEdit(item)}><strong>{item.allDay ? "All day" : new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(new Date(item.occurrenceStartAt))} {item.title}</strong>{item.place && <span><MapPin size={12} /> {item.place}</span>}{item.responsiblePersonName && <span className="church-calendar-responsible">On behalf of {item.responsiblePersonName}</span>}</button>{item.signupToken ? <a className="church-calendar-signup-link" href={`/join-group/${item.signupToken}`} target="_blank" rel="noreferrer">Sign up: {item.signupGroupName ?? "Group"}</a> : item.signupGroupName ? <span className="church-calendar-signup-link">Registration group: {item.signupGroupName}</span> : null</>; }
+  function appointmentButton(item: Appointment) {
+    return (
+      <div key={`${item.appointmentId}:${item.occurrenceStartAt}`} className="church-calendar-appointment-entry">
+        <button type="button" className="church-calendar-event" style={{ "--calendar-accent": calendars.find((calendar) => calendar.id === item.calendarId)?.color ?? "#3b82f6" } as CSSProperties} onClick={() => openEdit(item)}>
+          <strong>{item.allDay ? "All day" : new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(new Date(item.occurrenceStartAt))} {item.title}</strong>
+          {item.place && <span><MapPin size={12} /> {item.place}</span>}
+          {item.responsiblePersonName && <span className="church-calendar-responsible">On behalf of {item.responsiblePersonName}</span>}
+        </button>
+        {item.signupToken ? <a className="church-calendar-signup-link" href={`/join-group/${item.signupToken}`} target="_blank" rel="noreferrer">Sign up: {item.signupGroupName ?? "Group"}</a> : item.signupGroupName ? <span className="church-calendar-signup-link">Registration group: {item.signupGroupName}</span> : null}
+      </div>
+    );
+  }
 
   return <main className="church-calendar-page">
     <header className="church-calendar-header"><div><span className="eyebrow">PLANNING</span><h1>Calendar</h1><p>Appointments across your community, groups and personal calendars.</p></div><div className="church-calendar-header-actions"><button type="button" className="button button-secondary" onClick={() => void toggleArchive()}>{showArchive ? "Hide archive" : "Archive"}</button><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(true)}><Plus size={15} /> New calendar</button><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div></header>
