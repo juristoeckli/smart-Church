@@ -30,7 +30,7 @@ export function HomeCurrentPosts({ departmentId }: { departmentId: string }) {
   return <section className="directory-card community-upcoming-card">
     <div className="directory-heading">
       <h2>{translate("overview.currentPosts")}</h2>
-      <a className="button button-secondary" href={postUrl(pathname)}>Open Community <ArrowRight size={14} aria-hidden="true" /></a>
+      <a className="button button-secondary" href={postUrl(pathname)}>{translate("overview.openCommunity")} <ArrowRight size={14} aria-hidden="true" /></a>
     </div>
     <ul className="community-upcoming-list">
       {snapshot.posts.map((post) => <li className="community-upcoming-item" key={post.id}>
