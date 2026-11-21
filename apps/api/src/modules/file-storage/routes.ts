@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { canManageStoredFileWikiAudience, hasWikiFileAudienceSchema, storedFileWikiAudienceSql } from "../../stored-file-wiki-access.js";
 
 const resourceLimit = 25 * 1024 * 1024;
 function canonical(value: unknown): string {
@@ -113,27 +114,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
 
     async function canReadStoredFile(request: FastifyRequest, departmentId: string, fileId: string) {
-      const wikiSchema = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed");
-      if (!wikiSchema.rows[0]?.installed) return true;
-      const canManageWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
-      const wikiAccess = await pool!.query<{ linked: boolean; can_read: boolean }>(
-        `WITH attached_pages AS (
-           SELECT page.id,page.status,page.audience,page.audience_group_id
-             FROM wiki_page_files attachment
-             JOIN wiki_pages page ON page.id=attachment.page_id AND page.department_id=attachment.department_id
-            WHERE attachment.department_id=$1 AND attachment.file_id=$2
-         )
-         SELECT EXISTS(SELECT 1 FROM attached_pages) AS linked,
-                EXISTS(SELECT 1 FROM attached_pages page WHERE $3::boolean OR (page.status='active' AND (
-                  page.audience='location' OR (page.audience='group' AND EXISTS (
-                    SELECT 1 FROM group_members member
-                    JOIN department_memberships membership ON membership.contact_id=member.contact_id AND membership.department_id=$1
-                    WHERE member.group_id=page.audience_group_id AND member.status='active' AND membership.user_id=$4
-                  ))
-                ))) AS can_read`,
-        [departmentId, fileId, canManageWiki, request.authenticatedUser!.id],
-      );
-      return !wikiAccess.rows[0]?.linked || Boolean(wikiAccess.rows[0]?.can_read);
+      if (!await hasWikiFileAudienceSchema(pool!)) return true;
+      const result = await pool!.query(`SELECT 1 FROM stored_files stored
+        WHERE stored.department_id=$1 AND stored.id=$4 AND ${storedFileWikiAudienceSql}`,
+        [departmentId, canManageStoredFileWikiAudience(request), request.authenticatedUser!.id, fileId]);
+      return Boolean(result.rowCount);
     }
 
     routes.get<{ Querystring: { view?: string } }>("/api/files", async (request, reply) => {
@@ -141,20 +126,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (view !== "active" && view !== "trash") return reply.code(400).send({ error: "Choose a valid file view." });
       const departmentId = await department(request, reply, view === "trash");
       if (!departmentId) return reply;
-      const wikiSchema = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed");
-      const canManageWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
-      const audienceFilter = wikiSchema.rows[0]?.installed ? `AND (
-        NOT EXISTS (SELECT 1 FROM wiki_page_files attachment WHERE attachment.department_id=stored.department_id AND attachment.file_id=stored.id)
-        OR $2::boolean
-        OR EXISTS (
-          SELECT 1 FROM wiki_page_files attachment JOIN wiki_pages page ON page.id=attachment.page_id AND page.department_id=attachment.department_id
-           WHERE attachment.department_id=stored.department_id AND attachment.file_id=stored.id AND page.status='active'
-             AND (page.audience='location' OR (page.audience='group' AND EXISTS (
-               SELECT 1 FROM group_members member JOIN department_memberships membership ON membership.contact_id=member.contact_id AND membership.department_id=stored.department_id
-                WHERE member.group_id=page.audience_group_id AND member.status='active' AND membership.user_id=$3
-             )))
-        ))` : "";
-      const listParameters = wikiSchema.rows[0]?.installed ? [departmentId, canManageWiki, request.authenticatedUser!.id] : [departmentId];
+      const wikiSchema = await hasWikiFileAudienceSchema(pool!);
+      const audienceFilter = wikiSchema ? `AND ${storedFileWikiAudienceSql}` : "";
+      const listParameters = wikiSchema ? [departmentId, canManageStoredFileWikiAudience(request), request.authenticatedUser!.id] : [departmentId];
       const result = await pool!.query<ResourceRow>(
         `SELECT stored.id,stored.title,stored.category,stored.file_name,stored.content_type,stored.file_size,stored.created_at,stored.folder_id FROM stored_files stored
           WHERE stored.department_id = $1 AND ${view === "trash" ? "stored.deleted_at IS NOT NULL" : "stored.deleted_at IS NULL"} ${audienceFilter}

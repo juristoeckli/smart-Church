@@ -1,6 +1,7 @@
 import { captureSignupAnswers, prepareSignupQuestions, signupAnswerFields, signupQuestionsSchema, type SignupQuestion, type SignupQuestionDraft } from "./modules/community/signup-form.js";
 import { isResourceBookingManager } from "./resource-booking-policy.js";
 import { registerServiceEventFactsRoutes } from "./service-event-facts.js";
+import { registerServiceEventFilesRoutes } from "./service-event-files.js";
 import { registerEventVolunteerAbsenceRoutes } from "./event-volunteer-absences.js";
 import { registerRegistrationReceiptRoutes } from "./event-registration-notices.js";
 import { completedCheckInError, writeCoreEventAttendance } from "./event-attendance.js";
@@ -645,6 +646,7 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     location: row.location,
     ...(row.description ? { description: row.description } : {}),
     room: row.room ?? "",
+    ...(!row.source_system ? { canManageAttachments: true } : {}),
     assetIds: row.asset_ids ?? [],
     positions: row.positions ?? [],
     timePlan: row.time_plan ?? [],
@@ -2749,7 +2751,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   return result.rows.map((row) => {
     const event = mapServiceEvent({ ...row, asset_ids: (row.asset_ids ?? []).filter((id) => visibleAssets.has(id)) });
     const canManageRegistrations = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
-    const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, ...safeEvent }) => safeEvent)(event);
+    const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, canManageAttachments: _attachments, ...safeEvent }) => safeEvent)(event);
     return {
       ...visibleEvent,
       positions: (visibleEvent.positions ?? []).map((position, index) => {
@@ -3674,6 +3676,10 @@ app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registratio
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
+
+registerServiceEventFilesRoutes(app, { pool: pool ?? null, available: () => databaseReady,
+  resolveScope: (request, reply) => activeDepartmentId(request, reply, false, false, "events_manage"),
+  validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 registerServiceEventFactsRoutes(app, { pool: pool ?? null, available: () => databaseReady,
   resolveScope: (request, reply) => activeDepartmentId(request, reply, false, false, "events_manage"),

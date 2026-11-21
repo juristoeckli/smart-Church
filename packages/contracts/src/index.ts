@@ -106,6 +106,7 @@ export interface ServicePlanTemplate {
 }
 
 export interface ServiceEvent {
+  canManageAttachments?: boolean;
   responsibleContactId?: string | null;
   id: string;
   title: string;
