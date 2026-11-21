@@ -561,7 +561,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return resolveDepartmentId(request, reply);
     }
 
-    const dashboardWidgets = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "recentEventFacts"] as const;
+    const dashboardWidgets = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts"] as const;
     routes.get("/api/modules/notifications/home-widgets", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
@@ -570,7 +570,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         [departmentId, request.authenticatedUser!.id],
       );
       const row = result.rows[0];
-      return row ? { order: row.widget_order, visible: row.visible_widgets } : { order: dashboardWidgets, visible: dashboardWidgets };
+      if (!row) return { order: dashboardWidgets, visible: dashboardWidgets };
+      const newWidgets = dashboardWidgets.filter((id) => !row.widget_order.includes(id));
+      return { order: [...row.widget_order, ...newWidgets], visible: [...row.visible_widgets, ...newWidgets] };
     });
 
     routes.put<{ Body: { order: string[]; visible: string[] } }>("/api/modules/notifications/home-widgets", {

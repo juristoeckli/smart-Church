@@ -281,6 +281,27 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { resources: resources.rows, bookings: bookings.rows, canManage: isManager(request), timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
   });
 
+  app.get("/api/modules/resource-scheduler/home-bookings", async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    const canManage = isManager(request);
+    const selectBookings = `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,requester.display_name AS "requesterName",
+        booking.starts_at AS "startsAt",booking.ends_at AS "endsAt"
+      FROM resource_bookings booking JOIN bookable_resources resource
+        ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+      JOIN app_users requester ON requester.id=booking.requested_by
+      WHERE booking.department_id=$1`;
+    const [current, pending] = await Promise.all([
+      context.pool!.query(`${selectBookings} AND booking.status='approved'
+        AND booking.starts_at<=now() AND booking.ends_at>now()
+        AND ($2::boolean OR (resource.active AND booking.requested_by=$3))
+        ORDER BY booking.ends_at,booking.id LIMIT 6`, [departmentId, canManage, request.authenticatedUser!.id]),
+      canManage ? context.pool!.query(`${selectBookings} AND booking.status='requested' AND booking.ends_at>now()
+        ORDER BY booking.starts_at,booking.id LIMIT 6`, [departmentId]) : null,
+    ]);
+    return { current: current.rows, pending: pending?.rows ?? null };
+  });
+
   app.put<{ Params: { resourceId: string }; Body: { marked: boolean } }>("/api/modules/resource-scheduler/resources/:resourceId/mark", {
     schema: {
       params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } },
@@ -718,8 +739,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
-  app.put<{ Params: { bookingId: string }; Body: { status: "approved" | "declined" | "cancelled" } }>("/api/modules/resource-scheduler/bookings/:bookingId/status", {
-    schema: { params: { type: "object", required: ["bookingId"], properties: { bookingId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["approved", "declined", "cancelled"] } } } },
+  app.put<{ Params: { bookingId: string }; Body: { status: "approved" | "declined" | "cancelled"; expectedStatus?: "requested" } }>("/api/modules/resource-scheduler/bookings/:bookingId/status", {
+    schema: { params: { type: "object", required: ["bookingId"], properties: { bookingId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["status"], properties: { status: { type: "string", enum: ["approved", "declined", "cancelled"] }, expectedStatus: { type: "string", enum: ["requested"] } } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
@@ -733,18 +754,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     try {
       result = await context.pool!.query(`WITH changed AS (
         UPDATE resource_bookings SET status=$1,updated_at=now()
-        WHERE id=$2 AND department_id=$3 AND status IN ('requested','approved')
+        WHERE id=$2 AND department_id=$3 AND status IN ('requested','approved') AND ($7::text IS NULL OR (status=$7 AND ends_at>now()))
         RETURNING id,department_id,status
       )
       INSERT INTO resource_scheduler_audit (id,department_id,actor_user_id,action,booking_id,details)
       SELECT $4,department_id,$5,$6,id,jsonb_build_object('status',status) FROM changed`,
-      [request.body.status, request.params.bookingId, departmentId, randomUUID(), request.authenticatedUser!.id, `booking_${request.body.status}`]);
+      [request.body.status, request.params.bookingId, departmentId, randomUUID(), request.authenticatedUser!.id, `booking_${request.body.status}`, request.body.expectedStatus ?? null]);
     }
     catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "This approval conflicts with another booking or exceeds the configured quantity." });
       throw error;
     }
-    if (!result.rowCount) return reply.code(409).send({ error: "This booking is already closed." });
+    if (!result.rowCount) return reply.code(409).send({ error: request.body.expectedStatus ? "This booking is no longer awaiting a decision." : "This booking is already closed." });
     context.realtime.publish("module:resource-scheduler:changed", departmentId, { bookingId: request.params.bookingId, action: request.body.status });
     return { status: request.body.status };
   });
