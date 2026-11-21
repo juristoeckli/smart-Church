@@ -1,10 +1,11 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
-import { CalendarDays, ChevronLeft, ChevronRight, MapPin, Plus, Repeat2, RotateCcw, Trash2, X } from "lucide-react";
+import { CalendarDays, ChevronLeft, ChevronRight, MapPin, Plus, Printer, Repeat2, RotateCcw, Trash2, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { CalendarResourceRequest } from "./CalendarResourceRequest";
 import { CalendarGroupMeeting } from "./CalendarGroupMeeting";
 import { GroupMeetingAttendance, type GroupMeetingTarget } from "../check-in/GroupMeetingAttendance";
 import "./church-calendar.css";
+import { calendarPrintDocument } from "./calendar-print";
 
 type Scope = "community" | "group" | "personal";
 type View = "day" | "week" | "month" | "year" | "list";
@@ -106,9 +107,11 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [personSearch, setPersonSearch] = useState("");
   const [personChoices, setPersonChoices] = useState<PersonChoice[]>([]);
   const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>([]);
+  const selectionLocation = useRef<string | null>(null);
   const [anchor, setAnchor] = useState(() => todayInZone(viewerZone));
   const [view, setView] = useState<View>("month");
   const [loading, setLoading] = useState(true);
+  const [loadedPrintScope, setLoadedPrintScope] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -148,11 +151,12 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const headers = useMemo(() => ({ "x-department-id": departmentId }), [departmentId]);
   const mutationHeaders = useMemo(() => ({ ...headers, "x-csrf-token": csrfToken, "content-type": "application/json" }), [headers, csrfToken]);
   const range = useMemo(() => getRange(anchor, view), [anchor, view]);
+  const printScope = JSON.stringify([departmentId, range.from, range.to, queryTimeZone]);
 
   const loadVersion = useRef(0);
   const load = useCallback(async () => {
     const version = ++loadVersion.current;
-    setLoading(true); setError("");
+    setLoading(true); setLoadedPrintScope(""); setError("");
     try {
       const [calendarRows, eventRows, choiceRows] = await Promise.all([
         api<Calendar[]>("/api/modules/church-calendar/calendars", { headers }),
@@ -162,14 +166,19 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
       if (version !== loadVersion.current) return;
       setCalendars(calendarRows);
       setAppointments(eventRows);
+      setLoadedPrintScope(printScope);
       setChoices(choiceRows);
-      setSelectedCalendarIds((current) => current.length ? current.filter((id) => calendarRows.some((item) => item.id === id)) : calendarRows.map((item) => item.id));
+      const firstLoadForLocation = selectionLocation.current !== departmentId;
+      selectionLocation.current = departmentId;
+      setSelectedCalendarIds((current) => firstLoadForLocation
+        ? calendarRows.map((item) => item.id)
+        : current.filter((id) => calendarRows.some((item) => item.id === id)));
     } catch (reason) {
       if (version === loadVersion.current) setError(reason instanceof Error ? reason.message : "Could not load the calendar.");
     } finally {
       if (version === loadVersion.current) setLoading(false);
     }
-  }, [headers, range.from, range.to, queryTimeZone]);
+  }, [departmentId, headers, printScope, range.from, range.to, queryTimeZone]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -469,6 +478,30 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const locale = language;
   const clockFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }), [locale]);
   const timeLabel = (item: Appointment) => item.allDay ? "All day" : clockFormatter.format(new Date(`${displayStart(item)}Z`));
+
+  function printCalendar() {
+    if (loading || loadedPrintScope !== printScope) return;
+    const output = calendarPrintDocument({
+      view,
+      title: "Church calendar",
+      from: range.from.slice(0, 10),
+      through: range.to.slice(0, 10),
+      locale,
+      calendarNames: calendars.filter((calendar) => selectedCalendarIds.includes(calendar.id)).map(({ name }) => name),
+      appointments: visibleAppointments.map((item) => ({
+        date: displayStart(item).slice(0, 10), time: timeLabel(item), title: item.title,
+        subtitle: item.subtitle, calendarName: item.calendarName, place: item.place,
+      })),
+    });
+    const preview = window.open("", "_blank");
+    if (!preview) { setError("Allow pop-ups to open the calendar print preview."); return; }
+    preview.opener = null;
+    preview.document.open();
+    preview.document.write(output);
+    preview.document.close();
+    preview.focus();
+    preview.print();
+  }
   const editedOccurrence = editing && appointments.find((item) => item.appointmentId === editing.appointmentId
     && (item.originalOccurrenceStartAt ?? item.occurrenceStartAt) === (editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt));
   const canScheduleReminder = editing && department.enabledModules?.includes("notifications") && (editing.allDay
@@ -547,7 +580,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
           <a href={issuedFeed.url} download="calendar.ics" referrerPolicy="no-referrer">Download .ics</a>
         </div>
       </section>}{!calendars.length && !loading && <p className="church-calendar-empty">Create your first personal calendar or a shared calendar.</p>}</aside>
-      <section className="church-calendar-main"><div className="church-calendar-toolbar"><div className="church-calendar-date-nav"><button type="button" className="icon-button" aria-label="Previous" onClick={() => move(-1)}><ChevronLeft size={18} /></button><button type="button" className="icon-button" aria-label="Next" onClick={() => move(1)}><ChevronRight size={18} /></button><h2>{view === "year" ? anchor.getFullYear() : monthLabel(anchor, language)}</h2><button type="button" className="church-calendar-today" onClick={() => setAnchor(new Date())}>Today</button></div><div className="church-calendar-views" role="group" aria-label="Calendar view">{(["day", "week", "month", "year", "list"] as View[]).map((item) => <button type="button" key={item} className={view === item ? "active" : ""} aria-pressed={view === item} onClick={() => setView(item)}>{item[0].toUpperCase()+item.slice(1)}</button>)}</div></div>
+      <section className="church-calendar-main"><div className="church-calendar-toolbar"><div className="church-calendar-date-nav"><button type="button" className="icon-button" aria-label="Previous" onClick={() => move(-1)}><ChevronLeft size={18} /></button><button type="button" className="icon-button" aria-label="Next" onClick={() => move(1)}><ChevronRight size={18} /></button><h2>{view === "year" ? anchor.getFullYear() : monthLabel(anchor, language)}</h2><button type="button" className="church-calendar-today" onClick={() => setAnchor(new Date())}>Today</button></div><div className="church-calendar-views" role="group" aria-label="Calendar view">{(["day", "week", "month", "year", "list"] as View[]).map((item) => <button type="button" key={item} className={view === item ? "active" : ""} aria-pressed={view === item} onClick={() => setView(item)}>{item[0].toUpperCase()+item.slice(1)}</button>)}</div><button type="button" className="button button-secondary" disabled={loading || loadedPrintScope !== printScope} onClick={printCalendar}><Printer size={15} /> Print calendar</button></div>
         {loading ? <div className="church-calendar-loading"><RotateCcw size={18} className="spinning" /> Loading appointments…</div> : view === "month" ? <div className="church-calendar-month"><div className="church-calendar-weekdays">{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => <span key={day}>{day}</span>)}</div><div className="church-calendar-month-grid">{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <div key={index} className={`church-calendar-day ${day.getMonth() !== anchor.getMonth() ? "outside" : ""}`}><button className="church-calendar-day-number" type="button" onClick={() => { setAnchor(day); setView("day"); }}>{day.getDate()}</button>{eventsForDay(day).slice(0,4).map(appointmentButton)}{eventsForDay(day).length > 4 && <small>+{eventsForDay(day).length-4} more</small>}</div>; })}</div></div> : view === "week" || view === "day" ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => Number(displayStart(event).slice(5,7)) === month + 1).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(dateFromLocal(displayStart(item)), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong><small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{timeLabel(item)}</span><ChevronRight size={16} /></button>{(item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
         {!loading && !visibleAppointments.length && <div className="church-calendar-empty-state"><CalendarDays size={28} /><strong>No appointments in this view</strong><span>Try another date or add an appointment.</span><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div>}
       </section></div>
