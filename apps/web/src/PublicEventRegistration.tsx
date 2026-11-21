@@ -11,6 +11,8 @@ export function PublicEventRegistration({ token }: { token: string }) {
   const [sending, setSending] = useState(false);
   const [submitted, setSubmitted] = useState<"registered" | "waitlisted" | null>(null);
   const [cancellationToken, setCancellationToken] = useState("");
+  const [guests, setGuests] = useState<Array<{ firstName: string; lastName: string }>>([]);
+  const [attendees, setAttendees] = useState<Array<{ firstName: string; lastName: string; cancellationToken: string }>>([]);
   const [linkToken] = useState(() => /^#cancel=([0-9a-f]{64})$/.exec(window.location.hash)?.[1] ?? "");
   const [cancelled, setCancelled] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
@@ -39,12 +41,13 @@ export function PublicEventRegistration({ token }: { token: string }) {
       const response = await fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim() }),
+        body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim(), ...(guests.length ? { guests } : {}) }),
       });
-      const result = await response.json() as { status?: "registered" | "waitlisted"; cancellationToken?: string; error?: string };
+      const result = await response.json() as { status?: "registered" | "waitlisted"; cancellationToken?: string; attendees?: typeof attendees; error?: string };
       if (!response.ok || !result.status) throw new Error(publicErrorText(language, result.error ?? "Could not submit your registration."));
       setSubmitted(result.status);
       setCancellationToken(result.cancellationToken ?? "");
+      setAttendees(result.attendees ?? []);
     } catch (reason) { setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not submit your registration.")); }
     finally { setSending(false); }
   }
@@ -86,20 +89,30 @@ export function PublicEventRegistration({ token }: { token: string }) {
       <h1>{event.title}</h1>
       <div className="public-registration-details"><span><CalendarDays size={17} />{date}</span><span><Clock3 size={17} />{event.isAllDay ? publicText(language, "allDay") : `${event.startTime}${event.endTime ? ` – ${event.endTime}` : ""}`}</span><span><MapPin size={17} />{event.location}</span></div>
       {event.description && <p className="public-registration-description">{event.description}</p>}
-      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "registered" ? "registered" : "waitlisted")}</h2><p>{publicText(language, submitted === "registered" ? "registeredHelp" : "waitlistedHelp")}</p></div></div>
+      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, attendees.length ? (submitted === "registered" ? "partyRegistered" : "partyWaitlisted") : (submitted === "registered" ? "registered" : "waitlisted"))}</h2><p>{publicText(language, attendees.length ? "partyLinksHelp" : (submitted === "registered" ? "registeredHelp" : "waitlistedHelp"))}</p></div></div>
         : !event.registrationOpen ? <p className="public-registration-message">{publicText(language, "registrationClosed")}</p>
           : <>
             <p className="public-registration-capacity">{event.capacity ? publicText(language, "placesRemaining", { count: Math.max(event.capacity - event.registeredCount, 0) }) : publicText(language, "registrationOpen")}{event.waitlistCount ? publicText(language, "waitlistCount", { count: event.waitlistCount }) : ""}</p>
             <form className="public-registration-form" onSubmit={(submitEvent) => void register(submitEvent)}>
               <div className="form-row"><label>{publicText(language, "firstName")}<input name="firstName" autoComplete="given-name" maxLength={80} required /></label><label>{publicText(language, "lastName")}<input name="lastName" autoComplete="family-name" maxLength={80} required /></label></div>
               <label>{publicText(language, "email")}<input type="email" name="email" autoComplete="email" maxLength={254} required /></label>
+              {guests.map((guest, index) => <fieldset key={index} disabled={sending}>
+                <legend>{publicText(language, "additionalAttendee", { count: index + 1 })}</legend>
+                <div className="form-row">
+                  <label>{publicText(language, "firstName")}<input value={guest.firstName} required maxLength={80} onChange={(change) => setGuests((current) => current.map((person, position) => position === index ? { ...person, firstName: change.target.value } : person))} /></label>
+                  <label>{publicText(language, "lastName")}<input value={guest.lastName} required maxLength={80} onChange={(change) => setGuests((current) => current.map((person, position) => position === index ? { ...person, lastName: change.target.value } : person))} /></label>
+                </div>
+                <button type="button" className="button button-secondary" onClick={() => setGuests((current) => current.filter((_, position) => position !== index))}>{publicText(language, "removeAttendee")}</button>
+              </fieldset>)}
+              {guests.length < 9 && <button type="button" className="button button-secondary" disabled={sending} onClick={() => setGuests((current) => [...current, { firstName: "", lastName: "" }])}>{publicText(language, "addAttendee")}</button>}
               <p className="public-registration-privacy">{publicText(language, "eventPrivacy")}</p>
               {error && <p className="public-registration-error" role="alert">{error}</p>}
               <button className="button button-primary" type="submit" disabled={sending}>{sending ? publicText(language, "submitting") : publicText(language, "register")}</button>
             </form>
           </>}
     </>}
-    {cancellationToken && <p><a href={window.location.pathname + "#cancel=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a> · {publicText(language, "saveCancelLink")}</p>}
+    {attendees.length > 0 && <ul>{attendees.map((person) => <li key={person.cancellationToken}>{person.firstName} {person.lastName} · <a href={window.location.pathname + "#cancel=" + person.cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a></li>)}</ul>}
+    {!attendees.length && cancellationToken && <p><a href={window.location.pathname + "#cancel=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a> · {publicText(language, "saveCancelLink")}</p>}
     <footer>{publicText(language, "smartChurch")}</footer>
   </section></main>;
 }

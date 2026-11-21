@@ -3484,19 +3484,29 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
   };
 });
 
-app.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string } }>("/api/public/event-registrations/:token", {
+type PublicRegistrationPerson = { firstName: string; lastName: string };
+type PublicRegistrationBody = PublicRegistrationPerson & { email: string; guests?: PublicRegistrationPerson[] };
+type PublicRegistrationReceipt = PublicRegistrationPerson & { cancellationToken: string };
+
+app.post<{ Params: { token: string }; Body: PublicRegistrationBody }>("/api/public/event-registrations/:token", {
   schema: {
     params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email"], properties: {
       firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" },
+      guests: { type: "array", maxItems: 9, items: { type: "object", additionalProperties: false, required: ["firstName", "lastName"], properties: {
+        firstName: { type: "string", minLength: 1, maxLength: 80 },
+        lastName: { type: "string", minLength: 1, maxLength: 80 },
+      } } },
     } },
   },
-}, async (request, reply): Promise<{ status: "registered" | "waitlisted"; cancellationToken: string } | { error: string }> => {
+}, async (request, reply): Promise<{ status: "registered" | "waitlisted"; cancellationToken: string; attendees?: PublicRegistrationReceipt[] } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
-  const firstName = request.body.firstName.trim();
-  const lastName = request.body.lastName.trim();
-  const email = request.body.email.trim().toLocaleLowerCase();
-  if (!firstName || !lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
+  const email = request.body.email.trim().toLowerCase();
+  const party = [request.body, ...(request.body.guests ?? [])].map(({ firstName, lastName }) => ({
+    firstName: firstName.trim(), lastName: lastName.trim(),
+  }));
+  if (!party[0].firstName || !party[0].lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
+  if (party.some((person) => !person.firstName || !person.lastName)) return reply.code(400).send({ error: "Enter a first and last name for each attendee." });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -3504,21 +3514,29 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
       "SELECT id,department_id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND cancelled_at IS NULL AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
     );
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
-    if (!await lockDepartmentForWrite(client, event.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
-    const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2) AND status IN ('registered','waitlisted')", [event.rows[0].id, email]);
+    const { id: eventId, department_id: departmentId, registration_capacity: capacity } = event.rows[0];
+    if (!await lockDepartmentForWrite(client, departmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
+    const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2) AND status IN ('registered','waitlisted') LIMIT 1", [eventId, email]);
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
-    const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [event.rows[0].id]);
-    const status = event.rows[0].registration_capacity !== null && registered.rows[0].count >= event.rows[0].registration_capacity ? "waitlisted" : "registered";
-    const cancellationToken = randomBytes(32).toString("hex");
-    await client.query(
-      "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-      [randomUUID(), event.rows[0].id, firstName, lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex")],
-    );
+    const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [eventId]);
+    const status = capacity !== null && registered.rows[0].count + party.length > capacity ? "waitlisted" : "registered";
+    const attendees: PublicRegistrationReceipt[] = [];
+    for (const [index, person] of party.entries()) {
+      const cancellationToken = randomBytes(32).toString("hex");
+      await client.query(
+        "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash,additional_attendee) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        [randomUUID(), eventId, person.firstName, person.lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex"), index > 0],
+      );
+      attendees.push({ ...person, cancellationToken });
+    }
     await client.query("COMMIT");
-    return reply.header("Cache-Control", "no-store").code(201).send({ status, cancellationToken });
+    return reply.header("Cache-Control", "no-store").code(201).send({
+      status, cancellationToken: attendees[0].cancellationToken, ...(attendees.length > 1 ? { attendees } : {}),
+    });
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
+
 
 app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registrations/cancel", {
   schema: {
