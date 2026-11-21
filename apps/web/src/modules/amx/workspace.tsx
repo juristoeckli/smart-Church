@@ -40,6 +40,9 @@ const palette: Record<string, string> = { Grey2: "#d9d9d9", Grey5: "#898989", Bl
 const toCssColor = (color?: string) => !color ? undefined : color.startsWith("#") ? color : palette[color] ?? undefined;
 const roomPrefix: Record<string, string> = { "Gemeindesaal quer": "Que", "Gemeindesaal längs": "Lan", "Konferenzsaal 1": "Kon", "Bibliothek": "Bib" };
 const findPage = (name: string) => panel.pages.find((page) => page.name === name);
+const portForObject = (page: PanelPage, object: PanelObject) => object.channelPort && object.channelPort > 0
+  ? object.channelPort
+  : page.kind === "page" || page.name.startsWith("PWR_") ? 1 : 2;
 const mainAudioPage = (room: string, label: string) => {
   const prefix = roomPrefix[room] ?? (room === "Konferenz gross" ? "Kon" : undefined);
   const suffix = label === "Volumen" ? "Volume" : label === "Mikrofon" ? "Mik" : "Lautsprecher";
@@ -111,7 +114,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       return;
     }
     const channel = object.channel ?? 0;
-    const port = object.channelPort ?? (currentPage.kind === "page" || currentPage.name.startsWith("PWR_") ? 1 : 2);
+    const port = portForObject(currentPage, object);
     const action = actionIndex.get(`${port}:${channel}`);
     const sent = action ? await send(action) : true;
     if (!sent) return;
@@ -161,7 +164,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
-    const port = object.channelPort ?? (currentPage.kind === "page" || currentPage.name.startsWith("PWR_") ? 1 : 2);
+    const port = portForObject(currentPage, object);
     const background = toCssColor(state?.backgroundColor);
     const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
     const bitmap = imageUrl(state?.bitmap);
