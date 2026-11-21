@@ -219,7 +219,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.put<{ Body: { posts: boolean; reactions: boolean; comments: boolean; emailPosts?: boolean; emailReactions?: boolean; emailComments?: boolean } }>("/api/modules/community-feed/notification-preferences", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["posts", "reactions", "comments"], properties: { posts: { type: "boolean" }, reactions: { type: "boolean" }, comments: { type: "boolean" }, emailPosts: { type: "boolean" }, emailReactions: { type: "boolean" }, emailComments: { type: "boolean" } } },
+    schema: { body: { type: "object", additionalProperties: false, required: ["posts", "reactions", "comments"], properties: { posts: { type: "boolean" }, reactions: { type: "boolean" }, comments: { type: "boolean" }, emailPosts: { type: "boolean" }, emailReactions: { type: "boolean" }, emailComments: { type: "boolean" } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;
@@ -419,7 +419,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.post<{ Params: { postId: string }; Body: { type: "person" | "group" | "wiki" | "song"; entityId: string } }>("/api/modules/community-feed/posts/:postId/links", {
-    schema: { params: { type: "object", required: ["postId"], properties: { postId: { type: "string", format: "uuid" } }, body: { type: "object", additionalProperties: false, required: ["type", "entityId"], properties: { type: { type: "string", enum: ["person", "group", "wiki", "song"] }, entityId: { type: "string", format: "uuid" } } } },
+    schema: { params: { type: "object", required: ["postId"], properties: { postId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["type", "entityId"], properties: { type: { type: "string", enum: ["person", "group", "wiki", "song"] }, entityId: { type: "string", format: "uuid" } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;
@@ -453,7 +453,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.post<{ Params: { postId: string }; Body: { filename: string; contentType: string; data: string } }>("/api/modules/community-feed/posts/:postId/attachments", {
     bodyLimit: 1_500_000,
-    schema: { params: { type: "object", required: ["postId"], properties: { postId: { type: "string", format: "uuid" } }, body: { type: "object", additionalProperties: false, required: ["filename", "contentType", "data"], properties: { filename: { type: "string", minLength: 1, maxLength: 180 }, contentType: { type: "string", enum: ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf", "text/plain"] }, data: { type: "string", maxLength: 1_400_000 } } } },
+    schema: { params: { type: "object", required: ["postId"], properties: { postId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["filename", "contentType", "data"], properties: { filename: { type: "string", minLength: 1, maxLength: 180 }, contentType: { type: "string", enum: ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf", "text/plain"] }, data: { type: "string", maxLength: 1_400_000 } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;

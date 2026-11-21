@@ -211,7 +211,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   });
 
-  app.get<{ Params: { year: string } }>("/api/modules/finance/accounting-years/:year/summary", { schema: { params: { type: "object", additionalProperties: false, required: ["year"], properties: { year: { type: "string", pattern: "^(19[0-9]{2}|20[0-9]{2}|21[0-9]{2}|2200)$" } } } }, async (request, reply) => {
+  app.get<{ Params: { year: string } }>("/api/modules/finance/accounting-years/:year/summary", { schema: { params: { type: "object", additionalProperties: false, required: ["year"], properties: { year: { type: "string", pattern: "^(19[0-9]{2}|20[0-9]{2}|21[0-9]{2}|2200)$" } } } } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = Number(request.params.year);
     const configured = await pool!.query<{ accountingYear: number; label: string; startDate: string; endDate: string; status: string }>("SELECT accounting_year AS \"accountingYear\",label,start_date::text AS \"startDate\",end_date::text AS \"endDate\",status FROM finance_accounting_years WHERE department_id=$1 AND accounting_year=$2", [departmentId, year]);
