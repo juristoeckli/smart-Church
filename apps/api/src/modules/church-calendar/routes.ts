@@ -1,4 +1,5 @@
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
+import { registerAppointmentTemplates } from "./appointment-templates.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -187,6 +188,7 @@ async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId:
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  registerAppointmentTemplates(app, context, canManageCalendar);
   const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
   const userId = (request: FastifyRequest) => request.authenticatedUser!.id;
 
