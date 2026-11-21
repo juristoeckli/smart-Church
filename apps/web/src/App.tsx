@@ -35,6 +35,7 @@ import { Authentication, PasswordChangeRequired } from "./Authentication";
 import { SelfSignupPage } from "./SelfSignup";
 import { SelfSignupAdmin } from "./SelfSignupAdmin";
 import { ServicesEvents } from "./ServicesEvents";
+import { servicePlanLinkFromHash } from "./service-plan-link";
 import { mergeModuleTranslationOverrides, translateKnownModuleUiOverrideMessage } from "./modules/ui-translation-overrides";
 import { PublicEventRegistration } from "./PublicEventRegistration";
 import { PublicGroupSignup } from "./PublicGroupSignup";
@@ -138,6 +139,7 @@ const workspacePageHashes: Record<WorkspacePage, string> = {
   Settings: "#settings",
 };
 function workspacePageFromHash(hash: string): WorkspacePage | null {
+  if (servicePlanLinkFromHash(hash)) return "Services & events";
   const entry = Object.entries(workspacePageHashes).find(([, route]) => route === hash);
   if (entry) return entry[0] as WorkspacePage;
   const oldModuleHash = { "#video-streaming": "video-steffisburg", "#module-video": "video-steffisburg", "#presenter": "presenter", "#sync": "sync", "#system-laptop": "remote-desktop", "#file-storage": "file-storage" }[hash as "#video-streaming" | "#module-video" | "#presenter" | "#sync" | "#system-laptop" | "#file-storage"];
@@ -299,6 +301,8 @@ function WorkspaceApp() {
   const [pendingGroupNavigation, setPendingGroupNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingGroupCreateRequestId, setPendingGroupCreateRequestId] = useState(0);
   const [pendingSongNavigation, setPendingSongNavigation] = useState<{ id: string; requestId: number } | null>(null);
+  const [sharedPlanHash, setSharedPlanHash] = useState(window.location.hash);
+  const openedSharedPlan = useRef("");
   const [pendingEventNavigation, setPendingEventNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingResourceNavigation, setPendingResourceNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingDirectorySearch, setPendingDirectorySearch] = useState<{ destination: FullSearchDestination; departmentId: string; query: string; requestId: number } | null>(null);
@@ -744,17 +748,35 @@ function WorkspaceApp() {
   useEffect(() => {
     if (!modulesReady) return;
     const hash = workspacePageHash(page);
+    if (page === "Services & events" && servicePlanLinkFromHash(window.location.hash)) return;
     if (window.location.hash !== hash) window.location.hash = hash;
   }, [modulesReady, page]);
 
   useEffect(() => {
     const restorePageFromUrl = () => {
+      setSharedPlanHash(window.location.hash);
       const routePage = workspacePageFromHash(window.location.hash);
       if (routePage) setPage(routePage);
     };
     window.addEventListener("hashchange", restorePageFromUrl);
     return () => window.removeEventListener("hashchange", restorePageFromUrl);
   }, []);
+
+  useEffect(() => {
+    const plan = servicePlanLinkFromHash(sharedPlanHash);
+    if (!plan) {
+      openedSharedPlan.current = "";
+      return;
+    }
+    if (!authUser || !department.id || !modulesReady || page !== "Services & events" || sharedPlanHash !== window.location.hash
+      || openedSharedPlan.current === sharedPlanHash) return;
+    openedSharedPlan.current = sharedPlanHash;
+    if (plan.departmentId !== department.id) {
+      setNotice("This service plan link belongs to a different location. Select the location and open the link again.");
+      return;
+    }
+    setPendingEventNavigation({ id: plan.eventId, requestId: ++entityNavigationRequestId.current });
+  }, [authUser, department.id, modulesReady, page, sharedPlanHash]);
 
   useEffect(() => {
     if (authUser && department.id) {
