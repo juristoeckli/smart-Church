@@ -20,3 +20,5 @@
 
 .church-calendar-feed-result input{width:100%;min-width:0;margin-top:4px;font:inherit}
 .church-calendar-feed-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+
+.church-calendar-list-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .25rem; }

@@ -455,7 +455,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const result = await context.pool.query(
+    const result = await context.pool.query<{ scope: CalendarScope; ownerUserId: string | null }>(
       `SELECT calendar.id,calendar.name,calendar.scope,calendar.group_id AS "groupId",calendar.owner_user_id AS "ownerUserId",calendar.color,
               EXISTS(SELECT 1 FROM church_calendar_public_feeds feed WHERE feed.calendar_id=calendar.id AND feed.department_id=calendar.department_id AND feed.revoked_at IS NULL) AS "hasPublicFeed",
               EXISTS(SELECT 1 FROM church_calendar_subscriptions subscription WHERE subscription.calendar_id=calendar.id AND subscription.user_id=$2) AS "hasSubscription",
@@ -471,7 +471,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ORDER BY CASE calendar.scope WHEN 'community' THEN 0 WHEN 'group' THEN 1 ELSE 2 END,calendar.name`,
       [departmentId, userId(request), hasGroupVisibility(request)],
     );
-    return result.rows;
+    return result.rows.map((calendar) => ({ ...calendar, canManage: canManageCalendar(request, calendar.scope, calendar.ownerUserId) }));
   });
 
   app.post<{ Body: { name: string; scope: CalendarScope; groupId?: string; color?: string } }>("/api/modules/church-calendar/calendars", { schema: {
@@ -499,6 +499,51 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "calendar-created", calendarId: id });
     return reply.code(201).send(result.rows[0]);
+  });
+
+  app.patch<{ Params: { id: string }; Body: { name: string; color: string } }>("/api/modules/church-calendar/calendars/:id", {
+    schema: {
+      params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["name", "color"], properties: {
+        name: { type: "string", minLength: 1, maxLength: 120 },
+        color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" },
+      } },
+    },
+  }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const name = request.body.name.trim();
+    if (!name) return responseError(reply, 400, "Enter a calendar name.");
+
+    const client = await context.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 409, "This location is read-only on this installation.");
+      }
+      const { id } = request.params;
+      const { rows: [calendar] } = await client.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+        "SELECT scope,owner_user_id FROM church_calendar_calendars WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE",
+        [id, departmentId],
+      );
+      if (!calendar || !canManageCalendar(request, calendar.scope, calendar.owner_user_id)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 404, "Editable calendar not found.");
+      }
+      await client.query("UPDATE church_calendar_calendars SET name=$3,color=$4,updated_at=now() WHERE id=$1 AND department_id=$2",
+        [id, departmentId, name, request.body.color]);
+      await client.query("COMMIT");
+      context.realtime.publish("module:church-calendar:changed", departmentId, { action: "calendar-updated", calendarId: id });
+      return { id, name, color: request.body.color };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
 
   const reminderParams = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
