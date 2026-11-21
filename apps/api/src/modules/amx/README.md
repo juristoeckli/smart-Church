@@ -4,8 +4,8 @@ AMX Control is an optional Smart-Church module and is disabled by default. Insta
 
 The room actions use the channel mappings bundled with this integration. Enter the controller address under the AMX module settings for each installation; no site-specific IP address is shipped in the module.
 
-The API uses the NetLinx Telnet terminal (TCP `23` by default) to send `PULSE <D:P:S>,<channel>` for the programmed touch panel device address. It also reads current levels with `DEVICE STATUS <D:P:S>` and displays the level values mapped in the TP4 project. These status requests are read-only. The API does not open ICSP, request a temporary ICSP device address, or change controller authentication/encryption settings. The module uses the programmed device address and channels so NetLinx receives the same button events.
+The API uses ICSP (TCP `1319`) for control and current level feedback. For each action it registers a temporary client address, sends the TP4-mapped input-channel PUSH (`0x0084`) and RELEASE (`0x0085`) to the existing touch panel address `10001`, then disconnects. It requests read-only Device Status for level feedback. These ICSP operations do not change controller settings, authentication, or encryption. A live Stativ Mik 1 +/− test changed the mapped level through ICSP; the previous value was restored to within the meter's observed fluctuation.
 
-If the controller Telnet terminal asks for a login, enter the existing NetLinx username and password in the module settings. The password is encrypted at rest with the AMX key (`SMART_CHURCH_AMX_ENCRYPTION_KEY`), falling back to the existing Smart-Church sync key or database URL key source. Saving credentials only stores them for this client; it does not enable, disable, or modify NetLinx authentication.
+Set the NetLinx master IP address under AMX settings. The ICSP service uses fixed TCP port `1319`; no Telnet credentials are needed.
 
 For the Steffisburg master, the panel is device `10001` on system `1`; the Home mode buttons use channels `11`–`16`. Channel and audio mappings are fixed module data sourced from the TP4 project.

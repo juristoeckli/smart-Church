@@ -67,17 +67,27 @@ function labelFor(object: PanelObject) {
 export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [status, setStatus] = useState<Status | null>(null);
   const [levelValues, setLevelValues] = useState<Record<string, number>>({});
-  const [pageName, setPageName] = useState("Home");
+  const [basePageName, setBasePageName] = useState("Home");
+  const [overlayPages, setOverlayPages] = useState<string[]>([]);
   const [selectedRoom, setSelectedRoom] = useState("");
-  const [backStack, setBackStack] = useState<string[]>([]);
   const [busy, setBusy] = useState("");
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
   const [time, setTime] = useState(() => new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date()));
-  const [popupGroup, setPopupGroup] = useState("");
-  const currentPage = findPage(pageName) ?? findPage("Home")!;
+  const currentPage = findPage(overlayPages.at(-1) ?? basePageName) ?? findPage("Home")!;
+  const visiblePages = [findPage(basePageName) ?? findPage("Home")!, ...overlayPages.flatMap((name) => {
+    const page = findPage(name);
+    return page ? [page] : [];
+  })];
   const pageScale = useMemo(() => ({ width: "100%", aspectRatio: `${panel.project.screen.width}/${panel.project.screen.height}` }), []);
   const configured = Boolean(status?.configured);
+
+  async function refreshPageLevels(page: PanelPage = currentPage, signal?: AbortSignal) {
+    if (!page.objects.some((object) => object.type === "bargraph" && typeof object.level === "number" && typeof object.levelPort === "number" && object.levelPort > 0)) return;
+    const response = await fetch(`/api/modules/amx/levels?page=${encodeURIComponent(page.name)}`, { headers: { "x-department-id": departmentId }, signal });
+    const result = await readResponse<LevelFeedback>(response);
+    setLevelValues((current) => ({ ...current, ...result.values }));
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -95,9 +105,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const controller = new AbortController();
     const poll = async () => {
       try {
-        const response = await fetch(`/api/modules/amx/levels?page=${encodeURIComponent(currentPage.name)}`, { headers: { "x-department-id": departmentId }, signal: controller.signal });
-        const result = await readResponse<LevelFeedback>(response);
-        if (active) setLevelValues((current) => ({ ...current, ...result.values }));
+        await refreshPageLevels(currentPage, controller.signal);
       } catch (error) {
         if (active && !controller.signal.aborted) {
           const pageLevelIds = currentPage.objects.filter((object) => object.type === "bargraph" && typeof object.level === "number").map((object) => String(object.level));
@@ -117,20 +125,32 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
   }, [configured, currentPage, departmentId]);
 
-  function navigate(next: string, push = true) {
+  function navigate(next: string) {
     const page = findPage(next);
     if (!page) return;
-    if (push && next !== pageName) setBackStack((stack) => [...stack, pageName]);
-    setPageName(next);
-    setPopupGroup("");
+    if (page.kind === "page") {
+      setBasePageName(page.name);
+      setOverlayPages([]);
+      return;
+    }
+    setOverlayPages((stack) => stack.at(-1) === page.name ? stack : [...stack, page.name]);
   }
 
-  async function send(action: Action) {
+  function closeOverlay() {
+    setOverlayPages((stack) => stack.slice(0, -1));
+  }
+
+  async function send(action: Action, sourcePage: PanelPage = currentPage) {
     if (!configured || busy) return false;
     setBusy(action.id); setFeedback(""); setFailed(false);
     try {
       await readResponse(await fetch("/api/modules/amx/send", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ actionId: action.id }) }));
       setFeedback(`${action.name}: sent.`);
+      if (sourcePage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number")) {
+        void refreshPageLevels(sourcePage).catch((error: unknown) => {
+          if (error instanceof Error) { setFeedback(`Live level feedback: ${error.message}`); setFailed(true); }
+        });
+      }
       return true;
     } catch (error) {
       setFeedback(error instanceof Error ? error.message : "Could not send the AMX action."); setFailed(true);
@@ -138,57 +158,71 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     } finally { setBusy(""); }
   }
 
-  async function handleObject(object: PanelObject) {
+  async function handleObject(object: PanelObject, sourcePage: PanelPage = currentPage) {
     const label = labelFor(object);
-    if (label.trim().toLocaleLowerCase() === "zurück" || label.trim().toLocaleLowerCase() === "back") {
+    if (["zurück", "back"].some((word) => label.trim().toLocaleLowerCase().endsWith(word))) {
       goBack();
       return;
     }
     const channel = object.channel ?? 0;
-    const port = portForObject(currentPage, object);
+    const port = portForObject(sourcePage, object);
     const action = actionIndex.get(`${port}:${channel}`);
-    const sent = action ? await send(action) : true;
+    const sent = action ? await send(action, sourcePage) : true;
     if (!sent) return;
 
-    if (currentPage.name === "Home" && roomChannels[channel]) {
+    if (sourcePage.name === "Home" && object.pageFlip === "PWR_ASK" && roomChannels[channel]) {
       setSelectedRoom(roomChannels[channel]);
       navigate("PWR_ASK");
       return;
     }
-    if (currentPage.name === "PWR_ASK") {
+    if (sourcePage.name === "PWR_ASK") {
+      if (roomChannels[channel]) {
+        setSelectedRoom(roomChannels[channel]!);
+        return;
+      }
       if (channel === 2) navigate("Modus");
-      else if (channel === 4) navigate("Home");
+      else if (channel === 4) closeOverlay();
       return;
     }
-    if (currentPage.name === "PWR_OFF_ASK") {
+    if (sourcePage.name === "PWR_OFF_ASK") {
       if (channel === 3) navigate("Home");
-      else if (channel === 4) navigate("Modus");
+      else if (channel === 4) closeOverlay();
       return;
     }
-    if (currentPage.name === "Modus") {
-      if (channel === 5) { const target = mainAudioPage(selectedRoom, "Volumen"); if (target) navigate(target.name); }
-      else if (channel === 6) { const target = mainAudioPage(selectedRoom, "Mikrofon"); if (target) navigate(target.name); }
-      else if (channel === 7) { const target = mainAudioPage(selectedRoom, "Lautsprecher"); if (target) navigate(target.name); }
-      else if (channel === 8) navigate("Regie");
-      else if (label.toLowerCase() === "off") navigate("PWR_OFF_ASK");
-      return;
+    if (sourcePage.name === "Modus") {
+      if (roomChannels[channel] && channel !== 5 && channel !== 6 && channel !== 7) {
+        setSelectedRoom(roomChannels[channel]!);
+      }
+      if (object.pageFlip === "DetailPopup") {
+        const mode = channel === 5 ? "Volumen" : channel === 6 ? "Mikrofon" : channel === 7 ? "Lautsprecher" : "";
+        const target = mode ? mainAudioPage(selectedRoom, mode) : undefined;
+        if (target) navigate(target.name);
+        return;
+      }
+      if (channel === 8) {
+        navigate("Regie");
+        return;
+      }
     }
     if (object.pageFlip) {
       const target = findPage(object.pageFlip);
-      if (target?.name === currentPage.name) goBack();
-      else if (target) navigate(target.name);
-      else if (object.pageFlip === "DetailPopup" || object.pageFlip === "EQ") setPopupGroup(object.pageFlip);
-      else if (object.pageFlip === "PWR_OFF_ASK") navigate("PWR_OFF_ASK");
+      if (object.pageFlip === "DetailPopup" || object.pageFlip === "EQ" || target?.name === sourcePage.name) {
+        closeOverlay();
+      } else if (target) {
+        navigate(target.name);
+      }
     }
   }
 
   function goBack() {
-    const previous = backStack.at(-1) ?? (pageName === "Modus" ? "Home" : "Modus");
-    setBackStack((stack) => stack.slice(0, -1));
-    navigate(previous, false);
+    if (overlayPages.length) {
+      closeOverlay();
+      return;
+    }
+    if (basePageName !== "Home") setBasePageName("Home");
   }
 
-  const renderObject = (object: PanelObject): ReactNode => {
+  const renderObject = (page: PanelPage, object: PanelObject, layer: number): ReactNode => {
     const state = stateFor(object);
     const baseText = labelFor(object);
     const levelValue = object.type === "bargraph" && typeof object.level === "number" ? levelValues[String(object.level)] : undefined;
@@ -199,16 +233,16 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
-    const port = portForObject(currentPage, object);
+    const port = portForObject(page, object);
     const background = toCssColor(state?.backgroundColor);
     const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
     const bitmap = imageUrl(state?.bitmap);
-    const originX = currentPage.kind === "subpage" ? currentPage.canvas.x ?? 0 : 0;
-    const originY = currentPage.kind === "subpage" ? currentPage.canvas.y ?? 0 : 0;
+    const originX = page.kind === "subpage" ? page.canvas.x ?? 0 : 0;
+    const originY = page.kind === "subpage" ? page.canvas.y ?? 0 : 0;
     const style: CSSProperties = {
       left: `${(originX + object.x) / panel.project.screen.width * 100}%`, top: `${(originY + object.y) / panel.project.screen.height * 100}%`,
       width: `${object.width / panel.project.screen.width * 100}%`, height: `${object.height / panel.project.screen.height * 100}%`,
-      zIndex: object.z, color: foreground, backgroundColor: background === "transparent" ? undefined : background,
+      zIndex: layer * 1000 + object.z, color: foreground, backgroundColor: background === "transparent" ? undefined : background,
       fontSize: state?.fontId === 33 ? "clamp(10px, 2.65vw, 22px)" : "clamp(8px, 1.55vw, 14px)",
     };
     const inner = <>
@@ -216,30 +250,32 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       {text && text !== "header" && text !== "StatusBar" && <span className={`amx-object-label${levelValue !== undefined ? " amx-level-value" : ""}`}>{text}</span>}
     </>;
     if (!button && object.type === "bargraph") {
-      return <div key={`${currentPage.id}-${object.id}`} className="amx-panel-object amx-object-bargraph" style={style} aria-label={levelPercent === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelPercent)} percent`}>
+      return <div key={`${page.id}-${object.id}`} className="amx-panel-object amx-object-bargraph" style={style} aria-label={levelPercent === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelPercent)} percent`}>
         {levelPercent !== undefined && <span className="amx-level-fill" style={{ height: `${levelPercent}%` }} />}{inner}
       </div>;
     }
-    if (!button) return <div key={`${currentPage.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
+    if (!button) return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
     const mapped = actionIndex.has(`${port}:${object.channel}`);
     const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip));
-    return <button key={`${currentPage.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
+    return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
   };
 
   const visibleObjects = currentPage.objects;
-  const hasPanelBackButton = visibleObjects.some((object) => object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()));
-  const screenStyle: CSSProperties = { ...pageScale, backgroundImage: currentPage.name === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
+  const hasPanelBackButton = visibleObjects.some((object) => {
+    const label = labelFor(object).trim().toLocaleLowerCase();
+    return object.type === "general" && (["zurück", "back", "schliessen", "schließen", "abbrechen"].some((word) => label.endsWith(word))
+      || object.pageFlip === "DetailPopup" || object.pageFlip === "EQ");
+  });
+  const screenStyle: CSSProperties = { ...pageScale, backgroundImage: basePageName === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
 
   return <section className="amx-workspace" aria-label="AMX room control">
     <div className="amx-panel-frame">
       <div className="amx-panel-screen" style={screenStyle}>
-        {visibleObjects.map(renderObject)}
+        {visiblePages.map((page, layer) => page.objects.map((object) => renderObject(page, object, layer)))}
         {currentPage.name !== "Home" && !hasPanelBackButton && <button className="amx-panel-back" type="button" onClick={goBack} aria-label="Zurück">‹ Zurück</button>}
-        {popupGroup && <div className="amx-panel-popup" role="dialog" aria-label="Select a control page"><div>{panel.pages.filter((page) => page.group === popupGroup).map((page) => <button key={page.id} type="button" onClick={() => navigate(page.name)}>{page.name.replaceAll("_", " · ")}</button>)}<button type="button" onClick={() => setPopupGroup("")}>Schliessen</button></div></div>}
         {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
       </div>
     </div>
     {!configured && status && <p className="amx-setup-note">A site administrator must enter the NetLinx master IP address under Settings → Modules → AMX to enable controls.</p>}
-    <details className="amx-panel-map"><summary>All panel pages</summary><div>{panel.pages.filter((page) => page.kind === "subpage" && page.group === "ModusPopup").map((page) => <button key={page.id} type="button" onClick={() => navigate(page.name)}>{page.name.replaceAll("_", " · ")}</button>)}</div></details>
   </section>;
 }

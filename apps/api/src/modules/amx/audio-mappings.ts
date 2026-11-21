@@ -90,7 +90,7 @@ export const amxAudioLevels: AmxMappedLevel[] = pages.flatMap((page) => page.obj
 const systemActionDefs = [
   ["power-confirm-on", "Activate selected room", "PWR_ASK", 4],
   ["power-cancel", "Cancel room activation", "PWR_ASK", 3],
-  ["power-confirm-off", "Confirm system off", "PWR_OFF_ASK", 3],
+  ["power-confirm-off", "Confirm system off", "PWR_OFF_ASK", 4],
   ["mode-volume", "Open volume", "Modus", 24],
   ["mode-microphone", "Open microphones", "Modus", 1],
   ["mode-speakers", "Open speakers", "Modus", 2],
