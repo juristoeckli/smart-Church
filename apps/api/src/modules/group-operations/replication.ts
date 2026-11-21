@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type Row = Record<string, unknown>;
-type Snapshot = { version: 1; tables: Record<string, Row[]> };
+type Snapshot = { version: 2; tables: Record<string, Row[]> };
 const maxRows = 250_000;
 const maxBytes = 50 * 1024 * 1024;
 const batchSize = 500;
@@ -44,7 +44,7 @@ const tables = [
   },
   {
     name: "group_meeting_feedback_responses",
-    columns: "id department_id group_id meeting_id answers created_by updated_by created_at updated_at",
+    columns: "id department_id group_id meeting_id answers created_by updated_by created_at updated_at meeting_comment guest_count",
     users: ["created_by", "updated_by"], contacts: [],
   },
   {
@@ -66,7 +66,7 @@ function record(value: unknown): value is Row {
 }
 
 function checkedSnapshot(input: unknown): Snapshot {
-  if (!record(input) || input.version !== 1 || !record(input.tables) || Object.keys(input.tables).length !== tables.length) {
+  if (!record(input) || input.version !== 2 || !record(input.tables) || Object.keys(input.tables).length !== tables.length) {
     throw new Error("The Group Operations snapshot has an unsupported format.");
   }
   const data = input.tables;
@@ -82,7 +82,7 @@ function checkedSnapshot(input: unknown): Snapshot {
   if (count > maxRows || Buffer.byteLength(JSON.stringify(input)) > maxBytes) {
     throw new Error("The Group Operations snapshot exceeds the supported size.");
   }
-  return { version: 1, tables: data as Snapshot["tables"] };
+  return { version: 2, tables: data as Snapshot["tables"] };
 }
 
 async function selectRows(client: PoolClient, table: Table, departmentId: string) {
@@ -158,7 +158,7 @@ function canonical(value: unknown): string {
 export function registerGroupOperationsReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "1",
+    schemaVersion: "2",
     async inspect(departmentId) {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Group Operations database is unavailable."], recordCount: 0 };
       try {
@@ -170,7 +170,7 @@ export function registerGroupOperationsReplication(context: ModuleServerContext)
       }
     },
     async exportSnapshot(client, departmentId) {
-      const snapshot: Snapshot = { version: 1, tables: {} };
+      const snapshot: Snapshot = { version: 2, tables: {} };
       for (const table of tables) snapshot.tables[table.name] = await selectRows(client, table, departmentId);
       checkedSnapshot(snapshot);
       return snapshot;

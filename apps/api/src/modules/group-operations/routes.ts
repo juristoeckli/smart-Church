@@ -42,9 +42,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   async function canManageGroup(request: FastifyRequest, groupId: string, departmentId: string) {
     if (canManage(request)) return true;
     const result = await pool!.query(
-      `SELECT 1 FROM group_members member JOIN department_memberships account ON account.contact_id=member.contact_id
+      `SELECT 1 FROM group_members member
+         JOIN department_memberships account ON account.contact_id=member.contact_id
+         JOIN church_groups church_group ON church_group.id=member.group_id AND church_group.department_id=$2
         WHERE member.group_id=$1 AND account.department_id=$2 AND account.user_id=$3 AND member.status='active'
-          AND lower(regexp_replace(member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager') LIMIT 1`,
+          AND regexp_replace(lower(member.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager') LIMIT 1`,
       [groupId, departmentId, request.authenticatedUser?.id],
     );
     return Boolean(result.rowCount);
@@ -85,13 +87,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const canManageFeedback = await canManageGroup(request, request.query.groupId, departmentId);
     const canSubmitFeedback = Boolean(await activeGroupContact(request, request.query.groupId, departmentId));
     if (!canManageFeedback && !canSubmitFeedback) return reply.code(403).send({ error: "Active group membership is required to view meeting feedback." });
-    const meetings = await pool!.query(`SELECT id,meeting_date::text AS date,title FROM group_meetings WHERE department_id=$1 AND group_id=$2 ORDER BY meeting_date DESC,created_at DESC LIMIT 200`, [departmentId, request.query.groupId]);
+    const meetings = await pool!.query(
+      `SELECT meeting.id,meeting.meeting_date::text AS date,meeting.title,feedback.guest_count AS "guestCount"
+         FROM group_meetings meeting
+         LEFT JOIN group_meeting_feedback_responses feedback
+           ON $3 AND feedback.department_id=meeting.department_id AND feedback.group_id=meeting.group_id AND feedback.meeting_id=meeting.id
+        WHERE meeting.department_id=$1 AND meeting.group_id=$2
+        ORDER BY meeting.meeting_date DESC,meeting.created_at DESC LIMIT 200`,
+      [departmentId, request.query.groupId, canManageFeedback],
+    );
     const template = await pool!.query(`SELECT id,title,questions,anonymous_attendee_responses AS "anonymousAttendeeResponses",updated_at AS "updatedAt" FROM group_meeting_feedback_templates WHERE department_id=$1 AND group_id=$2`, [departmentId, request.query.groupId]);
     let response = null;
     if (request.query.meetingId) {
       const meeting = meetings.rows.find((row) => row.id === request.query.meetingId);
       if (!meeting) return reply.code(404).send({ error: "Meeting not found for this group." });
-      const result = canManageFeedback ? await pool!.query(`SELECT answers,created_at AS "createdAt",updated_at AS "updatedAt",COALESCE(actor.display_name,'Former user') AS "updatedBy"
+      const result = canManageFeedback ? await pool!.query(`SELECT answers,meeting_comment AS "comment",guest_count AS "guestCount",created_at AS "createdAt",updated_at AS "updatedAt",COALESCE(actor.display_name,'Former user') AS "updatedBy"
         FROM group_meeting_feedback_responses feedback LEFT JOIN app_users actor ON actor.id=feedback.updated_by
         WHERE feedback.department_id=$1 AND feedback.group_id=$2 AND feedback.meeting_id=$3`, [departmentId, request.query.groupId, request.query.meetingId]) : { rows: [] };
       response = result.rows[0] ?? null;
@@ -217,16 +227,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       "SELECT title,questions FROM group_meeting_feedback_templates WHERE department_id=$1 AND group_id=$2",
       [departmentId, request.query.groupId],
     );
-    if (!template.rowCount) return reply.code(404).send({ error: "This group has no meeting feedback template." });
-    const responses = await pool!.query<{ date: string; meeting_title: string | null; response_type: string; respondent: string | null; answers: Record<string, string>; updated_by: string | null; updated_at: Date | string | null }>(
+    const responses = await pool!.query<{ date: string; meeting_title: string | null; response_type: string; respondent: string | null; answers: Record<string, string>; updated_by: string | null; updated_at: Date | string | null; meeting_comment: string | null; guest_count: number | null }>(
       `WITH feedback_rows AS (
-         SELECT meeting_id,answers,'Leader'::text AS response_type,NULL::text AS respondent,
+         SELECT meeting_id,answers,'Leader'::text AS response_type,NULL::text AS respondent,feedback.meeting_comment,feedback.guest_count,
                 COALESCE(actor.display_name,'Former user') AS updated_by,feedback.updated_at
            FROM group_meeting_feedback_responses feedback LEFT JOIN app_users actor ON actor.id=feedback.updated_by
           WHERE feedback.department_id=$1 AND feedback.group_id=$2
          UNION ALL
          SELECT submission.meeting_id,submission.answers,'Attendee'::text AS response_type,
-                concat_ws(' ',person.first_name,person.last_name) AS respondent,
+                concat_ws(' ',person.first_name,person.last_name) AS respondent,NULL::text,NULL::int,
                 COALESCE(actor.display_name,'Former user') AS updated_by,submission.updated_at
            FROM group_meeting_feedback_attendee_submissions submission
            JOIN contacts person ON person.id=submission.contact_id AND person.department_id=submission.department_id
@@ -234,24 +243,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHERE submission.department_id=$1 AND submission.group_id=$2 AND submission.contact_id IS NOT NULL
          UNION ALL
          SELECT submission.meeting_id,submission.answers,'Attendee'::text AS response_type,
-                'Anonymous response'::text AS respondent,NULL::text AS updated_by,NULL::timestamptz AS updated_at
+                'Anonymous response'::text AS respondent,NULL::text,NULL::int,NULL::text AS updated_by,NULL::timestamptz AS updated_at
            FROM group_meeting_feedback_attendee_submissions submission
           WHERE submission.department_id=$1 AND submission.group_id=$2 AND submission.contact_id IS NULL
        )
        SELECT meeting.meeting_date::text AS date,meeting.title AS meeting_title,feedback.response_type,feedback.respondent,feedback.answers,
-              feedback.updated_by,feedback.updated_at
+              feedback.updated_by,feedback.updated_at,feedback.meeting_comment,feedback.guest_count
          FROM feedback_rows feedback
          JOIN group_meetings meeting ON meeting.id=feedback.meeting_id AND meeting.department_id=$1 AND meeting.group_id=$2
         ORDER BY meeting.meeting_date,meeting.created_at,meeting.id,feedback.response_type,feedback.respondent`,
       [departmentId, request.query.groupId],
     );
-    const questions = template.rows[0].questions;
+    const questions = template.rows[0]?.questions ?? [];
     const rows = [
-      ["Meeting date", "Meeting", "Feedback form", "Response type", "Respondent", "Updated by", "Updated at", ...questions.map((question) => question.prompt)],
-      ...responses.rows.map((response) => [response.date, response.meeting_title, template.rows[0].title, response.response_type, response.respondent, response.updated_by, response.updated_at ? new Date(response.updated_at).toISOString() : "", ...questions.map((question) => response.answers?.[question.id] ?? "")]),
+      ["Meeting date", "Meeting", "Feedback form", "Response type", "Respondent", "Updated by", "Updated at", "Guest count", "Meeting comment", ...questions.map((question) => question.prompt)],
+      ...responses.rows.map((response) => [response.date, response.meeting_title, template.rows[0]?.title ?? "", response.response_type, response.respondent, response.updated_by, response.updated_at ? new Date(response.updated_at).toISOString() : "", response.guest_count, response.meeting_comment, ...questions.map((question) => response.answers?.[question.id] ?? "")]),
     ];
     const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
-    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename="group-meeting-feedback-${request.query.groupId}.csv"`).send(csv);
+    return reply.header("cache-control", "private, no-store").type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename="group-meeting-feedback-${request.query.groupId}.csv"`).send(csv);
   });
 
   app.put<{ Body: { groupId: string; title: string; questions: Array<string | { prompt: string; required?: boolean }>; anonymousAttendeeResponses?: boolean } }>("/api/modules/group-operations/meeting-feedback/template", {
@@ -289,8 +298,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return result.rows[0];
   });
 
-  app.put<{ Body: { groupId: string; meetingId: string; answers: Record<string, string> } }>("/api/modules/group-operations/meeting-feedback/responses", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "meetingId", "answers"], properties: { groupId: uuid, meetingId: uuid, answers: { type: "object", maxProperties: 10, additionalProperties: { type: "string", maxLength: 2000 } } } } },
+  app.put<{ Body: { groupId: string; meetingId: string; answers: Record<string, string>; comment?: string; guestCount?: number | null } }>("/api/modules/group-operations/meeting-feedback/responses", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "meetingId", "answers"], properties: { groupId: uuid, meetingId: uuid, answers: { type: "object", maxProperties: 10, additionalProperties: { type: "string", maxLength: 2000 } }, comment: { type: "string", maxLength: 2000 }, guestCount: { type: ["integer", "null"], minimum: 0, maximum: 100000 } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
@@ -298,16 +307,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const meeting = await pool!.query("SELECT id FROM group_meetings WHERE id=$1 AND group_id=$2 AND department_id=$3", [request.body.meetingId, request.body.groupId, departmentId]);
     if (!meeting.rowCount) return reply.code(404).send({ error: "Meeting not found for this group." });
     const template = await pool!.query<{ questions: Array<{ id: string; prompt: string }> }>("SELECT questions FROM group_meeting_feedback_templates WHERE group_id=$1 AND department_id=$2", [request.body.groupId, departmentId]);
-    if (!template.rowCount) return reply.code(409).send({ error: "Create a meeting feedback template before recording responses." });
-    const questions = template.rows[0].questions;
+    const questions = template.rows[0]?.questions ?? [];
     const allowedIds = new Set(questions.map((question) => question.id));
     if (Object.keys(request.body.answers).some((id) => !allowedIds.has(id))) return reply.code(400).send({ error: "The feedback form changed. Reload it before saving." });
     const answers = Object.fromEntries(Object.entries(request.body.answers).map(([id, value]) => [id, value.trim()]));
-    const saved = await pool!.query(`INSERT INTO group_meeting_feedback_responses(id,department_id,group_id,meeting_id,answers,created_by,updated_by)
-      VALUES($1,$2,$3,$4,$5::jsonb,$6,$6)
-      ON CONFLICT(meeting_id) DO UPDATE SET answers=EXCLUDED.answers,updated_by=EXCLUDED.updated_by,updated_at=now()
-      WHERE group_meeting_feedback_responses.department_id=EXCLUDED.department_id AND group_meeting_feedback_responses.group_id=EXCLUDED.group_id
-      RETURNING id`, [randomUUID(), departmentId, request.body.groupId, request.body.meetingId, JSON.stringify(answers), request.authenticatedUser?.id ?? null]);
+    const { groupId, meetingId, comment, guestCount } = request.body;
+    const saved = await pool!.query(`INSERT INTO group_meeting_feedback_responses AS prior
+        (id,department_id,group_id,meeting_id,answers,created_by,updated_by,meeting_comment,guest_count)
+      VALUES($1,$2,$3,$4,$5::jsonb,$6,$6,COALESCE($7,''),$8)
+      ON CONFLICT(meeting_id) DO UPDATE SET
+        answers=(prior.answers - $9::text[]) || EXCLUDED.answers,
+        updated_by=EXCLUDED.updated_by,updated_at=now(),
+        meeting_comment=COALESCE($7,prior.meeting_comment),
+        guest_count=CASE WHEN $10 THEN EXCLUDED.guest_count ELSE prior.guest_count END
+      WHERE prior.department_id=EXCLUDED.department_id AND prior.group_id=EXCLUDED.group_id
+      RETURNING id`, [
+        randomUUID(), departmentId, groupId, meetingId, JSON.stringify(answers), request.authenticatedUser?.id ?? null,
+        comment?.trim() ?? null, guestCount ?? null, [...allowedIds], guestCount !== undefined,
+      ]);
     if (!saved.rowCount) return reply.code(409).send({ error: "The meeting feedback belongs to a different group or location." });
     await recordAudit(departmentId, request.body.groupId, request, "meeting_feedback_saved", request.body.meetingId, { answerCount: Object.keys(answers).length });
     return { saved: true };
