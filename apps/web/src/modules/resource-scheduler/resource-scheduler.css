@@ -56,3 +56,6 @@
 .resource-scheduler-booked-days-table small { display: block; font-weight: normal; }
 
 .resource-scheduler-cell-request { margin-top: .3rem; }
+
+.resource-booking-description summary { cursor: pointer; }
+.resource-booking-description p { margin: .2rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }

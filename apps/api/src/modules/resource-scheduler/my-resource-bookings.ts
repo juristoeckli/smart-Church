@@ -54,7 +54,7 @@ export function registerMyResourceBookings(app: FastifyInstance, context: Module
     const [department, bookings] = await Promise.all([
       context.pool!.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query<{ id: string; cursorStart: string }>(
-        `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,booking.subtitle,booking.quantity,
+        `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,booking.subtitle,booking.description,booking.quantity,
                 booking.status,CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
                 to_char(booking.starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorStart"
            FROM resource_bookings booking JOIN bookable_resources resource
