@@ -1,3 +1,4 @@
+import { registerPrivatePersonNotes } from "./private-person-notes.js";
 import { registerPersonServiceWorkload } from "./person-service-workload.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -74,6 +75,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return departmentId;
     }
     registerPersonAttachments(routes, context, department);
+    registerPrivatePersonNotes(routes, context, department);
     registerPeopleHistoryTimeline(routes, context, department);
     registerPeopleHouseholds(routes, context, department);
     registerPersonServiceWorkload(routes, context, department);
