@@ -345,15 +345,30 @@ function staffingGroupsFromDirectory(groups: DirectoryGroup[]): StaffingGroup[] 
   }));
 }
 
-function EventBulkRoleAssignment({ event, rosterEvents, contacts, qualifications, staffingGroups, canManage, departmentId, categoryFilter, onAssigned }: { event: ServiceEvent; rosterEvents: ServiceEvent[]; contacts: Contact[]; qualifications: VolunteerQualification[]; staffingGroups: StaffingGroup[]; canManage: boolean; departmentId: string; categoryFilter: string; onAssigned: () => void }) {
+type EventRoleAssignmentProps = {
+  event: ServiceEvent;
+  rosterEvents: ServiceEvent[];
+  contacts: Contact[];
+  qualifications: VolunteerQualification[];
+  staffingGroups: StaffingGroup[];
+  canManage: boolean;
+  departmentId: string;
+  categoryFilter: string;
+  directRoleIndex?: number;
+  onAssigned: (event: ServiceEvent) => void;
+};
+
+function EventBulkRoleAssignment({ event, rosterEvents, contacts, qualifications, staffingGroups, canManage, departmentId, categoryFilter, directRoleIndex, onAssigned }: EventRoleAssignmentProps) {
   const [contactId, setContactId] = useState("");
   const [staffingGroupId, setStaffingGroupId] = useState("");
-  const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
+  const [bulkSelectedIndices, setSelectedIndices] = useState<number[]>([]);
+  const selectedIndices = directRoleIndex === undefined ? bulkSelectedIndices : [directRoleIndex];
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState("");
   const [error, setError] = useState("");
   const matchesCategory = (position: ServicePosition) => categoryFilter === "" || (categoryFilter === UNCATEGORIZED_ROLE_FILTER ? !position.category?.trim() : position.category?.trim().toLocaleLowerCase() === categoryFilter.toLocaleLowerCase());
-  const unfilled = (event.positions ?? []).map((position, positionIndex) => ({ position, positionIndex })).filter(({ position }) => !position.contactId && matchesCategory(position));
+  const unfilled = (event.positions ?? []).map((position, positionIndex) => ({ position, positionIndex }))
+    .filter(({ position, positionIndex }) => !position.contactId && matchesCategory(position) && (directRoleIndex === undefined || positionIndex === directRoleIndex));
   const requiredForSelection = [...new Set(unfilled.filter(({ positionIndex }) => selectedIndices.includes(positionIndex)).flatMap(({ position }) => position.qualificationIds ?? []))];
   const groupFilter = staffingGroups.find((group) => group.id === staffingGroupId);
   const eligibleContacts = contacts.filter((person) => (!staffingGroupId || groupFilter?.memberIds.has(person.id))
@@ -376,20 +391,20 @@ function EventBulkRoleAssignment({ event, rosterEvents, contacts, qualifications
       if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not fill these roles." : "Could not fill these roles.");
       const count = selectedIndices.length;
       setSelectedIndices([]); setContactId(""); setFeedback(`Assigned the volunteer to ${count} ${count === 1 ? "role" : "roles"}.`);
-      onAssigned();
+      onAssigned(result);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not fill these roles."); }
     finally { setBusy(false); }
   }
 
   return <form className="event-bulk-role-assignment" onSubmit={(eventSubmit) => void assign(eventSubmit)}>
-    <strong>Fill several unassigned roles</strong>
+    <strong>{directRoleIndex === undefined ? "Fill several unassigned roles" : "Fill " + unfilled[0].position.name}</strong>
     {staffingGroups.length > 0 && <label>Candidate group<select value={staffingGroupId} disabled={busy}
       onChange={(change) => { setStaffingGroupId(change.target.value); setContactId(""); }}>
       <option value="">All eligible volunteers</option>
       {staffingGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
     </select></label>}
     {staffingGroupId && !eligibleContacts.length && <p role="status">No eligible volunteers match this group and the selected roles.</p>}
-    <label>Volunteer<select value={contactId} onChange={(change) => setContactId(change.target.value)}><option value="">Choose a volunteer</option>{eligibleContacts.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select>{requiredForSelection.length > 0 && <small>Showing only volunteers with every qualification needed for the selected roles.</small>}</label>
+    <label>Volunteer<select autoFocus={directRoleIndex !== undefined} value={contactId} onChange={(change) => setContactId(change.target.value)}><option value="">Choose a volunteer</option>{eligibleContacts.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select>{requiredForSelection.length > 0 && <small>Showing only volunteers with every qualification needed for the selected roles.</small>}</label>
     {context && <details className="event-duty-candidate-context" open>
       <summary>Selected volunteer’s duty history</summary>
       <p>{context.monthlyCount} assigned {context.monthlyCount === 1 ? "role" : "roles"} in the service month, excluding declined requests.</p>
@@ -398,10 +413,36 @@ function EventBulkRoleAssignment({ event, rosterEvents, contacts, qualifications
         {formatEventDate(priorEvent.eventDate)} · {priorEvent.title} · {position.name} · {position.responseStatus === "accepted" ? "Confirmed" : position.responseStatus === "declined" ? "Declined" : "Requested"}
       </li>)}</ul>}
     </details>}
-    <fieldset><legend>Select roles</legend>{unfilled.map(({ position, positionIndex }) => <label key={positionIndex}><input type="checkbox" checked={selectedIndices.includes(positionIndex)} disabled={Boolean(contactId) && !hasQualifications(contactId, position.qualificationIds ?? [], qualifications)} onChange={(change) => setSelectedIndices((current) => change.target.checked ? [...current, positionIndex] : current.filter((index) => index !== positionIndex))} />{position.name}{position.qualificationIds?.length ? <small> · Requires {position.qualificationIds.map((id) => qualifications.find((item) => item.id === id)?.name ?? "Qualification").join(", ")}</small> : null}</label>)}</fieldset>
-    <button className="button button-secondary" type="submit" disabled={busy || !candidate || !selectedIndices.length}>{busy ? "Assigning…" : "Assign selected roles"}</button>
+    {directRoleIndex === undefined && <fieldset><legend>Select roles</legend>{unfilled.map(({ position, positionIndex }) => <label key={positionIndex}><input type="checkbox" checked={selectedIndices.includes(positionIndex)} disabled={Boolean(contactId) && !hasQualifications(contactId, position.qualificationIds ?? [], qualifications)} onChange={(change) => setSelectedIndices((current) => change.target.checked ? [...current, positionIndex] : current.filter((index) => index !== positionIndex))} />{position.name}{position.qualificationIds?.length ? <small> · Requires {position.qualificationIds.map((id) => qualifications.find((item) => item.id === id)?.name ?? "Qualification").join(", ")}</small> : null}</label>)}</fieldset>}
+    <button className="button button-secondary" type="submit" disabled={busy || !candidate || !selectedIndices.length}>{busy ? "Assigning…" : directRoleIndex === undefined ? "Assign selected roles" : "Assign volunteer"}</button>
     {feedback && <p role="status">{feedback}</p>}{error && <p role="alert">{error}</p>}
   </form>;
+}
+
+function EventDetailStaffing(props: Omit<EventRoleAssignmentProps, "categoryFilter" | "directRoleIndex">) {
+  const { event, contacts, canManage, onAssigned } = props;
+  const [roleIndex, setRoleIndex] = useState<number>();
+  const positions = event.positions ?? [];
+  if (!positions.length) return null;
+  const editable = canManage && !event.importedFrom && !event.cancelledAt;
+  return <section className="event-details-section">
+    <h3>{translate("events.positions")}</h3>
+    <ul>{positions.map((position, index) => {
+      const person = contacts.find((contact) => contact.id === position.contactId);
+      return <li key={index}>
+        <strong>{position.name}</strong>
+        <span>{person ? person.firstName + " " + person.lastName : translate("events.unassigned")}</span>
+        {editable && !position.contactId && <button className="button button-secondary" type="button"
+          aria-expanded={roleIndex === index} aria-label={"Fill role " + position.name}
+          onClick={() => setRoleIndex(roleIndex === index ? undefined : index)}>Fill role</button>}
+      </li>;
+    })}</ul>
+    {editable && roleIndex !== undefined && positions[roleIndex] && !positions[roleIndex].contactId && <>
+      <EventBulkRoleAssignment {...props} key={roleIndex} categoryFilter="" directRoleIndex={roleIndex}
+        onAssigned={(result) => { setRoleIndex(undefined); onAssigned(result); }} />
+      <button className="button button-secondary" type="button" onClick={() => setRoleIndex(undefined)}>Cancel role assignment</button>
+    </>}
+  </section>;
 }
 
 export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, csrfToken, contacts, canManage, onNotice, linkedSongNavigation, songSearchNavigation, onLinkedSongHandled, linkedEventNavigation, onLinkedEventHandled }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; csrfToken: string; contacts: Contact[]; canManage: boolean; onNotice: (message: string) => void; linkedSongNavigation?: { id: string; requestId: number } | null; songSearchNavigation?: DirectorySearchNavigation; onLinkedSongHandled?: (requestId: number) => void; linkedEventNavigation?: { id: string; requestId: number } | null; onLinkedEventHandled?: (requestId: number) => void }) {
@@ -1123,7 +1164,13 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       <footer className="page-footer"><span>{translate("events.footer")}</span><span>© 2026 Smart Church</span></footer>
       {qualificationManagerOpen && canManage && <VolunteerQualificationSettings departmentId={departmentId} contacts={contacts} qualifications={volunteerQualifications} onChanged={() => loadVolunteerQualifications()} onClose={() => setQualificationManagerOpen(false)} />}{isWorshipLibraryOpen && <WorshipPlanning departmentId={departmentId} canManage={canManage} initialTemplate={newWorshipTemplate} onClose={() => { setIsWorshipLibraryOpen(false); setNewWorshipTemplate(undefined); }} onChanged={() => void refreshWorshipLibrary()} onNotice={onNotice} selectedSongId={linkedSongNavigation?.id} directorySearch={songSearchNavigation} selectedSongRequestId={linkedSongNavigation?.requestId} onSelectedSongHandled={(requestId) => onLinkedSongHandled?.(requestId)} />}
 
-      {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{eventKindLabel(detailsEvent.kind)}</span><h2 id="event-details-title">{detailsEvent.title}</h2>{canManage && detailsEvent.canManageAttachments && !detailsEvent.cancelledAt && <ServiceEventFilesPanel key={`files:${departmentId}:${detailsEvent.id}`} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} />}{detailsEvent.cancelledAt && <span className="event-cancelled-badge">Cancelled</span>}</div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatEventDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{eventTimeLabel(detailsEvent)}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div>{responsibleName(detailsEvent) && <div><dt>Responsible person</dt><dd>{responsibleName(detailsEvent)}</dd></div>}</dl>{canManage && !detailsEvent.cancelledAt && <EventVolunteerAvailabilityWarning key={`${departmentId}:${detailsEvent.id}`} departmentId={departmentId} eventId={detailsEvent.id} t={(message) => translateModuleText(message, eventTranslations, getActiveLanguage())} />}{canManage && <ServiceEventFactsPanel key={"facts:" + departmentId + ":" + detailsEvent.id} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} eventDate={detailsEvent.eventDate} />}{detailsEvent.cancelledAt && <p className="event-details-summary"><strong>Cancelled</strong> · {detailsEvent.cancellationReason || "No reason provided"} · {new Date(detailsEvent.cancelledAt).toLocaleString()}{detailsEvent.cancelledBy ? ` · by ${detailsEvent.cancelledBy}` : ""}</p>}{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}{detailsEvent.registrationEnabled && <p className="event-details-summary">{translate("events.registration").replace("{count}", String(detailsEvent.registrationCount ?? 0))}{detailsEvent.registrationCapacity ? ` / ${detailsEvent.registrationCapacity}` : ` ${translate("events.registered")}`}{detailsEvent.registrationCapacity && (detailsEvent.registrationCount ?? 0) >= detailsEvent.registrationCapacity ? translate("events.waitlistOpen") : ""}</p>}{canManage && !detailsEvent.importedFrom && <EventRegistrationFormSettings key={detailsEvent.id} departmentId={departmentId} eventId={detailsEvent.id} csrfToken={csrfToken} readOnly={Boolean(detailsEvent.cancelledAt)} />}{detailsEvent.attendanceRecordedAt && <p className="event-details-summary">{translate("events.attendance").replace("{adults}", String(detailsEvent.attendanceAdults ?? 0)).replace("{children}", String(detailsEvent.attendanceChildren ?? 0))}</p>}{Boolean(detailsEvent.positions?.length) && <section className="event-details-section"><h3>{translate("events.positions")}</h3><ul>{detailsEvent.positions!.map((position, index) => { const person = contacts.find((contact) => contact.id === position.contactId); return <li key={`${position.name}-${index}`}><strong>{position.name}</strong><span>{person ? `${person.firstName} ${person.lastName}` : translate("events.unassigned")}</span></li>; })}</ul></section>}<EventPositionStaffNotes event={detailsEvent} departmentId={departmentId} canManage={canManage} />{Boolean(detailsEvent.timePlan?.length) && <section className="event-details-section"><div className="service-planning-heading"><h3>{translate("events.timePlan")}</h3><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => void copyServicePlanLink(detailsEvent.id)}><Link2 size={15} />Copy plan link</button><button className="button button-secondary" type="button" onClick={() => printRunSheet(detailsEvent)}><Printer size={15} />Print run sheet</button>{canManage && <button className="button button-secondary" type="button" onClick={() => {
+      {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{eventKindLabel(detailsEvent.kind)}</span><h2 id="event-details-title">{detailsEvent.title}</h2>{canManage && detailsEvent.canManageAttachments && !detailsEvent.cancelledAt && <ServiceEventFilesPanel key={`files:${departmentId}:${detailsEvent.id}`} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} />}{detailsEvent.cancelledAt && <span className="event-cancelled-badge">Cancelled</span>}</div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatEventDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{eventTimeLabel(detailsEvent)}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div>{responsibleName(detailsEvent) && <div><dt>Responsible person</dt><dd>{responsibleName(detailsEvent)}</dd></div>}</dl>{canManage && !detailsEvent.cancelledAt && <EventVolunteerAvailabilityWarning key={`${departmentId}:${detailsEvent.id}`} departmentId={departmentId} eventId={detailsEvent.id} t={(message) => translateModuleText(message, eventTranslations, getActiveLanguage())} />}{canManage && <ServiceEventFactsPanel key={"facts:" + departmentId + ":" + detailsEvent.id} departmentId={departmentId} csrfToken={csrfToken} eventId={detailsEvent.id} eventDate={detailsEvent.eventDate} />}{detailsEvent.cancelledAt && <p className="event-details-summary"><strong>Cancelled</strong> · {detailsEvent.cancellationReason || "No reason provided"} · {new Date(detailsEvent.cancelledAt).toLocaleString()}{detailsEvent.cancelledBy ? ` · by ${detailsEvent.cancelledBy}` : ""}</p>}{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}{detailsEvent.registrationEnabled && <p className="event-details-summary">{translate("events.registration").replace("{count}", String(detailsEvent.registrationCount ?? 0))}{detailsEvent.registrationCapacity ? ` / ${detailsEvent.registrationCapacity}` : ` ${translate("events.registered")}`}{detailsEvent.registrationCapacity && (detailsEvent.registrationCount ?? 0) >= detailsEvent.registrationCapacity ? translate("events.waitlistOpen") : ""}</p>}{canManage && !detailsEvent.importedFrom && <EventRegistrationFormSettings key={detailsEvent.id} departmentId={departmentId} eventId={detailsEvent.id} csrfToken={csrfToken} readOnly={Boolean(detailsEvent.cancelledAt)} />}{detailsEvent.attendanceRecordedAt && <p className="event-details-summary">{translate("events.attendance").replace("{adults}", String(detailsEvent.attendanceAdults ?? 0)).replace("{children}", String(detailsEvent.attendanceChildren ?? 0))}</p>}<EventDetailStaffing key={detailsEvent.id} event={detailsEvent} rosterEvents={events} contacts={contacts}
+        qualifications={volunteerQualifications} staffingGroups={staffingGroups} canManage={canManage} departmentId={departmentId}
+        onAssigned={(updated) => {
+          setDetailsEvent((current) => current?.id === updated.id ? updated : current);
+          onNotice("Volunteer assigned.");
+          void loadEvents();
+        }} /><EventPositionStaffNotes event={detailsEvent} departmentId={departmentId} canManage={canManage} />{Boolean(detailsEvent.timePlan?.length) && <section className="event-details-section"><div className="service-planning-heading"><h3>{translate("events.timePlan")}</h3><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => void copyServicePlanLink(detailsEvent.id)}><Link2 size={15} />Copy plan link</button><button className="button button-secondary" type="button" onClick={() => printRunSheet(detailsEvent)}><Printer size={15} />Print run sheet</button>{canManage && <button className="button button-secondary" type="button" onClick={() => {
         setNewWorshipTemplate(templateFromServiceAgenda(detailsEvent));
         setDetailsEvent(null);
         setIsWorshipLibraryOpen(true);
