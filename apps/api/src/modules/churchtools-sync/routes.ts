@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerChurchToolsSyncReplication } from "./replication.js";
 import { parseChurchToolsEventDateTime } from "./event-time.js";
@@ -31,6 +31,7 @@ import { readChurchToolsAbsencePreview } from "./absence-preview.js";
 import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
 import { isVisibleChurchToolsHistoryPerson, membershipHistoryCursor, membershipHistoryPageSize, personalChurchToolsId, readChurchToolsMembershipHistoryPage, readMembershipHistoryCursor } from "./membership-history.js";
+import { fetchGuestWiki, guestWikiCategories, guestWikiPages, guestWikiRevision, wikiGuid } from "./wiki-copy.js";
 import { confirmsPublicStructureEdge, groupSourceGuid, groupSourceId, readStructureDefinition, readStructureGroup, singleVisibleParent } from "./group-structure.js";
 import { isSafeGroupParent, lockGroupHierarchy } from "../../group-hierarchy-parent.js";
 import { churchToolsPersonStatus, churchToolsPersonTags } from "./person-classification.js";
@@ -2449,6 +2450,130 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       finally { client.release(); }
       deps.realtime.publish("core:groups:changed", dept, { groupId: local?.id, action: "churchtools-structure-imported" });
       return { updated: true };
+    });
+
+    type WikiCopyBody = { categoryId?: string; pageGuid?: string; review?: string };
+    routes.post<{ Body: WikiCopyBody }>("/api/modules/sync/churchtools/wiki-copy", {
+      schema: { body: { type: "object", additionalProperties: false, properties: {
+        categoryId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+        pageGuid: { type: "string", format: "uuid" },
+        review: { type: "string", minLength: 1, maxLength: 1800 },
+      } } },
+    }, async (request, reply) => {
+      reply.header("Cache-Control", "private, no-store");
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      const { categoryId, review } = request.body;
+      const guid = wikiGuid(request.body.pageGuid);
+      if ((request.body.pageGuid && (!guid || !categoryId)) || (review && !guid)) {
+        return reply.code(400).send({ error: "Choose a source category and page for this Wiki review." });
+      }
+      const actor = request.authenticatedUser?.id;
+      const config = await settings(dept);
+      if (!actor || !config) return reply.code(403).send({ error: "Configure ChurchTools and sign in to review Wiki pages." });
+
+      const signal = AbortSignal.timeout(20_000);
+      let category: { id: string; name: string } | undefined;
+      let page: ReturnType<typeof guestWikiRevision>;
+      try {
+        const catalog = await fetchGuestWiki(config.instance_url, "categories", signal);
+        const categories = catalog === null ? [] : guestWikiCategories(catalog);
+        if (!categoryId) return { categories };
+        category = categories.find(({ id }) => id === categoryId);
+        if (!category) return reply.code(404).send({ error: "ChurchTools did not confirm a guest-readable Wiki category." });
+        const root = `categories/${categoryId}/pages`;
+        if (!guid) {
+          const listing = await fetchGuestWiki(config.instance_url, root, signal);
+          if (listing === null) return reply.code(404).send({ error: "ChurchTools did not permit guest access to the category pages." });
+          return { category, pages: guestWikiPages(listing, categoryId) };
+        }
+        page = guestWikiRevision(await fetchGuestWiki(config.instance_url, `${root}/${guid}`, signal), categoryId, guid);
+        if (!page) return reply.code(422).send({ error: "This page is unavailable to guests or cannot be copied as reference-free Markdown." });
+        const exact = guestWikiRevision(await fetchGuestWiki(config.instance_url, `${root}/${guid}/versions/${page.revision}`, signal), categoryId, guid);
+        if (!exact || exact.revision !== page.revision || exact.title !== page.title || exact.text !== page.text) {
+          return reply.code(409).send({ error: "ChurchTools did not confirm this exact Wiki revision. Start a fresh review." });
+        }
+      } catch {
+        return reply.code(400).send({ error: "Could not verify public ChurchTools Wiki data. Check the connection and try again." });
+      }
+
+      const scope = [dept, config.instance_url, categoryId];
+      const wikiAvailable = (db: Pick<PoolClient, "query">, lock = false) => db.query(`SELECT 1 FROM departments d JOIN installation_modules m
+        ON m.installation_id=d.installation_id AND m.module_id='wiki' AND m.enabled WHERE d.id=$1${lock ? " FOR SHARE OF m" : ""}`, [dept]);
+      const sourceHash = createHash("sha256").update(JSON.stringify([category, guid, page.revision, page.title, page.text])).digest("hex");
+      const destination = async (db: Pick<PoolClient, "query">) => {
+        const prior = await db.query<{ source_version: string; source_hash: string; source_category_id: string; status: string | null }>(`SELECT
+          receipt.source_version::text,receipt.source_hash,receipt.source_category_id,target.status FROM churchtools_migration_wiki_pages receipt
+          LEFT JOIN wiki_pages target ON target.id=receipt.page_id AND target.department_id=receipt.department_id
+          WHERE receipt.department_id=$1 AND receipt.instance_url=$2 AND receipt.source_guid=$3`, [dept, config.instance_url, guid]);
+        const saved = prior.rows[0];
+        if (saved) return { action: saved.source_version === page!.revision && saved.source_hash === sourceHash
+          && saved.source_category_id === categoryId && saved.status === "active" ? "existing" : "saved_page_changed", id: null, name: null };
+        const mappings = await db.query<{ id: string; name: string | null; archived_at: string | null }>(`SELECT receipt.category_id AS id,target.name,target.archived_at
+          FROM churchtools_migration_wiki_categories receipt LEFT JOIN wiki_categories target ON target.id=receipt.category_id
+            AND target.department_id=receipt.department_id
+          WHERE receipt.department_id=$1 AND receipt.instance_url=$2 AND receipt.source_category_id=$3`, scope);
+        const mapped = mappings.rows[0];
+        if (mapped && (!mapped.name || mapped.archived_at)) return { action: "category_archived", id: null, name: null };
+        if (mapped) {
+          const collision = await db.query("SELECT 1 FROM wiki_pages WHERE department_id=$1 AND category_id=$2 AND lower(title)=lower($3) LIMIT 1",
+            [dept, mapped.id, page!.title]);
+          return { action: collision.rowCount ? "page_title_conflict" : "create", id: mapped.id, name: mapped.name };
+        }
+        const collision = await db.query("SELECT 1 FROM wiki_categories WHERE department_id=$1 AND lower(name)=lower($2) LIMIT 1", [dept, category!.name]);
+        return { action: collision.rowCount ? "category_name_conflict" : "create", id: null, name: category!.name };
+      };
+      const signature = (target: Awaited<ReturnType<typeof destination>>) => createHash("sha256").update(JSON.stringify([
+        "wiki-copy", dept, config.instance_url, actor, categoryId, guid, sourceHash, target,
+      ])).digest("hex");
+      if (!(await wikiAvailable(pool!)).rowCount) return reply.code(409).send({ error: "Enable Wiki at this location before copying pages." });
+      const target = await destination(pool!);
+      if (!review) return {
+        category, guid, revision: page.revision, title: page.title, text: page.text, target,
+        review: target.action === "create" ? encrypt(JSON.stringify({ binding: signature(target), expiresAt: Date.now() + 15 * 60_000 })) : null,
+      };
+      const stale = () => reply.code(409).send({ error: "The source revision or destination changed. Start a fresh review." });
+      let binding: string;
+      try {
+        const proof = JSON.parse(decrypt(review));
+        if (typeof proof.binding !== "string" || typeof proof.expiresAt !== "number" || proof.expiresAt <= Date.now()
+          || target.action !== "create" || proof.binding !== signature(target)) return stale();
+        binding = proof.binding;
+      } catch { return stale(); }
+
+      const client = await pool!.connect();
+      let pageId: string;
+      try {
+        await client.query("BEGIN");
+        if (!await deps.lockDepartmentForWrite(client, dept)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This location is read-only." });
+        }
+        const currentSettings = await client.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, config.instance_url]);
+        if (!currentSettings.rowCount || !(await wikiAvailable(client, true)).rowCount) { await client.query("ROLLBACK"); return stale(); }
+        await client.query("LOCK TABLE wiki_categories,wiki_pages IN SHARE ROW EXCLUSIVE MODE");
+        const current = await destination(client);
+        if (current.action !== "create" || signature(current) !== binding) { await client.query("ROLLBACK"); return stale(); }
+        let destinationId = current.id;
+        if (!destinationId) {
+          destinationId = randomUUID();
+          await client.query("INSERT INTO wiki_categories(id,department_id,name,created_by,updated_by) VALUES($1,$2,$3,$4,$4)",
+            [destinationId, dept, category.name, actor]);
+          await client.query(`INSERT INTO churchtools_migration_wiki_categories(department_id,instance_url,source_category_id,category_id)
+            VALUES($1,$2,$3,$4)`, [...scope, destinationId]);
+        }
+        pageId = randomUUID();
+        await client.query(`INSERT INTO wiki_pages(id,department_id,category_id,title,content_html,audience,created_by,updated_by)
+          VALUES($1,$2,$3,$4,$5,'managers',$6,$6)`, [pageId, dept, destinationId, page.title, page.html, actor]);
+        await client.query(`INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)`,
+          [randomUUID(), dept, pageId, page.title, page.html, actor]);
+        await client.query(`INSERT INTO churchtools_migration_wiki_pages(department_id,instance_url,source_category_id,source_guid,source_version,source_hash,page_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7)`, [...scope, guid, page.revision, sourceHash, pageId]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+      deps.realtime.publish("module:wiki:changed", dept, { action: "churchtools-page-copied", pageId });
+      return reply.code(201).send({ created: true, pageId });
     });
 
     type MembershipHistoryBody = { groupId: string; loginToken: string; cursor?: string };
