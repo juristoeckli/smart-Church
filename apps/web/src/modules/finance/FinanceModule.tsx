@@ -59,6 +59,17 @@ type BankPreview = { headers: string[]; rowCount: number; duplicate: boolean; sa
 
 const money = (cents: number | string, currency: string) => new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(cents || 0) / 100);
 const today = () => new Date().toISOString().slice(0, 10);
+
+function monthInAccountingYear(month: string, start: string, end: string) {
+  if (!/^[0-9]{4}-(?:0[1-9]|1[0-2])$/.test(month)) return null;
+  const firstDay = month + "-01";
+  const last = new Date(firstDay + "T00:00:00Z");
+  last.setUTCMonth(last.getUTCMonth() + 1, 0);
+  const lastDay = last.toISOString().slice(0, 10);
+  const from = firstDay < start ? start : firstDay;
+  const to = lastDay > end ? end : lastDay;
+  return from <= to ? { from, to } : null;
+}
 const readFinanceQuery = (key: string) => new URLSearchParams(window.location.search).get(`finance${key}`) ?? "";
 const validDateQuery = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(`${value}T00:00:00Z`)) && new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) === value;
 const initialLine = (): JournalLine => ({ accountId: "", costCenterId: "", donorId: "", debit: "", credit: "", text: "" });
@@ -404,6 +415,23 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const financialDates = financialReportDates[financialDatesKey] ?? standardFinancialDates;
   const financialDateError = Boolean(financialDates.from && financialDates.to && financialDates.from > financialDates.to);
   const financialYear = bootstrap.accountingYears.find((item) => String(item.accountingYear) === year);
+  const transactionYearStart = financialYear?.startDate.slice(0, 10) ?? year + "-01-01";
+  const transactionYearEnd = financialYear?.endDate.slice(0, 10) ?? year + "-12-31";
+  const transactionMonth = transactionFrom.slice(0, 7);
+  const monthRange = monthInAccountingYear(transactionMonth, transactionYearStart, transactionYearEnd);
+  const selectedTransactionMonth = monthRange && monthRange.from === transactionFrom && monthRange.to === transactionTo ? transactionMonth : "";
+
+  function setTransactionDates(from: string, to: string) {
+    setTransactionPage(1);
+    setTransactionFrom(from);
+    setTransactionTo(to);
+  }
+
+  function applyTransactionMonth(month: string) {
+    if (!month) { setTransactionDates("", ""); return; }
+    const range = monthInAccountingYear(month, transactionYearStart, transactionYearEnd);
+    if (range) setTransactionDates(range.from, range.to);
+  }
   const financialQuery = new URLSearchParams({ year, report: reportType,
     ...(financialDates.from ? { from: financialDates.from } : {}),
     ...(financialDates.to ? { to: financialDates.to } : {}),
@@ -580,9 +608,12 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         <option value="">All cost centers</option>
         {transactionCostCenterId && !bootstrap.costCenters.some((center) => center.id === transactionCostCenterId) && <option value={transactionCostCenterId}>Selected cost center</option>}
         {bootstrap.costCenters.map((center) => <option key={center.id} value={center.id}>{center.code} · {center.name}{center.active ? "" : " (inactive)"}</option>)}
-      </select></label><label>From<input type="date" value={transactionFrom} onChange={(event) => { setTransactionPage(1); setTransactionFrom(event.target.value); }} /></label><label>To<input type="date" value={transactionTo} onChange={(event) => { setTransactionPage(1); setTransactionTo(event.target.value); }} /></label><label className="finance-posted-filter"><input type="checkbox" checked={transactionPostedOnly} onChange={(event) => {
+      </select></label><label>Transaction month<input type="month" value={selectedTransactionMonth}
+        min={transactionYearStart.slice(0, 7)} max={transactionYearEnd.slice(0, 7)}
+        onChange={(event) => applyTransactionMonth(event.target.value)} /></label><label>From<input type="date" value={transactionFrom} onChange={(event) => { setTransactionPage(1); setTransactionFrom(event.target.value); }} /></label><label>To<input type="date" value={transactionTo} onChange={(event) => { setTransactionPage(1); setTransactionTo(event.target.value); }} /></label><label className="finance-posted-filter"><input type="checkbox" checked={transactionPostedOnly} onChange={(event) => {
         setTransactionPage(1); setTransactionPostedOnly(event.target.checked);
       }} />Posted only</label>
+      {(transactionFrom || transactionTo) && <button className="finance-text-button" type="button" onClick={() => setTransactionDates("", "")}>Full accounting year</button>}
       {(query || transactionFrom || transactionTo || transactionDonorId || transactionAccountId || transactionCostCenterId || transactionPostedOnly) && <button className="finance-text-button" type="button" onClick={clearTransactionFilters}>Clear filters</button>}</div>
       <p className="finance-security-note" aria-live="polite">Showing {transactionTotal ? (transactionPage - 1) * 50 + 1 : 0}–{Math.min(transactionPage * 50, transactionTotal)} of {transactionTotal.toLocaleString()} transactions · year {year}{transactionFrom ? ` · from ${transactionFrom}` : ""}{transactionTo ? ` · through ${transactionTo}` : ""}{query ? ` · matching “${query}”` : ""}</p>
       {transactionFrom && transactionTo && transactionFrom > transactionTo && <p className="finance-error">Start date must be on or before end date.</p>}
