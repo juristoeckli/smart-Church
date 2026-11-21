@@ -89,7 +89,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   useEffect(() => { const timer = window.setInterval(() => setTime(new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date())), 30_000); return () => window.clearInterval(timer); }, []);
 
   useEffect(() => {
-    if (!configured || !currentPage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number")) return;
+    if (!configured || !currentPage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number" && typeof object.levelPort === "number" && object.levelPort > 0)) return;
     let timer = 0;
     let active = true;
     const controller = new AbortController();
@@ -100,6 +100,12 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
         if (active) setLevelValues((current) => ({ ...current, ...result.values }));
       } catch (error) {
         if (active && !controller.signal.aborted) {
+          const pageLevelIds = currentPage.objects.filter((object) => object.type === "bargraph" && typeof object.level === "number").map((object) => String(object.level));
+          setLevelValues((current) => {
+            const next = { ...current };
+            for (const id of pageLevelIds) delete next[id];
+            return next;
+          });
           setFeedback(error instanceof Error ? `Live level feedback: ${error.message}` : "Live level feedback could not be read.");
           setFailed(true);
         }
@@ -186,7 +192,10 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const state = stateFor(object);
     const baseText = labelFor(object);
     const levelValue = object.type === "bargraph" && typeof object.level === "number" ? levelValues[String(object.level)] : undefined;
-    const text = levelValue !== undefined ? `${Math.round(levelValue)}%` : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
+    const low = object.rangeLow ?? 0;
+    const high = object.rangeHigh ?? 100;
+    const levelPercent = levelValue === undefined || high <= low ? undefined : Math.max(0, Math.min(100, (levelValue - low) / (high - low) * 100));
+    const text = object.type === "bargraph" ? levelPercent !== undefined ? `${Math.round(levelPercent)}%` : "—" : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
@@ -207,11 +216,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       {text && text !== "header" && text !== "StatusBar" && <span className={`amx-object-label${levelValue !== undefined ? " amx-level-value" : ""}`}>{text}</span>}
     </>;
     if (!button && object.type === "bargraph") {
-      const low = object.rangeLow ?? 0;
-      const high = object.rangeHigh ?? 100;
-      const percent = levelValue === undefined || high <= low ? 0 : Math.max(0, Math.min(100, (levelValue - low) / (high - low) * 100));
-      return <div key={`${currentPage.id}-${object.id}`} className="amx-panel-object amx-object-bargraph" style={style} aria-label={levelValue === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelValue)} percent`}>
-        {levelValue !== undefined && <span className="amx-level-fill" style={{ height: `${percent}%` }} />}{inner}
+      return <div key={`${currentPage.id}-${object.id}`} className="amx-panel-object amx-object-bargraph" style={style} aria-label={levelPercent === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelPercent)} percent`}>
+        {levelPercent !== undefined && <span className="amx-level-fill" style={{ height: `${levelPercent}%` }} />}{inner}
       </div>;
     }
     if (!button) return <div key={`${currentPage.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
