@@ -1,9 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { PoolClient } from "pg";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { calendarReminderOccurrence, calendarReminderWindow, type CalendarReminderSchedule } from "../../calendar-reminders.js";
 import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
 import { addDays, calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, occurrenceStarts, startOfDay, wallDate, type Recurrence } from "../../calendar-occurrences.js";
+
+import { planCalendarSeriesSplit, truncateCalendarSeries, type ExplicitDate } from "../../calendar-series-split.js";
 
 type CalendarScope = "community" | "group" | "personal";
 type AppointmentInput = {
@@ -120,6 +123,53 @@ function foldIcsLine(value: string) {
     bytes += width;
   }
   return [...fragments, line].join("\r\n");
+}
+
+async function lockCalendarSeries(db: PoolClient, id: string, departmentId: string) {
+  const { rows: [row] } = await db.query<{ starts_at: string; ends_at: string; recurrence: Recurrence | null }>(
+    `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,recurrence
+       FROM church_calendar_appointments WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE`, [id, departmentId],
+  );
+  return row?.recurrence ? { ...row, recurrence: row.recurrence } : null;
+}
+
+async function updateCalendarSeriesResources(db: Pick<PoolClient, "query">, id: string, resourceIds: string[], actor: string) {
+  await db.query(`DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL
+    AND NOT (resource_booking_id=ANY($2::uuid[]))`, [id, resourceIds]);
+  if (resourceIds.length) await db.query(
+    `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
+     SELECT $1,booking_id,$3 FROM unnest($2::uuid[]) booking(booking_id) ON CONFLICT DO NOTHING`, [id, resourceIds, actor],
+  );
+}
+
+async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId: string, boundary: string, selectedOverrides: Record<string, unknown>,
+  targetOccurrence: (value: string) => string | null,
+) {
+  const { rows } = await db.query<{ original: string }>(
+    `SELECT DISTINCT to_char(original,'YYYY-MM-DD"T"HH24:MI:SS') AS original FROM (
+       SELECT original_start AS original FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start >= $2::timestamp
+       UNION ALL SELECT occurrence_start FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start >= $2::timestamp
+       UNION ALL SELECT original_start FROM church_calendar_reminders WHERE appointment_id=$1 AND original_start >= $2::timestamp
+       UNION ALL SELECT occurrence_start FROM church_calendar_event_generations WHERE appointment_id=$1 AND occurrence_start >= $2::timestamp
+     ) attached`, [oldId, boundary],
+  );
+  const linked = rows.flatMap(({ original }) => {
+    const nextOriginal = targetOccurrence(original);
+    return nextOriginal ? [{ original, nextOriginal }] : [];
+  });
+  if (!linked.length) return;
+  const positions = `jsonb_to_recordset($3::jsonb) AS positions(original timestamp,"nextOriginal" timestamp)`;
+  const bindings = [oldId, newId, JSON.stringify(linked)];
+  await db.query(`UPDATE church_calendar_appointment_exceptions e SET appointment_id=$2,original_start=positions."nextOriginal",
+    overrides=CASE WHEN e.original_start=$4::timestamp THEN $5::jsonb ELSE e.overrides END
+    FROM ${positions} WHERE e.appointment_id=$1 AND e.original_start=positions.original`, [...bindings, boundary, JSON.stringify(selectedOverrides)]);
+  await db.query(`UPDATE church_calendar_resource_links link SET appointment_id=$2,occurrence_start=positions."nextOriginal"
+    FROM ${positions} WHERE link.appointment_id=$1 AND link.occurrence_start=positions.original`, bindings);
+  await db.query(`UPDATE church_calendar_reminders reminder SET appointment_id=$2,original_start=positions."nextOriginal",
+    next_check_at=LEAST(reminder.next_check_at,now()) FROM ${positions}
+    WHERE reminder.appointment_id=$1 AND reminder.original_start=positions.original`, bindings);
+  await db.query(`UPDATE church_calendar_event_generations generation SET appointment_id=$2,occurrence_start=positions."nextOriginal"
+    FROM ${positions} WHERE generation.appointment_id=$1 AND generation.occurrence_start=positions.original`, bindings);
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
@@ -1221,7 +1271,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const values = normalized;
     const scope = request.query.scope ?? "series";
-    let resourceTargetId = row.id;
     const updateSeriesLinks = normalized.resourceBookingIds !== undefined && !(scope === "occurrence" && row.recurrence);
     const timeZone = normalized.timeZone === undefined ? row.time_zone ?? null : normalized.timeZone;
     const effectiveZone = timeZone ?? (normalized.timeZone === null ? canonicalTimeZone(row.location_time_zone) : null);
@@ -1257,34 +1306,75 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       );
     } else if (scope === "future" && row.recurrence) {
       if (!occurrenceStart || occurrenceStart <= row.starts_at) return responseError(reply, 400, "Choose an occurrence after the first appointment to split the series.");
-      const previousDay = addDays(startOfDay(occurrenceStart), -1).toISOString().slice(0, 10);
-      const nextStart = cleanLocalDateTime(normalized.startsAt)!;
-      const nextEnd = cleanLocalDateTime(normalized.endsAt)!;
+      const next = { startsAt: normalized.startsAt, endsAt: normalized.endsAt };
       const client = await context.pool.connect();
       const newId = randomUUID();
-      resourceTargetId = newId;
       try {
         await client.query("BEGIN");
-        const shortened = { ...row.recurrence, endsOn: previousDay, count: undefined };
-        await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(shortened)]);
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 423, "This location is read-only.");
+        }
+        const locked = await lockCalendarSeries(client, row.id, departmentId);
+        if (!locked || locked.starts_at !== row.starts_at || locked.ends_at !== row.ends_at
+          || JSON.stringify(locked.recurrence) !== JSON.stringify(row.recurrence)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "The series changed. Open the occurrence again before splitting it.");
+        }
+        const { rows: extras } = await client.query<ExplicitDate>(
+          `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS "startsAt",to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS "endsAt"
+             FROM church_calendar_extra_dates WHERE appointment_id=$1 FOR UPDATE`, [row.id],
+        );
+        const plan = planCalendarSeriesSplit(locked, occurrenceStart, next, normalized.recurrence ?? row.recurrence, extras);
+        if (!plan) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "Choose an existing occurrence and a new start time that does not duplicate a neighboring occurrence.");
+        }
+        const { rows: [selected] } = await client.query<{ cancelled: boolean; overrides: Record<string, unknown> }>(
+          "SELECT cancelled,overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp FOR UPDATE",
+          [row.id, occurrenceStart],
+        );
+        if (selected?.cancelled) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "Choose an active occurrence to split the series.");
+        }
+        const selectedOverrides = { ...selected?.overrides };
+        function resolveSeriesLink(key: "linkedEventId" | "signupGroupId" | "responsibleContactId", original: string | null) {
+          const proposed = values[key];
+          if (proposed === undefined || (Object.hasOwn(selectedOverrides, key) && proposed === selectedOverrides[key])) return original;
+          delete selectedOverrides[key];
+          return proposed;
+        }
+        const eventId = resolveSeriesLink("linkedEventId", row.linked_event_id);
+        const signupGroupId = resolveSeriesLink("signupGroupId", row.signup_group_id ?? null);
+        const responsibleContactId = resolveSeriesLink("responsibleContactId", row.responsible_contact_id ?? null);
+        for (const field of calendarFields) {
+          if (field !== "linkedEventId" && field !== "signupGroupId" && field !== "responsibleContactId") delete selectedOverrides[field];
+        }
+        await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(plan.previousRule)]);
         await client.query(
           `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
            VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
-          [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, nextStart, nextEnd, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(normalized.recurrence ?? row.recurrence), values.linkedEventId ?? row.linked_event_id, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, userId(request), timeZone],
+          [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, next.startsAt, next.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(plan.futureRule), eventId, signupGroupId, responsibleContactId, userId(request), timeZone],
         );
-        const scoped = await client.query<{ original: string }>(
-          `SELECT DISTINCT to_char(occurrence_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original FROM church_calendar_resource_links
-            WHERE appointment_id=$1 AND occurrence_start>=$2::timestamp`, [row.id, occurrenceStart],
+        await client.query("UPDATE church_calendar_extra_dates SET appointment_id=$2 WHERE appointment_id=$1 AND starts_at>$3::timestamp", [row.id, newId, occurrenceStart]);
+        await client.query("DELETE FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp", [row.id, occurrenceStart]);
+        if (plan.addedExtras.length) await client.query(
+          `INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by)
+           SELECT $1,dates."startsAt",dates."endsAt",$2 FROM jsonb_to_recordset($3::jsonb) AS dates("startsAt" timestamp,"endsAt" timestamp)`,
+          [newId, userId(request), JSON.stringify(plan.addedExtras)],
         );
-        const nextRule = { starts_at: nextStart, recurrence: normalized.recurrence ?? row.recurrence };
-        const retained = scoped.rows.map(({ original }) => original).filter((original) => calendarOccurrenceExists(nextRule, original));
-        if (retained.length) await client.query(
-          "UPDATE church_calendar_resource_links SET appointment_id=$2 WHERE appointment_id=$1 AND occurrence_start=ANY($3::timestamp[])",
-          [row.id, newId, retained],
+        await moveCalendarOccurrenceLinks(client, row.id, newId, occurrenceStart, selectedOverrides, plan.targetOccurrence);
+        await client.query(
+          `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
+           SELECT $2,resource_booking_id,created_by FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL`, [row.id, newId],
         );
+        if (updateSeriesLinks) await updateCalendarSeriesResources(client, newId, resourceIds, userId(request));
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
+      context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, futureAppointmentId: newId, scope });
+      return { updated: true, futureAppointmentId: newId };
     } else {
       const currentOccurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
       const seriesStart = currentOccurrenceStart ? new Date(wallDate(row.starts_at).getTime() + wallDate(normalized.startsAt).getTime() - wallDate(currentOccurrenceStart).getTime()) : wallDate(normalized.startsAt);
@@ -1300,17 +1390,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
       );
     }
-    if (updateSeriesLinks) {
-      await context.pool.query(
-        "DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL AND NOT (resource_booking_id=ANY($2::uuid[]))",
-        [resourceTargetId, resourceIds],
-      );
-      if (resourceIds.length) await context.pool.query(
-        `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
-         SELECT $1,booking_id,$3 FROM unnest($2::uuid[]) booking(booking_id) ON CONFLICT DO NOTHING`,
-        [resourceTargetId, resourceIds, userId(request)],
-      );
-    }
+    if (updateSeriesLinks) await updateCalendarSeriesResources(context.pool, row.id, resourceIds, userId(request));
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, scope });
     return { updated: true };
   });
@@ -1337,8 +1417,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=true,overrides='{}',updated_by=EXCLUDED.updated_by,updated_at=now()`, [row.id, occurrence, userId(request)],
       );
     } else if (scope === "future" && row.recurrence) {
-      const previousDay = addDays(startOfDay(occurrence!), -1).toISOString().slice(0, 10);
-      await context.pool.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify({ ...row.recurrence, endsOn: previousDay, count: undefined })]);
+      const boundary = occurrence!;
+      const client = await context.pool.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 423, "This location is read-only.");
+        }
+        const locked = await lockCalendarSeries(client, row.id, departmentId);
+        const boundaryExtra = await client.query("SELECT 1 FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp", [row.id, boundary]);
+        if (!locked || !(boundaryExtra.rowCount || calendarOccurrenceExists(locked, boundary))) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "Choose an existing occurrence to end the series.");
+        }
+        const previousRule = truncateCalendarSeries(locked, boundary);
+        await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(previousRule)]);
+        await client.query("DELETE FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp", [row.id, boundary]);
+        await client.query("DELETE FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start >= $2::timestamp", [row.id, boundary]);
+        await client.query("DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start >= $2::timestamp", [row.id, boundary]);
+        await client.query("DELETE FROM church_calendar_reminders WHERE appointment_id=$1 AND original_start >= $2::timestamp AND delivered_at IS NULL", [row.id, boundary]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
     } else {
       await context.pool.query("UPDATE church_calendar_appointments SET archived_at=now(),updated_at=now() WHERE id=$1 AND department_id=$2", [row.id, departmentId]);
     }
