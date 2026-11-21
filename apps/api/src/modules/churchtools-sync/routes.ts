@@ -4,6 +4,7 @@ import type { Pool } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerChurchToolsSyncReplication } from "./replication.js";
 import { parseChurchToolsEventDateTime } from "./event-time.js";
+import { bookingSourceId, normalizeChurchToolsBookingHistory, type ChurchToolsBookingHistory } from "./booking-history.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -37,17 +38,17 @@ function cryptoKey() {
   if (!source) throw new Error("Set SMART_CHURCH_SYNC_ENCRYPTION_KEY to encrypt the ChurchTools token.");
   return scryptSync(source, "smart-church/churchtools-sync/v1", 32);
 }
-function encrypt(token: string) {
+function encrypt(token: string, key = cryptoKey()) {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", cryptoKey(), iv);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
   const data = Buffer.concat([cipher.update(token, "utf8"), cipher.final()]);
   return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), data.toString("base64url")].join(".");
 }
-function decrypt(value: string) {
+function decrypt(value: string, key?: Buffer) {
   const [version, iv, tag, data] = value.split(".");
   if (version !== "v1" || !iv || !tag || !data) throw new Error("Re-enter the ChurchTools login token.");
   try {
-    const decipher = createDecipheriv("aes-256-gcm", cryptoKey(), Buffer.from(iv, "base64url"));
+    const decipher = createDecipheriv("aes-256-gcm", key ?? cryptoKey(), Buffer.from(iv, "base64url"));
     decipher.setAuthTag(Buffer.from(tag, "base64url"));
     return Buffer.concat([decipher.update(Buffer.from(data, "base64url")), decipher.final()]).toString("utf8");
   } catch { throw new Error("Re-enter the ChurchTools login token."); }
@@ -796,6 +797,20 @@ async function get(base: string, token: string, path: string): Promise<JsonObjec
   }
   return await response.json() as JsonObject;
 }
+async function listChurchToolsBookingHistory(config: Settings, token: string, resources: JsonObject[], startDate: string, endDate: string) {
+  const ids = [...new Set(resources.map((resource) => bookingSourceId(idOf(resource))))];
+  if (ids.includes(null)) throw new Error("ChurchTools returned an invalid bookable resource ID.");
+  const resourceIds = ids.filter((id): id is string => id !== null);
+  const batches: string[][] = [];
+  for (let offset = 0; offset < resourceIds.length; offset += 50) batches.push(resourceIds.slice(offset, offset + 50));
+  const payloads = await mapConcurrent(batches, 6, async (batch) => {
+    const query = new URLSearchParams({ from: startDate, to: endDate });
+    for (const id of batch) query.append("resource_ids[]", id);
+    for (const status of ["1", "2", "3"]) query.append("status_ids[]", status);
+    return get(config.instance_url, token, `bookings?${query}`);
+  });
+  return normalizeChurchToolsBookingHistory(payloads, new Set(resourceIds));
+}
 function rows(payload: JsonObject): JsonObject[] {
   const options = [payload.data, payload.data?.data, payload.persons, payload.groups, payload.events, payload.appointments, payload.resources, payload.members, payload.data?.persons, payload.data?.groups, payload.data?.events, payload.data?.resources, payload.data?.appointments, payload.data?.members, payload.items];
   return (options.find(Array.isArray) ?? []).filter((value: unknown) => value && typeof value === "object");
@@ -1150,7 +1165,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     }
 
     if (integration === "churchtools") {
-    routes.post<{ Body: { startDate: string; endDate: string } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } } }, async (request, reply) => {
+    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
       const config = await settings(dept); if (!config) return reply.code(404).send({ error: "Configure ChurchTools before preparing a migration." });
@@ -1164,6 +1179,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           get(config.instance_url, token, "persons/relationships"),
         ]);
         if (![peopleResult, groupsResult, resourcesResult, eventsResult].every((result) => result.complete)) return reply.code(413).send({ error: "At least one ChurchTools list exceeds the complete preview limit of 20,000 records. Narrow the migration date range and preview again." });
+        const bookingHistory = request.body.includeBookingHistory
+          ? await listChurchToolsBookingHistory(config, token, resourcesResult.items, request.body.startDate, request.body.endDate)
+          : null;
+        const existingBookings = bookingHistory?.length ? await pool!.query<{ source_id: string }>(
+          "SELECT source_id FROM churchtools_migration_booking_history WHERE department_id=$1 AND instance_url=$2 AND start_date=$3 AND end_date=$4",
+          [dept, config.instance_url, request.body.startDate, request.body.endDate],
+        ) : null;
+        const existingBookingIds = new Set(existingBookings?.rows.map((row) => row.source_id));
         const relationshipRows = rows(relationshipsPayload);
         if (relationshipRows.length > 200000) return reply.code(413).send({ error: "ChurchTools returned more than 200,000 person relationships. No migration preview was saved." });
         const relationshipsByPerson = churchToolsRelationshipsByPerson(relationshipRows);
@@ -1196,6 +1219,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }),
           ...mappedEvents.map((event) => ({ area: "event", ...event })),
           ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
+          ...(bookingHistory ?? []).map((booking) => ({
+            area: "booking", sourceId: booking.sourceId, title: booking.title ?? "Private booking",
+            date: booking.occurrences[0].startDate,
+            booking, instanceUrl: config.instance_url, windowStart: request.body.startDate, windowEnd: request.body.endDate,
+          })),
         ];
         const [localPeople, localGroups, localEvents, localResources, migrationLinks] = await Promise.all([
           pool!.query<{ source_id: string | null; source_system: string | null; email: string | null }>("SELECT source_id,source_system,email FROM contacts WHERE department_id=$1", [dept]),
@@ -1237,19 +1265,25 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (resourcesBySource.has(String(record.sourceId))) { record.action = "update"; update += 1; }
             else if (resourcesByName.has(String(record.name).toLocaleLowerCase())) { record.action = "review_name_conflict"; review += 1; }
             else { record.action = "create"; create += 1; }
+          } else if (record.area === "booking") {
+            if (existingBookingIds.has(String(record.sourceId))) { record.action = "update"; update += 1; }
+            else { record.action = "create"; create += 1; }
           }
         }
         const encryptedSnapshot = encrypt(JSON.stringify(records));
-        await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
-          VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now()`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
-        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
+        const saved = await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
+          VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,migration_running=FALSE,migration_started_at=NULL,updated_at=now()
+          WHERE churchtools_migration_snapshots.migration_running=FALSE OR churchtools_migration_snapshots.migration_started_at < now()-interval '15 minutes'`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
+        if (!saved.rowCount) return reply.code(409).send({ error: "Another migration batch is already running for this location." });
+        reply.header("Cache-Control", "private, no-store");
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
     });
     routes.post<{ Body?: { restart?: boolean } }>("/api/modules/sync/churchtools/migration", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Another ChurchTools operation is running for this location." });
-      const snapshotResult = await pool!.query<{ encrypted_snapshot: string; preview_at: Date | string; page: number; total: number; created_count: number; updated_count: number; skipped_count: number; failed_count: number; failed_records: Array<{ area: string; sourceId: string }>; complete: boolean }>("SELECT encrypted_snapshot,preview_at,page,total,created_count,updated_count,skipped_count,failed_count,failed_records,complete FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
+      const snapshotResult = await pool!.query<{ encrypted_snapshot: string; preview_at: string; page: number; total: number; created_count: number; updated_count: number; skipped_count: number; failed_count: number; failed_records: Array<{ area: string; sourceId: string }>; complete: boolean }>("SELECT encrypted_snapshot,preview_at::text,page,total,created_count,updated_count,skipped_count,failed_count,failed_records,complete FROM churchtools_migration_snapshots WHERE department_id=$1", [dept]);
       const saved = snapshotResult.rows[0]; if (!saved) return reply.code(409).send({ error: "Run a complete ChurchTools migration preview before importing." });
       const pageBefore = request.body?.restart ? 0 : saved.page;
       if (!request.body?.restart && pageBefore === 0 && Date.now() - new Date(saved.preview_at).getTime() > 60 * 60 * 1000) return reply.code(409).send({ error: "The migration preview expired. Create a fresh preview before importing." });
@@ -1259,12 +1293,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       running.add(dept); let reserved = false;
       try {
         const reservation = await pool!.query(`UPDATE churchtools_migration_snapshots SET migration_running=TRUE,migration_started_at=now(),updated_at=now()
-          WHERE department_id=$1 AND (migration_running=FALSE OR migration_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept]);
-        if (!reservation.rowCount) return reply.code(409).send({ error: "Another migration batch is already running for this location." });
+          WHERE department_id=$1 AND preview_at=$2::timestamptz AND page=$3
+          AND (migration_running=FALSE OR migration_started_at < now()-interval '15 minutes') RETURNING department_id`, [dept, saved.preview_at, saved.page]);
+        if (!reservation.rowCount) return reply.code(409).send({ error: "The migration preview or progress changed. Refresh before continuing." });
         reserved = true;
         let page = pageBefore; let created = request.body?.restart ? 0 : saved.created_count; let updated = request.body?.restart ? 0 : saved.updated_count; let skipped = request.body?.restart ? 0 : saved.skipped_count; let failed = request.body?.restart ? 0 : saved.failed_count; const failures = request.body?.restart ? [] : saved.failed_records;
         if (request.body?.restart) await pool!.query("UPDATE churchtools_migration_snapshots SET page=0,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
         const batch = snapshot.slice(page, page + 50); let batchCreated = 0; let batchUpdated = 0; let batchSkipped = 0; let batchFailed = 0; const batchFailures: Array<{ area: string; sourceId: string }> = [];
+        const bookingArchiveKey = batch.some((record) => record.area === "booking") ? cryptoKey() : undefined;
         const db = await pool!.connect();
         try {
           await db.query("BEGIN");
@@ -1358,6 +1394,22 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 const inserted = await db.query<{ id: string }>("INSERT INTO bookable_resources (id,department_id,name,category,description,location,capacity,requires_approval,active) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 8));
                 if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
               }
+            } else if (record.area === "booking") {
+              const booking = record.booking as ChurchToolsBookingHistory;
+              const args = [dept, record.instanceUrl, record.windowStart, record.windowEnd, sourceId, booking.resourceSourceId, booking.occurrences.length, encrypt(JSON.stringify(booking), bookingArchiveKey)];
+              const result = await db.query(`INSERT INTO churchtools_migration_booking_history
+                (department_id,instance_url,start_date,end_date,source_id,resource_source_id,occurrence_count,encrypted_snapshot)
+                SELECT department_id,instance_url,$3::date,$4::date,$5,$6,$7,$8
+                FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2
+                ON CONFLICT (department_id,instance_url,start_date,end_date,source_id) DO NOTHING RETURNING source_id`, args);
+              if (result.rowCount) batchCreated += 1;
+              else {
+                const updated = await db.query(`UPDATE churchtools_migration_booking_history SET resource_source_id=$6,occurrence_count=$7,encrypted_snapshot=$8,imported_at=now()
+                  WHERE department_id=$1 AND instance_url=$2 AND start_date=$3 AND end_date=$4 AND source_id=$5
+                  AND EXISTS (SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2)`, args);
+                if (updated.rowCount) batchUpdated += 1;
+                else throw new Error("ChurchTools connection changed after preview.");
+              }
             } else batchSkipped += 1;
             page += 1;
             } catch {
@@ -1376,6 +1428,47 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "The ChurchTools migration batch failed." }); }
       finally { if (reserved) await pool!.query("UPDATE churchtools_migration_snapshots SET migration_running=FALSE,migration_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {}); running.delete(dept); }
+    });
+    routes.get<{ Querystring: { offset?: number } }>("/api/modules/sync/churchtools/booking-history", {
+      schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 2147483647 } } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const offset = request.query.offset ?? 0;
+      const archive = await pool!.query<{ source_id: string; start_date: string; end_date: string; occurrence_count: number; encrypted_snapshot: string; resource_name: string | null }>(`
+        SELECT archive.source_id,archive.start_date::text,archive.end_date::text,archive.occurrence_count,archive.encrypted_snapshot,resource.name AS resource_name
+        FROM churchtools_migration_booking_history archive
+        JOIN churchtools_sync_settings config ON config.department_id=archive.department_id AND config.instance_url=archive.instance_url
+        LEFT JOIN churchtools_migration_links link ON link.department_id=archive.department_id AND link.area='resource' AND link.source_id=archive.resource_source_id
+        LEFT JOIN LATERAL (
+          SELECT local.name FROM bookable_resources local WHERE local.department_id=archive.department_id
+            AND (local.id=link.local_record_id OR (local.source_system='churchtools' AND local.source_id=archive.resource_source_id))
+          ORDER BY (local.id=link.local_record_id) DESC NULLS LAST LIMIT 1
+        ) resource ON true
+        WHERE archive.department_id=$1
+        ORDER BY archive.start_date DESC,archive.end_date DESC,archive.source_id ASC
+        OFFSET $2 LIMIT 21`, [dept, offset]);
+      const bookingArchiveKey = archive.rows.length ? cryptoKey() : undefined;
+      return reply.header("Cache-Control", "private, no-store").send({
+        entries: archive.rows.slice(0, 20).map((row) => {
+          const booking = JSON.parse(decrypt(row.encrypted_snapshot, bookingArchiveKey)) as ChurchToolsBookingHistory;
+          return { sourceId: row.source_id, windowStart: row.start_date, windowEnd: row.end_date, resourceName: row.resource_name, resourceSourceId: booking.resourceSourceId, title: booking.title, statusId: booking.statusId, occurrenceCount: row.occurrence_count, anonymized: booking.anonymized };
+        }),
+        nextOffset: archive.rows.length > 20 ? offset + 20 : null,
+      });
+    });
+    routes.get<{ Querystring: { sourceId: string; startDate: string; endDate: string } }>("/api/modules/sync/churchtools/booking-history/detail", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["sourceId", "startDate", "endDate"], properties: { sourceId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const { sourceId, startDate, endDate } = request.query;
+      const result = await pool!.query<{ encrypted_snapshot: string }>(`
+        SELECT archive.encrypted_snapshot FROM churchtools_migration_booking_history archive
+        JOIN churchtools_sync_settings config ON config.department_id=archive.department_id AND config.instance_url=archive.instance_url
+        WHERE archive.department_id=$1 AND archive.source_id=$2 AND archive.start_date=$3 AND archive.end_date=$4`,
+      [dept, sourceId, startDate, endDate]);
+      if (!result.rows[0]) return reply.code(404).send({ error: "ChurchTools booking history was not found." });
+      const booking = JSON.parse(decrypt(result.rows[0].encrypted_snapshot)) as ChurchToolsBookingHistory;
+      return reply.header("Cache-Control", "private, no-store").send({ booking });
     });
     routes.get("/api/modules/sync/churchtools", async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
