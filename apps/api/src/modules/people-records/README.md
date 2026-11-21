@@ -37,3 +37,5 @@ Read APIs require `people_view_private` or `people_manage` at the resolved locat
 - Consent entries are append-only; withdrawing consent is represented by a new entry, and no retention/export automation is included.
 - Bulk edits cover custom fields and member/visitor status; built-in profile attributes such as contact details are not batch editable. Configurable access partitioning within a location is also absent. Filters on distinct fields are supported; selecting the same custom field twice in one view is rejected. The directory keeps the person's name visible as its row identity even when first/last-name columns are unchecked.
 - Anniversary reports cover only the next 30 days and do not schedule notifications. Birthday exports intentionally omit age.
+
+The directory and CSV export can filter by active membership in an active group at the current location. Saved directory views retain the selected group. If it is archived or deleted later, the view returns no rows until the filter is cleared.
