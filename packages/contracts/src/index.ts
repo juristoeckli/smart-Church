@@ -64,6 +64,20 @@ export interface ServiceEventFactsPeriod {
   custom?: ServiceEventCustomFactTotal[];
 }
 
+
+export type LiveRunSheetAction = "start" | "previous" | "next" | "pause" | "resume" | "stop";
+export type LiveRunSheetStatus = {
+  revision: string | null;
+  active: {
+    mode: "running" | "paused";
+    index: number;
+    title: string;
+    previous: boolean;
+    nextTitle: string | null;
+    remainingMs: number | null;
+  } | null;
+};
+
 export interface ServicePlanItem {
   section?: string;
   title: string;

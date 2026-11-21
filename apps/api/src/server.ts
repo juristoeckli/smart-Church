@@ -1,5 +1,6 @@
 import { captureSignupAnswers, prepareSignupQuestions, signupAnswerFields, signupQuestionsSchema, type SignupQuestion, type SignupQuestionDraft } from "./modules/community/signup-form.js";
 import { isResourceBookingManager } from "./resource-booking-policy.js";
+import { registerLiveRunSheetRoutes } from "./event-live-run-sheet.js";
 import { registerServiceEventFactsRoutes } from "./service-event-facts.js";
 import { registerServiceEventFilesRoutes } from "./service-event-files.js";
 import { registerEventVolunteerAbsenceRoutes } from "./event-volunteer-absences.js";
@@ -3683,6 +3684,10 @@ registerServiceEventFilesRoutes(app, { pool: pool ?? null, available: () => data
 
 registerServiceEventFactsRoutes(app, { pool: pool ?? null, available: () => databaseReady,
   resolveScope: (request, reply) => activeDepartmentId(request, reply, false, false, "events_manage"),
+  validateMutation: validModuleMutation, lockDepartmentForWrite });
+
+registerLiveRunSheetRoutes(app, { pool: pool ?? null, available: () => databaseReady,
+  resolveScope: (request, reply, manage) => activeDepartmentId(request, reply, false, false, manage ? "events_manage" : undefined),
   validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 registerEventVolunteerAbsenceRoutes(app, { pool: pool ?? null, available: () => databaseReady,
