@@ -8,7 +8,7 @@ import "./amx.css";
 type PanelState = { number: number; style?: string; backgroundColor?: string; fontColor?: string; textColor?: string; fontId?: number; text?: string; bitmap?: string; bitmapX?: number; bitmapY?: number; textX?: number; textY?: number; iconX?: number; iconY?: number; justification?: number; textEffect?: number };
 type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[] };
 type PanelPage = { id: number; name: string; kind: string; group?: string | null; canvas: { x?: number | null; y?: number | null; width: number; height: number }; objects: PanelObject[] };
-type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }> };
+type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }>; fonts?: Array<{ id: number; name: string; subfamily: string; size: number }> };
 type Action = { id: string; name: string; channel: number; port?: number };
 type Status = { configured: boolean };
 type LevelFeedback = { page: string; values: Record<string, number>; updatedAt: string };
@@ -293,13 +293,17 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const background = toCssColor(state?.backgroundColor);
     const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
     const bitmap = imageUrl(state?.bitmap);
+    const font = panel.fonts?.find((item) => item.id === state?.fontId);
     const originX = page.kind === "subpage" ? page.canvas.x ?? 0 : 0;
     const originY = page.kind === "subpage" ? page.canvas.y ?? 0 : 0;
     const style: CSSProperties = {
       left: `${(originX + object.x) / panel.project.screen.width * 100}%`, top: `${(originY + object.y) / panel.project.screen.height * 100}%`,
       width: `${object.width / panel.project.screen.width * 100}%`, height: `${object.height / panel.project.screen.height * 100}%`,
       zIndex: layer * 1000 + object.z, color: foreground, backgroundColor: background === "transparent" ? undefined : background,
-      fontSize: state?.fontId === 33 ? "clamp(10px, 2.65vw, 22px)" : "clamp(8px, 1.55vw, 14px)",
+      fontFamily: font ? `"${font.name}", Arial, Helvetica, sans-serif` : "Arial, Helvetica, sans-serif",
+      fontSize: font ? `${font.size / 8}cqw` : "1.75cqw",
+      fontWeight: font?.subfamily.toLocaleLowerCase().includes("bold") ? 700 : 400,
+      fontStyle: font?.subfamily.toLocaleLowerCase().includes("italic") ? "italic" : "normal",
     };
     const inner = <>
       {bitmap && <img className="amx-object-image" src={bitmap} alt="" />}

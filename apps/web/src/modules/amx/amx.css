@@ -71,7 +71,7 @@
 /* TP4 based 800×600 control surface. */
 .amx-workspace{max-width:1040px;padding:clamp(6px,1vw,16px)}
 .amx-panel-frame{width:100%;padding:clamp(5px,.8vw,10px);border:1px solid #6a6b64;border-radius:12px;background:linear-gradient(145deg,#dad8c8,#aaa99c 26%,#686a68 49%,#c9c8bc 70%,#6d6f6f);box-shadow:0 16px 42px #0004}
-.amx-panel-screen{position:relative;isolation:isolate;width:100%;aspect-ratio:4/3;overflow:hidden;border:1px solid #55564d;background-color:#d8d6b9;background-size:100% 100%;font-family:Arial,Helvetica,sans-serif;color:#121311;touch-action:manipulation}
+.amx-panel-screen{position:relative;isolation:isolate;container-type:inline-size;width:100%;aspect-ratio:4/3;overflow:hidden;border:1px solid #55564d;background-color:#d8d6b9;background-size:100% 100%;font-family:Arial,Helvetica,sans-serif;color:#121311;touch-action:manipulation}
 .amx-panel-object{position:absolute;box-sizing:border-box;overflow:hidden;display:flex;align-items:center;justify-content:center;margin:0;border:0;border-radius:0;padding:0;text-align:center;white-space:pre-line;line-height:1.05;font-family:Arial,Helvetica,sans-serif;font-weight:600;text-shadow:0 1px 1px #fff8}
 .amx-object-image{position:absolute;inset:0;width:100%;height:100%;object-fit:fill;pointer-events:none}
 .amx-object-label{position:relative;z-index:1;max-width:100%;overflow:hidden;text-overflow:clip}
