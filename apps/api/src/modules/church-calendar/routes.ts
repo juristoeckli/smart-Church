@@ -451,14 +451,26 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     )).rows;
   });
 
+  const calendarGroupContributors = `FROM church_calendar_calendars calendar
+    JOIN church_groups church_group ON church_group.id=calendar.group_id AND church_group.department_id=calendar.department_id
+    JOIN department_memberships membership ON membership.department_id=calendar.department_id
+    JOIN group_members member ON member.group_id=church_group.id AND member.contact_id=membership.contact_id
+    WHERE calendar.id=$1 AND calendar.department_id=$2 AND membership.user_id=$3
+      AND calendar.scope='group' AND calendar.archived_at IS NULL AND calendar.allow_member_appointments
+      AND church_group.status='active' AND member.status='active'`;
+
   const calendarSortOrder = { type: "integer", minimum: 0, maximum: 2_147_483_647 } as const;
 
   app.get("/api/modules/church-calendar/calendars", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const result = await context.pool.query<{ scope: CalendarScope; ownerUserId: string | null }>(
+    const result = await context.pool.query<{ scope: CalendarScope; ownerUserId: string | null; memberCanCreate: boolean }>(
       `SELECT calendar.id,calendar.name,calendar.scope,calendar.group_id AS "groupId",calendar.owner_user_id AS "ownerUserId",calendar.color,calendar.sort_order AS "sortOrder",
+              calendar.allow_member_appointments AS "allowMemberAppointments",
+              (calendar.scope='group' AND calendar.allow_member_appointments AND church_group.status='active' AND EXISTS (
+                SELECT 1 FROM group_members member WHERE member.group_id=calendar.group_id AND member.contact_id=membership.contact_id AND member.status='active'
+              )) AS "memberCanCreate",
               EXISTS(SELECT 1 FROM church_calendar_public_feeds feed WHERE feed.calendar_id=calendar.id AND feed.department_id=calendar.department_id AND feed.revoked_at IS NULL) AS "hasPublicFeed",
               EXISTS(SELECT 1 FROM church_calendar_subscriptions subscription WHERE subscription.calendar_id=calendar.id AND subscription.user_id=$2) AS "hasSubscription",
               (membership.user_id IS NOT NULL AND ${calendarSubscriptionAudience}) AS "canSubscribe",
@@ -473,17 +485,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ORDER BY CASE calendar.scope WHEN 'community' THEN 0 WHEN 'group' THEN 1 ELSE 2 END,calendar.sort_order,calendar.name,calendar.id`,
       [departmentId, userId(request), hasGroupVisibility(request)],
     );
-    return result.rows.map((calendar) => ({ ...calendar, canManage: canManageCalendar(request, calendar.scope, calendar.ownerUserId) }));
+    return result.rows.map(({ memberCanCreate, ...calendar }) => {
+      const canManage = canManageCalendar(request, calendar.scope, calendar.ownerUserId);
+      return { ...calendar, canManage, canCreateAppointment: canManage || memberCanCreate === true };
+    });
   });
 
-  app.post<{ Body: { name: string; scope: CalendarScope; groupId?: string; color?: string; sortOrder?: number } }>("/api/modules/church-calendar/calendars", { schema: {
-    body: { type: "object", additionalProperties: false, required: ["name", "scope"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, scope: { type: "string", enum: ["community", "group", "personal"] }, groupId: { type: "string", format: "uuid" }, color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" }, sortOrder: calendarSortOrder } },
+  app.post<{ Body: { name: string; scope: CalendarScope; groupId?: string; color?: string; sortOrder?: number; allowMemberAppointments?: boolean } }>("/api/modules/church-calendar/calendars", { schema: {
+    body: { type: "object", additionalProperties: false, required: ["name", "scope"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, scope: { type: "string", enum: ["community", "group", "personal"] }, groupId: { type: "string", format: "uuid" }, color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" }, sortOrder: calendarSortOrder, allowMemberAppointments: { type: "boolean" } } },
   } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
     const scope = request.body.scope;
+    if (scope !== "group" && request.body.allowMemberAppointments === true) return responseError(reply, 400, "Only group calendars can allow member appointments.");
     const name = request.body.name.trim();
     if (!name) return responseError(reply, 400, "Enter a calendar name.");
     const ownerId = scope === "personal" ? userId(request) : null;
@@ -494,22 +510,39 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!group.rowCount) return responseError(reply, 404, "The selected group was not found.");
     }
     const id = randomUUID();
-    const result = await context.pool.query(
-      `INSERT INTO church_calendar_calendars(id,department_id,name,scope,group_id,owner_user_id,color,created_by,sort_order)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,name,scope,group_id AS "groupId",owner_user_id AS "ownerUserId",color,sort_order AS "sortOrder"`,
-      [id, departmentId, name, scope, scope === "group" ? request.body.groupId : null, ownerId, request.body.color ?? "#3b82f6", userId(request), request.body.sortOrder ?? 0],
-    );
+    const client = await context.pool.connect();
+    let created: unknown;
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 409, "This location is read-only on this installation.");
+      }
+      const result = await client.query(
+        `INSERT INTO church_calendar_calendars(id,department_id,name,scope,group_id,owner_user_id,color,created_by,sort_order,allow_member_appointments)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,name,scope,group_id AS "groupId",owner_user_id AS "ownerUserId",color,sort_order AS "sortOrder",allow_member_appointments AS "allowMemberAppointments"`,
+        [id, departmentId, name, scope, scope === "group" ? request.body.groupId : null, ownerId, request.body.color ?? "#3b82f6", userId(request), request.body.sortOrder ?? 0, scope === "group" && request.body.allowMemberAppointments === true],
+      );
+      created = result.rows[0];
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "calendar-created", calendarId: id });
-    return reply.code(201).send(result.rows[0]);
+    return reply.code(201).send(created);
   });
 
-  app.patch<{ Params: { id: string }; Body: { name: string; color: string; sortOrder?: number } }>("/api/modules/church-calendar/calendars/:id", {
+  app.patch<{ Params: { id: string }; Body: { name: string; color: string; sortOrder?: number; allowMemberAppointments?: boolean } }>("/api/modules/church-calendar/calendars/:id", {
     schema: {
       params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       body: { type: "object", additionalProperties: false, required: ["name", "color"], properties: {
         name: { type: "string", minLength: 1, maxLength: 120 },
         color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" },
         sortOrder: calendarSortOrder,
+        allowMemberAppointments: { type: "boolean" },
       } },
     },
   }, async (request, reply) => {
@@ -536,14 +569,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return responseError(reply, 404, "Editable calendar not found.");
       }
-      const { rows: [updated] } = await client.query<{ sortOrder: number }>(
-        `UPDATE church_calendar_calendars SET name=$3,color=$4,sort_order=COALESCE($5::integer,sort_order),updated_at=now()
-          WHERE id=$1 AND department_id=$2 RETURNING sort_order AS "sortOrder"`,
-        [id, departmentId, name, request.body.color, request.body.sortOrder ?? null],
+      if (calendar.scope !== "group" && request.body.allowMemberAppointments === true) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 400, "Only group calendars can allow member appointments.");
+      }
+      const { rows: [updated] } = await client.query<{ sortOrder: number; allowMemberAppointments: boolean }>(
+        `UPDATE church_calendar_calendars SET name=$3,color=$4,sort_order=COALESCE($5::integer,sort_order),
+          allow_member_appointments=COALESCE($6::boolean,allow_member_appointments),updated_at=now()
+          WHERE id=$1 AND department_id=$2 RETURNING sort_order AS "sortOrder",allow_member_appointments AS "allowMemberAppointments"`,
+        [id, departmentId, name, request.body.color, request.body.sortOrder ?? null, request.body.allowMemberAppointments ?? null],
       );
       await client.query("COMMIT");
       context.realtime.publish("module:church-calendar:changed", departmentId, { action: "calendar-updated", calendarId: id });
-      return { id, name, color: request.body.color, sortOrder: updated.sortOrder };
+      return { id, name, color: request.body.color, ...updated };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -1340,7 +1378,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     const calendar = calendarResult.rows[0];
     if (!calendar) return responseError(reply, 404, "The calendar was not found.");
-    if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to add appointments to this calendar.");
+    const isContributor = !canManageCalendar(request, calendar.scope, calendar.owner_user_id);
+    if (isContributor) {
+      const contribution = await context.pool.query(`SELECT 1 ${calendarGroupContributors} LIMIT 1`, [normalized.calendarId, departmentId, userId(request)]);
+      if (!contribution.rowCount) return responseError(reply, 403, "You do not have permission to add appointments to this calendar.");
+      if (normalized.linkedEventId || normalized.signupGroupId || normalized.resourceBookingIds?.length || normalized.responsibleContactId) {
+        return responseError(reply, 403, "Calendar managers must add event, signup, resource and contact links.");
+      }
+    }
     if (normalized.timeZone !== undefined && !validAppointmentTimes(normalized, normalized.timeZone ?? canonicalTimeZone(calendar.time_zone))) return responseError(reply, 400, invalidAppointmentTime);
     if (normalized.linkedEventId) {
       const event = await context.pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2", [normalized.linkedEventId, departmentId]);
@@ -1360,6 +1405,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
+      if (isContributor) {
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 409, "This location is read-only on this installation.");
+        }
+        const contribution = await client.query(
+          `SELECT 1 ${calendarGroupContributors} FOR SHARE OF calendar,church_group,membership,member`,
+          [normalized.calendarId, departmentId, userId(request)],
+        );
+        if (!contribution.rowCount) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 403, "You no longer have permission to add appointments to this calendar.");
+        }
+      }
       await client.query(
         `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
