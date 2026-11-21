@@ -1,3 +1,4 @@
+import { registerPersonServiceWorkload } from "./person-service-workload.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
@@ -75,6 +76,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     registerPersonAttachments(routes, context, department);
     registerPeopleHistoryTimeline(routes, context, department);
     registerPeopleHouseholds(routes, context, department);
+    registerPersonServiceWorkload(routes, context, department);
     async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[],canManage:boolean):Promise<Array<{field:string;operator:string;value:unknown}>>{
       if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
       if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
