@@ -4,20 +4,24 @@ import { locationGrantStatusLabels, type LocationGrantPreview } from "./Location
 import { registeredModules } from "./module-registry";
 
 type MatrixAccount = LocationGrantPreview & { id: string; username?: string };
-type MatrixResult = { page: number; hasNext: boolean; accounts: MatrixAccount[] };
+type MatrixResult = { page: number; total: number; hasNext: boolean; accounts: MatrixAccount[] };
 
 export function LocationAccessMatrix({ department, permissionLabels, onOpenAccount }: {
   department: DepartmentProfile;
   permissionLabels: Record<string, string>;
   onOpenAccount: (id: string) => void;
 }) {
-  const [filters, setFilters] = useState({ q: "", withGrants: false, page: 1 });
+  const [filters, setFilters] = useState({ q: "", withGrants: false, permission: "", permissionSource: "", accountStatus: "", page: 1 });
+  const [permissionInput, setPermissionInput] = useState("");
   const [result, setResult] = useState<MatrixResult>();
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    const query = new URLSearchParams({ ...filters, withGrants: String(filters.withGrants), page: String(filters.page) });
+    const query = new URLSearchParams({ q: filters.q, withGrants: String(filters.withGrants), page: String(filters.page) });
+    if (filters.permission) query.set("permission", filters.permission);
+    if (filters.permissionSource) query.set("permissionSource", filters.permissionSource);
+    if (filters.accountStatus) query.set("accountStatus", filters.accountStatus);
     setResult(undefined);
     setError("");
     void fetch(`/api/location-access/matrix?${query}`, {
@@ -35,18 +39,37 @@ export function LocationAccessMatrix({ department, permissionLabels, onOpenAccou
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    setFilters({ q: String(data.get("q") ?? "").trim(), withGrants: data.has("withGrants"), page: 1 });
+    setFilters({
+      q: String(data.get("q") ?? "").trim(), withGrants: data.has("withGrants"), page: 1,
+      permission: permissionInput, permissionSource: permissionInput ? String(data.get("permissionSource") ?? "") : "",
+      accountStatus: String(data.get("accountStatus") ?? ""),
+    });
   }
 
   return <section className="location-access-history location-access-preview" aria-label="Location permission matrix">
     <form className="module-toolbar" onSubmit={apply}>
       <label>Account name or username<input type="search" name="q" maxLength={80} /></label>
+      <label>Location permission<select name="permission" value={permissionInput} onChange={(event) => setPermissionInput(event.target.value)}>
+        <option value="">Any permission</option>
+        {Object.entries(permissionLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+      </select></label>
+      <label>Permission source<select name="permissionSource" key={permissionInput} disabled={!permissionInput}>
+        <option value="">Any source</option>
+        <option value="site_role">Site administrator role</option>
+        <option value="direct">Direct grant</option>
+        {permissionInput === "people_view_private" && <option value="via_people_manage">Included with Manage people</option>}
+      </select></label>
+      <label>Account status<select name="accountStatus">
+        <option value="">Any status</option>
+        {Object.entries(locationGrantStatusLabels).map(([status, label]) => <option key={status} value={status}>{label}</option>)}
+      </select></label>
       <label>Only accounts with grants<input type="checkbox" name="withGrants" /></label>
       <button type="submit" className="button button-secondary">Apply filters</button>
     </form>
     {error && <p role="alert">{error}</p>}
     {!result && !error && <p role="status">Loading the permission matrix…</p>}
-    {result?.accounts.length === 0 && <p role="status">No accounts match these filters.</p>}
+    {result && <p role="status">{result.total ? result.total.toLocaleString() + " matching accounts" : "No accounts match these filters."}</p>}
+    {result && result.total > 0 && result.accounts.length === 0 && <p>No accounts on this page.</p>}
     {result && result.accounts.length > 0 && <div className="location-access-history-scroll"><table className="location-access-history-table">
       <caption>Account grants at {department.location}</caption>
       <thead><tr><th scope="col">Account</th><th scope="col">Role and status</th>
