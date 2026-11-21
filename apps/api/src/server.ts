@@ -552,6 +552,9 @@ type ServiceEventRow = {
   registration_capacity?: number | null;
   registration_token?: string | null;
   registration_count?: number;
+  cancelled_at?: Date | string | null;
+  cancelled_by_name?: string | null;
+  cancellation_reason?: string | null;
   recurrence_id?: string | null;
   source_system?: string | null;
 };
@@ -637,6 +640,9 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     ...(row.registration_capacity ? { registrationCapacity: row.registration_capacity } : {}),
     ...(row.registration_enabled && row.registration_token ? { registrationToken: row.registration_token } : {}),
     registrationCount: row.registration_count ?? 0,
+    ...(row.cancelled_at ? { cancelledAt: new Date(row.cancelled_at).toISOString() } : {}),
+    ...(row.cancelled_by_name ? { cancelledBy: row.cancelled_by_name } : {}),
+    ...(row.cancellation_reason ? { cancellationReason: row.cancellation_reason } : {}),
     ...(row.attendance_recorded_at ? { attendanceRecordedAt: row.attendance_recorded_at } : {}),
     ...(row.recurrence_id ? { seriesId: row.recurrence_id } : {}),
     ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
@@ -2653,7 +2659,8 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
     `SELECT id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
             location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
-            registration_enabled, registration_capacity, registration_token,
+             registration_enabled, registration_capacity, registration_token, cancelled_at, cancellation_reason,
+            (SELECT display_name FROM app_users WHERE id=service_events.cancelled_by) AS cancelled_by_name,
             (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count
        FROM service_events
       WHERE department_id = $1
@@ -2679,6 +2686,108 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
       }),
     };
   });
+});
+
+app.post<{ Params: { id: string }; Body: { reason: string } }>("/api/events/:id/cancel", {
+  schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    body: { type: "object", additionalProperties: false, required: ["reason"], properties: { reason: { type: "string", minLength: 1, maxLength: 1000 } } },
+  },
+}, async (request, reply): Promise<{ cancelled: true; cancelledAt: string } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const reason = request.body.reason.trim();
+  if (!reason) return reply.code(400).send({ error: "Enter a reason for cancelling this event." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    if (!await lockDepartmentForWrite(client, selectedDepartmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." }); }
+    const event = await client.query<{ id: string; title: string; event_date: string; source_system: string | null }>(
+      "SELECT id,title,event_date::text,source_system FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId],
+    );
+    if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
+    if (event.rows[0].source_system) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported events are read-only. Cancel them in the source system and sync again." }); }
+    const changed = await client.query<{ cancelled_at: Date | string }>(
+      "UPDATE service_events SET cancelled_at=now(),cancelled_by=$3,cancellation_reason=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND cancelled_at IS NULL RETURNING cancelled_at",
+      [request.params.id, selectedDepartmentId, request.authenticatedUser?.id ?? null, reason],
+    );
+    if (!changed.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event is already cancelled." }); }
+    await client.query(
+      "INSERT INTO service_event_lifecycle_audit(id,department_id,event_id,actor_user_id,action,reason) VALUES($1,$2,$3,$4,'cancelled',$5)",
+      [randomUUID(), selectedDepartmentId, request.params.id, request.authenticatedUser?.id ?? null, reason],
+    );
+    await client.query("UPDATE event_position_swap_requests SET status='cancelled',responded_at=now() WHERE event_id=$1 AND status='pending'", [request.params.id]);
+    const notificationTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.module_notifications')::text AS table_name");
+    if (notificationTable.rows[0]?.table_name) {
+      // Keep notification records for audit, but prevent any queued reminder
+      // email from sending after this transaction commits.
+      await client.query(
+        "UPDATE module_notifications SET read_at=COALESCE(read_at,now()),email_enabled=false WHERE department_id=$1 AND (event_id=$2 OR related_event_id=$2) AND kind IN ('event_reminder','service_request','follow_up_assignment','follow_up_reminder')",
+        [selectedDepartmentId, request.params.id],
+      );
+      const deliveryTable = await client.query<{ table_name: string | null }>("SELECT to_regclass('public.module_notification_email_deliveries')::text AS table_name");
+      if (deliveryTable.rows[0]?.table_name) {
+        await client.query(
+          `UPDATE module_notification_email_deliveries delivery SET status='skipped',last_error='Event cancelled.',updated_at=now()
+            WHERE delivery.status IN ('pending','failed') AND delivery.notification_id IN (
+              SELECT notification.id FROM module_notifications notification
+               WHERE notification.department_id=$1 AND (notification.event_id=$2 OR notification.related_event_id=$2)
+                 AND notification.kind IN ('event_reminder','service_request','follow_up_assignment','follow_up_reminder'))`,
+          [selectedDepartmentId, request.params.id],
+        );
+      }
+      await client.query(
+        `INSERT INTO module_notifications(id,department_id,recipient_user_id,kind,title,body,related_event_id,sender_user_id,in_app_enabled,email_enabled)
+         SELECT gen_random_uuid(),$1,recipients.user_id,'announcement',left('Event cancelled: ' || $2,120),left($3,2000),$4,$5,true,true
+           FROM (
+             SELECT DISTINCT membership.user_id
+               FROM service_events event
+               CROSS JOIN LATERAL jsonb_array_elements(event.positions) AS position
+               JOIN department_memberships membership ON membership.department_id=event.department_id AND membership.contact_id=(position->>'contactId')::uuid
+              WHERE event.id=$4
+             UNION
+             SELECT DISTINCT membership.user_id
+               FROM event_registrations registration
+               JOIN service_events event ON event.id=registration.event_id
+               JOIN app_users account ON lower(btrim(account.email))=lower(btrim(registration.email))
+               JOIN department_memberships membership ON membership.department_id=event.department_id AND membership.user_id=account.id
+              WHERE event.id=$4 AND registration.status IN ('registered','waitlisted')
+           ) recipients
+         ON CONFLICT DO NOTHING`,
+        [selectedDepartmentId, event.rows[0].title, `“${event.rows[0].title}” on ${event.rows[0].event_date} has been cancelled. Reason: ${reason}`, request.params.id, request.authenticatedUser?.id ?? null],
+      );
+    }
+    await client.query("COMMIT");
+    return { cancelled: true, cancelledAt: new Date(changed.rows[0].cancelled_at).toISOString() };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.post<{ Params: { id: string } }>("/api/events/:id/restore", {
+  schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+}, async (request, reply): Promise<{ restored: true } | { error: string }> => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    if (!await lockDepartmentForWrite(client, selectedDepartmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." }); }
+    const event = await client.query<{ cancellation_reason: string | null; source_system: string | null }>(
+      "SELECT cancellation_reason,source_system FROM service_events WHERE id=$1 AND department_id=$2 AND cancelled_at IS NOT NULL FOR UPDATE", [request.params.id, selectedDepartmentId],
+    );
+    if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This cancelled event could not be found." }); }
+    if (event.rows[0].source_system) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported events are read-only." }); }
+    await client.query("UPDATE service_events SET cancelled_at=NULL,cancelled_by=NULL,cancellation_reason=NULL,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId]);
+    await client.query(
+      "INSERT INTO service_event_lifecycle_audit(id,department_id,event_id,actor_user_id,action,reason) VALUES($1,$2,$3,$4,'restored',$5)",
+      [randomUUID(), selectedDepartmentId, request.params.id, request.authenticatedUser?.id ?? null, event.rows[0].cancellation_reason ?? ""],
+    );
+    await client.query("COMMIT");
+    return { restored: true };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 });
 
 app.post<{ Body: CreateServiceEvent }>("/api/events", {
@@ -2758,11 +2867,12 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const previousPositionsResult = await client.query<{ positions: ServiceEvent["positions"] }>(
-      "SELECT positions FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE",
+    const previousPositionsResult = await client.query<{ positions: ServiceEvent["positions"]; cancelled_at: Date | null }>(
+      "SELECT positions,cancelled_at FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE",
       [request.params.id, selectedDepartmentId],
     );
     if (!previousPositionsResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
+    if (previousPositionsResult.rows[0].cancelled_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event has been cancelled. Restore it before editing assignments." }); }
     const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
     if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const result = await client.query<ServiceEventRow>(
@@ -2775,7 +2885,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
       RETURNING id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
                 location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
-                registration_enabled, registration_capacity, registration_token,
+                 registration_enabled, registration_capacity, registration_token, cancelled_at, cancellation_reason,
                 (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
     [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null],
   );
@@ -2809,10 +2919,14 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const previousSeries = await client.query<{ id: string; positions: ServiceEvent["positions"] }>(
-      "SELECT id,positions FROM service_events WHERE department_id=$1 AND recurrence_id=$2 FOR UPDATE",
+    const previousSeries = await client.query<{ id: string; positions: ServiceEvent["positions"]; cancelled_at: Date | null }>(
+      "SELECT id,positions,cancelled_at FROM service_events WHERE department_id=$1 AND recurrence_id=$2 FOR UPDATE",
       [selectedDepartmentId, source.rows[0].recurrence_id],
     );
+    if (previousSeries.rows.some((row) => row.cancelled_at)) {
+      await client.query("ROLLBACK");
+      return reply.code(409).send({ error: "This recurring series contains cancelled gatherings. Restore all cancelled gatherings before editing the series." });
+    }
     const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
     if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const result = await client.query<ServiceEventRow>(
@@ -2824,7 +2938,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
      RETURNING id,title,kind,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
        CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
        location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,attendance_recorded_at,recurrence_id,source_system,
-       registration_enabled,registration_capacity,registration_token,
+       registration_enabled,registration_capacity,registration_token,cancelled_at,cancellation_reason,
        (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
     [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null],
   );
@@ -2866,8 +2980,9 @@ app.put<{ Params: { id: string; positionIndex: string }; Body: { status: "pendin
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const eventResult = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null }>("SELECT positions,source_system FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    const eventResult = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; cancelled_at: Date | null }>("SELECT positions,source_system,cancelled_at FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
     if (!eventResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    if (eventResult.rows[0].cancelled_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event has been cancelled. Volunteer responses are closed." }); }
     if (eventResult.rows[0].source_system === "churchtools" || eventResult.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
     const position = eventResult.rows[0].positions?.[positionIndex];
     if (!position || position.contactId !== contactId) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You are not assigned to this service position." }); }
@@ -3021,11 +3136,12 @@ app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array
               CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
               location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,
               attendance_recorded_at,recurrence_id,source_system,registration_enabled,registration_capacity,
-              registration_token,0::int AS registration_count
+              registration_token,cancelled_at,cancellation_reason,0::int AS registration_count
          FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE`, [request.params.id, departmentId],
     );
     if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
     const row = current.rows[0];
+    if (row.cancelled_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event has been cancelled. Volunteer assignments are closed until it is restored." }); }
     if (row.source_system === "churchtools" || row.source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
     const event = mapServiceEvent(row);
     const nextPositions = [...(event.positions ?? [])];
@@ -3102,8 +3218,9 @@ app.post<{ Params: { id: string }; Body: { fromPositionIndex: number; toPosition
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; event_date: string }>("SELECT positions,source_system,to_char(event_date,'YYYY-MM-DD') AS event_date FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; event_date: string; cancelled_at: Date | null }>("SELECT positions,source_system,to_char(event_date,'YYYY-MM-DD') AS event_date,cancelled_at FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This gathering could not be found." }); }
+    if (event.rows[0].cancelled_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event has been cancelled. Volunteer swaps are closed." }); }
     if (event.rows[0].source_system === "churchtools" || event.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported service assignments are read-only." }); }
     if (event.rows[0].event_date < new Date().toISOString().slice(0, 10)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "You cannot request a swap for a gathering that has already taken place." }); }
     const positions = event.rows[0].positions ?? [];
@@ -3138,23 +3255,24 @@ app.put<{ Params: { id: string }; Body: { decision: "accepted" | "declined" | "c
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const swap = await client.query<{ event_id: string; from_position_index: number; to_position_index: number; requester_contact_id: string; target_contact_id: string; status: string; department_id: string }>(
-      `SELECT swap.event_id,swap.from_position_index,swap.to_position_index,swap.requester_contact_id,swap.target_contact_id,swap.status,event.department_id
+    const swap = await client.query<{ event_id: string; from_position_index: number; to_position_index: number; requester_contact_id: string; target_contact_id: string; status: string; department_id: string; cancelled_at: Date | null }>(
+      `SELECT swap.event_id,swap.from_position_index,swap.to_position_index,swap.requester_contact_id,swap.target_contact_id,swap.status,event.department_id,event.cancelled_at
        FROM event_position_swap_requests swap JOIN service_events event ON event.id=swap.event_id
        WHERE swap.id=$1 AND event.department_id=$2 FOR UPDATE OF swap,event`, [request.params.id, selectedDepartmentId],
     );
     if (!swap.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This swap request could not be found." }); }
     const row = swap.rows[0];
+    if (row.cancelled_at && request.body.decision !== "cancelled") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event has been cancelled. The swap cannot be accepted or declined." }); }
     const canManage = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
     const isTarget = row.target_contact_id === contactId;
     const isRequester = row.requester_contact_id === contactId;
     if (!canManage && !(request.body.decision === "cancelled" && isRequester) && !(request.body.decision !== "cancelled" && isTarget)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the requested volunteer can respond, and only the requester can cancel." }); }
     if (row.status !== "pending") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This swap request has already been answered." }); }
     if (request.body.decision === "accepted") {
-      const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; event_date: string }>("SELECT positions,source_system,to_char(event_date,'YYYY-MM-DD') AS event_date FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [row.event_id, selectedDepartmentId]);
+      const event = await client.query<{ positions: ServiceEvent["positions"]; source_system: string | null; event_date: string; cancelled_at: Date | null }>("SELECT positions,source_system,to_char(event_date,'YYYY-MM-DD') AS event_date,cancelled_at FROM service_events WHERE id=$1 AND department_id=$2 FOR UPDATE", [row.event_id, selectedDepartmentId]);
       const positions = event.rows[0]?.positions ?? [];
       const from = positions[row.from_position_index]; const to = positions[row.to_position_index];
-      if (!event.rowCount || event.rows[0].source_system || event.rows[0].event_date < new Date().toISOString().slice(0, 10) || from?.contactId !== row.requester_contact_id || to?.contactId !== row.target_contact_id) {
+      if (!event.rowCount || event.rows[0].cancelled_at || event.rows[0].source_system || event.rows[0].event_date < new Date().toISOString().slice(0, 10) || from?.contactId !== row.requester_contact_id || to?.contactId !== row.target_contact_id) {
         await client.query("ROLLBACK"); return reply.code(409).send({ error: "The event assignments changed since this request was made. Refresh the schedule." });
       }
       positions[row.from_position_index] = { ...from, contactId: row.target_contact_id };
@@ -3338,7 +3456,7 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
             location,description,registration_capacity,event_date>=CURRENT_DATE AS registration_open,
             (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='registered') AS registered_count,
             (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='waitlisted') AS waitlist_count
-       FROM service_events WHERE registration_token=$1 AND registration_enabled=true`,
+       FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND cancelled_at IS NULL`,
     [request.params.token],
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This registration link is unavailable." });
@@ -3370,7 +3488,7 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
   try {
     await client.query("BEGIN");
     const event = await client.query<{ id: string; department_id: string; registration_capacity: number | null }>(
-      "SELECT id,department_id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
+      "SELECT id,department_id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND cancelled_at IS NULL AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
     );
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
     if (!await lockDepartmentForWrite(client, event.rows[0].department_id)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }

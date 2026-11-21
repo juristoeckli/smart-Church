@@ -94,6 +94,9 @@ export interface ServiceEvent {
   registrationCapacity?: number;
   registrationToken?: string;
   registrationCount?: number;
+  cancelledAt?: string;
+  cancelledBy?: string;
+  cancellationReason?: string;
   seriesId?: string;
   importedFrom?: "churchtools" | "elvanto";
 }

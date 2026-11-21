@@ -223,6 +223,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN department_memberships m ON m.department_id = e.department_id
          LEFT JOIN module_notification_preferences p ON p.department_id = e.department_id AND p.user_id = m.user_id
         WHERE ((e.event_date + e.start_time) AT TIME ZONE d.time_zone) BETWEEN now() + interval '23 hours 50 minutes' AND now() + interval '24 hours 10 minutes'
+          AND e.cancelled_at IS NULL
           AND e.department_id = ANY($1::uuid[])
           AND COALESCE(p.event_reminders_enabled, true)
        ON CONFLICT DO NOTHING`, [writableIds],
@@ -241,6 +242,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN department_memberships m ON m.department_id=e.department_id AND m.contact_id=f.assigned_contact_id
          LEFT JOIN module_notification_preferences preference ON preference.department_id=e.department_id AND preference.user_id=m.user_id
         WHERE f.first_time_visitor=true AND f.follow_up_status='needed' AND f.assigned_contact_id IS NOT NULL
+          AND e.cancelled_at IS NULL
           AND e.department_id = ANY($1::uuid[])
           AND COALESCE(preference.follow_ups_enabled,true)
        ON CONFLICT DO NOTHING`, [writableIds],
@@ -259,6 +261,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN department_memberships m ON m.department_id=e.department_id AND m.contact_id=f.assigned_contact_id
          LEFT JOIN module_notification_preferences preference ON preference.department_id=e.department_id AND preference.user_id=m.user_id
         WHERE f.first_time_visitor=true AND f.follow_up_status='needed' AND f.assigned_contact_id IS NOT NULL
+          AND e.cancelled_at IS NULL
           AND e.department_id = ANY($1::uuid[])
           AND f.follow_up_due_date BETWEEN (now() AT TIME ZONE d.time_zone)::date AND ((now() AT TIME ZONE d.time_zone)::date + 1)
           AND COALESCE(preference.follow_ups_enabled,true)
@@ -279,6 +282,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN department_memberships m ON m.department_id=e.department_id AND m.contact_id=r.contact_id
          LEFT JOIN module_notification_preferences preference ON preference.department_id=e.department_id AND preference.user_id=m.user_id
         WHERE ((e.event_date+e.start_time) AT TIME ZONE d.time_zone) > now()
+          AND e.cancelled_at IS NULL
           AND e.department_id = ANY($1::uuid[])
           AND ((e.event_date+e.start_time) AT TIME ZONE d.time_zone) < now()+interval '30 days'
           AND COALESCE(preference.service_requests_enabled,true)

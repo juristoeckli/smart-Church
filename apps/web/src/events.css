@@ -77,3 +77,6 @@
 .worship-position-qualifications{display:grid;flex:1;min-width:180px;gap:4px;color:var(--muted);font-size:11px}.worship-position-qualifications select{min-height:64px}
 
 .event-role-category-filter{display:grid;gap:4px;color:var(--muted);font-size:10px}.event-role-category-filter select{height:34px;min-width:150px;padding:5px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font:inherit}
+
+.event-cancelled-badge{display:inline-flex;align-items:center;width:max-content;margin-top:.25rem;padding:.2rem .5rem;border-radius:999px;background:var(--danger-soft,#fce8e6);color:var(--danger,#a32626);font-size:.75rem;font-weight:700}.event-details-modal .event-cancelled-badge{margin-top:.6rem}
+
