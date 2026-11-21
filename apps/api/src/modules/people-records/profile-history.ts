@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { canManagePeopleFields } from "./field-privacy.js";
 
-const categories = ["profile", "privacy", "relationships", "attachments", "lifecycle", "membership"] as const;
+const categories = ["profile", "privacy", "relationships", "household", "attachments", "lifecycle", "membership"] as const;
 type Category = typeof categories[number];
 type TimelineQuery = { category?: Category; from?: string; through?: string; beforeTime?: string; beforeKey?: string };
 const pageSize = 50;
@@ -32,6 +32,7 @@ export function accessiblePeopleGroups(managerParameter: number, accountParamete
 const profileHistory = `SELECT h.id,'profile:'||h.id::text AS cursor_key,h.action,
     CASE WHEN h.action='consent_recorded' THEN 'privacy'
          WHEN h.action IN ('relationship_added','relationship_removed') THEN 'relationships'
+         WHEN h.action IN ('household_linked','household_unlinked','household_updated') THEN 'household'
          WHEN h.action IN ('attachment_added','attachment_removed') THEN 'attachments'
          WHEN h.action IN ('person_archived','person_restored','person_merged','csv_import_created') THEN 'lifecycle'
          ELSE 'profile' END AS category,

@@ -5,25 +5,8 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { maxPersonAttachments, registerPersonAttachments } from "./attachments.js";
 import { canManagePeopleFields, customFieldVisibilities, type CustomFieldVisibility } from "./field-privacy.js";
 import { accessiblePeopleGroups, canManageMembershipHistory, registerPeopleHistoryTimeline, visibleProfileHistory } from "./profile-history.js";
-
-const postalAddressLimits = { street: 160, additionalLine: 160, city: 100, region: 100, postalCode: 24, country: 100 } as const;
-type PostalAddress = Partial<Record<keyof typeof postalAddressLimits, string>>;
-const postalAddressSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: Object.fromEntries(Object.entries(postalAddressLimits).map(([key, maxLength]) =>
-    [key, { type: "string", maxLength, pattern: "^[^\\r\\n]*$" }],
-  )),
-};
-
-function normalizePostalAddress(address: PostalAddress | undefined): PostalAddress {
-  const result: PostalAddress = {};
-  for (const key of Object.keys(postalAddressLimits) as Array<keyof PostalAddress>) {
-    const value = address?.[key]?.trim();
-    if (value) result[key] = value;
-  }
-  return result;
-}
+import { normalizePostalAddress, postalAddressLimits, postalAddressSchema, type PostalAddress } from "./postal-address.js";
+import { registerPeopleHouseholds } from "./households.js";
 
 const uuid = { type: "string", format: "uuid" } as const;
 type FieldFilterInput={field:string;value:string;operator?:string};
@@ -91,6 +74,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     registerPersonAttachments(routes, context, department);
     registerPeopleHistoryTimeline(routes, context, department);
+    registerPeopleHouseholds(routes, context, department);
     async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[],canManage:boolean):Promise<Array<{field:string;operator:string;value:unknown}>>{
       if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
       if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
@@ -167,6 +151,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const blockers: string[] = [];
       const attachmentCount = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM people_record_attachments WHERE department_id=$1 AND contact_id=ANY($2::uuid[])", [departmentId, [keeperId, sourceId]]);
       if (attachmentCount.rows[0].count > maxPersonAttachments) blockers.push(`The combined profile would have more than ${maxPersonAttachments} attachments.`);
+      const households = await db.query<{ count: number }>("SELECT count(DISTINCT household_id)::int AS count FROM people_record_household_members WHERE department_id=$1 AND contact_id=ANY($2::uuid[])", [departmentId, [keeperId, sourceId]]);
+      if (households.rows[0].count > 1) blockers.push("These people belong to different households. Resolve the household memberships before merging.");
       if(source.sourceSystem||source.sourceId||source.elvantoSourceId)blockers.push("The source person is linked to a ChurchTools or Elvanto sync identity. Disconnect or reconcile that external identity before merging so the sync does not recreate the source record.");
       if (installed.rows[0]?.groups) {
         const automaticStatusDifference=installed.rows[0]?.groupAutoManaged?",CASE WHEN source.auto_managed IS DISTINCT FROM keeper.auto_managed THEN 'automatic status' END":"";
@@ -911,6 +897,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         // Values and dates have a natural-key uniqueness constraint; retain the keeper row when values match.
         await client.query("DELETE FROM people_record_values s USING people_record_values k WHERE s.department_id=$1 AND s.contact_id=$2 AND k.department_id=s.department_id AND k.contact_id=$3 AND k.field_id=s.field_id AND k.value=s.value",[d,sourceId,keeperId]);
         await client.query("DELETE FROM people_record_person_dates s USING people_record_person_dates k WHERE s.department_id=$1 AND s.contact_id=$2 AND k.department_id=s.department_id AND k.contact_id=$3 AND k.date_kind=s.date_kind AND k.date_value=s.date_value",[d,sourceId,keeperId]);
+        await client.query(`DELETE FROM people_record_household_members source USING people_record_household_members keeper
+          WHERE source.department_id=$1 AND source.contact_id=$2 AND keeper.department_id=source.department_id
+            AND keeper.contact_id=$3 AND keeper.household_id=source.household_id`, [d, sourceId, keeperId]);
         const hasGroupMembers=await client.query<{installed:boolean}>("SELECT to_regclass('public.group_members') IS NOT NULL AS installed");
         if(hasGroupMembers.rows[0]?.installed){const hasAutoManaged=await client.query<{installed:boolean}>("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='group_members' AND column_name='auto_managed') AS installed");await client.query(`DELETE FROM group_members s USING group_members k WHERE s.contact_id=$1 AND k.contact_id=$2 AND k.group_id=s.group_id AND s.role IS NOT DISTINCT FROM k.role AND s.status IS NOT DISTINCT FROM k.status AND s.joined_on IS NOT DISTINCT FROM k.joined_on${hasAutoManaged.rows[0]?.installed?" AND s.auto_managed IS NOT DISTINCT FROM k.auto_managed":""}`,[sourceId,keeperId]);}
         const hasGroupCustom=await client.query<{installed:boolean}>("SELECT to_regclass('public.group_membership_custom_fields') IS NOT NULL AS installed");
