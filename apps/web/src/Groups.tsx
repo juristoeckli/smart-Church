@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Check, ContactRound, Download, Link2, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { ChurchGroup, Contact, GroupLifecycleStatus } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
-import { groupAttendanceChanges, type GroupAttendanceEntry as AttendanceEntry } from "./group-attendance";
+import { getGroupAttendance, groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type GroupAttendanceEntry as AttendanceEntry, type GroupAttendanceSnapshot } from "./group-attendance";
 import { getActiveLanguage, translate } from "./i18n";
 import { translateModuleMessage } from "./modules/translations";
 
-type GroupMeeting = { id: string; date: string; title: string; attendeeCount: number; presentCount: number };
+type GroupMeeting = { id: string; date: string; title: string; attendeeCount: number; presentCount: number; completedAt?: string | null };
 
 type GroupJoinRequest = { id: string; groupId: string; firstName: string; lastName: string; email: string; status: "pending"; createdAt: string };
 type GroupStatusFilter = "all" | GroupLifecycleStatus;
@@ -125,14 +125,14 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [meetingTitle, setMeetingTitle] = useState("");
   const [activeMeetingId, setActiveMeetingId] = useState("");
   const [attendance, setAttendance] = useState<AttendanceEntry[]>([]);
-  const [attendanceBaseline, setAttendanceBaseline] = useState<{ meetingId: string; departmentId: string; rows: AttendanceEntry[] }>();
+  const [attendanceBaseline, setAttendanceBaseline] = useState<GroupAttendanceSnapshot & { meetingId: string; departmentId: string }>();
   const [attendanceReload, setAttendanceReload] = useState(0);
   const [attendanceConflict, setAttendanceConflict] = useState(false);
   const attendanceScope = departmentId + ":" + activeMeetingId;
   const currentAttendanceScope = useRef(attendanceScope);
   currentAttendanceScope.current = attendanceScope;
-  const attendanceChanges = attendanceBaseline?.meetingId === activeMeetingId && attendanceBaseline?.departmentId === departmentId
-    ? groupAttendanceChanges(attendanceBaseline.rows, attendance) : [];
+  const activeAttendance = attendanceBaseline?.meetingId === activeMeetingId && attendanceBaseline?.departmentId === departmentId ? attendanceBaseline : undefined;
+  const attendanceChanges = activeAttendance ? groupAttendanceChanges(activeAttendance.attendance, attendance) : [];
   const [attendanceLoading, setAttendanceLoading] = useState(false);
   const [attendanceSaving, setAttendanceSaving] = useState(false);
   const [joinRequests, setJoinRequests] = useState<GroupJoinRequest[]>([]);
@@ -355,13 +355,12 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     if (!activeMeetingId) return;
     const controller = new AbortController();
     setAttendanceLoading(true);
-    void fetch(`/api/group-meetings/${activeMeetingId}/attendance`, { headers: { "x-department-id": departmentId }, signal: controller.signal })
-      .then(async (response) => {
-        const result = await response.json() as AttendanceEntry[] | { error?: string };
-        if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? "Could not load attendance." : "Could not load attendance.");
+    void getGroupAttendance(activeMeetingId, departmentId, controller.signal)
+      .then((result) => {
         if (controller.signal.aborted) return;
-        setAttendance(result);
-        setAttendanceBaseline({ meetingId: activeMeetingId, departmentId, rows: result });
+        setAttendance(result.attendance);
+        setAttendanceBaseline({ meetingId: activeMeetingId, departmentId, ...result });
+        setMeetings((current) => current.map((meeting) => meeting.id === activeMeetingId ? { ...meeting, completedAt: result.completedAt } : meeting));
       }).catch((reason) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load attendance."); })
       .finally(() => { if (!controller.signal.aborted) setAttendanceLoading(false); });
     return () => controller.abort();
@@ -465,12 +464,12 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   }
 
   async function saveAttendance() {
-    if (!activeMeetingId || attendanceLoading || attendanceSaving || !attendanceChanges.length) return;
+    if (!activeAttendance || activeAttendance.completedAt || attendanceLoading || attendanceSaving || !attendanceChanges.length) return;
     setAttendanceSaving(true);
     setAttendanceConflict(false);
     setError("");
     try {
-      const response = await fetch(`/api/group-meetings/${activeMeetingId}/attendance`, {
+      const response = await fetch(groupAttendanceUrl(activeMeetingId), {
         method: "PUT",
         headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
         body: JSON.stringify({ attendance: attendanceChanges }),
@@ -479,19 +478,43 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       if (currentAttendanceScope.current !== attendanceScope) return;
       if (response.status === 409) setAttendanceConflict(true);
       if (!response.ok || !result.saved) throw new Error(result.error ?? "Could not save attendance.");
-      const rosterResponse = await fetch(`/api/group-meetings/${activeMeetingId}/attendance`, { headers: { "x-department-id": departmentId } });
-      const roster = await rosterResponse.json() as AttendanceEntry[];
-      if (currentAttendanceScope.current !== attendanceScope) return;
-      if (!rosterResponse.ok || !Array.isArray(roster)) {
+      let resultAfterSave: GroupAttendanceSnapshot;
+      try { resultAfterSave = await getGroupAttendance(activeMeetingId, departmentId); }
+      catch {
+        if (currentAttendanceScope.current !== attendanceScope) return;
         setAttendanceConflict(true);
         throw new Error("Attendance was saved. Reload to see the latest roster.");
       }
-      setAttendance(roster);
-      setAttendanceBaseline({ meetingId: activeMeetingId, departmentId, rows: roster });
-      setMeetings((current) => current.map((meeting) => meeting.id === activeMeetingId ? { ...meeting, presentCount: roster.filter((entry) => entry.status === "present").length } : meeting));
+      if (currentAttendanceScope.current !== attendanceScope) return;
+      setAttendance(resultAfterSave.attendance);
+      setAttendanceBaseline({ meetingId: activeMeetingId, departmentId, ...resultAfterSave });
+      setMeetings((current) => current.map((meeting) => meeting.id === activeMeetingId ? {
+        ...meeting,
+        completedAt: resultAfterSave.completedAt,
+        presentCount: resultAfterSave.attendance.filter((entry) => entry.status === "present").length,
+      } : meeting));
     } catch (reason) {
       if (currentAttendanceScope.current === attendanceScope) setError(reason instanceof Error ? reason.message : "Could not save attendance.");
     } finally { setAttendanceSaving(false); }
+  }
+
+  async function changeMeetingCompletion() {
+    if (!activeAttendance || attendanceLoading || attendanceSaving || attendanceChanges.length) return;
+    setAttendanceSaving(true);
+    setError("");
+    try {
+      const completedAt = await setGroupAttendanceCompletion(activeMeetingId, departmentId, csrfToken, activeAttendance.completedAt);
+      if (currentAttendanceScope.current !== attendanceScope) return;
+      setAttendanceBaseline({ ...activeAttendance, completedAt });
+      setMeetings((current) => current.map((meeting) => meeting.id === activeMeetingId ? { ...meeting, completedAt } : meeting));
+      setAttendanceReload((current) => current + 1);
+    } catch (reason) {
+      if (currentAttendanceScope.current !== attendanceScope) return;
+      setError(reason instanceof Error ? reason.message : "Could not change group meeting completion.");
+      setAttendanceConflict(true);
+    } finally {
+      setAttendanceSaving(false);
+    }
   }
 
   function downloadGroupAttendance() {
@@ -609,8 +632,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
           {!selected.importedFrom && <section className="group-attendance-section" aria-labelledby="group-attendance-title">
             <div className="community-members-heading"><div><h3 id="group-attendance-title">{translate("groups.attendance")}</h3><p>{translate("groups.attendanceHelp")}</p></div></div>
             {canManage && <form className="group-meeting-form" onSubmit={(event) => void createMeeting(event)}><label>{translate("groups.meetingDate")}<input type="date" required value={meetingDate} onChange={(event) => setMeetingDate(event.target.value)} /></label><label>{translate("groups.meetingName")} <span className="optional-label">{translate("groups.optional")}</span><input maxLength={160} value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} placeholder={translate("groups.meetingNameExample")} /></label><button className="button button-primary" type="submit" disabled={saving || memberListChanged}><Plus size={15} />{translate("groups.createMeeting")}</button>{memberListChanged && <small className="group-meeting-help">{translate("groups.saveRosterFirst")}</small>}</form>}
-            {meetings.length > 0 && <label className="group-meeting-picker">{translate("groups.meeting")}<select value={activeMeetingId} onChange={(event) => setActiveMeetingId(event.target.value)}><option value="">{translate("groups.chooseMeeting")}</option>{meetings.map((meeting) => <option key={meeting.id} value={meeting.id}>{formatUserDate(meeting.date)} {meeting.title ? `· ${meeting.title}` : ""} · {translate("groups.meetingAttendanceSummary").replace("{present}", String(meeting.presentCount)).replace("{total}", String(meeting.attendeeCount))}</option>)}</select></label>}
-            {activeMeetingId && <><div className="group-attendance-heading"><strong>{translate("groups.presentCount").replace("{count}", String(attendance.filter((entry) => entry.status === "present").length))}</strong><div className="community-inline-actions">{canManage && attendance.length > 0 && <button className="button button-secondary" type="button" onClick={downloadGroupAttendance}><Download size={14} />{translate("events.exportAttendance")}</button>}{canManage && <button className="button button-primary" type="button" onClick={() => void saveAttendance()} disabled={attendanceSaving || attendanceLoading || attendanceConflict || !attendanceChanges.length}><Check size={14} />{attendanceSaving ? translate("settings.personal.saving") : translate("groups.saveAttendance")}</button>}{attendanceConflict && <button className="button button-secondary" type="button" onClick={() => { setError(""); setAttendanceReload((current) => current + 1); }}>Discard changes and reload</button>}</div></div>{attendanceLoading ? <p className="community-empty">{translate("groups.loading")}</p> : attendance.length ? <div className="group-attendance-list">{attendance.map((entry) => <label className="community-member-row" key={entry.contactId}><span className="community-member-avatar">{entry.firstName[0]}{entry.lastName[0]}</span><span><strong>{entry.firstName} {entry.lastName}</strong></span><select aria-label={translate("groups.attendanceFor").replace("{name}", `${entry.firstName} ${entry.lastName}`)} disabled={!canManage || attendanceSaving} value={entry.status} onChange={(event) => setAttendance((current) => current.map((person) => person.contactId === entry.contactId ? { ...person, status: event.target.value as AttendanceEntry["status"] } : person))}><option value="present">{translate("groups.present")}</option><option value="absent">{translate("groups.absent")}</option><option value="excused">{translate("groups.excused")}</option></select></label>)}</div> : <p className="community-empty">{translate("groups.noRoster")}</p>}</>}
+            {meetings.length > 0 && <label className="group-meeting-picker">{translate("groups.meeting")}<select value={activeMeetingId} onChange={(event) => setActiveMeetingId(event.target.value)}><option value="">{translate("groups.chooseMeeting")}</option>{meetings.map((meeting) => <option key={meeting.id} value={meeting.id}>{formatUserDate(meeting.date)} {meeting.title ? `· ${meeting.title}` : ""}{meeting.completedAt ? " · completed" : ""} · {translate("groups.meetingAttendanceSummary").replace("{present}", String(meeting.presentCount)).replace("{total}", String(meeting.attendeeCount))}</option>)}</select></label>}
+            {activeMeetingId && <><div className="group-attendance-heading"><strong>{translate("groups.presentCount").replace("{count}", String(attendance.filter((entry) => entry.status === "present").length))}</strong><div className="community-inline-actions">{canManage && attendance.length > 0 && <button className="button button-secondary" type="button" onClick={downloadGroupAttendance}><Download size={14} />{translate("events.exportAttendance")}</button>}{canManage && <button className="button button-primary" type="button" onClick={() => void saveAttendance()} disabled={attendanceSaving || attendanceLoading || attendanceConflict || Boolean(activeAttendance?.completedAt) || !attendanceChanges.length}><Check size={14} />{attendanceSaving ? translate("settings.personal.saving") : translate("groups.saveAttendance")}</button>}{canManage && activeAttendance && <button className="button button-secondary" type="button" disabled={attendanceLoading || attendanceSaving || attendanceConflict || Boolean(attendanceChanges.length)} onClick={() => void changeMeetingCompletion()}>{activeAttendance.completedAt ? "Reopen attendance" : "Complete attendance"}</button>}{attendanceConflict && <button className="button button-secondary" type="button" onClick={() => { setError(""); setAttendanceReload((current) => current + 1); }}>Discard changes and reload</button>}</div></div>{activeAttendance?.completedAt && <p role="status">Attendance completed.</p>}{attendanceLoading ? <p className="community-empty">{translate("groups.loading")}</p> : attendance.length ? <div className="group-attendance-list">{attendance.map((entry) => <label className="community-member-row" key={entry.contactId}><span className="community-member-avatar">{entry.firstName[0]}{entry.lastName[0]}</span><span><strong>{entry.firstName} {entry.lastName}</strong></span><select aria-label={translate("groups.attendanceFor").replace("{name}", `${entry.firstName} ${entry.lastName}`)} disabled={!canManage || attendanceSaving || attendanceConflict || !activeAttendance || Boolean(activeAttendance.completedAt)} value={entry.status} onChange={(event) => setAttendance((current) => current.map((person) => person.contactId === entry.contactId ? { ...person, status: event.target.value as AttendanceEntry["status"] } : person))}><option value="present">{translate("groups.present")}</option><option value="absent">{translate("groups.absent")}</option><option value="excused">{translate("groups.excused")}</option></select></label>)}</div> : <p className="community-empty">{translate("groups.noRoster")}</p>}</>}
             {!meetings.length && !canManage && <p className="community-empty">{translate("groups.noMeetings")}</p>}
           </section>}
         </> : canManage ? <form className="community-new-group" onSubmit={saveGroup}><span className="community-group-icon"><ContactRound size={20} /></span><h2>{translate("groups.createStart")}</h2><p>{translate("groups.createStartHelp")}</p><label>{translate("groups.name")}<input autoFocus required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder={translate("groups.groupNameExample")} /></label><label>{translate("groups.description")} <span className="optional-label">{translate("groups.optional")}</span><textarea rows={3} maxLength={1000} value={description} onChange={(event) => setDescription(event.target.value)} placeholder={translate("groups.whoBelongs")} /></label><label>Group type <span className="optional-label">optional</span><input maxLength={80} value={groupType} onChange={(event) => setGroupType(event.target.value)} placeholder="Youth, small group, ministry" /></label><label>Lifecycle status<select value={groupStatus} onChange={(event) => setGroupStatus(event.target.value as GroupLifecycleStatus)}><option value="active">Active</option><option value="draft">Draft</option><option value="ended">Ended</option><option value="archived">Archived</option></select></label><label>Start date <span className="optional-label">optional</span><input type="date" value={startsOn} onChange={(event) => setStartsOn(event.target.value)} /></label><label>End date <span className="optional-label">optional</span><input type="date" value={endsOn} onChange={(event) => setEndsOn(event.target.value)} min={startsOn || undefined} /></label><button className="button button-primary" type="submit" disabled={saving || !name.trim()}><Plus size={16} />{translate("groups.create")}</button></form> : <p className="community-empty">{translate("groups.selectHint")}</p>}
