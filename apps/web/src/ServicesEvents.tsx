@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check, ClipboardList, Clock3, Download, Link2, MapPin, Music2, Pencil, Plus, Repeat2, Search, Trash2, UserCheck, Users, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CalendarDays, Check, ClipboardList, Clock3, Download, Link2, MapPin, Music2, Pencil, Plus, Printer, Repeat2, Search, Trash2, UserCheck, Users, X } from "lucide-react";
 import type { BookableResource, Contact, CreateServiceEvent, EventRegistration, ServiceEvent, ServiceEventCheckIn, ServiceEventKind, ServicePlanItem, ServicePlanTemplate, ServicePosition, VisitorFollowUp, WorshipSong } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
@@ -114,6 +114,10 @@ function preservePositionResponses(event: ServiceEvent, previous?: ServiceEvent)
 
 function csvCell(value: string | number) {
   return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function printHtml(value: string | number) {
+  return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
 }
 
 function eventPayload(form: HTMLFormElement): CreateServiceEvent {
@@ -620,6 +624,26 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
+  function printStaffingReport() {
+    const rows = dutyRosterEvents.flatMap((event) => (event.positions ?? []).filter(roleCategoryMatches).map((position) => {
+      const person = contacts.find((contact) => contact.id === position.contactId);
+      const response = position.responseStatus === "accepted" ? "Confirmed" : position.responseStatus === "declined" ? "Declined" : position.contactId ? "Requested" : "Unfilled";
+      return `<tr><td>${printHtml(formatEventDate(event.eventDate))}</td><td>${printHtml(event.title)}${event.cancelledAt ? " <strong class=\"cancelled\">Cancelled</strong>" : ""}</td><td>${printHtml(event.isAllDay ? "All day" : event.startTime)}</td><td>${printHtml(event.location)}${event.room ? ` · ${printHtml(event.room)}` : ""}</td><td>${printHtml(position.category?.trim() ?? "")}</td><td>${printHtml(position.name)}</td><td>${printHtml(person ? `${person.firstName} ${person.lastName}` : "")}</td><td>${printHtml(response)}</td></tr>`;
+    }));
+    if (rows.length === 0) return;
+    const popup = window.open("", "_blank", "width=1000,height=750");
+    if (!popup) {
+      onNotice("Allow pop-ups to print the staffing roster.");
+      return;
+    }
+    popup.opener = null;
+    popup.document.open();
+    popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Event staffing roster</title><style>
+      @page{size:auto;margin:14mm}body{font:12px/1.4 Arial,sans-serif;color:#17211a;margin:0}h1{font-size:21px;margin:0 0 4px}p{margin:0 0 16px;color:#526057;font-size:11px}table{width:100%;border-collapse:collapse}thead{display:table-header-group}tr{break-inside:avoid}th,td{padding:7px 6px;border:1px solid #cfd6d0;text-align:left;vertical-align:top}th{background:#edf2ed;font-weight:700}.cancelled{color:#a32626;font-size:10px}.print-actions{margin:0 0 14px}@media print{.print-actions{display:none}}
+      </style></head><body><div class="print-actions"><button type="button" onclick="window.print()">Print roster</button></div><h1>Event staffing roster</h1><p>${printHtml(roleCategoryFilter ? roleCategoryFilter === UNCATEGORIZED_ROLE_FILTER ? "Uncategorized roles" : roleCategoryFilter : "All role categories")} · ${printHtml(new Date().toLocaleString())}</p><table><thead><tr><th>Date</th><th>Event</th><th>Start</th><th>Location</th><th>Role category</th><th>Role</th><th>Assigned person</th><th>Response</th></tr></thead><tbody>${rows.join("")}</tbody></table><script>window.addEventListener("load",()=>window.print(),{once:true});</script></body></html>`);
+    popup.document.close();
+  }
+
   function downloadRegistrationsReport() {
     if (!checkInEvent || registrations.length === 0) return;
     const rows = [
@@ -805,7 +829,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
             <button className={scheduleView === "month" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "month"} onClick={() => setScheduleView("month")}>{translate("events.monthView")}</button>
             <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => { setFilter("all"); setScheduleView("attendance"); }}>{translate("events.attendanceReport")}</button>
           </div>
-          {canManage && scheduleView === "list" && <button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(roleCategoryMatches))}><Download size={15} />Export staffing</button>}
+          {canManage && scheduleView === "list" && <><button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(roleCategoryMatches))}><Download size={15} />Export staffing</button><button className="button button-secondary" type="button" onClick={printStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(roleCategoryMatches))}><Printer size={15} />Print staffing</button></>}
         </div>
 
         {scheduleView === "attendance" ? <div className="attendance-report">
