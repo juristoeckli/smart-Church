@@ -4,6 +4,7 @@ import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smar
 import { formatUserDate } from "./date-format";
 import { HomeDutyRequests } from "./HomeDutyRequests";
 import { HomeWelcome } from "./HomeWelcome";
+import { HomeRecordedEventFacts } from "./HomeRecordedEventFacts";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
 import { translateModuleUiOverrideMessage } from "./modules/ui-translation-overrides";
 
@@ -262,14 +263,16 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
       </div>)}</div> : <p className="community-empty">{translate("overview.noResourceApprovals")}</p>}
       {approvalFeedback && <p className="community-empty" role="status">{approvalFeedback}</p>}
     </section>,
-    recentEventFacts: recentEventFacts && <section className="directory-card community-upcoming-card">
+    recentEventFacts: <>{recentEventFacts && <section className="directory-card community-upcoming-card">
       <div className="directory-heading"><div><h2>{translate("overview.recentEventFacts")}</h2><p>{translate("overview.recentEventFactsHelp")}</p></div><button className="button button-secondary" type="button" onClick={() => onNavigate("Services & events")}>{translate("overview.openCalendar")} <ArrowRight size={14} /></button></div>
       {recordedFacts?.length ? <div className="community-upcoming-list">{recordedFacts.map((event, index) => <div className="community-upcoming-item" key={`${event.eventDate}:${event.title}:${index}`}><span className="community-upcoming-date">{formatUserDate(event.eventDate)}</span><div><strong>{event.title}</strong><small>{attendanceSummary([event])}</small></div></div>)}</div> : <p className="community-empty">{translate("overview.noRecentEventFacts")}</p>}
       {priorEventFacts && <dl className="community-upcoming-list">
         <div className="community-upcoming-item"><dt>{translate("overview.currentFactsPeriod")}</dt><dd>{attendanceSummary(recentEventFacts)}</dd></div>
         <div className="community-upcoming-item"><dt>{translate("overview.priorFactsPeriod")}</dt><dd>{attendanceSummary(priorEventFacts)}</dd></div>
       </dl>}
-    </section>,
+    </section>}
+      <HomeRecordedEventFacts key={departmentId + ":" + today.slice(0, 7)} departmentId={departmentId} period={today.slice(0, 7)} />
+    </>,
   };
 
   return <>
