@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type CSSProperties, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, MapPin, Plus, Repeat2, RotateCcw, Trash2, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { CalendarResourceRequest } from "./CalendarResourceRequest";
@@ -18,6 +18,7 @@ type Appointment = {
   appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string; originalOccurrenceStartAt?: string; seriesTimeZone?: string | null; timeZone?: string; startsAtUtc?: string | null; timeShifted?: boolean; seriesStartsAt: string; calendarId: string; calendarName: string; calendarScope: Scope;
   groupId?: string | null; title: string; subtitle: string; description: string; allDay: boolean; place: string; url: string;
   internalOnly: boolean; tags: string[]; recurrence: Recurrence | null; linkedEventId: string | null; resourceBookingIds: string[]; canManage: boolean;
+  viewStartsAt?: string; viewTimeZone?: string;
   resourceBookings?: LinkedResourceBooking[];
   resourceWindow?: { startsAt: string; endsAt: string } | null;
   linkedEventCancelled?: boolean; eventRegistration?: EventRegistration | null;
@@ -29,7 +30,23 @@ type ChoiceSet = { groups: Array<{ id: string; name: string }>; signupGroups: Ar
 type PersonChoice = { id: string; name: string };
 type Draft = { timeZone: string; calendarId: string; title: string; subtitle: string; description: string; startsAt: string; endsAt: string; allDay: boolean; place: string; url: string; internalOnly: boolean; tags: string; repeat: boolean; frequency: Frequency; interval: number; weekdays: number[]; weekday: number; weekOfMonth: number; endsOn: string; count: string; manualDates: string; linkedEventId: string; resourceBookingIds: string[]; signupGroupId: string; responsibleContactId: string };
 const initialDraft = (): Draft => ({ timeZone: "", calendarId: "", title: "", subtitle: "", description: "", startsAt: "", endsAt: "", allDay: false, place: "", url: "", internalOnly: false, tags: "", repeat: false, frequency: "weekly", interval: 1, weekdays: [], weekday: 0, weekOfMonth: 1, endsOn: "", count: "", manualDates: "", linkedEventId: "", resourceBookingIds: [], signupGroupId: "", responsibleContactId: "" });
-const namedTimeZones = Intl.supportedValuesOf("timeZone");
+const namedTimeZones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+const displayPreferencePrefix = "display-time-zone:";
+function validNamedZone(zone: string | undefined) {
+  if (!zone || !/^[A-Za-z][A-Za-z0-9_+/-]{0,79}$/.test(zone)) return null;
+  try { return new Intl.DateTimeFormat("en", { timeZone: zone }).resolvedOptions().timeZone ?? null; }
+  catch { return null; }
+}
+function displayPreference(state: string) {
+  const requested = state.startsWith(displayPreferencePrefix) ? state.slice(displayPreferencePrefix.length) : "";
+  return requested === "location" || requested === "device" ? requested : validNamedZone(requested) ?? "appointments";
+}
+function todayInZone(timeZone: string) {
+  const formatter = new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit", calendar: "iso8601", numberingSystem: "latn" });
+  const parts = Object.fromEntries(formatter.formatToParts().map(({ type, value }) => [type,value]));
+  return new Date(`${parts.year}-${parts.month}-${parts.day}T12:00:00`);
+}
+const displayStart = (appointment: Appointment) => appointment.viewStartsAt ?? appointment.occurrenceStartAt;
 const weekDays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const pad = (n: number) => String(n).padStart(2, "0");
 function dateInput(date: Date) { return `${date.getFullYear()}-${pad(date.getMonth()+1)}-${pad(date.getDate())}`; }
@@ -52,12 +69,18 @@ function localToIso(value: string) { return value.length === 16 ? `${value}:00` 
 function getRange(date: Date, view: View) {
   const start = new Date(date); start.setHours(0,0,0,0);
   const end = new Date(start);
-  if (view === "day") end.setDate(end.getDate()+1);
-  else if (view === "week") { start.setDate(start.getDate()-((start.getDay()+6)%7)); end.setTime(start.getTime()); end.setDate(end.getDate()+7); }
-  else if (view === "month") { start.setDate(1); start.setDate(start.getDate()-((start.getDay()+6)%7)); end.setTime(start.getTime()); end.setDate(end.getDate()+42); }
-  else if (view === "year") { start.setMonth(0,1); end.setFullYear(start.getFullYear()+1,0,1); }
-  else { start.setDate(start.getDate()-30); end.setDate(end.getDate()+61); }
-  return { from: `${dateInput(start)}T00:00`, to: `${dateInput(end)}T23:59` };
+  if (view === "week") {
+    start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    end.setTime(start.getTime()); end.setDate(end.getDate() + 6);
+  } else if (view === "month") {
+    start.setDate(1); start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    end.setTime(start.getTime()); end.setDate(end.getDate() + 41);
+  } else if (view === "year") {
+    start.setMonth(0, 1); end.setMonth(11, 31);
+  } else if (view === "list") {
+    start.setDate(start.getDate() - 30); end.setDate(end.getDate() + 60);
+  }
+  return { from: `${dateInput(start)}T00:00:00`, to: `${dateInput(end)}T23:59:59` };
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -67,7 +90,12 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-export function ChurchCalendarModule({ departmentId, csrfToken, department, canManageSite, language, realtime, onNavigateEntity }: ModuleContext) {
+export function ChurchCalendarModule({ departmentId, csrfToken, department, canManageSite, language, realtime, onNavigateEntity, state, onStateChange }: ModuleContext) {
+  const viewerPreference = displayPreference(state);
+  const locationTimeZone = validNamedZone(department.timeZone) ?? "UTC";
+  const deviceTimeZone = validNamedZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? "UTC";
+  const queryTimeZone = viewerPreference === "device" ? deviceTimeZone : viewerPreference;
+  const viewerZone = queryTimeZone === "appointments" || queryTimeZone === "location" ? locationTimeZone : queryTimeZone;
   const [calendars, setCalendars] = useState<Calendar[]>([]);
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [archivedAppointments, setArchivedAppointments] = useState<ArchivedAppointment[]>([]);
@@ -75,7 +103,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [personSearch, setPersonSearch] = useState("");
   const [personChoices, setPersonChoices] = useState<PersonChoice[]>([]);
   const [selectedCalendarIds, setSelectedCalendarIds] = useState<string[]>([]);
-  const [anchor, setAnchor] = useState(new Date());
+  const [anchor, setAnchor] = useState(() => todayInZone(viewerZone));
   const [view, setView] = useState<View>("month");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -113,21 +141,27 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const mutationHeaders = useMemo(() => ({ ...headers, "x-csrf-token": csrfToken, "content-type": "application/json" }), [headers, csrfToken]);
   const range = useMemo(() => getRange(anchor, view), [anchor, view]);
 
+  const loadVersion = useRef(0);
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     setLoading(true); setError("");
     try {
       const [calendarRows, eventRows, choiceRows] = await Promise.all([
         api<Calendar[]>("/api/modules/church-calendar/calendars", { headers }),
-        api<Appointment[]>(`/api/modules/church-calendar/appointments?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}`, { headers }),
+        api<Appointment[]>(`/api/modules/church-calendar/appointments?from=${encodeURIComponent(range.from)}&to=${encodeURIComponent(range.to)}&displayTimeZone=${encodeURIComponent(queryTimeZone)}`, { headers }),
         api<ChoiceSet>("/api/modules/church-calendar/choices", { headers }),
       ]);
+      if (version !== loadVersion.current) return;
       setCalendars(calendarRows);
       setAppointments(eventRows);
       setChoices(choiceRows);
       setSelectedCalendarIds((current) => current.length ? current.filter((id) => calendarRows.some((item) => item.id === id)) : calendarRows.map((item) => item.id));
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load the calendar."); }
-    finally { setLoading(false); }
-  }, [headers, range.from, range.to]);
+    } catch (reason) {
+      if (version === loadVersion.current) setError(reason instanceof Error ? reason.message : "Could not load the calendar.");
+    } finally {
+      if (version === loadVersion.current) setLoading(false);
+    }
+  }, [headers, range.from, range.to, queryTimeZone]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
@@ -200,7 +234,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     const end = new Date(start); end.setMinutes(end.getMinutes()+60);
     setEditing(null); setExtraDates([]); setImageFile(null); setScope("series");
     setPersonSearch(""); setPersonChoices([]);
-    setDraft({ ...initialDraft(), ...monthlyWeekdayParts(start), calendarId: calendars.find((item) => item.scope === "personal" && item.isOwner)?.id ?? calendars.find((item) => item.scope === "community")?.id ?? calendars[0]?.id ?? "", startsAt: dateTimeInput(start), endsAt: dateTimeInput(end) });
+    setDraft({ ...initialDraft(), ...monthlyWeekdayParts(start), timeZone: viewerZone === locationTimeZone ? "" : viewerZone, calendarId: calendars.find((item) => item.scope === "personal" && item.isOwner)?.id ?? calendars.find((item) => item.scope === "community")?.id ?? calendars[0]?.id ?? "", startsAt: dateTimeInput(start), endsAt: dateTimeInput(end) });
     setShowForm(true);
   }
   async function openEdit(item: Appointment) {
@@ -372,15 +406,17 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     finally { setBusy(false); }
   }
 
-  const locationTimeZone = department.timeZone;
+  const viewerTimeZones = [...new Set(["UTC", locationTimeZone, deviceTimeZone, ...(viewerPreference.includes("/") ? [viewerPreference] : []), ...namedTimeZones])];
   const timeZoneOptions = [...new Set([locationTimeZone, draft.timeZone, "UTC", ...namedTimeZones].filter(Boolean))];
   const zoneField = <label>Time zone<select value={draft.timeZone} disabled={Boolean(editing?.recurrence && scope === "occurrence")} onChange={(event) => setDraft({ ...draft, timeZone: event.target.value })}>
     <option value="">Location time zone ({locationTimeZone})</option>
     {timeZoneOptions.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
   </select>{draft.repeat && <small>Repeat dates follow the clock in this time zone.</small>}</label>;
-  const eventsForDay = (day: Date) => visibleAppointments.filter((event) => event.occurrenceStartAt.slice(0,10) === dateInput(day));
+  const eventsForDay = (day: Date) => visibleAppointments.filter((event) => displayStart(event).slice(0,10) === dateInput(day));
   const monthGridStart = new Date(anchor.getFullYear(), anchor.getMonth(), 1); monthGridStart.setDate(monthGridStart.getDate()-((monthGridStart.getDay()+6)%7));
   const locale = language;
+  const clockFormatter = useMemo(() => new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }), [locale]);
+  const timeLabel = (item: Appointment) => item.allDay ? "All day" : clockFormatter.format(new Date(`${displayStart(item)}Z`));
   const editedOccurrence = editing && appointments.find((item) => item.appointmentId === editing.appointmentId
     && (item.originalOccurrenceStartAt ?? item.occurrenceStartAt) === (editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt));
   const linkedResourceBookings = editedOccurrence?.resourceBookings ?? editing?.resourceBookings ?? [];
@@ -407,10 +443,12 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     </>;
   }
   function appointmentButton(item: Appointment) {
+    const authoredZoneLabel = viewerPreference === "appointments" && item.timeZone !== locationTimeZone ? item.timeZone : undefined;
     return (
       <div key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`} className="church-calendar-appointment-entry">
         <button type="button" className="church-calendar-event" style={{ "--calendar-accent": calendars.find((calendar) => calendar.id === item.calendarId)?.color ?? "#3b82f6" } as CSSProperties} onClick={() => openEdit(item)}>
-          <strong>{item.allDay ? "All day" : new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", timeZone: item.startsAtUtc && item.timeZone ? item.timeZone : "UTC" }).format(new Date(item.startsAtUtc ?? `${item.occurrenceStartAt}Z`))} {item.title}</strong>{!item.allDay && item.timeZone && (item.timeZone !== locationTimeZone || item.timeShifted) && <small>{item.timeZone}{item.timeShifted ? " · clock change" : ""}</small>}
+          <strong>{timeLabel(item)} {item.title}</strong>
+          {!item.allDay && (authoredZoneLabel || item.timeShifted) && <small>{authoredZoneLabel}{authoredZoneLabel && item.timeShifted ? " · " : ""}{item.timeShifted ? "Adjusted for clock change" : ""}</small>}
           {item.place && <span><MapPin size={12} /> {item.place}</span>}
           {item.responsiblePersonName && <span className="church-calendar-responsible">On behalf of {item.responsiblePersonName}</span>}
         </button>
@@ -423,9 +461,17 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     <header className="church-calendar-header"><div><span className="eyebrow">PLANNING</span><h1>Calendar</h1><p>Appointments across your community, groups and personal calendars.</p></div><div className="church-calendar-header-actions"><button type="button" className="button button-secondary" onClick={() => void toggleArchive()}>{showArchive ? "Hide archive" : "Archive"}</button><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(true)}><Plus size={15} /> New calendar</button><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div></header>
     {error && <div className="church-calendar-message church-calendar-error" role="alert">{error}</div>}{notice && <div className="church-calendar-message church-calendar-success" role="status">{notice}</div>}
     {showArchive && <section className="church-calendar-archive" aria-label="Archived appointments"><header><div><h2>Archived appointments</h2><p>Restore an appointment to return it to its calendar.</p></div><span>{archivedAppointments.length}</span></header>{archivedAppointments.length ? archivedAppointments.map((item) => <article key={item.appointmentId}><div><strong>{item.title}</strong><small>{item.calendarName} · {dayLabel(new Date(item.startsAt), language)}</small></div><button type="button" className="button button-secondary" onClick={() => void restoreAppointment(item.appointmentId)} disabled={busy}>Restore</button></article>) : <p className="church-calendar-empty">No archived appointments.</p>}</section>}
-    <div className="church-calendar-layout"><aside className="church-calendar-sidebar"><div className="church-calendar-mini-head"><strong>{monthLabel(anchor, language)}</strong><button className="icon-button" aria-label="Previous month" type="button" onClick={() => setAnchor((date) => shiftCalendarMonth(date, -1))}><ChevronLeft size={15} /></button><button className="icon-button" aria-label="Next month" type="button" onClick={() => setAnchor((date) => shiftCalendarMonth(date, 1))}><ChevronRight size={15} /></button></div><div className="church-calendar-mini-grid">{weekDays.map((day) => <span key={day}>{day[0]}</span>)}{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <button key={index} className={`${day.getMonth() === anchor.getMonth() ? "" : "outside"} ${dateInput(day) === dateInput(anchor) ? "selected" : ""}`} type="button" onClick={() => setAnchor(day)}>{day.getDate()}</button>; })}</div><button type="button" className="church-calendar-today" onClick={() => setAnchor(new Date())}>Today</button><h2>My calendars</h2><div className="church-calendar-list">{calendars.map((calendar) => <label key={calendar.id}><input type="checkbox" checked={selectedCalendarIds.includes(calendar.id)} onChange={(event) => setSelectedCalendarIds((current) => event.target.checked ? [...current, calendar.id] : current.filter((id) => id !== calendar.id))} /><i style={{ background: calendar.color }} /><span>{calendar.name}</span><small>{calendar.scope === "personal" ? "Personal" : calendar.scope === "group" ? calendar.groupName ?? "Group" : "Community"}</small></label>)}</div>{canManageShared && calendars.filter((calendar) => calendar.scope === "community").length > 0 && <section className="church-calendar-public-feed-settings"><h2>Public calendar feeds</h2>{calendars.filter((calendar) => calendar.scope === "community").map((calendar) => <div key={calendar.id}><span>{calendar.name}</span>{calendar.hasPublicFeed ? <><small>Feed enabled</small><button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Rotate link</button><button type="button" className="church-calendar-feed-button" onClick={() => void revokePublicFeed(calendar)} disabled={busy}>Revoke</button></> : <button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Create feed link</button>}</div>)}</section>}{publicFeedUrl && <div className="church-calendar-feed-result"><strong>Copy this calendar URL. It is shown only once.</strong><a href={publicFeedUrl}>{publicFeedUrl}</a></div>}{!calendars.length && !loading && <p className="church-calendar-empty">Create your first personal calendar or a shared calendar.</p>}</aside>
+    <div className="church-calendar-layout"><aside className="church-calendar-sidebar"><div className="church-calendar-mini-head"><strong>{monthLabel(anchor, language)}</strong><button className="icon-button" aria-label="Previous month" type="button" onClick={() => setAnchor((date) => shiftCalendarMonth(date, -1))}><ChevronLeft size={15} /></button><button className="icon-button" aria-label="Next month" type="button" onClick={() => setAnchor((date) => shiftCalendarMonth(date, 1))}><ChevronRight size={15} /></button></div><div className="church-calendar-mini-grid">{weekDays.map((day) => <span key={day}>{day[0]}</span>)}{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <button key={index} className={`${day.getMonth() === anchor.getMonth() ? "" : "outside"} ${dateInput(day) === dateInput(anchor) ? "selected" : ""}`} type="button" onClick={() => setAnchor(day)}>{day.getDate()}</button>; })}</div><button type="button" className="church-calendar-today" onClick={() => setAnchor(todayInZone(viewerZone))}>Today</button>
+      <label className="church-calendar-display-zone">Display time zone
+        <select value={viewerPreference} onChange={(event) => onStateChange(displayPreferencePrefix + event.target.value)}>
+          <option value="appointments">Appointment time zones</option>
+          <option value="location">Location ({locationTimeZone})</option>
+          <option value="device">Device ({deviceTimeZone})</option>
+          <optgroup label="Named time zones">{viewerTimeZones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}</optgroup>
+        </select>
+      </label><h2>My calendars</h2><div className="church-calendar-list">{calendars.map((calendar) => <label key={calendar.id}><input type="checkbox" checked={selectedCalendarIds.includes(calendar.id)} onChange={(event) => setSelectedCalendarIds((current) => event.target.checked ? [...current, calendar.id] : current.filter((id) => id !== calendar.id))} /><i style={{ background: calendar.color }} /><span>{calendar.name}</span><small>{calendar.scope === "personal" ? "Personal" : calendar.scope === "group" ? calendar.groupName ?? "Group" : "Community"}</small></label>)}</div>{canManageShared && calendars.filter((calendar) => calendar.scope === "community").length > 0 && <section className="church-calendar-public-feed-settings"><h2>Public calendar feeds</h2>{calendars.filter((calendar) => calendar.scope === "community").map((calendar) => <div key={calendar.id}><span>{calendar.name}</span>{calendar.hasPublicFeed ? <><small>Feed enabled</small><button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Rotate link</button><button type="button" className="church-calendar-feed-button" onClick={() => void revokePublicFeed(calendar)} disabled={busy}>Revoke</button></> : <button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Create feed link</button>}</div>)}</section>}{publicFeedUrl && <div className="church-calendar-feed-result"><strong>Copy this calendar URL. It is shown only once.</strong><a href={publicFeedUrl}>{publicFeedUrl}</a></div>}{!calendars.length && !loading && <p className="church-calendar-empty">Create your first personal calendar or a shared calendar.</p>}</aside>
       <section className="church-calendar-main"><div className="church-calendar-toolbar"><div className="church-calendar-date-nav"><button type="button" className="icon-button" aria-label="Previous" onClick={() => move(-1)}><ChevronLeft size={18} /></button><button type="button" className="icon-button" aria-label="Next" onClick={() => move(1)}><ChevronRight size={18} /></button><h2>{view === "year" ? anchor.getFullYear() : monthLabel(anchor, language)}</h2><button type="button" className="church-calendar-today" onClick={() => setAnchor(new Date())}>Today</button></div><div className="church-calendar-views" role="group" aria-label="Calendar view">{(["day", "week", "month", "year", "list"] as View[]).map((item) => <button type="button" key={item} className={view === item ? "active" : ""} aria-pressed={view === item} onClick={() => setView(item)}>{item[0].toUpperCase()+item.slice(1)}</button>)}</div></div>
-        {loading ? <div className="church-calendar-loading"><RotateCcw size={18} className="spinning" /> Loading appointments…</div> : view === "month" ? <div className="church-calendar-month"><div className="church-calendar-weekdays">{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => <span key={day}>{day}</span>)}</div><div className="church-calendar-month-grid">{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <div key={index} className={`church-calendar-day ${day.getMonth() !== anchor.getMonth() ? "outside" : ""}`}><button className="church-calendar-day-number" type="button" onClick={() => { setAnchor(day); setView("day"); }}>{day.getDate()}</button>{eventsForDay(day).slice(0,4).map(appointmentButton)}{eventsForDay(day).length > 4 && <small>+{eventsForDay(day).length-4} more</small>}</div>; })}</div></div> : view === "week" || view === "day" ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => new Date(event.occurrenceStartAt).getMonth() === month).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(new Date(item.occurrenceStartAt), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong><small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{item.allDay ? "All day" : new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit" }).format(new Date(item.occurrenceStartAt))}</span><ChevronRight size={16} /></button>{(item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
+        {loading ? <div className="church-calendar-loading"><RotateCcw size={18} className="spinning" /> Loading appointments…</div> : view === "month" ? <div className="church-calendar-month"><div className="church-calendar-weekdays">{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => <span key={day}>{day}</span>)}</div><div className="church-calendar-month-grid">{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <div key={index} className={`church-calendar-day ${day.getMonth() !== anchor.getMonth() ? "outside" : ""}`}><button className="church-calendar-day-number" type="button" onClick={() => { setAnchor(day); setView("day"); }}>{day.getDate()}</button>{eventsForDay(day).slice(0,4).map(appointmentButton)}{eventsForDay(day).length > 4 && <small>+{eventsForDay(day).length-4} more</small>}</div>; })}</div></div> : view === "week" || view === "day" ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => Number(displayStart(event).slice(5,7)) === month + 1).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(dateFromLocal(displayStart(item)), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong><small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{timeLabel(item)}</span><ChevronRight size={16} /></button>{(item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
         {!loading && !visibleAppointments.length && <div className="church-calendar-empty-state"><CalendarDays size={28} /><strong>No appointments in this view</strong><span>Try another date or add an appointment.</span><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div>}
       </section></div>
     {showCalendarForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal" role="dialog" aria-modal="true" aria-labelledby="calendar-create-heading"><header><div><span className="eyebrow">CALENDAR SETUP</span><h2 id="calendar-create-heading">New calendar</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowCalendarForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void createCalendar(event)}><label>Calendar name<input required maxLength={120} value={calendarName} onChange={(event) => setCalendarName(event.target.value)} /></label><label>Calendar type<select value={calendarScope} onChange={(event) => setCalendarScope(event.target.value as Scope)}><option value="personal">Personal</option>{canManageShared && <><option value="community">Community</option><option value="group">Group</option></>}</select></label>{calendarScope === "group" && <label>Group<select required value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">Choose group</option>{choices.groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}<label>Color<input type="color" value={calendarColor} onChange={(event) => setCalendarColor(event.target.value)} /></label><footer><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(false)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy || !calendarName.trim()}><Plus size={15} /> Create calendar</button></footer></form></section></div>}

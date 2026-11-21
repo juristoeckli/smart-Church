@@ -22,6 +22,8 @@ The optional `church-calendar` module adds community, group and personal calenda
 
 Organizers can select a named time zone or follow the location time zone. Existing appointments follow the location zone. If the location zone is unrecognized, Calendar uses UTC. Recurring appointments keep their authored clock time and calendar date. Timed occurrences expose UTC instants and public iCalendar exports use those instants. The calendar labels times authored in another zone. All-day appointments use calendar dates.
 
+Calendar can display timed appointments in their authored zones, the location zone, the device zone, or another named zone. Changing the display zone sorts and groups timed appointments by the displayed date, including occurrences that move across midnight. All-day dates stay on their authored calendar day. The editor continues to use saved appointment times and their authored zone. The display selection is remembered by this browser for this location.
+
 The editor rejects timed values in a spring-forward gap. If a recurring date later lands in a gap, its start shifts forward by the gap and keeps its duration. A repeated fall-back time uses the later instant. Generated service events use the location clock and reject timed occurrences that cross midnight there.
 
 ## Follow-up parity work
@@ -30,4 +32,4 @@ The feed currently expands one year ahead and does not emit resource bookings, p
 
 Generated service events leave public registration disabled by default. Managers can opt in for community appointments without internal occurrences and set an optional capacity per event. Each generated event gets its own link and uses the existing Services & events registration and waitlist. Existing linked events remain unchanged.
 
-Remaining parity work includes setup/lead-in and cleanup/lag buffers on resource bookings, calendar sharing controls beyond location roles, and a per-viewer calendar display time zone. Generated service events include the appointment title, time, place and description. Images still need malware scanning and version history.
+Remaining parity work includes calendar sharing controls beyond location roles. Generated service events include the appointment title, time, place and description. Images still need malware scanning and version history.

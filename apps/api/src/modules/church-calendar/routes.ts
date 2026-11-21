@@ -17,7 +17,10 @@ type AppointmentRow = {
   owner_user_id: string | null; group_id: string | null; signup_group_id?: string | null; has_image?: boolean;
   time_zone?: string | null; location_time_zone?: string;
 };
-type Occurrence = Record<string, unknown> & { appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string };
+type Occurrence = Record<string, unknown> & {
+  appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string;
+  startsAtUtc?: string | null; viewStartsAt?: string; allDay?: boolean;
+};
 
 const calendarFields = ["title", "subtitle", "description", "startsAt", "endsAt", "allDay", "place", "url", "internalOnly", "tags", "linkedEventId", "signupGroupId", "responsibleContactId"] as const;
 
@@ -62,9 +65,9 @@ function validAppointmentTimes(input: Pick<AppointmentInput, "startsAt" | "endsA
 const invalidAppointmentTime = "A start or end time does not exist in the selected time zone. Choose another clock time.";
 
 function canManageCalendar(request: FastifyRequest, scope: CalendarScope, ownerId: string | null) {
+  if (scope === "personal") return ownerId === request.authenticatedUser?.id;
   if (request.activeDepartmentRole === "site_admin") return true;
   if ((request.activeDepartmentModulePermissions?.["church-calendar"] ?? []).includes("manage")) return true;
-  if (scope === "personal") return ownerId === request.authenticatedUser?.id;
   const permissions = request.activeDepartmentPermissions ?? [];
   return scope === "group" ? permissions.includes("groups_manage") || permissions.includes("events_manage") : permissions.includes("events_manage");
 }
@@ -291,9 +294,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM church_calendar_calendars calendar
          LEFT JOIN church_groups church_group ON church_group.id=calendar.group_id AND church_group.department_id=calendar.department_id
         WHERE calendar.department_id=$1 AND calendar.archived_at IS NULL
-          AND (calendar.scope='community' OR calendar.owner_user_id=$2 OR $3 OR EXISTS (
+          AND (calendar.scope='community' OR calendar.owner_user_id=$2 OR (calendar.scope='group' AND ($3 OR EXISTS (
             SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
-             WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=calendar.group_id))
+             WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=calendar.group_id AND member.status='active'))))
         ORDER BY CASE calendar.scope WHEN 'community' THEN 0 WHEN 'group' THEN 1 ELSE 2 END,calendar.name`,
       [departmentId, userId(request), hasGroupVisibility(request)],
     );
@@ -327,13 +330,32 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.code(201).send(result.rows[0]);
   });
 
-  app.get<{ Querystring: { from?: string; to?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const from = cleanLocalDateTime(request.query.from ?? `${localDateTime(new Date()).slice(0, 10)}T00:00`);
-    const to = cleanLocalDateTime(request.query.to ?? `${localDateTime(new Date(Date.now() + 31 * 86400_000)).slice(0, 10)}T23:59`);
-    if (!from || !to || to < from) return responseError(reply, 400, "Choose a valid calendar date range.");
+    const preference = request.query.displayTimeZone;
+    const projected = preference !== undefined;
+    let displayZone = preference === "appointments" || preference === undefined ? null : canonicalTimeZone(preference);
+    if (preference === "location") {
+      const location = await context.pool.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+      displayZone = canonicalTimeZone(location.rows[0]?.time_zone) ?? "UTC";
+    } else if (projected && preference !== "appointments" && !displayZone) {
+      return responseError(reply, 400, "Choose a valid display time zone.");
+    }
+    const when = (instant: number) => displayZone ? appointmentWallTime(instant, displayZone) : localDateTime(new Date(instant));
+    const now = Date.now();
+    const visibleFrom = cleanLocalDateTime(request.query.from ?? `${when(now).slice(0, 10)}T00:00`);
+    const visibleTo = cleanLocalDateTime(request.query.to ?? `${when(now + 31 * 86_400_000).slice(0, 10)}T23:59:59`);
+    if (!visibleFrom || !visibleTo || visibleTo < visibleFrom || (projected && wallDate(visibleTo).getTime() - wallDate(visibleFrom).getTime() > 400 * 86_400_000)) {
+      return responseError(reply, 400, "Choose a valid calendar date range of up to 400 days.");
+    }
+    // Authored and viewer zones can be more than one calendar date apart.
+    const pad = projected ? 2 : 0;
+    const from = pad ? localDateTime(addDays(startOfDay(visibleFrom), -pad)) : visibleFrom;
+    const to = pad ? `${localDateTime(addDays(startOfDay(visibleTo), pad)).slice(0, 10)}T23:59:59` : visibleTo;
+    const overrideWindow = `left(exception.overrides->>'startsAt',10)
+      BETWEEN to_char($2::timestamp,'YYYY-MM-DD') AND to_char($3::timestamp,'YYYY-MM-DD')`;
     const result = await context.pool.query<AppointmentRow>(
       `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
               to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
@@ -346,14 +368,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN departments department ON department.id=appointment.department_id
          JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
         WHERE appointment.department_id=$1 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
-          AND appointment.starts_at <= $3::timestamp
-          AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $2::timestamp)
-            OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $2::timestamp::date))
-          AND (calendar.scope='community' OR calendar.owner_user_id=$4 OR $5 OR EXISTS (
+          AND ((appointment.starts_at <= $3::timestamp
+            AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $2::timestamp)
+              OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $2::timestamp::date)))
+            OR ($6::boolean AND (
+              EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
+                       WHERE exception.appointment_id=appointment.id AND NOT exception.cancelled AND ${overrideWindow})
+              OR EXISTS (SELECT 1 FROM church_calendar_extra_dates extra WHERE extra.appointment_id=appointment.id AND extra.starts_at BETWEEN $2::timestamp AND $3::timestamp)
+            )))
+          AND (calendar.scope='community' OR calendar.owner_user_id=$4 OR (calendar.scope='group' AND ($5 OR EXISTS (
             SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
-             WHERE membership.user_id=$4 AND membership.department_id=$1 AND member.group_id=calendar.group_id))
+             WHERE membership.user_id=$4 AND membership.department_id=$1 AND member.group_id=calendar.group_id AND member.status='active'))))
         ORDER BY appointment.starts_at,appointment.title LIMIT 2000`,
-      [departmentId, from, to, userId(request), hasGroupVisibility(request)],
+      [departmentId, from, to, userId(request), hasGroupVisibility(request), projected],
     );
     const appointments = result.rows;
     if (!appointments.length) return [];
@@ -363,8 +390,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids],
     );
     const extraDates = await context.pool.query<{ appointment_id: string; starts_at: string; ends_at: string }>(
-      `SELECT appointment_id,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
-         FROM church_calendar_extra_dates WHERE appointment_id=ANY($1::uuid[]) AND starts_at <= $3::timestamp AND ends_at >= $2::timestamp`, [ids, from, to],
+      `SELECT extra.appointment_id,to_char(extra.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(extra.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
+         FROM church_calendar_extra_dates extra
+        WHERE extra.appointment_id=ANY($1::uuid[]) AND ((extra.starts_at <= $3::timestamp AND extra.ends_at >= $2::timestamp)
+          OR ($4::boolean AND EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
+                 WHERE exception.appointment_id=extra.appointment_id AND exception.original_start=extra.starts_at
+                   AND NOT exception.cancelled AND ${overrideWindow})))`, [ids, from, to, projected],
     );
     const resourceLinks = await context.pool.query<{
       appointment_id: string; resource_booking_id: string; occurrence_start: string | null; name: string; status: string;
@@ -381,7 +412,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE link.appointment_id=ANY($1::uuid[])
         ORDER BY resource.name,booking.starts_at,link.resource_booking_id`, [ids, departmentId],
     );
-    const exceptionMap = new Map(exceptions.rows.map((row) => [`${row.appointment_id}:${row.original_start.replace(" ", "T")}`, row]));
+    const exceptionMap = new Map(exceptions.rows.map((row) => [`${row.appointment_id}:${row.original_start}`, row]));
+    const movedStarts = new Map<string, string[]>();
+    if (projected) for (const exception of exceptions.rows) {
+      const start = cleanLocalDateTime(exception.overrides?.startsAt);
+      if (exception.cancelled || !start || start < from || start > to) continue;
+      const list = movedStarts.get(exception.appointment_id);
+      if (list) list.push(exception.original_start); else movedStarts.set(exception.appointment_id, [exception.original_start]);
+    }
     const canViewResponsiblePeople = canSeePrivatePeople(request);
     const responsibleIds = [...new Set([
       ...appointments.map((row) => row.responsible_contact_id).filter((id): id is string => Boolean(id && /^[0-9a-f-]{36}$/i.test(id))),
@@ -432,10 +470,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const baseEnd = wallDate(row.ends_at);
       const duration = Math.max(0, baseEnd.getTime() - baseStart.getTime());
       const starts = occurrenceStarts(row, from, to);
-      const extras = (extraMap.get(row.id) ?? []).map((extra) => wallDate(extra.startsAt));
-      const deduplicatedStarts = [...new Map([...starts, ...extras].map((start) => [localDateTime(start), start])).values()];
-      for (const start of deduplicatedStarts) {
-        const original = localDateTime(start);
+      const extraEnds = new Map((extraMap.get(row.id) ?? []).map((extra) => [extra.startsAt, extra.endsAt]));
+      const originals = new Set([...starts.map(localDateTime), ...extraEnds.keys()]);
+      for (const original of movedStarts.get(row.id) ?? []) {
+        if (!originals.has(original) && calendarOccurrenceExists(row, original)) originals.add(original);
+      }
+      for (const original of originals) {
         const exception = exceptionMap.get(`${row.id}:${original}`);
         if (exception?.cancelled) continue;
         const override = exception?.overrides ?? {};
@@ -450,13 +490,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const responsibleContactId = typeof rawResponsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(rawResponsibleContactId) ? rawResponsibleContactId : null;
         const signupGroup = signupGroupId ? signupGroupsById.get(signupGroupId) : undefined;
         const startAt = cleanLocalDateTime(override.startsAt) ?? original;
-        const endAt = cleanLocalDateTime(override.endsAt) ?? (extras.some((date) => localDateTime(date) === original)
-          ? (extraMap.get(row.id)?.find((extra) => extra.startsAt === original)?.endsAt ?? localDateTime(new Date(start.getTime() + duration)))
-          : localDateTime(new Date(start.getTime() + duration)));
-        const end = wallDate(endAt);
-        if (end < wallDate(from) || startAt > to) continue;
+        const endAt = cleanLocalDateTime(override.endsAt) ?? extraEnds.get(original) ?? localDateTime(new Date(wallDate(original).getTime() + duration));
+        if (!projected && (endAt < from || startAt > to)) continue;
         const allDay = (override.allDay ?? row.all_day) === true;
         const instants = allDay ? null : appointmentInstants(startAt, endAt, timeZone);
+        const viewTimeZone = displayZone ?? timeZone;
+        const viewStartsAt = instants ? appointmentWallTime(Date.parse(instants.startsAtUtc), viewTimeZone) : startAt;
+        if (projected && (viewStartsAt < visibleFrom || viewStartsAt > visibleTo)) continue;
         const resourceWindow = allDay ? calendarBookingWindow(startAt, endAt, true, timeZone) : instants;
         const seriesBookings = links.get(row.id) ?? [];
         const resourceBookings = [...seriesBookings, ...(links.get(`${row.id}:${original}`) ?? [])].map((booking) => ({
@@ -467,10 +507,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }));
         output.push({
           appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, originalOccurrenceStartAt: original, seriesTimeZone, timeZone,
+          ...(projected ? { viewStartsAt, viewTimeZone } : {}),
           startsAtUtc: instants?.startsAtUtc ?? null, endsAtUtc: instants?.endsAtUtc ?? null, timeShifted: instants?.shifted ?? false, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
           calendarName: row.calendar_name, calendarScope: row.calendar_scope, groupId: row.group_id,
           title: override.title ?? row.title, subtitle: override.subtitle ?? row.subtitle, description: override.description ?? row.description,
-          allDay: override.allDay ?? row.all_day, place: override.place ?? row.place, url: override.url ?? row.url,
+          allDay, place: override.place ?? row.place, url: override.url ?? row.url,
           internalOnly, tags: override.tags ?? row.tags,
           recurrence: row.recurrence, linkedEventId: linkedEvent?.id ?? null, linkedEventCancelled: linkedEvent?.cancelled ?? false, eventRegistration,
           resourceBookingIds: seriesBookings.map((booking) => booking.resource_booking_id), resourceBookings,
@@ -484,7 +525,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         });
       }
     }
-    return output.sort((left, right) => left.occurrenceStartAt.localeCompare(right.occurrenceStartAt)).slice(0, 2500);
+    return output.sort((left, right) => {
+      if (!projected) return left.occurrenceStartAt.localeCompare(right.occurrenceStartAt);
+      const leftTime = left.viewStartsAt ?? left.occurrenceStartAt;
+      const rightTime = right.viewStartsAt ?? right.occurrenceStartAt;
+      return leftTime.slice(0, 10).localeCompare(rightTime.slice(0, 10))
+        || Number(Boolean(right.allDay)) - Number(Boolean(left.allDay))
+        || (displayZone && left.startsAtUtc && right.startsAtUtc ? left.startsAtUtc.localeCompare(right.startsAtUtc) : leftTime.localeCompare(rightTime));
+    }).slice(0, 2500);
   });
 
   app.post<{ Params: { id: string }; Body: { throughDate: string } }>("/api/modules/church-calendar/appointments/:id/registration-groups", { schema: {
@@ -797,9 +845,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         JOIN church_calendar_appointments appointment ON appointment.id=image.appointment_id AND appointment.department_id=image.department_id
         JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
        WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
-         AND (calendar.scope='community' OR calendar.owner_user_id=$3 OR $4 OR EXISTS(
+         AND (calendar.scope='community' OR calendar.owner_user_id=$3 OR (calendar.scope='group' AND ($4 OR EXISTS(
            SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
-            WHERE membership.user_id=$3 AND membership.department_id=$2 AND member.group_id=calendar.group_id))`,
+            WHERE membership.user_id=$3 AND membership.department_id=$2 AND member.group_id=calendar.group_id AND member.status='active'))))`,
       [request.params.id, departmentId, userId(request), hasGroupVisibility(request)]);
     const file = image.rows[0];
     if (!file) return responseError(reply, 404, "Appointment image not found.");
@@ -874,9 +922,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               calendar.id AS "calendarId",calendar.name AS "calendarName",calendar.scope AS "calendarScope",calendar.owner_user_id AS "ownerUserId"
          FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id
         WHERE appointment.department_id=$1 AND appointment.archived_at IS NOT NULL AND calendar.archived_at IS NULL
-          AND (calendar.scope='community' OR calendar.owner_user_id=$2 OR $3 OR EXISTS (
+          AND (calendar.scope='community' OR calendar.owner_user_id=$2 OR (calendar.scope='group' AND ($3 OR EXISTS (
             SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
-             WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=calendar.group_id))
+             WHERE membership.user_id=$2 AND membership.department_id=$1 AND member.group_id=calendar.group_id AND member.status='active'))))
         ORDER BY appointment.archived_at DESC LIMIT 250`, [departmentId, userId(request), hasGroupVisibility(request)]);
     return result.rows.filter((row) => canManageCalendar(request, row.calendarScope, row.ownerUserId));
   });

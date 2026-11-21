@@ -14,3 +14,6 @@
 .church-calendar-registration { display: grid; gap: 0.15rem; margin-block-end: 0.15rem; font-size: 0.75rem; }
 .church-calendar-event-link { display: block; border: 0; background: none; padding: 0; color: var(--accent, #2563eb); text-align: start; text-decoration: underline; cursor: pointer; font: inherit; font-size: 0.75rem; }
 .church-calendar-list-links { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem; padding: 0 0.75rem 0.5rem; }
+
+.church-calendar-display-zone{display:grid;gap:5px;margin:14px 0 0;font-size:12px;font-weight:650}
+.church-calendar-display-zone select{width:100%;min-width:0;padding:6px;border:1px solid var(--line,#d0d5dd);border-radius:7px;background:var(--surface,#fff);color:inherit;font:inherit}
