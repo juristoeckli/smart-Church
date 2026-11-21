@@ -71,10 +71,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const [peopleRows, groupRows, wikiRows, songRows, eventRows, resourceRows, bookingRows] = await Promise.all([
       canViewPrivatePeople ? pool.query<{ id: string; title: string }>(
         localUuidQuery
-          ? `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts WHERE department_id=$1 AND id=$2`
+          ? `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts WHERE department_id=$1 AND archived_at IS NULL AND id=$2`
           : validIdQuery
             ? externalPersonLookupSql(state.contactSourceReady, state.migrationLinksReady)
-            : `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts WHERE department_id=$1 AND concat_ws(' ',first_name,last_name) ILIKE $2 ORDER BY lower(last_name),lower(first_name),id LIMIT 6`,
+            : `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts WHERE department_id=$1 AND archived_at IS NULL AND concat_ws(' ',first_name,last_name) ILIKE $2 ORDER BY lower(last_name),lower(first_name),id LIMIT 6`,
         localUuidQuery || !validIdQuery ? values : [departmentId, id],
       ).then((result) => result.rows) : Promise.resolve([]),
       pool.query<{ id: string; title: string; detail: string }>(
@@ -143,11 +143,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 function externalPersonLookupSql(sourceColumnsReady: boolean, migrationLinksReady: boolean) {
   const selectors: string[] = [];
   if (sourceColumnsReady) selectors.push(`SELECT contact.id,concat_ws(' ',contact.first_name,contact.last_name) AS title
-    FROM contacts contact WHERE contact.department_id=$1 AND contact.source_system='churchtools' AND contact.source_id=$2`);
+    FROM contacts contact WHERE contact.department_id=$1 AND contact.archived_at IS NULL AND contact.source_system='churchtools' AND contact.source_id=$2`);
   if (migrationLinksReady) selectors.push(`SELECT contact.id,concat_ws(' ',contact.first_name,contact.last_name) AS title
     FROM churchtools_migration_links link JOIN contacts contact
       ON contact.id=link.local_record_id AND contact.department_id=link.department_id
-    WHERE link.department_id=$1 AND link.area='person' AND link.source_id=$2`);
+    WHERE link.department_id=$1 AND link.area='person' AND contact.archived_at IS NULL AND link.source_id=$2`);
   return selectors.length
     ? `SELECT DISTINCT id,title FROM (${selectors.join(" UNION ALL ")}) imported_person LIMIT 6`
     : `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts WHERE department_id=$1 AND $2::text IS NOT NULL AND false`;

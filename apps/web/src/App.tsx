@@ -851,15 +851,16 @@ function WorkspaceApp() {
 
   useEffect(() => setLogoUnavailable(false), [logoSrc]);
 
+  const activeContacts = useMemo(() => contacts.filter((contact) => !contact.archivedAt), [contacts]);
   const visibleContacts = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return contacts.filter((contact) => {
+    return activeContacts.filter((contact) => {
       const matchesStatus = statusFilter === "all" || contact.status === statusFilter;
       const matchesQuery = !normalizedQuery || [contact.firstName, contact.lastName, contact.email, contact.phone]
         .some((value) => value?.toLocaleLowerCase().includes(normalizedQuery));
       return matchesStatus && matchesQuery;
     }).sort((a, b) => `${a.lastName} ${a.firstName}`.localeCompare(`${b.lastName} ${b.firstName}`) * (contactSort === "asc" ? 1 : -1));
-  }, [contacts, query, statusFilter, contactSort]);
+  }, [activeContacts, query, statusFilter, contactSort]);
 
   async function addContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1346,8 +1347,8 @@ function WorkspaceApp() {
         }
   }
 
-  const memberCount = contacts.filter((contact) => contact.status === "member").length;
-  const visitorCount = contacts.filter((contact) => contact.status === "visitor").length;
+  const memberCount = activeContacts.filter((contact) => contact.status === "member").length;
+  const visitorCount = activeContacts.filter((contact) => contact.status === "visitor").length;
   const hasServerPermission = (permission: ServerPermission) => authUser?.role === "server_admin" || authUser?.serverPermissions.includes(permission) === true;
   const moduleManagementModules = useMemo(() => {
     const installed = installedModuleCatalog ?? [];
@@ -1819,7 +1820,7 @@ function WorkspaceApp() {
           </section>
 
           <section className="stat-grid" aria-label="People summary">
-            <article className="stat-card"><div className="stat-icon stat-icon-green"><UsersRound size={19} /></div><div className="stat-content"><span>Total people</span><strong>{contacts.length}</strong><small>At this location</small></div></article>
+            <article className="stat-card"><div className="stat-icon stat-icon-green"><UsersRound size={19} /></div><div className="stat-content"><span>Total people</span><strong>{activeContacts.length}</strong><small>At this location</small></div></article>
             <article className="stat-card"><div className="stat-icon stat-icon-blue"><Church size={18} /></div><div className="stat-content"><span>Members</span><strong>{memberCount}</strong><small>At this location</small></div></article>
             <article className="stat-card"><div className="stat-icon stat-icon-amber"><ContactRound size={19} /></div><div className="stat-content"><span>Visitors</span><strong>{visitorCount}</strong><small>At this location</small></div></article>
             {canManagePeople && <button className="stat-card stat-card-action" type="button" onClick={() => contactImportInput.current?.click()} disabled={isSaving}><div className="import-icon"><Plus size={19} /></div><span className="stat-content"><span>Growing together</span><strong className="stat-action-title">Import people</strong><small>Upload a CSV file</small></span><span className="card-arrow">↗</span></button>}
@@ -1833,7 +1834,7 @@ function WorkspaceApp() {
               {visibleContacts.map((contact, index) => <tr key={contact.id} className="people-clickable-row" tabIndex={0} onClick={(event) => { if (!(event.target instanceof Element) || !event.target.closest("button, a, input, select, textarea, summary")) setDetailsContact(contact); }} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) { event.preventDefault(); setDetailsContact(contact); } }}><td><div className="person-cell"><div className={`person-avatar avatar-${index % 6}`}>{initials(contact)}</div><div><strong data-no-translate>{contact.firstName} {contact.lastName}</strong>{contact.importedFrom === "churchtools" ? <small>ChurchTools · read-only</small> : contact.importedFrom === "elvanto" ? <small>Elvanto · read-only</small> : <small data-no-translate>{department.location}</small>}{(contact.elvantoProfile || contact.churchtoolsProfile) && <details><summary>Imported profile</summary><dl>{Object.entries(contact.churchtoolsProfile ?? contact.elvantoProfile ?? {}).map(([key, value]) => <div key={key}><dt>{importedProfileLabels[key] ?? key}</dt><dd data-no-translate>{key === "customFields" && Array.isArray(value) ? value.map((field) => { const item = field as { name?: string; value?: unknown }; return `${item.name ?? "Custom field"}: ${importedProfileValue(item.value)}`; }).join(" · ") : importedProfileValue(value)}</dd></div>)}</dl></details>}{contact.churchtoolsRelationships?.length ? <details className="person-related-people"><summary>Related people</summary><ul>{contact.churchtoolsRelationships.map((relationship, relationIndex) => <li key={`${relationship.relatedContactId}-${relationship.sourceRelationshipId ?? relationIndex}`}>{relationship.relationshipName ? `${relationship.relationshipName}: ` : ""}<span data-no-translate>{relationship.relatedFirstName} {relationship.relatedLastName}</span>{relationship.degreeOfRelationship ? ` · ${relationship.degreeOfRelationship}` : ""}</li>)}</ul></details> : null}</div></div></td><td><span className={`status-pill ${contact.status === "member" ? "status-member" : "status-visitor"}`}><span />{contact.status === "member" ? "Member" : "Visitor"}</span></td><td className="muted-cell" data-no-translate>{contact.email || "—"}</td><td className="muted-cell" data-no-translate>{contact.phone || "—"}</td><td>{canManagePeople && !contact.importedFrom && <div className="event-actions"><button className="event-action" type="button" aria-label={`Edit ${contact.firstName} ${contact.lastName}`} onClick={() => { setEditingContact(contact); setIsAddOpen(true); }}><Pencil size={14} /></button><button className="event-action event-delete-action" type="button" aria-label={`Delete ${contact.firstName} ${contact.lastName}`} onClick={() => void deleteContact(contact)}><Trash2 size={14} /></button></div>}</td></tr>)}
               {visibleContacts.length === 0 && <tr><td colSpan={5} className="empty-state">{isLoading ? "Loading people…" : loadError ? "People could not be loaded." : "No people yet. Add someone to get started."}</td></tr>}
             </tbody></table></div>
-            <footer className="table-footer"><span>Showing <strong>{visibleContacts.length}</strong> of <strong>{contacts.length}</strong> people</span></footer>
+            <footer className="table-footer"><span>Showing <strong>{visibleContacts.length}</strong> of <strong>{activeContacts.length}</strong> people</span></footer>
           </section>
 
           <footer className="page-footer"><span>Made for the moments that matter.</span><span>© 2026 Smart Church</span></footer>

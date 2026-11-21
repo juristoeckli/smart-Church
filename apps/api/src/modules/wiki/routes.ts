@@ -692,7 +692,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.id=ANY($3::uuid[])
-          AND stored.deleted_at IS NULL AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000
+          AND stored.deleted_at IS NULL AND stored.content_type IN ('image/jpeg','image/png') AND stored.file_size BETWEEN 1 AND 2000000
         ORDER BY attachment.created_at,attachment.file_id LIMIT 5`,
       [departmentId, request.params.id, inlineRefs.map((image) => image.fileId)],
     ) : { rows: [] as Array<{ id: string; title: string; fileName: string; fileData: Buffer }> };
@@ -702,7 +702,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.deleted_at IS NULL
-          AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000
+          AND stored.content_type IN ('image/jpeg','image/png') AND stored.file_size BETWEEN 1 AND 2000000
         ORDER BY attachment.created_at,attachment.file_id LIMIT 5`,
       [departmentId, request.params.id],
     );

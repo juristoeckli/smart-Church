@@ -16,13 +16,14 @@ export interface Contact {
   email?: string;
   phone?: string;
   status: ContactStatus;
+  archivedAt?: string;
   importedFrom?: "churchtools" | "elvanto";
   elvantoProfile?: Record<string, unknown>;
   churchtoolsProfile?: Record<string, unknown>;
   churchtoolsRelationships?: ContactRelationship[];
 }
 
-export type CreateContact = Omit<Contact, "id">;
+export type CreateContact = Omit<Contact, "id" | "archivedAt">;
 
 export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 

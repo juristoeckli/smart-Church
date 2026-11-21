@@ -1,3 +1,5 @@
+import { pngForPdf } from "./png.js";
+
 function escapePdf(value: string) {
   return value.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
 }
@@ -117,8 +119,12 @@ export function createWikiPdf(title: string, html: string, images: WikiPdfImage[
 
   for (const image of images.slice(0, 5)) {
     if (image.data.length > 2_000_000) continue;
-    const dimensions = jpegDimensions(image.data);
+    const jpeg = jpegDimensions(image.data);
+    const png = jpeg ? null : pngForPdf(image.data);
+    const dimensions = jpeg ?? png;
     if (!dimensions) continue;
+    const imageData = png?.data ?? image.data;
+    const imageFilter = png ? "FlateDecode" : "DCTDecode";
     const imageObject = objects.length + 1;
     const pageObject = imageObject + 1;
     const contentObject = imageObject + 2;
@@ -135,8 +141,8 @@ export function createWikiPdf(title: string, html: string, images: WikiPdfImage[
       "q", `${width} 0 0 ${height} ${x} ${y} cm`, "/Im1 Do", "Q",
     ].join("\n");
     objects.push(Buffer.concat([
-      Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${dimensions.width} /Height ${dimensions.height} /ColorSpace /${dimensions.colorSpace} /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.data.length} >>\nstream\n`, "ascii"),
-      image.data,
+      Buffer.from(`<< /Type /XObject /Subtype /Image /Width ${dimensions.width} /Height ${dimensions.height} /ColorSpace /${dimensions.colorSpace} /BitsPerComponent 8 /Filter /${imageFilter} /Length ${imageData.length} >>\nstream\n`, "ascii"),
+      imageData,
       Buffer.from("\nendstream", "ascii"),
     ]));
     objects.push(Buffer.from(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 3 0 R >> /XObject << /Im1 ${imageObject} 0 R >> >> /Contents ${contentObject} 0 R >>`, "ascii"));

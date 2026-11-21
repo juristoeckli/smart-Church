@@ -41,3 +41,5 @@ Read APIs require `people_view_private` or `people_manage` at the resolved locat
 The directory and CSV export can filter by active membership in a specific active group or any active group of a selected type at the current location. When both filters are set, the same group must match both. Saved directory views retain the filters. If a saved group or type becomes unavailable, the filter continues to apply until cleared.
 
 Directory, saved views, and CSV support an exact group membership role filter (case-insensitive). When group, group type and role are combined, all filters apply to the same active membership.
+
+People managers can archive or restore a person from their profile. The archive list and its CSV export honor the same filters. Archiving keeps the location contact, linked records, and audit history. Default directory and global search results exclude archived people. Imports continue checking all contacts for duplicates, including archived records.

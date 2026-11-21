@@ -2437,7 +2437,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
   if (!selectedDepartmentId) return reply;
 
   const result = await pool.query(
-    `SELECT id, first_name, last_name, email, phone, status, source_system, elvanto_profile, churchtools_profile
+    `SELECT id, first_name, last_name, email, phone, status, source_system, elvanto_profile, churchtools_profile, archived_at
        FROM contacts
       WHERE department_id = $1
       ORDER BY created_at DESC, last_name, first_name`,
@@ -2501,6 +2501,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
     ...(canViewPrivatePeople && row.email ? { email: row.email } : {}),
     ...(canViewPrivatePeople && row.phone ? { phone: row.phone } : {}),
     status: row.status,
+    ...(row.archived_at ? { archivedAt: new Date(row.archived_at).toISOString() } : {}),
     ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : row.source_system === "elvanto" ? { importedFrom: "elvanto" as const } : {}),
     ...(canViewPrivatePeople && row.source_system === "elvanto" && row.elvanto_profile && Object.keys(row.elvanto_profile).length ? { elvantoProfile: row.elvanto_profile as Record<string, unknown> } : {}),
     ...(canViewPrivatePeople && row.churchtools_profile && Object.keys(row.churchtools_profile).length ? { churchtoolsProfile: row.churchtools_profile as Record<string, unknown> } : {}),
