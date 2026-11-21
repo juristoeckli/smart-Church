@@ -30,6 +30,8 @@ import { canonicalTimeZone } from "../../calendar-time.js";
 import { readChurchToolsAbsencePreview } from "./absence-preview.js";
 import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
+import { isVisibleChurchToolsHistoryPerson, membershipHistoryCursor, membershipHistoryPageSize, personalChurchToolsId, readChurchToolsMembershipHistoryPage, readMembershipHistoryCursor } from "./membership-history.js";
+
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
 const elvantoAreas = ["people", "peopleFlows", "groups", "services", "songs", "calendar", "financial"] as const;
@@ -2173,6 +2175,76 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         }
         throw error;
       } finally { db.release(); }
+    });
+
+    type MembershipHistoryBody = { groupId: string; loginToken: string; cursor?: string };
+    routes.post<{ Body: MembershipHistoryBody }>("/api/modules/sync/churchtools/membership-history", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "loginToken"], properties: {
+        groupId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+        loginToken: { type: "string", pattern: "^[-A-Za-z0-9._~+/=]{8,512}$" },
+        cursor: { type: "string", minLength: 1, maxLength: 1800 },
+      } } },
+    }, async (request, reply) => {
+      const { groupId, cursor, loginToken } = request.body;
+      // Keep the personal credential only in this request's local variable.
+      request.body.loginToken = "";
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      const actor = request.authenticatedUser?.id;
+      const config = await settings(dept);
+      if (!actor || !config) return reply.code(403).send({ error: "Configure ChurchTools and sign in to review membership history." });
+      try {
+        const source = new URL(config.instance_url);
+        if (source.protocol !== "https:" || source.username || source.password || source.search || source.hash) {
+          throw new Error("Invalid ChurchTools instance URL.");
+        }
+      } catch {
+        return reply.code(409).send({ error: "Use a configured HTTPS ChurchTools connection to review membership history." });
+      }
+      const verified = await pool!.query<{ source_person_id: string }>(`SELECT proof.source_person_id
+        FROM department_memberships member JOIN contacts person ON person.id=member.contact_id
+          AND person.department_id=member.department_id AND person.archived_at IS NULL
+        JOIN churchtools_migration_person_provenance proof ON proof.department_id=person.department_id AND proof.contact_id=person.id
+        WHERE member.department_id=$1 AND member.user_id=$2 AND proof.instance_url=$3`, [dept, actor, config.instance_url]);
+      const ownerSourceId = verified.rows[0]?.source_person_id;
+      if (!ownerSourceId) return reply.code(403).send({ error: "Link your account to a verified ChurchTools People record at this location." });
+      const binding = { departmentId: dept, instanceUrl: config.instance_url, groupId, ownerSourceId, actor };
+      let offsetId: string | undefined;
+      if (cursor) {
+        try { offsetId = readMembershipHistoryCursor(JSON.parse(decrypt(cursor)), binding) ?? undefined; }
+        catch { /* Reject invalid, expired, and differently scoped cursors uniformly. */ }
+        if (!offsetId) return reply.code(409).send({ error: "The membership-history review expired. Start a fresh review." });
+      }
+      const signal = AbortSignal.timeout(20_000);
+      try {
+        const identity = await get(config.instance_url, loginToken, "whoami", signal);
+        if (personalChurchToolsId(identity) !== ownerSourceId) {
+          return reply.code(403).send({ error: "Use the personal ChurchTools token for your own verified account." });
+        }
+        const query = new URLSearchParams({ limit: String(membershipHistoryPageSize), ...(offsetId ? { offset_id: offsetId } : {}) });
+        const payload = await get(config.instance_url, loginToken, `groups/${groupId}/members/history?${query}`, signal);
+        const source = readChurchToolsMembershipHistoryPage(payload, groupId, offsetId);
+        const persons = [...new Set(source.rows.map(({ personId }) => personId))];
+        const visible = new Set((await mapConcurrent(persons, 5, async (personId) => {
+          try {
+            const current = await get(config.instance_url, loginToken, `persons/${personId}`, signal);
+            return isVisibleChurchToolsHistoryPerson(current, personId) ? personId : null;
+          } catch (error) {
+            if (error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status)) return null;
+            throw error;
+          }
+        })).filter((person): person is string => person !== null));
+        return reply.header("Cache-Control", "private, no-store").send({
+          sourceInstance: config.instance_url, sourceGroupId: groupId,
+          entries: source.rows.filter(({ personId }) => visible.has(personId)),
+          nextCursor: source.nextOffset ? encrypt(JSON.stringify(membershipHistoryCursor(binding, source.nextOffset))) : null,
+        });
+      } catch (error) {
+        if (error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status)) {
+          return reply.code(403).send({ error: "ChurchTools did not permit this account to review the group history." });
+        }
+        return reply.code(400).send({ error: "Could not verify a complete group-history batch. Try the review again." });
+      }
     });
 
     type VolunteerResponseBody = { eventId: string; reviewHash?: string; sourceIds?: string[] };
