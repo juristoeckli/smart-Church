@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 type Range = { startsOn: string; endsOn: string };
-type Row = Range & { id: string };
+type Row = Range & { id: string; startsAt?: string; endsAt?: string };
 type Translate = (message: string) => string;
 const endpoint = "/api/events/volunteer-absences";
 const empty = { startsOn: "", endsOn: "" };
@@ -72,6 +72,9 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
   const [linked, setLinked] = useState<boolean | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
   const [draft, setDraft] = useState<Range>(empty);
+  const [timeZone, setTimeZone] = useState<string | null>(null);
+  const [timed, setTimed] = useState(false);
+  const [clock, setClock] = useState({ startsAt: "", endsAt: "" });
   const [editing, setEditing] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -79,9 +82,10 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
     if (!open) return;
     const controller = new AbortController();
     void fetch(endpoint, { signal: controller.signal, headers: { "x-department-id": departmentId } }).then(async (response) => {
-      const result = await response.json() as { linked: boolean; rows: Row[]; error?: string };
+      const result = await response.json() as { linked: boolean; timeZone: string | null; rows: Row[]; error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not load volunteer availability.");
       setLinked(result.linked);
+      setTimeZone(result.timeZone);
       setRows(result.rows);
     }).catch((cause: unknown) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Could not load volunteer availability.");
@@ -89,7 +93,7 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
     return () => controller.abort();
   }, [departmentId, open]);
 
-  function stopEditing() { setEditing(""); setDraft(empty); }
+  function stopEditing() { setEditing(""); setDraft(empty); setTimed(false); setClock({ startsAt: "", endsAt: "" }); }
   async function mutate(method: "POST" | "PUT" | "DELETE", id?: string) {
     setBusy(true);
     setError("");
@@ -97,7 +101,7 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
       const response = await fetch(id ? `${endpoint}/${id}` : endpoint, {
         method, headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken,
           ...(method === "DELETE" ? {} : { "Content-Type": "application/json" }) },
-        ...(method === "DELETE" ? {} : { body: JSON.stringify(draft) }),
+        ...(method === "DELETE" ? {} : { body: JSON.stringify(timed ? clock : draft) }),
       });
       const result = await response.json() as Row & { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not save volunteer availability.");
@@ -114,24 +118,41 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
   return <details className="directory-card" onToggle={(event) => { setError(""); setOpen(event.currentTarget.open); }}>
     <summary>{t("My volunteer availability")}</summary>
     {open && <>
-      <p>{t("Record all-day absences. Event managers see an availability warning if you are already assigned to an overlapping event.")}</p>
+      <p>{t("Record all-day or timed absences. Event managers see an availability warning if you are already assigned to an overlapping event.")}</p>
       {linked === null && !error && <p role="status">{t("Loading availability…")}</p>}
       {linked === false && <p>{t("Link your account to a People record at this location to use volunteer availability.")}</p>}
       {linked && <>
         {rows.length ? <ul>{rows.map((row) => <li key={row.id}>
-          <span>{row.startsOn}{row.endsOn !== row.startsOn ? ` – ${row.endsOn}` : ""}</span>{" "}
+          <span>{row.startsAt && row.endsAt ? `${row.startsAt.replace("T", " ")} – ${row.endsAt.replace("T", " ")}`
+            : row.startsOn + (row.endsOn !== row.startsOn ? ` – ${row.endsOn}` : "")}</span>{" "}
           <button type="button" className="button button-secondary" disabled={busy}
-            onClick={() => { setEditing(row.id); setDraft({ startsOn: row.startsOn, endsOn: row.endsOn }); }}>{t("Edit dates")}</button>{" "}
+            onClick={() => {
+              setEditing(row.id);
+              setDraft({ startsOn: row.startsOn, endsOn: row.endsOn });
+              setTimed(!!row.startsAt);
+              setClock({ startsAt: row.startsAt ?? "", endsAt: row.endsAt ?? "" });
+            }}>{t("Edit absence")}</button>{" "}
           <button type="button" className="button button-secondary" disabled={busy} onClick={() => void mutate("DELETE", row.id)}>{t("Remove absence")}</button>
         </li>)}</ul> : <p>{t("No absences recorded.")}</p>}
         <form onSubmit={save}>
           <fieldset disabled={busy}>
-            <div className="form-row">
+            <label>{t("Absence type")}<select value={timed ? "time" : "days"} onChange={(event) => setTimed(event.target.value === "time")}>
+              <option value="days">{t("All day")}</option><option value="time" disabled={!timeZone}>{t("Timed")}</option>
+            </select></label>
+            {timed ? <>
+              <p>{timeZone} · {t("When the clock repeats, the later time is used.")}</p>
+              <div className="form-row">
+                <label>{t("Starts at")}<input type="datetime-local" step="1" required value={clock.startsAt}
+                  onChange={(event) => setClock({ ...clock, startsAt: event.target.value })} /></label>
+                <label>{t("Ends at")}<input type="datetime-local" step="1" required value={clock.endsAt}
+                  onChange={(event) => setClock({ ...clock, endsAt: event.target.value })} /></label>
+              </div>
+            </> : <div className="form-row">
               <label>{t("First day")}<input type="date" required value={draft.startsOn} max={draft.endsOn || undefined}
                 onChange={(event) => setDraft({ ...draft, startsOn: event.target.value })} /></label>
               <label>{t("Last day (inclusive)")}<input type="date" required value={draft.endsOn} min={draft.startsOn || undefined}
                 onChange={(event) => setDraft({ ...draft, endsOn: event.target.value })} /></label>
-            </div>
+            </div>}
             <button type="submit" className="button button-primary">{t(editing ? "Save absence" : "Add absence")}</button>
             {editing && <button type="button" className="button button-secondary" onClick={stopEditing}>{t("Cancel editing")}</button>}
           </fieldset>

@@ -8,6 +8,7 @@ export type AbsenceScope = { departmentId: string; instanceUrl: string; personId
 type SourcePreview = ReturnType<typeof readChurchToolsAbsencePreview>;
 type Receipt = { source_absence_id: string; absence_id: string | null; originalStart: string; originalEnd: string; localStart: string | null; localEnd: string | null };
 type Range = { startsOn: string; endsOn: string };
+type LocalRange = Range & { timed: boolean };
 type Consent = Range & { confirmedAt: string };
 
 export async function verifiedAbsenceContact(db: Db, scope: AbsenceScope, lock = false) {
@@ -19,7 +20,7 @@ export async function verifiedAbsenceContact(db: Db, scope: AbsenceScope, lock =
 }
 
 function absenceStatus(source: SourcePreview["dates"][number], receipt: Receipt | undefined, scope: Pick<AbsenceScope, "from" | "through">,
-  consent: Consent | null, local: Range[],
+  consent: Consent | null, local: LocalRange[],
 ) {
   const { sourceStartDate: start, sourceEndDate: end, timed } = source;
   if (timed) return "timed_source";
@@ -32,7 +33,7 @@ function absenceStatus(source: SourcePreview["dates"][number], receipt: Receipt 
   if (start < scope.from || end > scope.through) return "outside_review";
   if (!consent) return "consent_required";
   if (start < consent.startsOn || end > consent.endsOn) return "outside_consent";
-  if (local.some(({ startsOn, endsOn }) => startsOn === start && endsOn === end)) return "local_copy_present";
+  if (local.some(({ startsOn, endsOn, timed }) => !timed && startsOn === start && endsOn === end)) return "local_copy_present";
   if (local.some(({ startsOn, endsOn }) => start <= endsOn && end >= startsOn)) return "local_overlap";
   return "ready";
 }
@@ -47,11 +48,17 @@ export async function reviewChurchToolsAbsenceImport(db: Db, scope: AbsenceScope
     ${lock ? "FOR SHARE OF grant_row,member" : ""}`, args);
   if (lock) await db.query("LOCK TABLE event_volunteer_absences IN SHARE ROW EXCLUSIVE MODE");
   const [local, receipts] = await Promise.all([
-    db.query<Range>(`SELECT starts_on::text AS "startsOn",ends_on::text AS "endsOn" FROM event_volunteer_absences
-      WHERE department_id=$1 AND contact_id=$2 AND starts_on<=$4::date AND ends_on>=$3::date ORDER BY starts_on,ends_on,id`,
+    db.query<LocalRange>(`SELECT first_day::text AS "startsOn",last_day::text AS "endsOn",timed FROM (
+      SELECT COALESCE((a.starts_at AT TIME ZONE d.time_zone)::date,a.starts_on) AS first_day,
+        COALESCE(((a.ends_at - interval '1 microsecond') AT TIME ZONE d.time_zone)::date,a.ends_on) AS last_day,
+        a.starts_at IS NOT NULL AS timed
+      FROM event_volunteer_absences a JOIN departments d ON d.id=a.department_id
+      WHERE a.department_id=$1 AND a.contact_id=$2
+    ) local_ranges WHERE first_day<=$4::date AND last_day>=$3::date ORDER BY first_day,last_day,timed`,
     [scope.departmentId, contactId, scope.from, scope.through]),
     db.query<Receipt>(`SELECT receipt.source_absence_id,receipt.absence_id,receipt.original_start::text AS "originalStart",
-      receipt.original_end::text AS "originalEnd",local_record.starts_on::text AS "localStart",local_record.ends_on::text AS "localEnd"
+      receipt.original_end::text AS "originalEnd",CASE WHEN local_record.starts_at IS NULL THEN local_record.starts_on::text END AS "localStart",
+      CASE WHEN local_record.starts_at IS NULL THEN local_record.ends_on::text END AS "localEnd"
       FROM churchtools_migration_absence_receipts receipt LEFT JOIN event_volunteer_absences local_record
         ON local_record.id=receipt.absence_id AND local_record.department_id=receipt.department_id AND local_record.contact_id=receipt.contact_id
       WHERE receipt.department_id=$1 AND receipt.instance_url=$2 AND receipt.source_person_id=$3 AND receipt.contact_id=$4`, args),
