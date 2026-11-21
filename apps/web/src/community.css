@@ -5,6 +5,10 @@
 .community-stat-arrow{margin-left:auto;align-self:center;color:var(--muted)}
 .community-upcoming-card{overflow:hidden}
 .community-upcoming-list{padding:0 20px 8px}
+.home-welcome-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+.home-welcome-copy{min-width:0;overflow-wrap:anywhere}
+.home-welcome-form{display:grid;gap:8px;margin-bottom:12px;padding:14px}
+.home-welcome-form label{display:grid;gap:4px}.home-welcome-form input{width:100%;padding:8px;border:1px solid var(--line);border-radius:7px;color:var(--ink);background:var(--panel)}
 .home-duty-list{list-style:none;margin:0}.community-upcoming-item.home-duty-item small{white-space:normal;overflow-wrap:anywhere}.community-upcoming-item>.home-duty-actions{flex-direction:row;flex-wrap:wrap}
 @media(max-width:640px){.community-upcoming-item.home-duty-item{grid-template-columns:1fr;padding:10px 0;gap:6px}}
 .community-upcoming-item{min-height:58px;display:grid;grid-template-columns:115px minmax(0,1fr) auto;align-items:center;gap:14px;border-top:1px solid var(--line)}

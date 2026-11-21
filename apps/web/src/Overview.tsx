@@ -3,6 +3,7 @@ import { ArrowDown, ArrowRight, ArrowUp, Building2, CalendarDays, ContactRound, 
 import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { HomeDutyRequests } from "./HomeDutyRequests";
+import { HomeWelcome } from "./HomeWelcome";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
 import { translateModuleUiOverrideMessage } from "./modules/ui-translation-overrides";
 
@@ -41,12 +42,13 @@ async function loadHomeBookings(departmentId: string, signal?: AbortSignal) {
   return response.ok ? await response.json() as HomeBookings : null;
 }
 
-export function Overview({ departmentId, departmentLocation, timeZone, contacts, csrfToken, onNavigate, onOpenBooking, onOpenGroupCalendar, onOpenEvent }: {
+export function Overview({ departmentId, departmentLocation, timeZone, contacts, csrfToken, canManageSite, onNavigate, onOpenBooking, onOpenGroupCalendar, onOpenEvent }: {
   departmentId: string;
   departmentLocation: string;
   timeZone: string;
   contacts: Contact[];
   csrfToken: string;
+  canManageSite: boolean;
   onNavigate: (page: OverviewPage) => void;
   onOpenBooking: (id: string) => void;
   onOpenGroupCalendar: () => void;
@@ -250,7 +252,8 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
 
   return <>
     <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error ? translateModuleUiOverrideMessage("core-admin", getActiveLanguage(), error) : translate("overview.churchAt").replace("{location}", departmentLocation)}</div>
-    <section className="page-heading"><div><div className="eyebrow">{translate("overview.eyebrow")}</div><h1>{translate("overview.title")}</h1><p className="page-subtitle">{translate("overview.subtitle")}</p></div><button className="button button-secondary" type="button" onClick={() => { setDashboardDraft(dashboardWidgets); setDashboardSettingsOpen(true); }}><Settings2 size={15} />{translate("overview.customizeHome")}</button></section>
+    <HomeWelcome departmentId={departmentId} csrfToken={csrfToken} canEdit={canManageSite}
+      actions={<button className="button button-secondary" type="button" onClick={() => { setDashboardDraft(dashboardWidgets); setDashboardSettingsOpen(true); }}><Settings2 size={15} />{translate("overview.customizeHome")}</button>} />
     {dashboardWidgets.order.map((id) => dashboardWidgets.visible.includes(id) ? <div key={id}>{widgetContent[id]}</div> : null)}
     {dashboardFeedback && <p role="status" className="community-empty">{dashboardFeedback}</p>}
     {dashboardSettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDashboardSettingsOpen(false)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="overview-dashboard-settings-title"><div className="modal-heading"><div><span className="eyebrow">{translate("overview.eyebrow")}</span><h2 id="overview-dashboard-settings-title">{translate("overview.customizeHome")}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDashboardSettingsOpen(false)}><X size={19} /></button></div><p>{translate("overview.customizeHomeHelp")}</p><div className="dashboard-widget-settings">{dashboardDraft.order.map((id, index) => <div className="dashboard-widget-setting" key={id}><label><input type="checkbox" checked={dashboardDraft.visible.includes(id)} onChange={(event) => setDashboardDraft((current) => ({ ...current, visible: event.target.checked ? [...current.visible, id] : current.visible.filter((visibleId) => visibleId !== id) }))} /><span>{translate(dashboardWidgetLabels[id])}</span></label><span><button className="icon-button" type="button" aria-label={translate("overview.moveWidgetUp")} disabled={index === 0} onClick={() => setDashboardDraft((current) => { const order = [...current.order]; [order[index - 1], order[index]] = [order[index], order[index - 1]]; return { ...current, order }; })}><ArrowUp size={16} /></button><button className="icon-button" type="button" aria-label={translate("overview.moveWidgetDown")} disabled={index === dashboardDraft.order.length - 1} onClick={() => setDashboardDraft((current) => { const order = [...current.order]; [order[index + 1], order[index]] = [order[index], order[index + 1]]; return { ...current, order }; })}><ArrowDown size={16} /></button></span></div>)}</div><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDashboardSettingsOpen(false)}>{translate("events.cancel")}</button><button className="button button-primary" type="button" disabled={dashboardSaving} onClick={() => void saveDashboardWidgets()}>{dashboardSaving ? translate("events.saving") : translate("events.saveChanges")}</button></div></section></div>}
