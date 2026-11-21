@@ -6,6 +6,8 @@ type EntityType = "person" | "group" | "wiki" | "song";
 type SearchResult = { id: string; type: EntityType; title: string; detail?: string };
 type Categories = { people: SearchResult[]; groups: SearchResult[]; wiki: SearchResult[]; songs: SearchResult[] };
 type SearchResponse = { isIdQuery: boolean; canSearchPeople: boolean; categories: Categories };
+type QuickCreateType = "person" | "group" | "wiki";
+type QuickCreateAction = { type: QuickCreateType; label: string; description: string };
 function loadRecent(recentStorageKey: string): string[] {
   try {
     const value = JSON.parse(localStorage.getItem(recentStorageKey) ?? "[]");
@@ -13,10 +15,12 @@ function loadRecent(recentStorageKey: string): string[] {
   } catch { return []; }
 }
 
-export function GlobalSearch({ departmentId, userId, onNavigateEntity }: {
+export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCreateActions = [], onQuickCreate }: {
   departmentId: string;
   userId: string;
   onNavigateEntity?: (type: EntityType, id: string) => void;
+  quickCreateActions?: QuickCreateAction[];
+  onQuickCreate?: (type: QuickCreateType) => void;
 }) {
   const recentStorageKey = `smart-church-global-search-recent:${departmentId}:${userId}`;
   const [open, setOpen] = useState(false);
@@ -105,7 +109,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity }: {
       <section className="global-search-dialog" role="dialog" aria-modal="true" aria-label="Global search">
         <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search People, Groups, Wiki, Songs or # ID" aria-label="Search People, Groups, Wiki, Songs or ID" autoComplete="off" /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
         <div className="global-search-body">
-          {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly.</p>{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
+          {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly.</p>{quickCreateActions.length > 0 && onQuickCreate && <section className="global-search-quick-create"><strong>Quick create</strong>{quickCreateActions.map((action) => <button type="button" key={action.type} onClick={() => { hide(); onQuickCreate(action.type); }}><span><b>{action.label}</b><small>{action.description}</small></span></button>)}</section>}{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
           {query.trim() && !query.trim().startsWith("#") && query.trim().length < 2 && <p className="global-search-hint">Type at least two characters, or enter # followed by a record ID.</p>}
           {loading && <p className="global-search-status" role="status">Searching…</p>}
           {error && <p className="global-search-status global-search-error" role="alert">{error}</p>}

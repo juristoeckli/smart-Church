@@ -12,7 +12,7 @@ type FeedGroup = { id: string; name: string; isSubscribed: boolean };
 type FeedAttachment = { id: string; filename: string; contentType: string; url: string };
 type FeedLink = { type: "person" | "group" | "wiki" | "song"; id: string; label: string };
 type EntityOption = { id: string; label: string };
-type FeedNotification = { id: string; postId: string; kind: "post" | "reaction" | "comment"; createdAt: string; readAt: string | null; actorName: string | null; postTitle: string; summary: string };
+type FeedNotification = { id: string; postId: string; kind: "post" | "reaction" | "comment" | "mention"; createdAt: string; readAt: string | null; actorName: string | null; postTitle: string; summary: string };
 type FeedReport = { id: string; postId: string; title: string; body: string; authorName: string; reporterName: string; reason: "spam" | "inappropriate" | "harmful" | "other"; details: string; status: "open" | "dismissed" | "actioned"; createdAt: string };
 type FeedNotificationPreferences = { posts: boolean; reactions: boolean; comments: boolean; emailPosts: boolean; emailReactions: boolean; emailComments: boolean };
 type FeedPost = {
@@ -56,6 +56,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const [visibility, setVisibility] = useState<"location" | "members">("location");
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
+  const [mentionedPeople, setMentionedPeople] = useState<EntityOption[]>([]);
   const [publishAt, setPublishAt] = useState("");
   const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
@@ -72,6 +73,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const [linkQuery, setLinkQuery] = useState("");
   const [entityOptions, setEntityOptions] = useState<EntityOption[]>([]);
   const [postLinks, setPostLinks] = useState<FeedLink[]>([]);
+  const canMentionPeople = canManageSite || department.role === "site_admin" || (department.permissions ?? []).includes("people_view_private") || (department.permissions ?? []).includes("people_manage");
   const [notifications, setNotifications] = useState<FeedNotification[]>([]);
   const [notificationPreferences, setNotificationPreferences] = useState<FeedNotificationPreferences>({ posts: true, reactions: true, comments: true, emailPosts: true, emailReactions: true, emailComments: true });
   const [notificationPreferencesLoaded, setNotificationPreferencesLoaded] = useState(false);
@@ -82,6 +84,8 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const [reports, setReports] = useState<FeedReport[]>([]);
   const [showReports, setShowReports] = useState(false);
   const [reportStatus, setReportStatus] = useState<FeedReport["status"]>("open");
+
+  useEffect(() => { if (!canMentionPeople && linkType === "person") setLinkType("group"); }, [canMentionPeople, linkType]);
 
   useEffect(() => {
     if (!detailsPost) return;
@@ -158,15 +162,20 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   }
 
   useEffect(() => {
-    if (!linkQuery.trim()) { setEntityOptions([]); return; }
+    if (!linkQuery.trim() || (linkType === "person" && !canMentionPeople)) { setEntityOptions([]); return; }
     const controller = new AbortController();
     const timer = window.setTimeout(() => void fetch(`/api/modules/community-feed/entities?${new URLSearchParams({ type: linkType, q: linkQuery })}`, { headers: { "x-department-id": departmentId }, signal: controller.signal })
       .then((response) => response.json() as Promise<EntityOption[]>).then(setEntityOptions).catch(() => undefined), 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [departmentId, linkType, linkQuery]);
+  }, [departmentId, linkType, linkQuery, canMentionPeople]);
 
   function addLink(option: EntityOption) {
-    if (!postLinks.some((link) => link.type === linkType && link.id === option.id)) setPostLinks((current) => [...current, { type: linkType, ...option }]);
+    if (linkType === "person") {
+      if (canMentionPeople && !mentionedPeople.some((person) => person.id === option.id)) {
+        setMentionedPeople((current) => [...current, option]);
+        setBody((current) => `${current}${current && !current.endsWith(" ") ? " " : ""}@${option.label}`);
+      }
+    } else if (!postLinks.some((link) => link.type === linkType && link.id === option.id)) setPostLinks((current) => [...current, { type: linkType, ...option }]);
     setLinkQuery(""); setEntityOptions([]);
   }
 
@@ -181,12 +190,13 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     formEvent.preventDefault();
     setSaving(true); setError(""); setFeedback("");
     try {
-      const result = await sendMutation("/api/modules/community-feed/posts", "POST", { title: title.trim(), body: body.trim(), publishAt: publishAt ? new Date(publishAt).toISOString() : null, commentsEnabled, groupId: groupId || null, visibility });
+      const validMentions = mentionedPeople.filter((person) => body.includes(`@${person.label}`));
+      const result = await sendMutation("/api/modules/community-feed/posts", "POST", { title: title.trim(), body: body.trim(), mentions: validMentions.map((person) => person.id), publishAt: publishAt ? new Date(publishAt).toISOString() : null, commentsEnabled, groupId: groupId || null, visibility });
       const postId = String(result.id);
       if (!postId || postId === "undefined") throw new Error("The post was created, but its attachments could not be saved. Refresh the feed and edit the post.");
       for (const file of files) await uploadAttachment(postId, file);
       for (const link of postLinks) await sendMutation(`/api/modules/community-feed/posts/${postId}/links`, "POST", { type: link.type, entityId: link.id });
-      setTitle(""); setBody(""); setFiles([]); setPostLinks([]); setPublishAt(""); setCommentsEnabled(true); setGroupId(""); setVisibility("location");
+      setTitle(""); setBody(""); setFiles([]); setPostLinks([]); setMentionedPeople([]); setPublishAt(""); setCommentsEnabled(true); setGroupId(""); setVisibility("location");
       setFeedback(publishAt ? t("Your post was scheduled.") : t("Your post was published."));
       await load();
     } catch (reason) { setError(reason instanceof Error ? t(reason.message) : t("Could not publish the post.")); }
@@ -346,7 +356,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
       <input aria-label={t("Post title")} maxLength={120} placeholder={t("Title (optional)")} value={title} onChange={(event) => setTitle(event.target.value)} />
       <textarea aria-label={t("Post text")} maxLength={4000} required rows={4} placeholder={t("What would you like the church to know?")} value={body} onChange={(event) => setBody(event.target.value)} />
       <label>{t("Photos and files (up to five, 1 MiB each)")}<input type="file" multiple accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain" onChange={(event) => { const chosen = Array.from(event.target.files ?? []).slice(0, 5); const invalid = chosen.find((file) => file.size > 1_048_576); if (invalid) { setError(t("Each attachment must be 1 MiB or smaller.")); setFiles([]); } else { setError(""); setFiles(chosen); } }} /></label>{files.length > 0 && <small>{files.map((file) => file.name).join(" · ")}</small>}
-      <div className="community-post-composer-options"><label>{t("Link or mention")}<select value={linkType} onChange={(event) => setLinkType(event.target.value as FeedLink["type"])}><option value="person">{t("Person")}</option><option value="group">{t("Group")}</option><option value="wiki">{t("Wiki page")}</option><option value="song">{t("Song")}</option></select></label><label>{t("Search this location")}<input value={linkQuery} onChange={(event) => setLinkQuery(event.target.value)} placeholder={t("Type a name…")} /></label>{entityOptions.length > 0 && <div role="listbox" className="community-entity-options">{entityOptions.map((option) => <button type="button" key={option.id} onClick={() => addLink(option)}>{option.label}</button>)}</div>}</div>{postLinks.length > 0 && <div className="community-post-link-chips">{postLinks.map((link) => <button type="button" key={`${link.type}:${link.id}`} onClick={() => setPostLinks((current) => current.filter((item) => item.id !== link.id || item.type !== link.type))}>{link.type}: {link.label} ×</button>)}</div>}
+      <div className="community-post-composer-options"><label>{t("Link or mention")}<select value={linkType} onChange={(event) => setLinkType(event.target.value as FeedLink["type"])}><option value="person" disabled={!canMentionPeople}>{t("Mention a person")}</option><option value="group">{t("Group")}</option><option value="wiki">{t("Wiki page")}</option><option value="song">{t("Song")}</option></select></label><label>{t("Search this location")}<input value={linkQuery} onChange={(event) => setLinkQuery(event.target.value)} placeholder={t("Type a name…")} /></label>{entityOptions.length > 0 && <div role="listbox" className="community-entity-options">{entityOptions.map((option) => <button type="button" key={option.id} onClick={() => addLink(option)}>{option.label}</button>)}</div>}</div>{mentionedPeople.length > 0 && <div className="community-post-link-chips">{mentionedPeople.map((person) => <button type="button" key={`mention:${person.id}`} onClick={() => { setMentionedPeople((current) => current.filter((item) => item.id !== person.id)); setBody((current) => current.replace(`@${person.label}`, "").replace(/\s{2,}/g, " ")); }}>@{person.label} ×</button>)}</div>}{postLinks.length > 0 && <div className="community-post-link-chips">{postLinks.map((link) => <button type="button" key={`${link.type}:${link.id}`} onClick={() => setPostLinks((current) => current.filter((item) => item.id !== link.id || item.type !== link.type))}>{link.type}: {link.label} ×</button>)}</div>}
       <div className="community-post-composer-options"><label>{t("Post to group (optional)")}<select value={groupId} onChange={(event) => { setGroupId(event.target.value); if (!event.target.value) setVisibility("location"); }}><option value="">{t("Everyone in this location")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>{groupId && <><label>{t("Who can see this post?")}<select value={visibility} onChange={(event) => setVisibility(event.target.value as "location" | "members")}><option value="location">{t("Everyone in this location")}</option><option value="members">{t("Group members only")}</option></select></label>{(() => { const group = groups.find((item) => item.id === groupId); return group ? <button className="community-post-details" type="button" onClick={() => void toggleSubscription(group)}>{group.isSubscribed ? t("Unfollow group") : t("Follow group")}</button> : null; })()}</>}</div>
       <div className="community-post-composer-options"><label>{t("Schedule publication")}<input type="datetime-local" min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} value={publishAt} onChange={(event) => setPublishAt(event.target.value)} /></label><label className="community-post-checkbox"><input type="checkbox" checked={commentsEnabled} onChange={(event) => setCommentsEnabled(event.target.checked)} />{t("Allow comments")}</label></div>
       <div className="community-post-composer-footer"><small>{body.length}/4000</small><button className="button button-primary" type="submit" disabled={saving || !body.trim()}><Send size={15} />{saving ? t("Saving…") : publishAt ? t("Schedule post") : t("Publish")}</button></div>
@@ -356,7 +366,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     <section className="community-feed-notifications" aria-label={t("Community notifications")}>
       <div className="community-feed-notifications-heading"><strong><Bell size={16} /> {t("Notifications")}{notifications.some((item) => !item.readAt) ? ` · ${notifications.filter((item) => !item.readAt).length}` : ""}</strong>{notifications.some((item) => !item.readAt) && <button type="button" className="community-post-details" onClick={() => void markNotificationsRead()}>{t("Mark all read")}</button>}</div>
       <details className="community-notification-preferences"><summary>{t("Notification preferences")}</summary><div className="community-notification-preference-group"><strong>{t("In-app alerts")}</strong><div className="community-notification-preference-options"><label><input type="checkbox" disabled={!notificationPreferencesLoaded} checked={notificationPreferences.posts} onChange={(event) => setNotificationPreferences((current) => ({ ...current, posts: event.target.checked }))} />{t("New post notifications")}</label><label><input type="checkbox" disabled={!notificationPreferencesLoaded} checked={notificationPreferences.reactions} onChange={(event) => setNotificationPreferences((current) => ({ ...current, reactions: event.target.checked }))} />{t("Reaction notifications")}</label><label><input type="checkbox" disabled={!notificationPreferencesLoaded} checked={notificationPreferences.comments} onChange={(event) => setNotificationPreferences((current) => ({ ...current, comments: event.target.checked }))} />{t("Comment notifications")}</label></div></div><div className="community-notification-preference-group"><strong>{t("Email alerts")}</strong><p>{t("Email alerts also require Email notifications to be enabled in Notifications for this location.")}</p><div className="community-notification-preference-options"><label><input type="checkbox" disabled={!notificationPreferencesLoaded} checked={notificationPreferences.emailPosts} onChange={(event) => setNotificationPreferences((current) => ({ ...current, emailPosts: event.target.checked }))} />{t("New post email alerts")}</label><label><input type="checkbox" disabled={!notificationPreferencesLoaded} checked={notificationPreferences.emailReactions} onChange={(event) => setNotificationPreferences((current) => ({ ...current, emailReactions: event.target.checked }))} />{t("Reaction email alerts")}</label><label><input type="checkbox" disabled={!notificationPreferencesLoaded} checked={notificationPreferences.emailComments} onChange={(event) => setNotificationPreferences((current) => ({ ...current, emailComments: event.target.checked }))} />{t("Comment email alerts")}</label><button type="button" className="community-post-details" disabled={!notificationPreferencesLoaded || savingNotificationPreferences} onClick={() => void saveNotificationPreferences()}>{savingNotificationPreferences ? t("Saving…") : t("Save preferences")}</button></div></div></details>
-      {notifications.length ? <ul>{notifications.slice(0, 8).map((item) => <li key={item.id} className={item.readAt ? "is-read" : "is-unread"}><button type="button" onClick={() => void openNotification(item)}><span>{item.actorName ? `${item.actorName} ${item.summary}` : item.summary}{item.postTitle ? ` · ${item.postTitle}` : ""}</span><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></button></li>)}</ul> : <p>{t("You have no community notifications yet.")}</p>}
+      {notifications.length ? <ul>{notifications.slice(0, 8).map((item) => <li key={item.id} className={item.readAt ? "is-read" : "is-unread"}><button type="button" onClick={() => void openNotification(item)}><span>{item.actorName ? `${item.actorName} ${t(item.summary)}` : item.summary}{item.postTitle ? ` · ${item.postTitle}` : ""}</span><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></button></li>)}</ul> : <p>{t("You have no community notifications yet.")}</p>}
     </section>
     <div className="community-feed-filters"><label>{t("Show")}<select value={feedScope} onChange={(event) => setFeedScope(event.target.value as "all" | "mine" | "groups" | "following" | "hidden")}><option value="all">{t("All posts")}</option><option value="groups">{t("Group posts")}</option><option value="following">{t("Following")}</option><option value="mine">{t("My posts")}</option><option value="hidden">{t("Hidden posts")}</option></select></label>{feedScope === "groups" && <label>{t("Group")}<select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="">{t("All my groups")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}{canReviewReports && <button type="button" className="community-post-details" onClick={() => { const next = !showReports; setShowReports(next); if (next) void loadReports(); }}>{showReports ? t("Hide reports") : t("Review reports")}</button>}</div>
     {showReports && <section className="community-post-list" aria-label={t("Post reports")}><div className="community-feed-filters"><label>{t("Report status")}<select value={reportStatus} onChange={(event) => { const next = event.target.value as FeedReport["status"]; setReportStatus(next); void loadReports(next); }}><option value="open">{t("Open")}</option><option value="dismissed">{t("Dismissed")}</option><option value="actioned">{t("Actioned")}</option></select></label></div>{reports.length ? reports.map((report) => <article className="community-post-card" key={report.id}><header className="community-post-header"><div className="community-post-author"><strong>{report.title || t("Community update")}</strong><time>{t("Reported by")} {report.reporterName} · {formatPostDate(report.createdAt)}</time></div></header><p>{t("Post by")} {report.authorName} · {t(report.reason)}{report.details ? ` — ${report.details}` : ""}</p><p className="community-post-body">{report.body}</p>{report.status === "open" && <div className="community-post-actions"><button type="button" className="community-post-details" onClick={() => void reviewReport(report, "dismissed")}>{t("Dismiss report")}</button><button type="button" className="community-post-details" onClick={() => void reviewReport(report, "actioned")}>{t("Mark actioned")}</button></div>}</article>) : <p className="community-feed-empty">{t("There are no reports in this status.")}</p>}</section>}

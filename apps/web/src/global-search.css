@@ -78,6 +78,7 @@
 .global-search-error { color: var(--danger, #b42318); }
 
 .global-search-recent,
+.global-search-quick-create,
 .global-search-category {
   display: grid;
   gap: 0.2rem;
@@ -85,6 +86,7 @@
 }
 
 .global-search-recent > strong,
+.global-search-quick-create > strong,
 .global-search-category h2 {
   margin: 0;
   padding: 0.45rem 0.6rem;
@@ -96,6 +98,7 @@
 }
 
 .global-search-recent button,
+.global-search-quick-create button,
 .global-search-result {
   display: flex;
   align-items: center;
@@ -111,7 +114,17 @@
   cursor: pointer;
 }
 
+.global-search-quick-create button > span {
+  display: grid;
+  flex: 1;
+  gap: 0.15rem;
+}
+
+.global-search-quick-create button b { font-size: 0.875rem; }
+.global-search-quick-create button small { color: var(--muted, #687386); font-size: 0.75rem; }
+
 .global-search-recent button:hover,
+.global-search-quick-create button:hover,
 .global-search-result:hover,
 .global-search-result.is-active {
   background: var(--green-soft, #f0f3f8);

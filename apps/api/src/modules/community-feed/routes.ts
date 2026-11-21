@@ -181,6 +181,31 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   }
 
+  async function createMentionNotifications(postId: string, departmentId: string, actorId: string, contactIds: string[]) {
+    if (!pool || contactIds.length === 0) return;
+    await pool.query(
+      `WITH post AS (
+         SELECT id,department_id,group_id,visibility FROM community_posts
+          WHERE id=$1 AND department_id=$2
+       ), recipients AS (
+         SELECT DISTINCT membership.user_id
+           FROM unnest($3::uuid[]) mentioned(contact_id)
+           JOIN contacts contact ON contact.id=mentioned.contact_id AND contact.department_id=$2 AND contact.status='member'
+           JOIN department_memberships membership ON membership.contact_id=contact.id AND membership.department_id=$2
+           JOIN post ON TRUE
+          WHERE post.group_id IS NULL OR post.visibility='location' OR EXISTS (
+            SELECT 1 FROM group_members group_member
+             WHERE group_member.group_id=post.group_id AND group_member.contact_id=contact.id AND group_member.status='active'
+          )
+       )
+       INSERT INTO community_post_notifications(id,department_id,post_id,recipient_user_id,actor_user_id,kind,in_app_enabled,email_enabled)
+       SELECT gen_random_uuid(),post.department_id,post.id,recipient.user_id,$4,'mention',true,false
+         FROM post JOIN recipients recipient ON recipient.user_id<>$4
+       ON CONFLICT DO NOTHING`,
+      [postId, departmentId, contactIds, actorId],
+    );
+  }
+
   app.get("/api/modules/community-feed/notification-preferences", async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     const departmentId = await resolveDepartmentId(request, reply);
@@ -226,7 +251,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool.query(
       `SELECT notification.id,notification.post_id AS "postId",notification.kind,notification.created_at AS "createdAt",notification.read_at AS "readAt",
               actor.display_name AS "actorName",post.title AS "postTitle",
-              CASE notification.kind WHEN 'post' THEN 'posted an update' WHEN 'reaction' THEN 'reacted to your post' ELSE 'commented on a post' END AS summary
+              CASE notification.kind WHEN 'post' THEN 'posted an update' WHEN 'reaction' THEN 'reacted to your post' WHEN 'mention' THEN 'mentioned you in a post' ELSE 'commented on a post' END AS summary
          FROM community_post_notifications notification
          JOIN community_posts post ON post.id=notification.post_id AND post.department_id=notification.department_id
          LEFT JOIN app_users actor ON actor.id=notification.actor_user_id
@@ -365,6 +390,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
     const term = `%${(request.query.q ?? "").trim().replace(/[%_\\]/g, "\\$&")}%`;
+    const peoplePermissions = request.activeDepartmentPermissions ?? [];
+    if (request.query.type === "person" && request.activeDepartmentRole !== "site_admin" && !peoplePermissions.includes("people_view_private") && !peoplePermissions.includes("people_manage")) return reply.code(403).send({ error: "Private People access is required to search people for Community Feed mentions." });
     const isWikiManager = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
     if (request.query.type === "wiki") {
       try {
@@ -575,8 +602,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { reviewed: true, status: request.body.status };
   });
 
-  app.post<{ Body: { title?: string; body: string; publishAt?: string | null; commentsEnabled?: boolean; groupId?: string | null; visibility?: "location" | "members" } }>("/api/modules/community-feed/posts", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["body"], properties: { title: { type: "string", maxLength: 120 }, body: { type: "string", minLength: 1, maxLength: 4000 }, publishAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] }, commentsEnabled: { type: "boolean" }, groupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, visibility: { type: "string", enum: ["location", "members"] } } } },
+  app.post<{ Body: { title?: string; body: string; mentions?: string[]; publishAt?: string | null; commentsEnabled?: boolean; groupId?: string | null; visibility?: "location" | "members" } }>("/api/modules/community-feed/posts", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["body"], properties: { title: { type: "string", maxLength: 120 }, body: { type: "string", minLength: 1, maxLength: 4000 }, mentions: { type: "array", uniqueItems: true, maxItems: 20, items: { type: "string", format: "uuid" } }, publishAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] }, commentsEnabled: { type: "boolean" }, groupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, visibility: { type: "string", enum: ["location", "members"] } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;
@@ -588,6 +615,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (publishAt && !Number.isFinite(publishAt.getTime())) return reply.code(400).send({ error: "Choose a valid publication date and time." });
     const groupId = request.body.groupId ?? null;
     const visibility = request.body.visibility ?? "location";
+    const mentionIds = request.body.mentions ?? [];
+    if (mentionIds.length) {
+      const peoplePermissions = request.activeDepartmentPermissions ?? [];
+      if (request.activeDepartmentRole !== "site_admin" && !peoplePermissions.includes("people_view_private") && !peoplePermissions.includes("people_manage")) return reply.code(403).send({ error: "Private People access is required to mention people in Community Feed posts." });
+      const mentionedPeople = await pool.query<{ id: string; label: string }>("SELECT id,trim(first_name||' '||last_name) AS label FROM contacts WHERE department_id=$1 AND status='member' AND id=ANY($2::uuid[])", [departmentId, mentionIds]);
+      if (mentionedPeople.rowCount !== mentionIds.length || mentionedPeople.rows.some((person) => !body.includes(`@${person.label}`))) return reply.code(400).send({ error: "Choose active location members and include each selected name in the post text." });
+    }
     if (visibility === "members" && !groupId) return reply.code(400).send({ error: "Member-only posts need a group." });
     if (groupId) {
       const access = await pool.query(
@@ -608,7 +642,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     const author = await pool.query("SELECT display_name FROM app_users WHERE id=$1", [request.authenticatedUser!.id]);
     const post = { ...result.rows[0], authorName: author.rows[0].display_name, likeCount: 0, likedByMe: false, myReaction: null, reactions: {}, canDelete: true, comments: [] };
-    if (!publishAt || publishAt.getTime() <= Date.now()) await createFeedNotifications(String(post.id), departmentId, request.authenticatedUser!.id, "post");
+    if (mentionIds.length) {
+      await pool.query("INSERT INTO community_post_mentions(department_id,post_id,contact_id) SELECT $1,$2,contact_id FROM unnest($3::uuid[]) AS mentions(contact_id) ON CONFLICT DO NOTHING", [departmentId, post.id, mentionIds]);
+    }
+    if (!publishAt || publishAt.getTime() <= Date.now()) {
+      await createMentionNotifications(String(post.id), departmentId, request.authenticatedUser!.id, mentionIds);
+      await createFeedNotifications(String(post.id), departmentId, request.authenticatedUser!.id, "post");
+    }
     realtime.publish("module:community-feed:changed", departmentId, { postId: post.id, action: "created" });
     return reply.code(201).send(post);
   });
@@ -621,11 +661,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
     const result = await pool.query(
-      "UPDATE community_posts SET publish_at=NULL,updated_at=now() WHERE id=$1 AND department_id=$2 AND (author_user_id=$3 OR $4) RETURNING id",
+      "UPDATE community_posts SET publish_at=NULL,updated_at=now() WHERE id=$1 AND department_id=$2 AND (author_user_id=$3 OR $4) RETURNING id,author_user_id",
       [request.params.postId, departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"],
     );
     if (!result.rowCount) return reply.code(404).send({ error: "This post could not be found or you cannot publish it." });
-    await createFeedNotifications(request.params.postId, departmentId, request.authenticatedUser!.id, "post");
+    const mentions = await pool.query<{ contact_id: string }>("SELECT contact_id::text FROM community_post_mentions WHERE department_id=$1 AND post_id=$2", [departmentId, request.params.postId]);
+    await createMentionNotifications(request.params.postId, departmentId, String(result.rows[0].author_user_id), mentions.rows.map((mention) => mention.contact_id));
+    await createFeedNotifications(request.params.postId, departmentId, String(result.rows[0].author_user_id), "post");
     realtime.publish("module:community-feed:changed", departmentId, { postId: request.params.postId, action: "published" });
     return { published: true };
   });

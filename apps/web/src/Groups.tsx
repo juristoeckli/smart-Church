@@ -15,7 +15,7 @@ function csvCell(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; onNavigationHandled?: (requestId: number) => void }) {
+export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, createRequestId = 0, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; createRequestId?: number; onNavigationHandled?: (requestId: number) => void }) {
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [directorySearch, setDirectorySearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<GroupStatusFilter>("all");
@@ -116,6 +116,11 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     }
     onNavigationHandled?.(navigationTarget.requestId);
   }, [navigationTarget, groups, loading, onNavigationHandled]);
+
+  useEffect(() => {
+    if (!createRequestId || !canManage) return;
+    setSelectedId(""); setDetailsGroup(null); setName(""); setDescription(""); setGroupType(""); setGroupStatus("active"); setStartsOn(""); setEndsOn(""); setEditing(false);
+  }, [createRequestId, canManage]);
 
   async function saveDirectoryView() {
     if (!savedViewName.trim()) { setError("Enter a name for this saved view."); return; }

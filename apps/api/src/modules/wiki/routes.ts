@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { createWikiPdf } from "./pdf.js";
 
 type WikiAudience = "location" | "group" | "managers";
 type WikiPageRow = { id: string; category_id: string; title: string; content_html: string; status: "active" | "archived"; redirect_url: string | null; is_homepage: boolean; audience?: WikiAudience; audience_group_id?: string | null; created_at: Date | string; updated_at: Date | string; updated_by: string | null; editor_name?: string | null };
@@ -466,5 +467,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     result.rows[0].content_html = await hideUnreadableWikiEntityLinks(result.rows[0].content_html, request, departmentId);
     const title = result.rows[0].title.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
     return reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; base-uri 'none'; form-action 'none'").header("X-Content-Type-Options", "nosniff").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:3rem auto;padding:0 1rem;color:#17212b}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:.4rem}</style><main><h1>${title}</h1>${safeHtml(result.rows[0].content_html)}</main></html>`);
+  });
+
+  app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/export/pdf", async (request, reply) => {
+    const departmentId = await site(request, reply);
+    if (!departmentId) return reply;
+    if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Active Wiki page not found." });
+    const result = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
+    if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
+    const content = await hideUnreadableWikiEntityLinks(safeHtml(result.rows[0].content_html), request, departmentId);
+    const filename = result.rows[0].title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "wiki-page";
+    return reply.type("application/pdf").header("Content-Disposition", `attachment; filename="${filename}.pdf"`).header("X-Content-Type-Options", "nosniff").send(createWikiPdf(result.rows[0].title, content));
   });
 }

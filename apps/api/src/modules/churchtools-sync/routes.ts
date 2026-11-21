@@ -833,6 +833,13 @@ function idOf(row: JsonObject) {
 function firstText(...values: any[]) {
   return (values.find((value) => typeof value === "string" && value.trim()) ?? "").trim();
 }
+function churchToolsGroupType(group: JsonObject) {
+  const nestedType = group.groupType ?? group.group_type ?? group.type ?? group.groupTypeInfo;
+  const value = typeof nestedType === "string" ? nestedType : nestedType && typeof nestedType === "object"
+    ? firstText(nestedType.name, nestedType.title, nestedType.label, nestedType.value)
+    : "";
+  return firstText(value, group.groupTypeName, group.group_type_name, group.typeName, group.type_name).slice(0, 80);
+}
 function elvantoPeopleExportHash(contact: { id: string; first_name: string; last_name: string; email: string | null; phone: string | null; elvanto_source_id: string | null }) {
   return createHash("sha256").update(JSON.stringify([contact.id, contact.first_name, contact.last_name, contact.email, contact.phone, contact.elvanto_source_id])).digest("hex");
 }
@@ -1069,18 +1076,19 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const sourceId = idOf(group); const name = firstText(group.name, group.title);
             if (!sourceId || !name) continue;
             const description = firstText(group.description, group.information, group.note).slice(0, 1000);
+            const groupType = churchToolsGroupType(group);
             const found = await db.query<{ id: string }>("SELECT id FROM church_groups WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [departmentId, sourceId]);
             let groupId: string;
             if (found.rowCount) {
               groupId = found.rows[0].id;
-              await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2", [groupId, departmentId, name.slice(0, 120), description]);
+              await db.query("UPDATE church_groups SET name=$3,description=$4,group_type=CASE WHEN $5<>'' THEN $5 ELSE group_type END,updated_at=now() WHERE id=$1 AND department_id=$2", [groupId, departmentId, name.slice(0, 120), description, groupType]);
             } else {
               const matching = await db.query<{ id: string }>("SELECT id FROM church_groups WHERE department_id=$1 AND source_system IS NULL AND lower(name)=lower($2) ORDER BY created_at LIMIT 1 FOR UPDATE", [departmentId, name]);
               if (matching.rowCount) {
                 groupId = matching.rows[0].id;
-                await db.query("UPDATE church_groups SET name=$3,description=$4,source_system='churchtools',source_id=$5,updated_at=now() WHERE id=$1 AND department_id=$2", [groupId, departmentId, name.slice(0, 120), description, sourceId]);
+                await db.query("UPDATE church_groups SET name=$3,description=$4,group_type=CASE WHEN $6<>'' THEN $6 ELSE group_type END,source_system='churchtools',source_id=$5,updated_at=now() WHERE id=$1 AND department_id=$2", [groupId, departmentId, name.slice(0, 120), description, sourceId, groupType]);
               } else {
-                const inserted = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,$3,'churchtools',$4) RETURNING id", [departmentId, name.slice(0, 120), description, sourceId]);
+                const inserted = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description,group_type,source_system,source_id) VALUES (gen_random_uuid(),$1,$2,$3,$4,'churchtools',$5) RETURNING id", [departmentId, name.slice(0, 120), description, groupType, sourceId]);
                 groupId = inserted.rows[0].id;
               }
             }
@@ -1184,7 +1192,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }),
           ...groupsResult.items.map((group) => {
             const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
-            return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
+            return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), groupType: churchToolsGroupType(group), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
           }),
           ...mappedEvents.map((event) => ({ area: "event", ...event })),
           ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
@@ -1287,11 +1295,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               if (!linked.rowCount) {
                 const collision = await db.query("SELECT 1 FROM church_groups WHERE department_id=$1 AND lower(name)=lower($2) LIMIT 1", [dept, record.name]);
                 if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
-                linked = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description) VALUES (gen_random_uuid(),$1,$2,$3) ON CONFLICT DO NOTHING RETURNING id", [dept, record.name, record.description ?? ""]);
+                linked = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description,group_type) VALUES (gen_random_uuid(),$1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id", [dept, record.name, record.description ?? "", record.groupType ?? ""]);
                 if (!linked.rowCount) { batchSkipped += 1; page += 1; continue; }
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchCreated += 1;
               } else {
-                await db.query("UPDATE church_groups SET name=$3,description=$4,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.name, record.description ?? ""]);
+                await db.query("UPDATE church_groups SET name=$3,description=$4,group_type=CASE WHEN $5<>'' THEN $5 ELSE group_type END,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.name, record.description ?? "", record.groupType ?? ""]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchUpdated += 1;
               }
               const memberDetails = Array.isArray(record.memberDetails) ? record.memberDetails.filter((item: unknown): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];

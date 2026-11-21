@@ -1,6 +1,6 @@
 # Community Feed
 
-The module provides a location-scoped post feed with group visibility, group subscriptions, scheduled publication, post editing, comment controls, four reactions, filters, hide/unhide, shareable post links, user-submitted post reports, a site-admin review queue, and an in-app notification inbox.
+The module provides a location-scoped post feed with group visibility, group subscriptions, scheduled publication, post editing, comment controls, four reactions, filters, hide/unhide, shareable post links, user-submitted post reports, a site-admin review queue, and an in-app notification inbox. Members with private People access can search active location members, insert an `@Name` mention in a new post, and notify linked accounts who can see that post. Mention inbox alerts are in-app only; scheduled post alerts become visible when the post is published.
 
 Feed notifications cover published posts in groups the recipient follows (or member-only group posts), reactions, and comments. Users can set separate per-location preferences for these three notification kinds; all are enabled by default. Preferences affect newly created notifications only and do not hide posts or delete existing inbox history. The inbox shows unread state, supports mark-read actions, and checks the current post visibility before showing a notification.
 
@@ -24,5 +24,5 @@ Location site admins can grant the Community Feed `Review post reports` module p
 ## Known gaps
 
 - Attachments are limited to five 1 MiB files per post and the accepted MIME list above; there is no image resizing, video, audio, or virus scanning.
-- Moderators can resolve reports only for posts visible to them; there is no automatic post removal. Push notifications, email digests, and per-person mention delivery are not implemented. Community Feed emails are individual generic alerts, not digests.
+- Moderators can resolve reports only for posts visible to them; there is no automatic post removal. Push notifications and email digests are not implemented. Community Feed emails are individual generic alerts, not digests.
 - Song search is available when the Worship Planning table exists; Wiki search is available when the Wiki tables exist. The current module-only implementation catches missing optional Wiki/Song tables and returns no matches.
