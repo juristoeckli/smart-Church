@@ -9,6 +9,7 @@ import { churchToolsSongCrosswalkId, importChurchToolsSong, readChurchToolsSongC
 import { churchToolsAgendaSourceId, normalizeChurchToolsAgenda, resolveChurchToolsAgendaSongs } from "./event-agenda.js";
 import { importChurchToolsMemberships, readChurchToolsGroupMemberships, readChurchToolsGroupRoles, type ChurchToolsGroupMembership } from "./group-membership.js";
 import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCustomValue } from "./group-membership-custom-fields.js";
+import { ChurchToolsFinanceRangeError, compareChurchToolsFinanceCodes, financeDay, readChurchToolsFinanceCodes, readChurchToolsFinanceJournal, readChurchToolsFinancePeriods } from "./finance-preview.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -808,6 +809,10 @@ async function get(base: string, token: string, path: string): Promise<JsonObjec
   }
   return await response.json() as JsonObject;
 }
+async function listChurchToolsFinancePeriods(base: string, token: string) {
+  const [periods, clients] = await Promise.all([get(base, token, "finance/accountingperiods"), get(base, token, "finance/clients")]);
+  return readChurchToolsFinancePeriods(periods, clients);
+}
 async function listChurchToolsBookingHistory(config: Settings, token: string, resources: JsonObject[], startDate: string, endDate: string) {
   const ids = [...new Set(resources.map((resource) => bookingSourceId(idOf(resource))))];
   if (ids.includes(null)) throw new Error("ChurchTools returned an invalid bookable resource ID.");
@@ -1564,6 +1569,75 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "The ChurchTools migration batch failed." }); }
       finally { if (reserved) await pool!.query("UPDATE churchtools_migration_snapshots SET migration_running=FALSE,migration_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {}); running.delete(dept); }
+    });
+    routes.get("/api/modules/sync/churchtools/finance/periods", async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      try {
+        const periods = await listChurchToolsFinancePeriods(config.instance_url, decrypt(config.encrypted_login_token));
+        return reply.header("Cache-Control", "private, no-store").send({ periods });
+      } catch (error) {
+        const status = error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools accounting periods." });
+      }
+    });
+    routes.get<{ Querystring: { periodId: string; startDate: string; endDate: string } }>("/api/modules/sync/churchtools/finance/preview", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const { periodId, startDate, endDate } = request.query;
+      if (!financeDay(startDate) || !financeDay(endDate) || startDate > endDate) return reply.code(400).send({ error: "Choose a valid finance preview date range." });
+      try {
+        const token = decrypt(config.encrypted_login_token);
+        const periods = await listChurchToolsFinancePeriods(config.instance_url, token);
+        const period = periods.find((item) => item.periodId === periodId);
+        if (!period) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        if (startDate < period.startDate || endDate > period.endDate) return reply.code(400).send({ error: "The preview dates must stay within the selected ChurchTools accounting period." });
+        const periodQuery = new URLSearchParams({ accounting_period_id: periodId });
+        const [accounts, costCenters, financeTables] = await Promise.all([
+          get(config.instance_url, token, `finance/accounts?${periodQuery}&calculate_balance=false`)
+            .then((payload) => readChurchToolsFinanceCodes(payload, periodId, "account")),
+          get(config.instance_url, token, `finance/costcenters?${periodQuery}`)
+            .then((payload) => readChurchToolsFinanceCodes(payload, periodId, "cost center")),
+          pool!.query<{ installed: boolean }>(`SELECT to_regclass('public.finance_accounts') IS NOT NULL
+            AND to_regclass('public.finance_cost_centers') IS NOT NULL AND to_regclass('public.finance_accounting_years') IS NOT NULL AS installed`),
+        ]);
+        const journal = await readChurchToolsFinanceJournal((page, limit) => {
+          const query = new URLSearchParams({ accounting_period_id: periodId, start_date: startDate, end_date: endDate,
+            order_by: "date", order_direction: "ASC", page: String(page), limit: String(limit) });
+          return get(config.instance_url, token, `finance/transactions?${query}`);
+        }, accounts, costCenters, startDate, endDate);
+        let target = null;
+        if (financeTables.rows[0]?.installed) {
+          const [targetAccounts, targetCostCenters, targetPeriods] = await Promise.all([
+            pool!.query<{ code: string; active: boolean }>("SELECT code,active FROM finance_accounts WHERE department_id=$1", [dept]),
+            pool!.query<{ code: string; active: boolean }>("SELECT code,active FROM finance_cost_centers WHERE department_id=$1", [dept]),
+            pool!.query<{ startDate: string; endDate: string; status: string; year: number }>(`SELECT start_date::text AS "startDate",end_date::text AS "endDate",status,accounting_year AS year
+              FROM finance_accounting_years WHERE department_id=$1 AND start_date<=$3 AND end_date>=$2 ORDER BY start_date,accounting_year`,
+            [dept, period.startDate, period.endDate]),
+          ]);
+          const exact = targetPeriods.rows.length === 1 && targetPeriods.rows[0].startDate === period.startDate && targetPeriods.rows[0].endDate === period.endDate
+            ? targetPeriods.rows[0] : null;
+          target = {
+            accounts: compareChurchToolsFinanceCodes(accounts, targetAccounts.rows),
+            costCenters: compareChurchToolsFinanceCodes(costCenters, targetCostCenters.rows),
+            periodMatch: exact ? "exact" : targetPeriods.rows.length ? "overlap" : "missing",
+            matchingYear: exact?.year ?? null, matchingStatus: exact?.status ?? null,
+          };
+        }
+        return reply.header("Cache-Control", "private, no-store").send({
+          period, startDate, endDate, source: { accounts: accounts.size, costCenters: costCenters.size }, journal, target,
+        });
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceRangeError ? 413
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not preview ChurchTools finance data." });
+      }
     });
     routes.get<{ Querystring: { offset?: number; query?: string } }>("/api/modules/sync/churchtools/membership-details", {
       schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 2147483647 }, query: { type: "string", maxLength: 120 } } } },
