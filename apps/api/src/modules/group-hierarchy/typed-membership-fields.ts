@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { csvDocument } from "../../csv-export.js";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -244,6 +245,45 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     );
     return { updated: changed.rowCount };
   }, 200));
+
+  const exportLimit = 2000;
+  app.get<{ Params: { groupId: string } }>(`${base}/export.csv`, { schema: { params: groupParams } }, async (request, reply) => {
+    const location = await scope(request, reply);
+    if (!location) return reply;
+    const { departmentId, groupId } = location;
+    const client = await pool!.connect();
+    let activeFields: Field[];
+    let members: {
+      firstName: string; lastName: string; role: string; status: string;
+      fieldValues: Record<string, string | number | boolean>;
+    }[];
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      if (!await checkGroup(request, reply, location, client)) { await client.query("ROLLBACK"); return reply; }
+      activeFields = (await definitions(client, location)).filter(field => !field.archivedAt);
+      const roster = await client.query<typeof members[number]>(
+        `SELECT person.first_name AS "firstName",person.last_name AS "lastName",member.role,member.status,
+                COALESCE((SELECT jsonb_object_agg(field.key,field.value) FROM jsonb_each(answer.field_values) field
+                           WHERE field.key=ANY($3::text[])),'{}'::jsonb) AS "fieldValues"
+           FROM group_members member JOIN contacts person ON person.id=member.contact_id AND person.department_id=$1
+           LEFT JOIN group_member_field_answers answer ON answer.department_id=$1 AND answer.group_id=$2 AND answer.contact_id=member.contact_id
+          WHERE member.group_id=$2 AND person.archived_at IS NULL
+          ORDER BY lower(person.last_name),lower(person.first_name),person.id LIMIT $4`,
+        [departmentId, groupId, activeFields.map(field => field.id), exportLimit + 1],
+      );
+      members = roster.rows;
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+    if (members.length > exportLimit) return reply.code(422).send({ error: `This CSV supports groups with up to ${exportLimit} roster members.` });
+    const headers = ["First name", "Last name", "Membership role", "Membership status", ...activeFields.map(field => field.label)];
+    const rows = members.map(member => [member.firstName, member.lastName, member.role, member.status, ...activeFields.map(field => member.fieldValues[field.id])]);
+    return reply.header("Cache-Control", "private, no-store")
+      .header("Content-Disposition", "attachment; filename=group-membership-fields.csv")
+      .type("text/csv; charset=utf-8").send(csvDocument(headers, rows));
+  });
 
   app.get<{ Params: { groupId: string; contactId: string } }>(`${base}/:contactId`, { schema: { params: memberParams } }, async (request, reply) => {
     const location = await scope(request, reply);

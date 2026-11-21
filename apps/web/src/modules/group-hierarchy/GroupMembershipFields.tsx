@@ -114,6 +114,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [reload, setReload] = useState(0);
+  const [exporting, setExporting] = useState(false);
   const [rename, setRename] = useState<{ field: Field; label: string } | null>(null);
   const activeFields = fields?.filter(field => !field.archivedAt) ?? [];
   const archivedFields = fields?.filter(field => field.archivedAt) ?? [];
@@ -145,6 +146,28 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     }).catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
   }, [base, contactId, reload, request]);
+
+  async function exportFields() {
+    if (exporting) return;
+    setExporting(true);
+    setError("");
+    try {
+      const response = await fetch(base + "/export.csv", {
+        headers: { "x-department-id": departmentId }, cache: "no-store",
+      });
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.error ?? "Could not export membership fields.");
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "group-membership-fields.csv";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not export membership fields."); }
+    finally { setExporting(false); }
+  }
 
   async function addField(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -209,6 +232,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     {!fields && !error && <p>Loading membership fields…</p>}
     {fields && activeFields.length === 0 && <p>No active typed fields configured for this group.</p>}
     {fields && !contactId && <>
+      {activeFields.length > 0 && <button type="button" disabled={exporting} onClick={() => void exportFields()}>Export member fields (CSV)</button>}
       {activeFields.length > 0 && <ul>{activeFields.map(field => <li key={field.id}>
         {rename?.field.id === field.id ? <form onSubmit={event => { event.preventDefault(); void changeField(rename.field, { label: rename.label }); }}>
           <label>Field label<input required maxLength={80} disabled={saving} value={rename.label} onChange={event => setRename({ field: rename.field, label: event.target.value })}/></label>

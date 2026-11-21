@@ -1,5 +1,6 @@
 import type { FastifyReply } from "fastify";
 import type { Pool } from "pg";
+import { csvDocument } from "../../csv-export.js";
 import { createWorkbook } from "../finance/workbook.js";
 
 const reportKinds = ["meetings", "people"] as const;
@@ -34,12 +35,6 @@ const columnsByKind = {
     ...commonColumns, { key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "attendance", label: "Attendance" },
   ],
 };
-
-function csvCell(value: unknown) {
-  const text = String(value ?? "");
-  const safe = /^[=+\-@\t\r\n]/u.test(text) || /^\s+[=+\-@]/u.test(text) ? "'" + text : text;
-  return '"' + safe.replaceAll('"', '""') + '"';
-}
 
 export async function sendGroupAttendanceReport(pool: Pool, reply: FastifyReply, departmentId: string, groupId: string, query: AttendanceReportQuery) {
   if (query.from && query.to && query.from > query.to) return reply.code(400).send({ error: "Choose an end date on or after the start date." });
@@ -104,5 +99,5 @@ export async function sendGroupAttendanceReport(pool: Pool, reply: FastifyReply,
     return reply.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
       .send(createWorkbook("Report", headers, rows));
   }
-  return reply.type("text/csv; charset=utf-8").send("\uFEFF" + [headers, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n"));
+  return reply.type("text/csv; charset=utf-8").send(csvDocument(headers, rows));
 }
