@@ -102,6 +102,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
   const [controllerStatusError, setControllerStatusError] = useState("");
+  const [levelFeedbackError, setLevelFeedbackError] = useState("");
   const [time, setTime] = useState(() => new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date()));
   const currentPage = findPage(overlayPages.at(-1) ?? basePageName) ?? findPage("Home")!;
   const visibleModePage = [...overlayPages].reverse().find((name) => name === "Regie" || /_(Volume|Mik|Lautsprecher)$/.test(name));
@@ -156,6 +157,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   useEffect(() => { const timer = window.setInterval(() => setTime(new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date())), 30_000); return () => window.clearInterval(timer); }, []);
 
   useEffect(() => {
+    setLevelFeedbackError("");
     if (!configured || !currentPage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number" && typeof object.levelPort === "number" && object.levelPort > 0)) return;
     let timer = 0;
     let active = true;
@@ -163,6 +165,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const poll = async () => {
       try {
         await refreshPageLevels(currentPage, controller.signal);
+        if (active) setLevelFeedbackError("");
       } catch (error) {
         if (active && !controller.signal.aborted) {
           const pageLevelIds = currentPage.objects.filter((object) => object.type === "bargraph" && typeof object.level === "number").map((object) => String(object.level));
@@ -171,8 +174,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
             for (const id of pageLevelIds) delete next[id];
             return next;
           });
-          setFeedback(error instanceof Error ? `Live level feedback: ${error.message}` : "Live level feedback could not be read.");
-          setFailed(true);
+          setLevelFeedbackError(error instanceof Error ? `Live level feedback: ${error.message}` : "Live level feedback could not be read.");
         }
       } finally {
         if (active) timer = window.setTimeout(() => void poll(), 15_000);
@@ -444,8 +446,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     <div className="amx-panel-frame">
       <div className="amx-panel-screen" style={screenStyle}>
         {visiblePages.flatMap((page, layer) => [renderPageBackdrop(page, layer), ...page.objects.map((object) => renderObject(page, object, layer))])}
-        {(controllerStatusError || feedback) && <div className="amx-toast-stack" role="status" aria-live="polite">
+        {(controllerStatusError || levelFeedbackError || feedback) && <div className="amx-toast-stack" role="status" aria-live="polite">
           {controllerStatusError && <p className="amx-toast amx-toast-error">{controllerStatusError}</p>}
+          {levelFeedbackError && <p className="amx-toast amx-toast-error">{levelFeedbackError}</p>}
           {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`}>{feedback}</p>}
         </div>}
         {currentPage.name === "PWR_COUNT" && failed && <button type="button" className="amx-progress-continue" onClick={() => { setBasePageName("Modus"); setOverlayPages([]); setFeedback(""); setFailed(false); }}>Weiter</button>}

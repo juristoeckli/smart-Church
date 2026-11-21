@@ -26,6 +26,9 @@ const roomStatusChannels: Array<[number, string]> = [
   [11, "Gemeindesaal quer"], [16, "Gemeindesaal längs"], [13, "Konferenzsaal 1"],
   [12, "Bibliothek"], [15, "Alle Räume Autonom"], [14, "Konferenz gross"],
 ];
+// TP4 channel feedback is mapped to these panel ports; objects without an
+// explicit channelPort use port 1.
+const panelFeedbackPorts = [1, 2, 3, 9, 10, 13] as const;
 
 function validHost(host: string) {
   if (!host || host.length > 253 || host.includes("://") || /[\s/@\\]/.test(host)) return false;
@@ -132,11 +135,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const host = result.rows[0]?.host;
     if (!host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
     try {
-      // The TP4's four DSP status indicators are on channels 21–24 across
-      // panel ports 1–4. Read every mapped port so indicators 3 and 4 are
-      // backed by live state too.
       const channelsByPort: Record<string, number[]> = Object.fromEntries(await Promise.all(
-        [1, 2, 3, 4].map(async (port) => [
+        panelFeedbackPorts.map(async (port) => [
           String(port),
           await readIcspDeviceChannels(host, { device: 10001, port, system: 1 }),
         ] as const),
