@@ -503,7 +503,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const mapped = Boolean(mappedAction);
     const modeNavigation = page.name === "Modus" && [5, 6, 7, 8].includes(object.channel ?? -1);
     const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip)) || modeNavigation;
-    const holdButton = mappedAction && /^(?:\\+|\\-|−)$/.test(baseText.trim()) ? mappedAction : undefined;
+    const holdButton = mappedAction && /^(?:[+]|-|−)$/.test(baseText.trim()) ? mappedAction : undefined;
     return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${activeRoomState || activeModeState || state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped && !localNavigation)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped && !localNavigation ? "Set the NetLinx host in AMX module settings." : undefined}
       onPointerDown={holdButton ? (event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); void holdAction(holdButton); } : undefined}
       onPointerUp={holdButton ? () => void releaseHeldAction(holdButton.id) : undefined}
