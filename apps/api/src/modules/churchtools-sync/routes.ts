@@ -6,6 +6,7 @@ import { registerChurchToolsSyncReplication } from "./replication.js";
 import { parseChurchToolsEventDateTime } from "./event-time.js";
 import { bookingSourceId, normalizeChurchToolsBookingHistory, type ChurchToolsBookingHistory } from "./booking-history.js";
 import { churchToolsSongCrosswalkId, importChurchToolsSong, readChurchToolsSongCatalog, type ChurchToolsSong } from "./song-catalog.js";
+import { applyArrangementMedia, ArrangementMediaReviewError, buildArrangementMediaReview, loadArrangementMediaTarget, readChurchToolsArrangementMedia } from "./arrangement-media.js";
 import { churchToolsAgendaSourceId, normalizeChurchToolsAgenda, resolveChurchToolsAgendaSongs } from "./event-agenda.js";
 import { importChurchToolsMemberships, readChurchToolsGroupMemberships, readChurchToolsGroupRoles, type ChurchToolsGroupMembership } from "./group-membership.js";
 import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCustomValue } from "./group-membership-custom-fields.js";
@@ -1933,6 +1934,65 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not preview ChurchTools finance data." });
       }
     });
+    type ArrangementMediaBody = { songId: string; arrangementId: string; reviewHash?: string; selection?: { chart?: string; audio?: string } };
+    const sourceMediaId = { type: "string", pattern: "^[1-9][0-9]{0,15}$" };
+    routes.post<{ Body: ArrangementMediaBody }>("/api/modules/sync/churchtools/arrangement-media", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["songId", "arrangementId"], properties: {
+        songId: sourceMediaId, arrangementId: sourceMediaId, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        selection: { type: "object", additionalProperties: false, minProperties: 1, properties: { chart: sourceMediaId, audio: sourceMediaId } },
+      } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId || !deps.validateMutation(request, reply)) return reply;
+      const actor = request.authenticatedUser?.id;
+      if (!actor) return reply.code(403).send({ error: "Sign in to review worship arrangement media." });
+      const config = await settings(departmentId);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing arrangement media." });
+      const { songId, arrangementId, reviewHash, selection } = request.body;
+      if (!!reviewHash !== !!selection) return reply.code(400).send({ error: "Review the arrangement and select attachments before applying links." });
+      const scope = { departmentId, instanceUrl: config.instance_url, songId, arrangementId };
+      const target = await loadArrangementMediaTarget(pool!, scope);
+      if (!target) return reply.code(404).send({ error: "Import this song and arrangement into the local worship catalog first." });
+      let entries: ReturnType<typeof readChurchToolsArrangementMedia>;
+      try {
+        const token = decrypt(config.encrypted_login_token);
+        const signal = AbortSignal.timeout(20_000);
+        const [arrangement, files] = await Promise.all([
+          get(config.instance_url, token, `songs/${songId}/arrangements/${arrangementId}`, signal),
+          get(config.instance_url, token, `files/song_arrangement/${arrangementId}`, signal),
+        ]);
+        entries = readChurchToolsArrangementMedia(arrangement, files, arrangementId);
+      } catch (error) {
+        const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools arrangement media." });
+      }
+      if (!reviewHash || !selection) return reply.header("Cache-Control", "private, no-store").send(buildArrangementMediaReview(scope, target, entries));
+      const db = await pool!.connect();
+      try {
+        await db.query("BEGIN");
+        await db.query("SET LOCAL lock_timeout = '5s'");
+        if (!await deps.lockDepartmentForWrite(db, departmentId)) {
+          await db.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const current = await db.query(`SELECT 1 FROM churchtools_sync_settings
+          WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE`,
+        [departmentId, config.instance_url, config.encrypted_login_token]);
+        const locked = current.rowCount ? await loadArrangementMediaTarget(db, scope, true) : null;
+        if (!locked) throw new ArrangementMediaReviewError("The ChurchTools connection or local arrangement changed. Review it again.");
+        const result = await applyArrangementMedia(db, scope, locked, entries, selection, actor, reviewHash);
+        await db.query("COMMIT");
+        return reply.header("Cache-Control", "private, no-store").send(result);
+      } catch (error) {
+        await db.query("ROLLBACK");
+        if (error instanceof ArrangementMediaReviewError) return reply.code(409).send({ error: error.message });
+        if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
+          return reply.code(409).send({ error: "The local arrangement is busy. Try the review again." });
+        }
+        throw error;
+      } finally { db.release(); }
+    });
+
     type CalendarSeriesScope = { calendarId: string; seriesId: string; timeZone: string; targetCalendarId: string; reviewHash?: string; linkServiceEvents?: boolean };
     const calendarSeriesSchema = { type: "object", additionalProperties: false,
       required: ["calendarId", "seriesId", "timeZone", "targetCalendarId"], properties: {
