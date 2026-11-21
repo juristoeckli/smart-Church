@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowDownToLine, BookOpenCheck, CircleDollarSign, FileText, Landmark, Plus, RefreshCw, Search, ShieldCheck, Users, WalletCards } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { ArrowDown, ArrowDownToLine, ArrowUp, BookOpenCheck, CircleDollarSign, FileText, Landmark, Plus, RefreshCw, Search, ShieldCheck, Users, WalletCards } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { DraftPostingReview } from "./DraftPostingReview";
 import "./finance.css";
@@ -13,6 +13,10 @@ type AccountingYear = { accountingYear: number; label: string; startDate: string
 type AccountingYearSummary = { period: AccountingYear; currency: string; totals: { transactionCount: number; debitCents: number; creditCents: number; incomeCents: number; expenseCents: number }; unreconciledBank: { rowCount: number; amountCents: number }; yearEndTransfer: null | { sourceYear: number; targetYear: number; closingTransactionId: string | null; openingTransactionId: string | null; closingEquityAccountId: string; createdAt: string }; budgetVariance: Array<{ id: string; accountCode: string | null; accountName: string | null; accountType: string | null; costCenterCode: string | null; costCenterName: string | null; budgetCents: number; actualCents: number; varianceCents: number }> };
 type Bootstrap = { currency: string; accounts: Account[]; costCenters: CostCenter[]; donors: Donor[]; years: number[]; accountingYears: AccountingYear[]; budgets: Budget[]; taxTypes?: TaxType[] };
 type Transaction = { id: string; bookingDate: string; accountingYear: number; receiptNumber: string; bookingText: string; status: "posted" | "draft"; reversesTransactionId: string | null; createdAt: string; debitCents: number; creditCents: number; lineCount: number };
+const transactionSortColumns = ["date", "receipt", "description", "debit", "credit", "status"] as const;
+type TransactionSortColumn = typeof transactionSortColumns[number];
+type TransactionSort = { sort: TransactionSortColumn; direction: "asc" | "desc" };
+
 type TransactionPage = { items: Transaction[]; total: number; page: number; pageSize: number };
 type TransactionDetail = Transaction & { lines: Array<{ id: string; lineNumber: number; accountCode: string; accountName: string; accountType: string; costCenterName: string | null; donorName: string | null; debitCents: number; creditCents: number; text: string }>; audit: Array<{ action: string; details: Record<string, unknown>; actorName: string | null; createdAt: string }> };
 type StatementLine = { id: string; bookingDate: string; receiptNumber: string; bookingText: string; lineText: string; debitCents: number; creditCents: number; runningBalanceCents: number };
@@ -51,6 +55,10 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [query, setQuery] = useState(() => readFinanceQuery("Q").slice(0, 100));
   const [transactionFrom, setTransactionFrom] = useState(() => { const value = readFinanceQuery("From"); return validDateQuery(value) ? value : ""; });
   const [transactionTo, setTransactionTo] = useState(() => { const value = readFinanceQuery("To"); return validDateQuery(value) ? value : ""; });
+  const [transactionSort, setTransactionSort] = useState<TransactionSort>(() => ({
+    sort: transactionSortColumns.find((column) => column === readFinanceQuery("Sort")) ?? "date",
+    direction: readFinanceQuery("Direction") === "asc" ? "asc" : "desc",
+  }));
   const [transactionPage, setTransactionPage] = useState(() => { const value = Number.parseInt(readFinanceQuery("Page"), 10); return Number.isSafeInteger(value) && value > 0 ? Math.min(value, 100_000) : 1; });
   const [transactionTotal, setTransactionTotal] = useState(0);
   const [error, setError] = useState("");
@@ -110,13 +118,16 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     return result;
   }, [departmentId, csrfToken]);
 
+  const loadVersion = useRef(0);
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     setLoading(true); setError("");
     try {
-      const params = new URLSearchParams({ year, q: query, page: String(transactionPage), pageSize: "50" });
+      const params = new URLSearchParams({ year, q: query, page: String(transactionPage), pageSize: "50", ...transactionSort });
       if (transactionFrom) params.set("from", transactionFrom);
       if (transactionTo) params.set("to", transactionTo);
       const [next, result] = await Promise.all([send<Bootstrap>("/api/modules/finance/bootstrap"), send<TransactionPage>(`/api/modules/finance/transactions?${params}`)]);
+      if (version !== loadVersion.current) return;
       setBootstrap(next); setCurrencyDraft(next.currency); setTransactions(result.items); setTransactionTotal(result.total);
       if (next.accountingYears.length && !next.accountingYears.some((item) => item.accountingYear === Number(year))) {
         const todayYear = next.accountingYears.find((item) => item.startDate.slice(0, 10) <= today() && item.endDate.slice(0, 10) >= today());
@@ -124,22 +135,27 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
       }
       if (!statementAccount && next.accounts.length) setStatementAccount(next.accounts[0]!.id);
       if (!bankAccountId && next.accounts.some((account) => account.accountType === "asset" && account.active)) setBankAccountId(next.accounts.find((account) => account.accountType === "asset" && account.active)!.id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load the finance ledger."); }
-    finally { setLoading(false); }
-  }, [send, year, query, statementAccount, bankAccountId, transactionFrom, transactionTo, transactionPage]);
+    } catch (reason) {
+      if (version === loadVersion.current) setError(reason instanceof Error ? reason.message : "Could not load the finance ledger.");
+    } finally {
+      if (version === loadVersion.current) setLoading(false);
+    }
+  }, [send, year, query, statementAccount, bankAccountId, transactionFrom, transactionTo, transactionPage, transactionSort]);
 
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    for (const key of ["Year", "Q", "From", "To", "Page"]) params.delete(`finance${key}`);
+    for (const key of ["Year", "Q", "From", "To", "Page", "Sort", "Direction"]) params.delete(`finance${key}`);
     if (year !== String(new Date().getFullYear())) params.set("financeYear", year);
     if (query) params.set("financeQ", query);
     if (transactionFrom) params.set("financeFrom", transactionFrom);
     if (transactionTo) params.set("financeTo", transactionTo);
     if (transactionPage > 1) params.set("financePage", String(transactionPage));
+    if (transactionSort.sort !== "date") params.set("financeSort", transactionSort.sort);
+    if (transactionSort.direction !== "desc") params.set("financeDirection", transactionSort.direction);
     const search = params.toString();
     window.history.replaceState(window.history.state, "", `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`);
-  }, [year, query, transactionFrom, transactionTo, transactionPage]);
+  }, [year, query, transactionFrom, transactionTo, transactionPage, transactionSort]);
 
   async function action(work: () => Promise<unknown>, success: string) {
     setSaving(true); setError(""); setFeedback("");
@@ -373,9 +389,20 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not open transaction."); }
   }
 
+  function sortHeading(column: TransactionSortColumn, label: string) {
+    const active = transactionSort.sort === column;
+    const ascending = transactionSort.direction === "asc";
+    return <th scope="col" aria-sort={active ? (ascending ? "ascending" : "descending") : undefined}>
+      <button className="finance-text-button" type="button" onClick={() => {
+        setTransactionPage(1);
+        setTransactionSort({ sort: column, direction: active && ascending ? "desc" : "asc" });
+      }}>{label}{active && (ascending ? <ArrowUp aria-hidden="true" size={12} /> : <ArrowDown aria-hidden="true" size={12} />)}</button>
+    </th>;
+  }
+
   async function exportCsv() {
     try {
-      const params = new URLSearchParams({ year, q: query });
+      const params = new URLSearchParams({ year, q: query, ...transactionSort });
       if (transactionFrom) params.set("from", transactionFrom);
       if (transactionTo) params.set("to", transactionTo);
       const response = await fetch(`/api/modules/finance/transactions/export.${exportFormat}?${params}`, { headers: { "x-department-id": departmentId } });
@@ -423,7 +450,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
       <div className="finance-filter-row"><label>{t("Search transactions")}<input aria-label={t("Search transactions")} placeholder={t("Search transactions")} value={query} onChange={(event) => { setTransactionPage(1); setQuery(event.target.value); }} /></label><label>From<input type="date" value={transactionFrom} onChange={(event) => { setTransactionPage(1); setTransactionFrom(event.target.value); }} /></label><label>To<input type="date" value={transactionTo} onChange={(event) => { setTransactionPage(1); setTransactionTo(event.target.value); }} /></label>{(query || transactionFrom || transactionTo) && <button className="finance-text-button" type="button" onClick={() => { setQuery(""); setTransactionFrom(""); setTransactionTo(""); setTransactionPage(1); }}>Clear filters</button>}</div>
       <p className="finance-security-note" aria-live="polite">Showing {transactionTotal ? (transactionPage - 1) * 50 + 1 : 0}–{Math.min(transactionPage * 50, transactionTotal)} of {transactionTotal.toLocaleString()} transactions · year {year}{transactionFrom ? ` · from ${transactionFrom}` : ""}{transactionTo ? ` · through ${transactionTo}` : ""}{query ? ` · matching “${query}”` : ""}</p>
       {transactionFrom && transactionTo && transactionFrom > transactionTo && <p className="finance-error">Start date must be on or before end date.</p>}
-      {loading ? <p>Loading transactions…</p> : transactions.length ? <><div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Booking date")}</th><th>{t("Receipt number")}</th><th>{t("Booking text")}</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Status</th><th>Details</th>{canManage && <th />}</tr></thead><tbody>{transactions.map((item) => <tr key={item.id}><td>{new Date(`${item.bookingDate}T00:00:00`).toLocaleDateString()}</td><td>{item.receiptNumber}{item.reversesTransactionId && <small>Reversal</small>}</td><td>{item.bookingText}</td><td>{money(item.debitCents, bootstrap.currency)}</td><td>{money(item.creditCents, bootstrap.currency)}</td><td>{item.status === "posted" ? t("Posted") : t("Draft")}</td><td><button className="finance-text-button" type="button" onClick={() => void openTransaction(item)}>Open</button></td>{canManage && <td>{item.status === "posted" && !item.reversesTransactionId && <button className="finance-text-button" type="button" onClick={() => void reverseTransaction(item)}>{t("Reverse")}</button>}</td>}</tr>)}</tbody></table></div><div className="finance-form-actions"><span>Page {transactionPage} of {Math.max(1, Math.ceil(transactionTotal / 50))}</span><button className="button button-secondary" type="button" disabled={loading || transactionPage <= 1} onClick={() => setTransactionPage((current) => current - 1)}>Previous</button><button className="button button-secondary" type="button" disabled={loading || transactionPage >= Math.ceil(transactionTotal / 50)} onClick={() => setTransactionPage((current) => current + 1)}>Next</button></div></> : <p className="finance-empty">{t("No transactions yet.")}</p>}
+      {loading ? <p>Loading transactions…</p> : transactions.length ? <><div className="finance-table-wrap"><table className="finance-table"><thead><tr>{sortHeading("date", t("Booking date"))}{sortHeading("receipt", t("Receipt number"))}{sortHeading("description", t("Booking text"))}{sortHeading("debit", t("Debit"))}{sortHeading("credit", t("Credit"))}{sortHeading("status", "Status")}<th>Details</th>{canManage && <th />}</tr></thead><tbody>{transactions.map((item) => <tr key={item.id}><td>{new Date(`${item.bookingDate}T00:00:00`).toLocaleDateString()}</td><td>{item.receiptNumber}{item.reversesTransactionId && <small>Reversal</small>}</td><td>{item.bookingText}</td><td>{money(item.debitCents, bootstrap.currency)}</td><td>{money(item.creditCents, bootstrap.currency)}</td><td>{item.status === "posted" ? t("Posted") : t("Draft")}</td><td><button className="finance-text-button" type="button" onClick={() => void openTransaction(item)}>Open</button></td>{canManage && <td>{item.status === "posted" && !item.reversesTransactionId && <button className="finance-text-button" type="button" onClick={() => void reverseTransaction(item)}>{t("Reverse")}</button>}</td>}</tr>)}</tbody></table></div><div className="finance-form-actions"><span>Page {transactionPage} of {Math.max(1, Math.ceil(transactionTotal / 50))}</span><button className="button button-secondary" type="button" disabled={loading || transactionPage <= 1} onClick={() => setTransactionPage((current) => current - 1)}>Previous</button><button className="button button-secondary" type="button" disabled={loading || transactionPage >= Math.ceil(transactionTotal / 50)} onClick={() => setTransactionPage((current) => current + 1)}>Next</button></div></> : <p className="finance-empty">{t("No transactions yet.")}</p>}
     </section>}
     {tab === "accounts" && <section className="finance-section"><div className="finance-section-heading"><div><h2>{t("Accounts")}</h2><p>Chart of accounts and cost centers for {year}.</p></div>{canManage && <div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => setShowCostCenter(true)}><Plus size={15} />{t("New cost center")}</button><button className="button button-primary" type="button" onClick={() => setShowAccount(true)}><Plus size={15} />{t("New account")}</button></div>}</div><h3>Chart of accounts</h3>{bootstrap.accounts.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Account code")}</th><th>{t("Name")}</th><th>{t("Type")}</th><th>Status</th>{canManage && <th>Actions</th>}</tr></thead><tbody>{bootstrap.accounts.map((item) => <tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{item.accountType}</td><td>{item.active ? "Active" : "Archived"}</td>{canManage && <td>{masterDataStatusButton("accounts", item)}</td>}</tr>)}</tbody></table></div> : <p className="finance-empty">{t("No accounts yet.")}</p>}<h3>Cost centers</h3>{bootstrap.costCenters.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>Code</th><th>{t("Name")}</th><th>Status</th>{canManage && <th>Actions</th>}</tr></thead><tbody>{bootstrap.costCenters.map((item) => <tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{item.active ? "Active" : "Archived"}</td>{canManage && <td>{masterDataStatusButton("cost-centers", item)}</td>}</tr>)}</tbody></table></div> : <p className="finance-empty">No cost centers yet.</p>}</section>}
     {tab === "donors" && <section className="finance-section"><div className="finance-section-heading"><div><h2>{t("Donors")}</h2><p>Donor master data and ledger-linked giving.</p></div>{canManage && <button className="button button-primary" type="button" onClick={() => setShowDonor(true)}><Plus size={15} />{t("New donor")}</button>}</div>{canManage && <div className="finance-filter-row"><label>Statement from<input type="date" value={donorStatementFrom} onChange={(event) => setDonorStatementFrom(event.target.value)} /></label><label>Through<input type="date" value={donorStatementTo} onChange={(event) => setDonorStatementTo(event.target.value)} /></label><span className="finance-security-note">Exports include posted donor-linked income lines.</span></div>}{donorStatementFrom && donorStatementTo && donorStatementFrom > donorStatementTo && <p className="finance-error">Start date must be on or before end date.</p>}{bootstrap.donors.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Name")}</th><th>Type</th><th>{t("Email")}</th><th>Giving total</th><th>Latest gift</th><th>Status</th>{canManage && <th>Statement</th>}</tr></thead><tbody>{bootstrap.donors.map((item) => <tr key={item.id}><td>{item.displayName}</td><td>{item.donorType === "joint" ? t("Joint donor") : t("Individual")}</td><td>{item.email}</td><td>{money(item.totalGiftsCents ?? 0, bootstrap.currency)}</td><td>{item.latestGiftDate ? new Date(`${item.latestGiftDate.slice(0, 10)}T00:00:00`).toLocaleDateString() : "—"}</td><td>{item.active ? "Active" : "Archived"}</td>{canManage && <td><button className="finance-text-button" type="button" disabled={Boolean(donorStatementFrom && donorStatementTo && donorStatementFrom > donorStatementTo)} onClick={() => void exportDonorStatement(item.id)}><ArrowDownToLine size={14} />CSV</button></td>}</tr>)}</tbody></table></div> : <p className="finance-empty">{t("No donors yet.")}</p>}</section>}
