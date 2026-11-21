@@ -3,6 +3,7 @@ import { ArrowDown, ArrowRight, ArrowUp, Building2, CalendarDays, ContactRound, 
 import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { HomeDutyRequests } from "./HomeDutyRequests";
+import { HomeLinks } from "./HomeLinks";
 import { HomeWelcome } from "./HomeWelcome";
 import { HomeCurrentPosts } from "./HomeCurrentPosts";
 import { HomeRecordedEventFacts } from "./HomeRecordedEventFacts";
@@ -16,7 +17,7 @@ type GroupAppointment = { appointmentId: string; occurrenceStartAt: string; occu
 type ResourceBooking = { id: string; resourceName: string; location: string; purpose: string; requesterName: string; startsAt: string; endsAt: string };
 type HomeBookings = { current: ResourceBooking[]; pending: ResourceBooking[] | null };
 type RecentEventFact = { eventDate: string; title: string; adults: number; children: number; checkedIn: number; firstTimeVisitors: number };
-const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts"] as const;
+const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts", "homeLinks"] as const;
 type DashboardWidgetId = typeof dashboardWidgetIds[number];
 const defaultDashboardWidgets = { order: [...dashboardWidgetIds], visible: [...dashboardWidgetIds] };
 type WidgetLayout = typeof defaultDashboardWidgets;
@@ -41,6 +42,7 @@ const dashboardWidgetLabels: Record<DashboardWidgetId, TranslationKey> = {
   currentBookings: "overview.widgetCurrentBookings", resourceApprovals: "overview.resourceApprovals", recentEventFacts: "overview.widgetRecentEventFacts",
   dutyRequests: "overview.dutyRequests",
   currentPosts: "overview.currentPosts",
+  homeLinks: "overview.homeLinks",
 };
 
 function attendanceSummary(rows: RecentEventFact[]) {
@@ -265,6 +267,7 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
       </div>)}</div> : <p className="community-empty">{translate("overview.noResourceApprovals")}</p>}
       {approvalFeedback && <p className="community-empty" role="status">{approvalFeedback}</p>}
     </section>,
+    homeLinks: <HomeLinks key={departmentId} departmentId={departmentId} csrfToken={csrfToken} canEdit={canManageSite} />,
     currentPosts: <HomeCurrentPosts key={departmentId} departmentId={departmentId} />,
     recentEventFacts: <>{recentEventFacts && <section className="directory-card community-upcoming-card">
       <div className="directory-heading"><div><h2>{translate("overview.recentEventFacts")}</h2><p>{translate("overview.recentEventFactsHelp")}</p></div><button className="button button-secondary" type="button" onClick={() => onNavigate("Services & events")}>{translate("overview.openCalendar")} <ArrowRight size={14} /></button></div>
