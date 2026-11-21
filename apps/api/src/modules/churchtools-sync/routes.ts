@@ -2516,7 +2516,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
 
       const scope = [dept, config.instance_url, categoryId];
       const wikiAvailable = (db: Pick<PoolClient, "query">, lock = false) => db.query(`SELECT 1 FROM departments d JOIN installation_modules m
-        ON m.installation_id=d.installation_id AND m.module_id='wiki' AND m.enabled WHERE d.id=$1${lock ? " FOR SHARE OF m" : ""}`, [dept]);
+        ON m.installation_id=d.installation_id AND m.module_id='wiki' AND m.enabled WHERE d.id=$1 AND 'wiki'=ANY(d.enabled_modules)${lock ? " FOR SHARE OF d,m" : ""}`, [dept]);
       const sourceHash = createHash("sha256").update(JSON.stringify([category, guid, page.revision, page.title, page.text])).digest("hex");
       const destination = async (db: Pick<PoolClient, "query">) => {
         const prior = await db.query<{ source_version: string; source_hash: string; source_category_id: string; status: string | null }>(`SELECT
