@@ -1,5 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
-import { hasResourceSchedulerCapacityGuard, lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
+import { hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -18,7 +18,7 @@ const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 
 type BookableResourceRow = {
   id: string; name: string; category: BookableResource["category"]; description: string; location: string;
-  capacity: number | null; requires_approval: boolean; calendar_required: boolean; active: boolean; source_system?: string | null;
+  capacity: number | null; requires_approval: boolean; calendar_required: boolean; manager_booking_only: boolean; active: boolean; source_system?: string | null;
 };
 
 type BookingRow = {
@@ -31,8 +31,8 @@ function mapGroup(row: { id: string; name: string; description: string; group_ty
   return { id: row.id, name: row.name, description: row.description, ...(row.group_type?.trim() ? { groupType: row.group_type.trim() } : {}), status: row.status ?? "active", startsOn: row.starts_on ? String(row.starts_on).slice(0, 10) : null, endsOn: row.ends_on ? String(row.ends_on).slice(0, 10) : null, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" || row.source_system === "elvanto" ? { importedFrom: row.source_system } : {}) };
 }
 
-function mapBookableResource(row: BookableResourceRow): BookableResource & { calendarRequired: boolean } {
-  return { id: row.id, name: row.name, category: row.category, description: row.description, location: row.location, ...(row.capacity ? { capacity: row.capacity } : {}), requiresApproval: row.requires_approval, calendarRequired: row.calendar_required, active: row.active, ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+function mapBookableResource(row: BookableResourceRow): BookableResource & { calendarRequired: boolean; managerBookingOnly: boolean } {
+  return { id: row.id, name: row.name, category: row.category, description: row.description, location: row.location, ...(row.capacity ? { capacity: row.capacity } : {}), requiresApproval: row.requires_approval, calendarRequired: row.calendar_required, managerBookingOnly: row.manager_booking_only, active: row.active, ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
 }
 
 function mapBooking(row: BookingRow): ResourceBooking {
@@ -1044,12 +1044,15 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query<BookableResourceRow>(
-        `SELECT id, name, category, description, location, capacity, requires_approval, calendar_required, active, source_system
+        `SELECT id, name, category, description, location, capacity, requires_approval, calendar_required, manager_booking_only, active, source_system
            FROM bookable_resources WHERE department_id = $1 ${request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage") ? "" : "AND active = true"}
           ORDER BY active DESC, category, lower(name)`,
         [departmentId],
       );
-      return result.rows.map(mapBookableResource);
+      const canManageBookings = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
+      return result.rows.map((row) => ({
+        ...mapBookableResource(row), canRequestBooking: !row.manager_booking_only || canManageBookings,
+      }));
     });
 
     routes.post<{ Body: { name: string; category: BookableResource["category"]; description?: string; location?: string; capacity?: number; requiresApproval: boolean; active: boolean } }>("/api/resources", { schema: { body: bookableResourceBodySchema } }, async (request, reply) => {
@@ -1061,7 +1064,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const result = await pool!.query<BookableResourceRow>(
           `INSERT INTO bookable_resources (id, department_id, name, category, description, location, capacity, requires_approval, active)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           RETURNING id, name, category, description, location, capacity, requires_approval, calendar_required, active`,
+           RETURNING id, name, category, description, location, capacity, requires_approval, calendar_required, manager_booking_only, active`,
           [randomUUID(), departmentId, name, request.body.category, request.body.description?.trim() ?? "", request.body.location?.trim() ?? "", request.body.capacity ?? null, request.body.requiresApproval, request.body.active],
         );
         return reply.code(201).send(mapBookableResource(result.rows[0]));
@@ -1084,7 +1087,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       try {
         const result = await pool!.query<BookableResourceRow>(
           `UPDATE bookable_resources SET name=$3, category=$4, description=$5, location=$6, capacity=$7, requires_approval=$8, active=$9, updated_at=now()
-            WHERE id=$1 AND department_id=$2 RETURNING id, name, category, description, location, capacity, requires_approval, calendar_required, active, source_system`,
+            WHERE id=$1 AND department_id=$2 RETURNING id, name, category, description, location, capacity, requires_approval, calendar_required, manager_booking_only, active, source_system`,
           [request.params.id, departmentId, name, request.body.category, request.body.description?.trim() ?? "", request.body.location?.trim() ?? "", request.body.capacity ?? null, request.body.requiresApproval, request.body.active],
         );
         if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
@@ -1135,6 +1138,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const resource = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
         if (!resource?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This resource is not available for booking." }); }
         if (resource.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
+        if (resource.manager_booking_only && !isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))) {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: resourceManagerRequired });
+        }
         const schedulerCapacity = await hasResourceSchedulerCapacityGuard(client);
         if (!schedulerCapacity) {
           const conflicts = await client.query(

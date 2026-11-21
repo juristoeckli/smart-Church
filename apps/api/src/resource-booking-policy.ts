@@ -1,11 +1,20 @@
+import type { FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 
 export const resourceCalendarRequired = "This resource must be booked from a saved Calendar occurrence.";
 
+export const resourceManagerRequired = "Only resource managers can make new bookings for this resource.";
+
+export function isResourceBookingManager(request: FastifyRequest, allowSchedulerGrant = true) {
+  return request.activeDepartmentRole === "site_admin"
+    || (request.activeDepartmentPermissions ?? []).includes("resources_manage")
+    || (allowSchedulerGrant && (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage"));
+}
+
 export async function lockResourceBookingPolicy(client: PoolClient, departmentId: string, resourceId: string) {
   await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, resourceId]);
-  const result = await client.query<{ id: string; name: string; requires_approval: boolean; calendar_required: boolean; active: boolean; responsible_user_id: string | null }>(
-    "SELECT id,name,requires_approval,calendar_required,active,responsible_user_id FROM bookable_resources WHERE id=$1 AND department_id=$2",
+  const result = await client.query<{ id: string; name: string; requires_approval: boolean; calendar_required: boolean; active: boolean; responsible_user_id: string | null; manager_booking_only: boolean }>(
+    "SELECT id,name,requires_approval,calendar_required,active,responsible_user_id,manager_booking_only FROM bookable_resources WHERE id=$1 AND department_id=$2",
     [resourceId, departmentId],
   );
   return result.rows[0] ?? null;
