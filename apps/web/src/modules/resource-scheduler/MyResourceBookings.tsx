@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 type Period = "upcoming" | "past";
 type Status = "requested" | "approved" | "declined" | "cancelled";
-type Booking = { id: string; resourceName: string; location: string; purpose: string; quantity: number; status: Status; startsAt: string; endsAt: string };
+type Booking = { id: string; resourceName: string; location: string; purpose: string; quantity: number; status: Status; allDayDate?: string | null; startsAt: string; endsAt: string };
 type BookingPage = { bookings: Booking[]; nextCursor: string | null; timeZone: string };
 
 export function MyResourceBookings({ departmentId, refreshVersion, statusLabels, onHistory }: {
@@ -64,8 +64,10 @@ export function MyResourceBookings({ departmentId, refreshVersion, statusLabels,
         <tbody>{page.bookings.map(booking => <tr key={booking.id}>
           <th scope="row">{booking.resourceName}{booking.location && <small>{booking.location}</small>}</th>
           <td>{booking.purpose}<small>{booking.quantity} {booking.quantity === 1 ? "unit" : "units"}</small></td>
-          <td>{formatter?.format(new Date(booking.startsAt))}</td>
-          <td>{formatter?.format(new Date(booking.endsAt))}</td>
+          {booking.allDayDate ? <td colSpan={2}><time dateTime={booking.allDayDate}>{booking.allDayDate}</time> · All day</td> : <>
+            <td>{formatter?.format(new Date(booking.startsAt))}</td>
+            <td>{formatter?.format(new Date(booking.endsAt))}</td>
+          </>}
           <td>{statusLabels[booking.status]}</td>
           <td><button type="button" className="button button-secondary" onClick={() => onHistory(booking.id, booking.resourceName)}>Booking history</button></td>
         </tr>)}</tbody>

@@ -19,3 +19,5 @@ The migration defaults every existing resource to one available unit and adds qu
 Members and managers can mark resources on the weekly matrix and select **Marked only** to filter their schedule and printout. Marks are stored separately for each account and location.
 
 The weekly matrix searches resource name, category, and location as well as booking purpose and requester name. Search combines with resource, status, and marked-only filters before the booking limit. Printing uses the displayed matches.
+
+The scheduler stores the selected local date for new one-off full-day requests and checks that their time interval matches that full day in the location time zone. The weekly schedule and My bookings display them as all-day. Existing timed reservations keep their original classification. To move a full-day request, cancel it and make a new request.
