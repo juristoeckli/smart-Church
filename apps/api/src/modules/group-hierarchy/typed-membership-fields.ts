@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { csvDocument } from "../../csv-export.js";
+import { createWorkbook } from "../finance/workbook.js";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -323,7 +324,7 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
   });
 
   const exportLimit = 2000;
-  app.get<{ Params: { groupId: string }; Querystring: { fieldId?: string[] } }>(`${base}/export.csv`, {
+  for (const format of ["csv", "xlsx"] as const) app.get<{ Params: { groupId: string }; Querystring: { fieldId?: string[] } }>(`${base}/export.${format}`, {
     schema: { params: groupParams, querystring: { type: "object", additionalProperties: false, properties: { fieldId: rosterFieldIds } } },
   }, async (request, reply) => {
     const location = await scope(request, reply);
@@ -362,12 +363,14 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
     } finally { client.release(); }
-    if (members.length > exportLimit) return reply.code(422).send({ error: `This CSV supports groups with up to ${exportLimit} roster members.` });
+    if (members.length > exportLimit) return reply.code(422).send({ error: `This export supports groups with up to ${exportLimit} roster members.` });
     const headers = ["First name", "Last name", "Membership role", "Membership status", ...activeFields.map(field => field.label)];
     const rows = members.map(member => [member.firstName, member.lastName, member.role, member.status, ...activeFields.map(field => member.fieldValues[field.id] ?? field.defaultValue)]);
-    return reply.header("Cache-Control", "private, no-store")
-      .header("Content-Disposition", "attachment; filename=group-membership-fields.csv")
-      .type("text/csv; charset=utf-8").send(csvDocument(headers, rows));
+    reply.header("Cache-Control", "private, no-store")
+      .header("Content-Disposition", "attachment; filename=group-membership-fields." + format);
+    return format === "xlsx"
+      ? reply.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").send(createWorkbook("Report", headers, rows))
+      : reply.type("text/csv; charset=utf-8").send(csvDocument(headers, rows));
   });
 
   app.get<{ Params: { groupId: string; contactId: string } }>(`${base}/:contactId`, { schema: { params: memberParams } }, async (request, reply) => {

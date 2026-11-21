@@ -1,4 +1,4 @@
-import { TypedRosterColumns, type RosterMember } from "./TypedRosterColumns";
+import { rosterExportFormats, TypedRosterColumns, type RosterExportFormat, type RosterMember } from "./TypedRosterColumns";
 import { useCallback, useEffect, useState, type FormEvent, type ChangeEvent } from "react";
 
 const fieldTypes = { text: "Text", number: "Number", boolean: "Yes / no", date: "Date", select: "Single choice" } as const;
@@ -157,14 +157,14 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     return () => controller.abort();
   }, [base, contactId, reload, request]);
 
-  async function exportFields(fieldIds?: string[]) {
+  async function exportFields(format: RosterExportFormat, fieldIds?: string[]) {
     if (exporting) return;
     setExporting(true);
     setError("");
     try {
       const params = new URLSearchParams();
       for (const id of fieldIds ?? []) params.append("fieldId", id);
-      const response = await fetch(base + "/export.csv" + (fieldIds?.length ? "?" + params : ""), {
+      const response = await fetch(base + "/export." + format + (fieldIds?.length ? "?" + params : ""), {
         headers: { "x-department-id": departmentId }, cache: "no-store",
       });
       if (!response.ok) {
@@ -174,7 +174,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = "group-membership-fields.csv";
+      link.download = "group-membership-fields." + format;
       link.click();
       URL.revokeObjectURL(url);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not export membership fields."); }
@@ -260,7 +260,8 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     {!fields && !error && <p>Loading membership fields…</p>}
     {fields && activeFields.length === 0 && <p>No active typed fields configured for this group.</p>}
     {fields && !contactId && <>
-      {activeFields.length > 0 && <button type="button" disabled={exporting} onClick={() => void exportFields()}>Export member fields (CSV)</button>}
+      {activeFields.length > 0 && rosterExportFormats.map(({ format, label }) =>
+        <button key={format} type="button" disabled={exporting} onClick={() => void exportFields(format)}>Export member fields ({label})</button>)}
       {activeFields.length > 0 && <ul>{activeFields.map(field => <li key={field.id}>
         {labelDraft?.field.id === field.id ? <form onSubmit={event => {
           event.preventDefault();

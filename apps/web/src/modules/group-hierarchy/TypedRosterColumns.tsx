@@ -5,12 +5,14 @@ export type RosterMember = { contactId: string; firstName: string; lastName: str
 type Field = { id: string; label: string; revision: number };
 type Row = { contactId: string; values: Record<string, Value | null> };
 type Request = <T>(url: string, init?: RequestInit) => Promise<T>;
+export const rosterExportFormats = [{ format: "csv", label: "CSV" }, { format: "xlsx", label: "Excel" }] as const;
+export type RosterExportFormat = typeof rosterExportFormats[number]["format"];
 const pageSize = 25;
 const maxFields = 8;
 
 export function TypedRosterColumns({ base, fields, members, revision, request, exporting, onExport }: {
   base: string; fields: Field[]; members: RosterMember[]; revision: number; request: Request;
-  exporting: boolean; onExport: (fieldIds: string[]) => Promise<void>;
+  exporting: boolean; onExport: (format: RosterExportFormat, fieldIds: string[]) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -53,9 +55,10 @@ export function TypedRosterColumns({ base, fields, members, revision, request, e
         {field.label}
       </label>)}
     </fieldset>
-    {selected.length > 0 && <button type="button" disabled={exporting} onClick={() => void onExport(selected.map(field => field.id))}>
-      Export whole group with these columns (CSV)
-    </button>}
+    {selected.length > 0 && rosterExportFormats.map(({ format, label }) =>
+      <button key={format} type="button" disabled={exporting} onClick={() => void onExport(format, selected.map(field => field.id))}>
+        Export whole group with these columns ({label})
+      </button>)}
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>Retry</button></p>}
     {query && !rows && !error && <p role="status">Loading roster values…</p>}
     {selected.length > 0 && !visible.length && <p>No members match the roster filters.</p>}
