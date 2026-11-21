@@ -2,9 +2,15 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 
 type HomeLink = { label: string; url: string };
-type Welcome = { heading: string; subtitle: string; links: HomeLink[] };
-type WelcomeUpdate = { heading?: string; subtitle?: string; links?: HomeLink[] };
+type Welcome = { heading: string; subtitle: string; notice: string; links: HomeLink[] };
+type WelcomeUpdate = { heading?: string; subtitle?: string; notice?: string; links?: HomeLink[] };
 const maxLinks = 12;
+const maxNoticeLength = 300;
+
+export function normalizeHomeNotice(value: unknown): string | null {
+  if (typeof value !== "string" || /[\u0000-\u001f\u007f]/.test(value) || value.length > maxNoticeLength) return null;
+  return value.trim();
+}
 
 export function normalizeHomeLinks(value: unknown): HomeLink[] | null {
   if (!Array.isArray(value) || value.length > maxLinks) return null;
@@ -32,13 +38,13 @@ export function registerHomeWelcome(app: FastifyInstance, dependencies: {
     const departmentId = await dependencies.department(request, reply);
     if (!departmentId) return reply;
     const { rows: [welcome] } = await dependencies.getPool().query<Welcome>(
-      "SELECT heading,subtitle,links FROM overview_location_welcome WHERE department_id=$1", [departmentId],
+      "SELECT heading,subtitle,links,notice FROM overview_location_welcome WHERE department_id=$1", [departmentId],
     );
-    return reply.header("Cache-Control", "private, no-store").send({ heading: welcome?.heading ?? "", subtitle: welcome?.subtitle ?? "", links: normalizeHomeLinks(welcome?.links) ?? [] });
+    return reply.header("Cache-Control", "private, no-store").send({ heading: welcome?.heading ?? "", subtitle: welcome?.subtitle ?? "", notice: normalizeHomeNotice(welcome?.notice) ?? "", links: normalizeHomeLinks(welcome?.links) ?? [] });
   });
   app.put<{ Body: WelcomeUpdate }>(path, {
     schema: { body: { type: "object", additionalProperties: false, anyOf: [{ required: ["heading", "subtitle"] }, { required: ["links"], not: { anyOf: [{ required: ["heading"] }, { required: ["subtitle"] }] } }], properties: {
-      heading: { type: "string", maxLength: 100 }, subtitle: { type: "string", maxLength: 300 },
+      heading: { type: "string", maxLength: 100 }, subtitle: { type: "string", maxLength: 300 }, notice: { type: "string", maxLength: maxNoticeLength },
       links: { type: "array", maxItems: maxLinks, items: { type: "object", additionalProperties: false, required: ["label", "url"], properties: {
         label: { type: "string", minLength: 1, maxLength: 80 }, url: { type: "string", minLength: 1, maxLength: 2048 },
       } } },
@@ -53,6 +59,10 @@ export function registerHomeWelcome(app: FastifyInstance, dependencies: {
     }
     const heading = request.body.heading?.trim() ?? null;
     const subtitle = request.body.subtitle?.trim() ?? null;
+    const notice = normalizeHomeNotice(request.body.notice);
+    if (request.body.notice !== undefined && notice === null) {
+      return reply.code(400).send({ error: "Enter the Home notice as a single line of text." });
+    }
     const links = request.body.links === undefined ? null : normalizeHomeLinks(request.body.links);
     if (request.body.links && !links) return reply.code(400).send({ error: "Give each link a label and a valid HTTP or HTTPS address." });
     if (/[\u0000-\u001f\u007f]/.test((heading ?? "") + (subtitle ?? ""))) {
@@ -77,16 +87,17 @@ export function registerHomeWelcome(app: FastifyInstance, dependencies: {
         return reply.code(403).send({ error: "A site administrator browser session is required to edit Home settings." });
       }
       const { rows: [welcome] } = await client.query<Welcome>(
-        `INSERT INTO overview_location_welcome (department_id,heading,subtitle,links)
-         VALUES($1,COALESCE($2,''),COALESCE($3,''),COALESCE($4::jsonb,'[]'::jsonb))
+        `INSERT INTO overview_location_welcome (department_id,heading,subtitle,links,notice)
+         VALUES($1,COALESCE($2,''),COALESCE($3,''),COALESCE($4::jsonb,'[]'::jsonb),COALESCE($5,''))
          ON CONFLICT(department_id) DO UPDATE SET
            heading=COALESCE($2,overview_location_welcome.heading),
            subtitle=COALESCE($3,overview_location_welcome.subtitle),
-           links=COALESCE($4::jsonb,overview_location_welcome.links)
-         RETURNING heading,subtitle,links`,
-        [departmentId, heading, subtitle, links === null ? null : JSON.stringify(links)],
+           links=COALESCE($4::jsonb,overview_location_welcome.links),
+           notice=COALESCE($5,overview_location_welcome.notice)
+         RETURNING heading,subtitle,links,notice`,
+        [departmentId, heading, subtitle, links === null ? null : JSON.stringify(links), notice],
       );
-      if (!welcome.heading && !welcome.subtitle && !welcome.links.length) {
+      if (!welcome.heading && !welcome.subtitle && !welcome.links.length && !welcome.notice) {
         await client.query("DELETE FROM overview_location_welcome WHERE department_id=$1", [departmentId]);
       }
       await client.query("COMMIT");

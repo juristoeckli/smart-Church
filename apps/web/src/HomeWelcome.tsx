@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { translate } from "./i18n";
 
-type Welcome = { heading: string; subtitle: string };
-const emptyWelcome: Welcome = { heading: "", subtitle: "" };
+type Welcome = { heading: string; subtitle: string; notice: string };
+const emptyWelcome: Welcome = { heading: "", subtitle: "", notice: "" };
 
 export function HomeWelcome({ departmentId, csrfToken, canEdit, actions }: {
   departmentId: string;
@@ -23,7 +23,7 @@ export function HomeWelcome({ departmentId, csrfToken, canEdit, actions }: {
     }).then(async (response) => {
       if (!response.ok) throw new Error(translate("overview.welcomeUnavailable"));
       const data = await response.json() as Welcome;
-      if (!controller.signal.aborted) setWelcome(data);
+      if (!controller.signal.aborted) setWelcome({ ...data, notice: data.notice ?? "" });
     }).catch(() => {
       if (!controller.signal.aborted) setError(translate("overview.welcomeUnavailable"));
     });
@@ -44,7 +44,7 @@ export function HomeWelcome({ departmentId, csrfToken, canEdit, actions }: {
       });
       const data = await response.json() as Welcome | { error: string };
       if (!response.ok || "error" in data) throw new Error("error" in data ? data.error : translate("overview.welcomeSaveFailed"));
-      setWelcome(data);
+      setWelcome({ ...data, notice: data.notice ?? "" });
       setDraft(undefined);
       setNotice(translate("overview.welcomeSaved"));
     } catch (reason) {
@@ -69,12 +69,18 @@ export function HomeWelcome({ departmentId, csrfToken, canEdit, actions }: {
         {actions}
       </div>
     </section>
+    {welcome?.notice && <aside className="directory-card" aria-label={translate("overview.homeNotice")}>
+      <p><strong>{translate("overview.homeNotice")}</strong> · {welcome.notice}</p>
+    </aside>}
     {canEdit && draft && <form className="directory-card home-welcome-form" aria-label={translate("overview.editWelcome")} onSubmit={(event) => void save(event)}>
       <p>{translate("overview.welcomeHelp")}</p>
       <label>{translate("overview.welcomeHeading")}<input maxLength={100} value={draft.heading} disabled={saving}
         onChange={(event) => setDraft({ ...draft, heading: event.target.value })} /></label>
       <label>{translate("overview.welcomeSubtitle")}<input maxLength={300} value={draft.subtitle} disabled={saving}
         onChange={(event) => setDraft({ ...draft, subtitle: event.target.value })} /></label>
+      <label>{translate("overview.homeNotice")}<input maxLength={300} value={draft.notice} disabled={saving}
+        onChange={(event) => setDraft({ ...draft, notice: event.target.value })} /></label>
+      <p>{translate("overview.homeNoticeHelp")}</p>
       <div className="form-actions">
         <button className="button button-secondary" type="button" disabled={saving} onClick={() => setDraft(emptyWelcome)}>{translate("overview.clearWelcome")}</button>
         <button className="button button-primary" disabled={saving}>{translate(saving ? "events.saving" : "events.saveChanges")}</button>
