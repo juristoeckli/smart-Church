@@ -260,19 +260,12 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
   };
 
-  const visibleObjects = currentPage.objects;
-  const hasPanelBackButton = visibleObjects.some((object) => {
-    const label = labelFor(object).trim().toLocaleLowerCase();
-    return object.type === "general" && (["zurück", "back", "schliessen", "schließen", "abbrechen"].some((word) => label.endsWith(word))
-      || object.pageFlip === "DetailPopup" || object.pageFlip === "EQ");
-  });
   const screenStyle: CSSProperties = { ...pageScale, backgroundImage: basePageName === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
 
   return <section className="amx-workspace" aria-label="AMX room control">
     <div className="amx-panel-frame">
       <div className="amx-panel-screen" style={screenStyle}>
         {visiblePages.map((page, layer) => page.objects.map((object) => renderObject(page, object, layer)))}
-        {currentPage.name !== "Home" && !hasPanelBackButton && <button className="amx-panel-back" type="button" onClick={goBack} aria-label="Zurück">‹ Zurück</button>}
         {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
       </div>
     </div>
