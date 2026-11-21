@@ -202,14 +202,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
   } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
-    const feed = await context.pool.query<{ department_id: string; calendar_id: string; calendar_name: string }>(
-      `SELECT feed.department_id,feed.calendar_id,calendar.name AS calendar_name FROM church_calendar_public_feeds feed
+    const feed = await context.pool.query<{ department_id: string; calendar_id: string; calendar_name: string; time_zone: string; local_today: string }>(
+      `SELECT feed.department_id,feed.calendar_id,calendar.name AS calendar_name,
+              department.time_zone,to_char(now() AT TIME ZONE department.time_zone,'YYYY-MM-DD') AS local_today
+         FROM church_calendar_public_feeds feed
+         JOIN departments department ON department.id=feed.department_id
         JOIN church_calendar_calendars calendar ON calendar.id=feed.calendar_id AND calendar.department_id=feed.department_id
        WHERE feed.token_hash=$1 AND feed.revoked_at IS NULL AND calendar.scope='community' AND calendar.archived_at IS NULL`, [hashFeedToken(request.params.token)]);
     const source = feed.rows[0];
     if (!source) return reply.code(404).send({ error: "Public calendar feed not found." });
-    const from = localDateTime(new Date()).slice(0, 10);
-    const toDate = new Date(); toDate.setUTCDate(toDate.getUTCDate() + 366);
+    const from = source.local_today;
+    const toDate = wallDate(`${from}T00:00:00`);
+    toDate.setUTCDate(toDate.getUTCDate() + 366);
     const to = localDateTime(toDate).slice(0, 10);
     const events = await context.pool.query<AppointmentRow>(
       `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
@@ -236,6 +240,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Smart-Church//Calendar//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", `X-WR-CALNAME:${icsEscape(source.calendar_name)}`];
     const stamp = icsDateTime(`${localDateTime(new Date())}Z`);
+    const timedOccurrences: Array<{ line: number; startsAt: string; endsAt: string }> = [];
     for (const row of events.rows) {
       const start = wallDate(row.starts_at);
       const duration = Math.max(0, wallDate(row.ends_at).getTime() - start.getTime());
@@ -244,7 +249,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const occurrence of starts) {
         const original = localDateTime(occurrence);
         const exception = exceptions.get(`${row.id}:${original}`);
-        if (exception?.cancelled) continue;
+        if (exception?.cancelled || exception?.overrides?.internalOnly === true) continue;
         const override = exception?.overrides ?? {};
         const startsAt = cleanLocalDateTime(override.startsAt) ?? original;
         const endsAt = cleanLocalDateTime(override.endsAt) ?? extraOccurrences.get(row.id)?.get(original) ?? localDateTime(new Date(occurrence.getTime() + duration));
@@ -253,15 +258,46 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const place = String(override.place ?? row.place);
         const url = String(override.url ?? row.url);
         lines.push("BEGIN:VEVENT", `UID:${row.id}-${icsDateTime(original)}@smart-church`, `DTSTAMP:${stamp}`);
-        if (row.all_day) {
-          const dayAfter = localDateTime(new Date(wallDate(startsAt).getTime() + 86_400_000)).slice(0, 10).replaceAll("-", "");
-          lines.push(`DTSTART;VALUE=DATE:${startsAt.slice(0, 10).replaceAll("-", "")}`, `DTEND;VALUE=DATE:${dayAfter}`);
-        } else lines.push(`DTSTART:${icsDateTime(startsAt)}`, `DTEND:${icsDateTime(endsAt)}`);
+        if ((override.allDay ?? row.all_day) === true) {
+          const startDate = startsAt.slice(0, 10);
+          const endDate = endsAt.slice(0, 10);
+          const endMidnight = wallDate(`${endDate}T00:00:00`);
+          const nextStartDay = wallDate(`${startDate}T00:00:00`).getTime() + 86_400_000;
+          const roundedEnd = endMidnight.getTime() + (wallDate(endsAt).getTime() > endMidnight.getTime() ? 86_400_000 : 0);
+          const exclusiveEnd = localDateTime(new Date(Math.max(nextStartDay, roundedEnd))).slice(0, 10).replaceAll("-", "");
+          lines.push(`DTSTART;VALUE=DATE:${startDate.replaceAll("-", "")}`, `DTEND;VALUE=DATE:${exclusiveEnd}`);
+        } else {
+          timedOccurrences.push({ line: lines.length, startsAt, endsAt });
+          lines.push("", "");
+        }
         lines.push(`SUMMARY:${icsEscape(title)}`);
         if (description) lines.push(`DESCRIPTION:${icsEscape(description)}`);
         if (place) lines.push(`LOCATION:${icsEscape(place)}`);
         if (/^https:\/\/[^\u0000-\u001f\u007f]+$/i.test(url)) lines.push(`URL:${url}`);
         lines.push("END:VEVENT");
+      }
+    }
+    // Expand wall times using the location zone before exporting UTC instants.
+    // Batch conversions to keep query size bounded even for large feeds.
+    for (let offset = 0; offset < timedOccurrences.length; offset += 2000) {
+      const batch = timedOccurrences.slice(offset, offset + 2000);
+      const { rows } = await context.pool.query<{ line: number; starts_at: string; ends_at: string }>(
+        `SELECT line,
+                to_char(start_instant AT TIME ZONE 'UTC','YYYYMMDD"T"HH24MISS"Z"') AS starts_at,
+                to_char((CASE WHEN end_instant <= start_instant AND local_end > local_start
+                              THEN start_instant + (local_end - local_start)
+                              ELSE end_instant END) AT TIME ZONE 'UTC','YYYYMMDD"T"HH24MISS"Z"') AS ends_at
+           FROM (
+             SELECT line,local_start,local_end,
+                    local_start AT TIME ZONE $4 AS start_instant,
+                    local_end AT TIME ZONE $4 AS end_instant
+               FROM unnest($1::int[],$2::timestamp[],$3::timestamp[]) occurrence(line,local_start,local_end)
+           ) converted`,
+        [batch.map((item) => item.line), batch.map((item) => item.startsAt), batch.map((item) => item.endsAt), source.time_zone],
+      );
+      for (const row of rows) {
+        lines[row.line] = `DTSTART:${row.starts_at}`;
+        lines[row.line + 1] = `DTEND:${row.ends_at}`;
       }
     }
     lines.push("END:VCALENDAR");
