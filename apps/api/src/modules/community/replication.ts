@@ -3,8 +3,8 @@ import type { ModuleServerContext } from "../module-sdk.js";
 
 type GroupJoinRequest = Record<string, unknown>;
 type FormRow = { department_id: string; group_id: string; revision: string; questions: unknown[]; opens_at?: string | Date | null; closes_at?: string | Date | null; default_role?: string; heading?: string; active_seat_limit?: number | null; waitlist_limit?: number | null; counted_roles?: string[]; connected_admission?: boolean };
-type Snapshot = { version: 2 | 3 | 4 | 5 | 6 | 7; groupJoinRequests: GroupJoinRequest[]; signupForms?: FormRow[] };
-const requestColumns = "id,department_id,group_id,first_name,last_name,email,status,contact_id,created_at,reviewed_at,reviewed_by,answer_snapshot";
+type Snapshot = { version: 2 | 3 | 4 | 5 | 6 | 7 | 8; groupJoinRequests: GroupJoinRequest[]; signupForms?: FormRow[] };
+const requestColumns = "id,department_id,group_id,first_name,last_name,email,status,contact_id,created_at,reviewed_at,reviewed_by,answer_snapshot,withdrawal_hash,withdrawn_at";
 async function loadForms(client: PoolClient, departmentId: string) {
   return (await client.query<FormRow>(
     "SELECT department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles,connected_admission FROM group_signup_forms WHERE department_id=$1 ORDER BY group_id", [departmentId],
@@ -20,7 +20,7 @@ function canonical(value: unknown): string {
 }
 
 function remapReviewer(row: GroupJoinRequest, userIdMap: Map<string, string>, departmentId?: string) {
-  const copy: GroupJoinRequest = { ...row, answer_snapshot: row.answer_snapshot ?? [] };
+  const copy: GroupJoinRequest = { ...row, answer_snapshot: row.answer_snapshot ?? [], withdrawal_hash: row.withdrawal_hash ?? null, withdrawn_at: row.withdrawn_at ?? null };
   if (departmentId && typeof copy.department_id === "string") copy.department_id = departmentId;
   if (typeof copy.reviewed_by === "string") copy.reviewed_by = userIdMap.get(copy.reviewed_by) ?? copy.reviewed_by;
   return copy;
@@ -29,7 +29,7 @@ function remapReviewer(row: GroupJoinRequest, userIdMap: Map<string, string>, de
 export function registerCommunityReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "7",
+    schemaVersion: "8",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Community database is unavailable."], recordCount: 0 };
       try {
@@ -49,11 +49,11 @@ export function registerCommunityReplication(context: ModuleServerContext) {
     exportSnapshot: async (client: PoolClient, departmentId) => {
       const result = await client.query(`SELECT ${requestColumns}
         FROM group_join_requests WHERE department_id=$1 ORDER BY created_at,id`, [departmentId]);
-      return { version: 7, groupJoinRequests: result.rows, signupForms: await loadForms(client, departmentId) };
+      return { version: 8, groupJoinRequests: result.rows, signupForms: await loadForms(client, departmentId) };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as Snapshot;
-      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6 && snapshot.version !== 7) || !Array.isArray(snapshot.groupJoinRequests) || snapshot.groupJoinRequests.length > 100_000 || Buffer.byteLength(JSON.stringify(snapshot)) > maxSnapshotBytes) throw new Error("The Community group-join request snapshot is invalid or exceeds the supported limits.");
+      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6 && snapshot.version !== 7 && snapshot.version !== 8) || !Array.isArray(snapshot.groupJoinRequests) || snapshot.groupJoinRequests.length > 100_000 || Buffer.byteLength(JSON.stringify(snapshot)) > maxSnapshotBytes) throw new Error("The Community group-join request snapshot is invalid or exceeds the supported limits.");
       if (snapshot.version >= 4 && (!Array.isArray(snapshot.signupForms) || snapshot.signupForms.length > 100_000)) throw new Error("The Community signup-form snapshot is invalid.");
       await client.query("DELETE FROM group_signup_forms WHERE department_id=$1", [departmentId]);
       for (const form of snapshot.signupForms ?? []) {
@@ -67,16 +67,16 @@ export function registerCommunityReplication(context: ModuleServerContext) {
       }
       await client.query("DELETE FROM group_join_requests WHERE department_id=$1", [departmentId]);
       for (const source of snapshot.groupJoinRequests) {
-        if (typeof source.id !== "string" || typeof source.group_id !== "string" || typeof source.first_name !== "string" || typeof source.last_name !== "string" || typeof source.email !== "string" || !(snapshot.version === 2 ? ["pending", "approved", "declined"] : ["pending", "approved", "declined", "waitlisted"]).includes(String(source.status))) throw new Error("The Community snapshot contains an invalid group-join request.");
+        if (typeof source.id !== "string" || typeof source.group_id !== "string" || typeof source.first_name !== "string" || typeof source.last_name !== "string" || typeof source.email !== "string" || !(snapshot.version === 2 ? ["pending", "approved", "declined"] : snapshot.version < 8 ? ["pending", "approved", "declined", "waitlisted"] : ["pending", "approved", "declined", "waitlisted", "withdrawn"]).includes(String(source.status))) throw new Error("The Community snapshot contains an invalid group-join request.");
         const row = remapReviewer(source, restoreContext.userIdMap);
         await client.query(`INSERT INTO group_join_requests(${requestColumns})
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`, [row.id, departmentId, row.group_id, row.first_name, row.last_name, row.email, row.status, row.contact_id, row.created_at, row.reviewed_at, row.reviewed_by, JSON.stringify(row.answer_snapshot)]);
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14)`, [row.id, departmentId, row.group_id, row.first_name, row.last_name, row.email, row.status, row.contact_id, row.created_at, row.reviewed_at, row.reviewed_by, JSON.stringify(row.answer_snapshot), row.withdrawal_hash, row.withdrawn_at]);
       }
       return { recordCount: snapshot.groupJoinRequests.length + (snapshot.signupForms?.length ?? 0) };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as Snapshot;
-      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6 && snapshot.version !== 7) || !Array.isArray(snapshot.groupJoinRequests)) return { ready: false, blockers: ["No supported Community group-join request snapshot is available."] };
+      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6 && snapshot.version !== 7 && snapshot.version !== 8) || !Array.isArray(snapshot.groupJoinRequests)) return { ready: false, blockers: ["No supported Community group-join request snapshot is available."] };
       const actual = (await client.query(`SELECT ${requestColumns}
         FROM group_join_requests WHERE department_id=$1 ORDER BY created_at,id`, [departmentId])).rows as GroupJoinRequest[];
       const expectedRows = snapshot.groupJoinRequests.map((row) => canonical(remapReviewer(row, restoreContext?.userIdMap ?? new Map(), departmentId))).sort();

@@ -14,6 +14,7 @@ import { previewGroupWaitlistPromotion, promotionBatchSize } from "./group-waitl
 import { checkGroupAdmissionCapacity } from "./signup-capacity.js";
 import { defaultSignupPolicy, editableSignupPolicy, normalizeSignupPolicy, signupState } from "./signup-policy.js";
 import { registerGroupDuplication } from "./group-duplication.js";
+import { createGroupWithdrawalReceipt, registerPublicGroupWithdrawal } from "./group-withdrawal.js";
 import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -649,6 +650,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       finally { client.release(); }
     });
 
+    registerPublicGroupWithdrawal(routes, dependencies);
+
     routes.get<{ Params: { token: string } }>("/api/public/group-signups/:token", { schema: {
       params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
@@ -679,6 +682,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const lastName = request.body.lastName.trim();
       const email = request.body.email.trim().toLocaleLowerCase();
       if (!firstName || !lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
+      const receipt = createGroupWithdrawalReceipt();
       const client = await pool!.connect();
       let groupId = "";
       let groupDepartmentId = "";
@@ -709,8 +713,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         );
         if (member.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A registration for this email is already on file." }); }
         await client.query(
-          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email,answer_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)",
-          [randomUUID(), groupDepartmentId, groupId, firstName, lastName, email, JSON.stringify(captured.saved)],
+          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email,answer_snapshot,withdrawal_hash) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)",
+          [randomUUID(), groupDepartmentId, groupId, firstName, lastName, email, JSON.stringify(captured.saved), receipt.hash],
         );
         await client.query("COMMIT");
       } catch (error) {
@@ -719,7 +723,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         throw error;
       } finally { client.release(); }
       realtime.publish("core:groups:changed", groupDepartmentId, { groupId, action: "join-requested" });
-      return reply.code(201).send({ status: "pending" as const });
+      return reply.header("Cache-Control", "private, no-store").code(201).send({ status: "pending" as const, withdrawalToken: receipt.secret });
     });
 
     routes.post<{ Params: { token: string }; Body: { formRevision?: string; answers?: Record<string, string> } }>("/api/public/group-signups/:token/connected", { schema: {

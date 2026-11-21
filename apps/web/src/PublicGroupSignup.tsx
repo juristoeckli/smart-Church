@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { GroupWithdrawal, withdrawalReceiptPattern } from "./GroupWithdrawal";
 import { Check, ContactRound } from "lucide-react";
 import type { SignupQuestion } from "./GroupSignupFormEditor";
 import { publicErrorText, publicLanguage, publicText } from "./public-translations";
@@ -6,12 +7,24 @@ import { publicErrorText, publicLanguage, publicText } from "./public-translatio
 type PublicGroup = { name: string; description: string; revision?: string | null; questions?: SignupQuestion[]; heading?: string; signupState?: "scheduled" | "open" | "closed"; opensAt?: string | null; timeZone?: string; connectedAdmission?: boolean };
 
 export function PublicGroupSignup({ token }: { token: string }) {
+  const readReceipt = () => new URLSearchParams(window.location.hash.slice(1)).get("receipt");
+  const [receipt, setReceipt] = useState(readReceipt);
+  useEffect(() => {
+    const update = () => setReceipt(readReceipt());
+    window.addEventListener("hashchange", update);
+    return () => window.removeEventListener("hashchange", update);
+  }, []);
+  return receipt !== null ? <GroupWithdrawal key={receipt} receipt={receipt} /> : <GroupSignupForm token={token} />;
+}
+
+function GroupSignupForm({ token }: { token: string }) {
   const language = publicLanguage();
   const [group, setGroup] = useState<PublicGroup | null>(null);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState<"pending" | "approved" | null>(null);
+  const [withdrawalToken, setWithdrawalToken] = useState("");
   const [useLinkedAccount, setUseLinkedAccount] = useState(false);
   const [reload, setReload] = useState(0);
   const [formChanged, setFormChanged] = useState(false);
@@ -55,11 +68,12 @@ export function PublicGroupSignup({ token }: { token: string }) {
         method: "POST", headers: { "content-type": "application/json", ...(csrfToken ? { "x-csrf-token": csrfToken } : {}) },
         body: JSON.stringify({ ...applicant, ...questions }),
       });
-      const result = await response.json() as { status?: string; error?: string; code?: string };
+      const result = await response.json() as { status?: string; error?: string; code?: string; withdrawalToken?: string };
       if (result.code === "group_signup_window_closed") setReload((value) => value + 1);
       if (response.status === 409 && result.error === "The signup questions changed. Reload the form before submitting.") setFormChanged(true);
       if (!response.ok || (result.status !== "pending" && result.status !== "approved")) throw new Error(publicErrorText(language, result.error ?? "Could not send your request."));
       setSubmitted(result.status);
+      if (result.withdrawalToken && withdrawalReceiptPattern.test(result.withdrawalToken)) setWithdrawalToken(result.withdrawalToken);
     } catch (reason) { setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not send your request.")); }
     finally { setSending(false); }
   }
@@ -71,7 +85,7 @@ export function PublicGroupSignup({ token }: { token: string }) {
       <h1>{group.heading || group.name}</h1>
       {group.heading && <p>{group.name}</p>}
       {group.description && <p className="public-registration-description">{group.description}</p>}
-      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "approved" ? "groupJoined" : "groupRequestSent")}</h2><p>{publicText(language, submitted === "approved" ? "groupConnectedSuccess" : "groupRequestHelp")}</p></div></div> : group.signupState === "closed" || group.signupState === "scheduled" ? <div className="public-registration-message">
+      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, submitted === "approved" ? "groupJoined" : "groupRequestSent")}</h2><p>{publicText(language, submitted === "approved" ? "groupConnectedSuccess" : "groupRequestHelp")}</p>{withdrawalToken && <p><a href={window.location.pathname + "#receipt=" + withdrawalToken} target="_blank" rel="noreferrer">{publicText(language, "groupWithdrawalLink")}</a> · {publicText(language, "groupWithdrawalPrivacy")}</p>}</div></div> : group.signupState === "closed" || group.signupState === "scheduled" ? <div className="public-registration-message">
         <p>{publicText(language, group.signupState === "scheduled" ? "groupSignupScheduled" : "groupSignupClosed")}</p>
         {group.signupState === "scheduled" && group.opensAt && <p><time dateTime={group.opensAt}>
           {new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short", timeZone: group.timeZone }).format(new Date(group.opensAt))}
