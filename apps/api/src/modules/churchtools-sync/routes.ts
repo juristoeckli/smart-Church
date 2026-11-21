@@ -13,6 +13,7 @@ import { ChurchToolsFinanceRangeError, compareChurchToolsFinanceCodes, financeDa
 import { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
 import { buildChurchToolsFinanceJournalDryRun, isTwoDecimalFinanceCurrency, selectChurchToolsJournalRow } from "./finance-journal-dry-run.js";
 import { createReviewedJournalDrafts, journalDraftBatchId, planReviewedJournalDrafts, readJournalDraftReceipt } from "./finance-journal-drafts.js";
+import { readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -878,8 +879,9 @@ async function readReviewedJournalSource(config: Settings, scope: JournalScope) 
 }
 
 async function evaluateReviewedJournal(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, scope: JournalScope,
-  { source, rows }: NonNullable<Awaited<ReturnType<typeof readReviewedJournalSource>>>, lockRows = false) {
-  const mapping = await reviewFinanceMapping(db, departmentId, instanceUrl, source, lockRows);
+  { source, rows }: NonNullable<Awaited<ReturnType<typeof readReviewedJournalSource>>>, lockRows = false,
+  reviewedMapping?: Awaited<ReturnType<typeof reviewFinanceMapping>>) {
+  const mapping = reviewedMapping ?? await reviewFinanceMapping(db, departmentId, instanceUrl, source, lockRows);
   const ledgerTables = await db.query<{ installed: boolean }>(`SELECT to_regclass('public.finance_settings') IS NOT NULL
     AND to_regclass('public.finance_accounting_years') IS NOT NULL AND to_regclass('public.finance_transactions') IS NOT NULL
     AND to_regclass('public.finance_transaction_lines') IS NOT NULL AS installed`);
@@ -1840,6 +1842,71 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const status = error instanceof ChurchToolsFinanceRangeError ? 413
           : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools journal dry-run." });
+      }
+    });
+    routes.get<{ Querystring: JournalScope }>("/api/modules/sync/churchtools/finance/split-review", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
+        sourceCurrency: { type: "string", pattern: "^[A-Z]{3}$" },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const scope = request.query;
+      const invalid = journalScopeError(scope);
+      if (invalid) return reply.code(400).send({ error: invalid });
+      try {
+        const journal = await readReviewedJournalSource(config, scope);
+        if (!journal) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        const parentIds = [...new Set(journal.rows.flatMap((row) => row.splitParentId ? [row.splitParentId] : []))];
+        if (parentIds.length > 25) return reply.code(413).send({ error: "The selected range contains more than 25 split groups. Choose a narrower date range." });
+        const mapping = await reviewFinanceMapping(pool!, dept, config.instance_url, journal.source);
+        const preview = await evaluateReviewedJournal(pool!, dept, config.instance_url, scope, journal, false, mapping);
+        const token = decrypt(config.encrypted_login_token);
+        const groups = await mapConcurrent(parentIds, 5, async (parentId) => {
+          try {
+            const payload = await get(config.instance_url, token, `finance/splittransactions/${encodeURIComponent(parentId)}`);
+            const group = readChurchToolsSplitGroup(payload, parentId, scope);
+            return group ? { parentId, state: "available" as const, group } : { parentId, state: "outside_selected_dates" as const, group: null };
+          } catch (error) {
+            if (error instanceof ChurchToolsReadError && error.status === 403) return { parentId, state: "restricted" as const, group: null };
+            if (error instanceof ChurchToolsReadError && error.status === 404) return { parentId, state: "missing" as const, group: null };
+            throw error;
+          }
+        });
+        if (groups.reduce((sum, entry) => sum + (entry.group?.children.length ?? 0), 0) > 1000) {
+          return reply.code(413).send({ error: "The selected split groups contain more than 1,000 child rows. Choose a narrower date range." });
+        }
+        const parentCount = new Map<string, number>();
+        const sourceNumbers = [...new Set(groups.flatMap(({ group }) => {
+          if (!group?.documentNumber) return [];
+          parentCount.set(group.documentNumber, (parentCount.get(group.documentNumber) ?? 0) + 1);
+          return [group.documentNumber];
+        }))];
+        const duplicates = new Set(preview.rows.filter((row) => row.reasons.includes("duplicate_local_document")).map((row) => row.sourceId));
+        const linkedRows = mapping.targetFinanceAvailable ? await pool!.query<Parameters<typeof reconcileChurchToolsSplitGroup>[3][number]>(`
+          SELECT kind,source_id,target_id FROM churchtools_migration_finance_links WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`,
+        [dept, config.instance_url, scope.periodId]) : null;
+        const targetNumbers = preview.targetYear !== null && sourceNumbers.length ? await pool!.query<{ receipt_number: string }>(`
+          SELECT DISTINCT receipt_number FROM finance_transactions WHERE department_id=$1 AND accounting_year=$2 AND receipt_number=ANY($3::text[])`,
+        [dept, preview.targetYear, sourceNumbers]) : null;
+        const existingParentNumbers = new Set(targetNumbers?.rows.map((row) => row.receipt_number));
+        const reviewed = groups.map(({ parentId, state, group }) => {
+          if (!group) return { parentId, state, review: null };
+          const conflictingReceipt = existingParentNumbers.has(group.documentNumber) || group.children.some((row) => duplicates.has(row.sourceId));
+          const review = reconcileChurchToolsSplitGroup(group, journal.rows, mapping, linkedRows?.rows ?? [], preview.blockedBy,
+            conflictingReceipt, (parentCount.get(group.documentNumber) ?? 0) > 1);
+          return { parentId, state, review };
+        });
+        return reply.header("Cache-Control", "private, no-store").send({
+          formatVersion: 1, sourceInstance: config.instance_url, ...scope, targetCurrency: preview.targetCurrency, targetYear: preview.targetYear,
+          blockedBy: preview.blockedBy, groups: reviewed,
+        });
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceRangeError ? 413
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools split journal review." });
       }
     });
     routes.post<{ Body: JournalScope & { reviewHash: string; sourceIds: string[] } }>("/api/modules/sync/churchtools/finance/journal-drafts", {

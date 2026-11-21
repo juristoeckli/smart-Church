@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { FinanceSplitReview } from "./FinanceSplitReview";
 
 type SourceLine = { accountId: string; debitMinor: string; creditMinor: string };
 type TargetLine = SourceLine & { accountCode: string; costCenterId: string | null };
@@ -103,5 +104,6 @@ export function FinanceJournalDryRun({ departmentId, periodId, startDate, endDat
       </div>}
       {review.candidates > 0 && <button type="button" className="button button-primary" disabled={busy || !selected.length} onClick={() => void createDrafts()}>{t("Create selected unposted drafts")} ({selected.length})</button>}
     </section>}
+    <FinanceSplitReview key={currency} departmentId={departmentId} periodId={periodId} startDate={startDate} endDate={endDate} currency={currency} t={t} />
   </details>;
 }

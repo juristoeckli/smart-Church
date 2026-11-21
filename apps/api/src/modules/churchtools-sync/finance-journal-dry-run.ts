@@ -33,9 +33,11 @@ export function selectChurchToolsJournalRow(raw: Readonly<Record<string, unknown
   const amount = typeof raw.amount === "number" && Number.isSafeInteger(raw.amount) ? raw.amount : null;
   const costCenterId = sourceId(raw.costCenterId);
   const contraCostCenterId = sourceId(raw.contraCostCenterId);
+  const splitParentId = sourceId(raw.splitTransactionId);
+  const taxBaseId = sourceId(raw.taxBaseId);
   const flags = {
-    split: Boolean(sourceId(raw.splitTransactionId)),
-    tax: Boolean(sourceId(raw.taxBaseId) || sourceId(raw.taxTransactionId) || sourceId(raw.taxRateId)),
+    split: Boolean(splitParentId),
+    tax: Boolean(taxBaseId || sourceId(raw.taxTransactionId) || sourceId(raw.taxRateId)),
     cancellation: Boolean(sourceId(raw.stornoBaseId) || sourceId(raw.stornoTransactionId)),
     transfer: Boolean((debitAccountId && debitAccountId === creditAccountId) || contraCostCenterId),
     immutable: raw.isImmutable !== false,
@@ -43,7 +45,7 @@ export function selectChurchToolsJournalRow(raw: Readonly<Record<string, unknown
     donation: Boolean(sourceId(raw.donatorId) || sourceId(raw.donatorSpouseId) || raw.donator || raw.donatorSpouse || raw.isWaiverOfReimbursementOfExpenses === true),
     invalidCostCenter: raw.costCenterId !== null && raw.costCenterId !== undefined && !costCenterId,
   };
-  return { sourceId: sourceId(raw.id)!, date: String(raw.documentDate), documentNumber, amount, debitAccountId, creditAccountId, costCenterId, contraCostCenterId, flags };
+  return { sourceId: sourceId(raw.id)!, date: String(raw.documentDate), documentNumber, amount, debitAccountId, creditAccountId, costCenterId, contraCostCenterId, splitParentId, taxBaseId, flags };
 }
 
 type JournalRow = ReturnType<typeof selectChurchToolsJournalRow>;
@@ -111,6 +113,7 @@ export function buildChurchToolsFinanceJournalDryRun(rows: JournalRow[], input: 
       sourceId: row.sourceId, date: row.date, documentNumber: row.documentNumber || null,
       signedMinor: row.amount?.toString() ?? null, sourceCostCenterId: row.costCenterId, matchedCostCenterCode: center?.code ?? null,
       sourceContraCostCenterId: row.contraCostCenterId,
+      splitParentId: row.splitParentId,
       reasons, sourceLines, proposedTargetLines: targetLines,
     };
   });
