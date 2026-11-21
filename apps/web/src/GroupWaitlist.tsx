@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
 
+const stopReasons = {
+  capacity: "All counted admission seats are filled.",
+  role: "The next person has a different role and needs individual review.",
+  archive: "The next person's People record is archived and needs individual review.",
+  batch: "Review the next batch after promoting these members.",
+} as const;
+
 type WaitlistRow = { contactId: string; firstName: string; lastName: string; role: string; position: number };
+
+type PromotionPreview = { candidates: WaitlistRow[]; stoppedBy: keyof typeof stopReasons | null; expectedOrder: string[] };
 
 export function GroupWaitlist({ departmentId, groupId, csrfToken, rosterRevision, disabled, onPending, onChanged }: {
   departmentId: string;
@@ -17,11 +26,13 @@ export function GroupWaitlist({ departmentId, groupId, csrfToken, rosterRevision
   const [version, setVersion] = useState(0);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [preview, setPreview] = useState<PromotionPreview>();
   const path = "/api/groups/" + groupId + "/waitlist";
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
+    setPreview(undefined);
     setError("");
     void fetch(path, { signal: controller.signal, headers: { "x-department-id": departmentId } })
       .then(async (result) => {
@@ -35,7 +46,23 @@ export function GroupWaitlist({ departmentId, groupId, csrfToken, rosterRevision
     return () => controller.abort();
   }, [path, departmentId, rosterRevision, version]);
 
-  async function change(action: { order: string[] } | { promoteContactId: string }) {
+  async function previewPromotion() {
+    if (busy || loading || disabled) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setPreview(undefined);
+    try {
+      const response = await fetch(path + "/promotion-preview", { headers: { "x-department-id": departmentId } });
+      const data = await response.json() as PromotionPreview & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Could not preview the promotion.");
+      setPreview(data);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not preview the promotion.");
+    } finally { setBusy(false); }
+  }
+
+  async function change(action: { order: string[] } | { promoteContactId: string } | { promoteNext: string[] }) {
     if (busy || loading || disabled) return;
     setBusy(true);
     onPending(true);
@@ -45,15 +72,18 @@ export function GroupWaitlist({ departmentId, groupId, csrfToken, rosterRevision
       const response = await fetch(path, {
         method: "PUT",
         headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
-        body: JSON.stringify({ expectedOrder: rows.map((row) => row.contactId), ...action }),
+        body: JSON.stringify({ expectedOrder: "promoteNext" in action ? preview?.expectedOrder : rows.map((row) => row.contactId), ...action }),
       });
       const data = await response.json() as WaitlistRow[] | { error?: string };
       if (!response.ok || !Array.isArray(data)) throw new Error(Array.isArray(data) ? "Could not update the waitlist." : data.error ?? "Could not update the waitlist.");
       setRows(data);
-      const promoted = "promoteContactId" in action;
+      setPreview(undefined);
+      const promoted = "promoteContactId" in action || "promoteNext" in action;
       if (promoted) await onChanged();
-      setNotice(promoted ? "The person is now an active group member." : "Waitlist order saved.");
+      setNotice("promoteNext" in action ? `${action.promoteNext.length} members promoted.`
+        : promoted ? "The person is now an active group member." : "Waitlist order saved.");
     } catch (reason) {
+      setPreview(undefined);
       setError(reason instanceof Error ? reason.message : "Could not update the waitlist.");
     } finally {
       setBusy(false);
@@ -72,13 +102,27 @@ export function GroupWaitlist({ departmentId, groupId, csrfToken, rosterRevision
       <div><h3>Membership waitlist</h3>{notice && <p role="status">{notice}</p>}</div>
       <button className="button button-secondary" type="button" disabled={busy || loading} onClick={() => setVersion((current) => current + 1)}>Refresh waitlist</button>
     </div>
+    {!loading && rows.length > 0 && <div className="community-inline-actions">
+      <button className="button button-secondary" type="button" disabled={busy || disabled} onClick={() => void previewPromotion()}>Preview next promotions</button>
+    </div>}
+    {preview && <div className="group-attendance-list">
+      <h4>Next members eligible for batch promotion</h4>
+      {preview.candidates.length > 0 ? <>
+        <ol>{preview.candidates.map(({ contactId, firstName, lastName }) => <li key={contactId}>{firstName} {lastName}</li>)}</ol>
+        <button className="button button-primary" type="button" disabled={busy || disabled} onClick={() => void change({
+          promoteNext: preview.candidates.map(({ contactId }) => contactId),
+        })}>Confirm promotion ({preview.candidates.length})</button>
+      </> : <p>No members can be promoted as a batch.</p>}
+      {preview.stoppedBy && <p>{stopReasons[preview.stoppedBy]}</p>}
+      <button className="button button-secondary" type="button" disabled={busy} onClick={() => setPreview(undefined)}>Close preview</button>
+    </div>}
     {error && <p role="alert" className="community-empty">{error}</p>}
     {loading && <p role="status" className="community-empty">Loading waitlist…</p>}
     {!loading && !error && !rows.length && <p className="community-empty">Set a member’s status to Waitlist to add them here.</p>}
     {!loading && rows.length > 0 && <ol className="group-attendance-list">
       {rows.map((record, index) => {
         const name = record.firstName + " " + record.lastName;
-        const blocked = busy || disabled || Boolean(error);
+        const blocked = busy || disabled || Boolean(error) || Boolean(preview);
         return <li key={record.contactId} className="community-member-row">
           <span className="community-member-avatar">{record.position}</span>
           <span><strong>{name}</strong> <small>{record.role}</small></span>

@@ -1,11 +1,10 @@
-import type { PoolClient } from "pg";
+import type { Pool, PoolClient } from "pg";
 import type { SignupPolicyDraft } from "./signup-policy.js";
 
 type Destination = "active" | "waitlist";
 
-// Review and promote callers hold the native group row lock before counting and writing.
-export async function checkGroupAdmissionCapacity(
-  client: PoolClient,
+export async function groupAdmissionSlots(
+  client: Pool | PoolClient,
   departmentId: string,
   groupId: string,
   destination: Destination,
@@ -25,7 +24,19 @@ export async function checkGroupAdmissionCapacity(
      ) AS count, (roles.names IS NULL OR lower(trim($5::text))=ANY(roles.names)) AS counts FROM roles`,
     [departmentId, groupId, roles, destination, role],
   );
-  if (!result.rows[0].counts || Number(result.rows[0].count) < limit) return null;
+  return result.rows[0].counts ? Math.max(0, limit - Number(result.rows[0].count)) : null;
+}
+
+// Review and promotion writes hold the native group row lock before counting.
+export async function checkGroupAdmissionCapacity(
+  client: PoolClient,
+  departmentId: string,
+  groupId: string,
+  destination: Destination,
+  role: string,
+  policy: SignupPolicyDraft,
+) {
+  if (await groupAdmissionSlots(client, departmentId, groupId, destination, role, policy) !== 0) return null;
   return destination === "active"
     ? "The admission seat limit has been reached. Leave the application pending or choose the waitlist."
     : "The admission waitlist limit has been reached.";

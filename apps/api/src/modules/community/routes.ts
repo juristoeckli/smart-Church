@@ -7,6 +7,7 @@ import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { groupMemberDraftSchema, groupMembershipState, groupWaitlist, type GroupMembershipDraft } from "./group-waitlist.js";
 import { captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAnswerFields, signupSettingsSchema, type SignupSettings } from "./signup-form.js";
+import { previewGroupWaitlistPromotion, promotionBatchSize } from "./group-waitlist-promotion.js";
 import { checkGroupAdmissionCapacity } from "./signup-capacity.js";
 import { defaultSignupPolicy, editableSignupPolicy, normalizeSignupPolicy, signupState } from "./signup-policy.js";
 import { registerCommunityReplication } from "./replication.js";
@@ -338,13 +339,30 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return groupWaitlist(pool!, departmentId, request.params.id);
     });
 
-    type QueueChange = { expectedOrder: string[] } & ({ order: string[] } | { promoteContactId: string });
+    routes.get<{ Params: { id: string } }>("/api/groups/:id/waitlist/promotion-preview", { schema: { params: waitlistParams } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const groupId = request.params.id;
+      const group = (await pool!.query<{ source_system: string | null; status: string }>(
+        "SELECT source_system,status FROM church_groups WHERE id=$1 AND department_id=$2", [groupId, departmentId],
+      )).rows[0];
+      if (!group) return reply.code(404).send({ error: "Group not found." });
+      if (group.source_system === "churchtools" || group.source_system === "elvanto") return reply.code(403).send({ error: "This group's waitlist is managed in the source system." });
+      if (group.status !== "active") return reply.code(409).send({ error: "Batch promotion is available for active groups." });
+      reply.header("cache-control", "private, no-store");
+      return previewGroupWaitlistPromotion(pool!, departmentId, groupId, await groupWaitlist(pool!, departmentId, groupId));
+    });
+
+
+    type QueueChange = { expectedOrder: string[] } & ({ order: string[] } | { promoteContactId: string } | { promoteNext: string[] });
     routes.put<{ Params: { id: string }; Body: QueueChange }>("/api/groups/:id/waitlist", { schema: {
       params: waitlistParams,
       body: {
         type: "object", additionalProperties: false, required: ["expectedOrder"],
-        oneOf: [{ required: ["order"] }, { required: ["promoteContactId"] }],
-        properties: { expectedOrder: waitlistOrder, order: waitlistOrder, promoteContactId: { type: "string", format: "uuid" } },
+        oneOf: [{ required: ["order"] }, { required: ["promoteContactId"] }, { required: ["promoteNext"] }],
+        properties: { expectedOrder: waitlistOrder, order: waitlistOrder, promoteContactId: { type: "string", format: "uuid" },
+          promoteNext: { ...waitlistOrder, minItems: 1, maxItems: promotionBatchSize },
+        },
       },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
@@ -354,8 +372,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const group = (await client.query<{ source_system: string | null }>(
-          "SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [groupId, departmentId],
+        const group = (await client.query<{ source_system: string | null; status: string }>(
+          "SELECT source_system,status FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [groupId, departmentId],
         )).rows[0];
         if (!group) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
         if (group.source_system === "churchtools" || group.source_system === "elvanto") {
@@ -370,24 +388,42 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         }
         const promoteContactId = "promoteContactId" in request.body ? request.body.promoteContactId : null;
         const order = "order" in request.body ? request.body.order : null;
+        const batch = "promoteNext" in request.body ? request.body.promoteNext : null;
         if ((promoteContactId && !currentOrder.includes(promoteContactId)) ||
             (order && (currentOrder.length !== order.length || order.some((contactId) => !currentOrder.includes(contactId))))) {
           await client.query("ROLLBACK");
           return reply.code(400).send({ error: "Choose people from the current waitlist." });
         }
         await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser?.id ?? ""]);
-        if (promoteContactId) {
+        if (batch) {
+          if (group.status !== "active") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Batch promotion is available for active groups." }); }
+          const preview = await previewGroupWaitlistPromotion(client, departmentId, groupId, queue);
+          if (JSON.stringify(preview.candidates.map(({ contactId }) => contactId)) !== JSON.stringify(batch)) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "Waitlist eligibility or available seats changed. Preview the promotion again." });
+          }
+        } else if (promoteContactId) {
           const role = queue.find(({ contactId }) => contactId === promoteContactId)!.role;
           const { policy } = await readSignupForm(client, departmentId, groupId);
           const capacityError = await checkGroupAdmissionCapacity(client, departmentId, groupId, "active", role, policy);
           if (capacityError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: capacityError }); }
-          await client.query(
+        }
+        const promoted = batch ?? (promoteContactId ? [promoteContactId] : []);
+        if (promoted.length) {
+          const updated = await client.query(
             `UPDATE group_members member SET status='active', joined_on=COALESCE(member.joined_on,
-               (current_timestamp AT TIME ZONE COALESCE(zone.name,'UTC'))::date)
-               FROM departments site LEFT JOIN pg_timezone_names zone ON zone.name=site.time_zone
-              WHERE site.id=$1 AND member.group_id=$2 AND member.contact_id=$3 AND member.status='waitlist'`,
-            [departmentId, groupId, promoteContactId],
+                (current_timestamp AT TIME ZONE COALESCE(zone.name,'UTC'))::date)
+                FROM departments site LEFT JOIN pg_timezone_names zone ON zone.name=site.time_zone
+                JOIN contacts person ON person.department_id=site.id
+               WHERE site.id=$1 AND member.group_id=$2 AND member.contact_id=ANY($3::uuid[]) AND person.id=member.contact_id
+                 AND member.status='waitlist' AND (NOT $4 OR (lower(trim(member.role))='member' AND person.archived_at IS NULL))
+               RETURNING member.contact_id`,
+            [departmentId, groupId, promoted, Boolean(batch)],
           );
+          if (updated.rowCount !== promoted.length) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "The waitlist changed. Refresh it before continuing." });
+          }
         } else if (order && JSON.stringify(order) !== JSON.stringify(currentOrder)) {
           await client.query(
             `UPDATE group_members member SET waitlist_priority=ranking.position::int
@@ -399,7 +435,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         }
         const next = await groupWaitlist(client, departmentId, groupId);
         await client.query("COMMIT");
-        realtime.publish("core:groups:changed", departmentId, { groupId, action: promoteContactId ? "waitlist-member-promoted" : "waitlist-reordered" });
+        realtime.publish("core:groups:changed", departmentId, { groupId, action: batch ? "waitlist-batch-promoted" : promoteContactId ? "waitlist-member-promoted" : "waitlist-reordered" });
         return next;
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
