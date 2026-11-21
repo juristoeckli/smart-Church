@@ -1,4 +1,5 @@
 import { isResourceBookingManager } from "./resource-booking-policy.js";
+import { registerServiceEventFactsRoutes } from "./service-event-facts.js";
 import { registerEventVolunteerAbsenceRoutes } from "./event-volunteer-absences.js";
 import { registerRegistrationReceiptRoutes } from "./event-registration-notices.js";
 import { completedCheckInError, writeCoreEventAttendance } from "./event-attendance.js";
@@ -3657,6 +3658,10 @@ app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registratio
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
+
+registerServiceEventFactsRoutes(app, { pool: pool ?? null, available: () => databaseReady,
+  resolveScope: (request, reply) => activeDepartmentId(request, reply, false, false, "events_manage"),
+  validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 registerEventVolunteerAbsenceRoutes(app, { pool: pool ?? null, available: () => databaseReady,
   resolveScope: (request, reply, manage) => activeDepartmentId(request, reply, false, false, manage ? "events_manage" : undefined),

@@ -36,6 +36,19 @@ export interface ServicePosition {
   canRespond?: boolean;
 }
 
+export interface ServiceEventFacts {
+  visitors?: number;
+  firstTimeVisitors?: number;
+  collection?: { amount: string; currency: string };
+}
+
+export interface ServiceEventFactsPeriod {
+  period: string;
+  visitors: string | null;
+  firstTimeVisitors: string | null;
+  collections: Array<{ amount: string; currency: string }>;
+}
+
 export interface ServicePlanItem {
   section?: string;
   title: string;
