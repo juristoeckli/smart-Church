@@ -17,7 +17,9 @@ The optional `church-calendar` module adds community, group and personal calenda
 - Appointments and individual series occurrences can link to a group with public signup enabled. The calendar shows a direct signup link to the existing group signup page; it does not create a separate registration roster or capacity for calendar events.
 - Appointment images accept JPEG, PNG, GIF, or WebP up to 1 MiB; uploads validate file signatures, are location-scoped, and downloads follow the calendar's visibility rules.
 
-Appointment wall-clock values are stored as local timestamps so recurring entries preserve the same displayed clock time across series. This first pass does not yet convert display values between different user/location time zones. The calendar treats these values as floating local time and does not resolve daylight-saving transitions against a named timezone: a wall time skipped by a spring-forward transition or repeated during a fall-back transition can be interpreted differently by external clients. Public community feeds convert timed occurrences to UTC using the location time zone. At a daylight-saving gap or overlap, PostgreSQL applies the standard-time interpretation. If a gap would collapse a positive event duration, the feed keeps its wall-clock duration after the adjusted start. All-day events remain date-only with an exclusive end date.
+Organizers can select a named time zone or follow the location time zone. Existing appointments follow the location zone. If the location zone is unrecognized, Calendar uses UTC. Recurring appointments keep their authored clock time and calendar date. Timed occurrences expose UTC instants and public iCalendar exports use those instants. The calendar labels times authored in another zone. All-day appointments use calendar dates.
+
+The editor rejects timed values in a spring-forward gap. If a recurring date later lands in a gap, its start shifts forward by the gap and keeps its duration. A repeated fall-back time uses the later instant. Generated service events use the location clock and reject timed occurrences that cross midnight there.
 
 ## Follow-up parity work
 
@@ -25,4 +27,4 @@ The feed currently expands one year ahead and does not emit resource bookings, p
 
 Generated service events leave public registration disabled by default. Managers can opt in for community appointments without internal occurrences and set an optional capacity per event. Each generated event gets its own link and uses the existing Services & events registration and waitlist. Existing linked events remain unchanged.
 
-Remaining parity work includes setup/lead-in and cleanup/lag buffers on resource bookings, calendar sharing controls beyond location roles, and timezone conversion across users and locations. Generation currently uses the appointment title, time, place and description, rejects occurrences crossing midnight; it does not copy event assets. Images do not yet have malware scanning or version history.
+Remaining parity work includes setup/lead-in and cleanup/lag buffers on resource bookings, calendar sharing controls beyond location roles, and a per-viewer calendar display time zone. Generated service events include the appointment title, time, place and description. Images still need malware scanning and version history.

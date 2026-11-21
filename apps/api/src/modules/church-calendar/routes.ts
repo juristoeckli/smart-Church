@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "./appointment-time.js";
 
 type CalendarScope = "community" | "group" | "personal";
 type Frequency = "daily" | "weekly" | "monthly" | "monthly_weekday" | "yearly" | "manual";
@@ -8,13 +9,14 @@ type Recurrence = { frequency: Frequency; interval?: number; weekdays?: number[]
 type AppointmentInput = {
   calendarId: string; title: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; allDay?: boolean;
   place?: string; url?: string; internalOnly?: boolean; tags?: string[]; recurrence?: Recurrence | null; linkedEventId?: string | null;
-  resourceBookingIds?: string[]; signupGroupId?: string | null; responsibleContactId?: string | null;
+  resourceBookingIds?: string[]; signupGroupId?: string | null; responsibleContactId?: string | null; timeZone?: string | null;
 };
 type AppointmentRow = {
   id: string; calendar_id: string; title: string; subtitle: string; description: string; starts_at: string; ends_at: string;
   all_day: boolean; place: string; url: string; internal_only: boolean; tags: string[]; recurrence: Recurrence | null;
   linked_event_id: string | null; created_by: string; calendar_scope: CalendarScope; calendar_name: string; responsible_contact_id?: string | null; responsible_name?: string | null;
   owner_user_id: string | null; group_id: string | null; signup_group_id?: string | null; signup_token?: string | null; signup_group_name?: string | null; has_image?: boolean;
+  time_zone?: string | null; location_time_zone?: string;
 };
 type Occurrence = Record<string, unknown> & { appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string };
 
@@ -24,9 +26,9 @@ function cleanLocalDateTime(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const cleaned = value.trim().replace(" ", "T").slice(0, 19);
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(cleaned)) return null;
-  const date = new Date(`${cleaned.length === 16 ? `${cleaned}:00` : cleaned}Z`);
-  if (!Number.isFinite(date.getTime())) return null;
-  return cleaned.length === 16 ? `${cleaned}:00` : cleaned;
+  const wallTime = cleaned.length === 16 ? `${cleaned}:00` : cleaned;
+  const date = new Date(`${wallTime}Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 19) === wallTime ? wallTime : null;
 }
 
 function wallDate(value: string) {
@@ -58,7 +60,12 @@ function occurrenceStarts(row: AppointmentRow, from: string, to: string, maxOccu
     const candidate = new Date(`${date.slice(0, 10)}T${row.starts_at.slice(11, 19)}Z`);
     return Number.isFinite(candidate.getTime()) ? candidate : null;
   };
-  if (rule.frequency === "manual") return (rule.dates ?? []).map(byManualDate).filter((date): date is Date => Boolean(date && date >= fromDate && date <= toDate && date >= start)).slice(0, maxOccurrences);
+  if (rule.frequency === "manual") {
+    const through = addDays(rule.endsOn ? new Date(Math.min(startOfDay(rule.endsOn).getTime(), toDate.getTime())) : toDate, 1);
+    const requestedDates = [...new Set(rule.dates ?? [])].sort();
+    return requestedDates.map(byManualDate).filter((date): date is Date => Boolean(date && date >= start && date < through))
+      .slice(0, rule.count ?? requestedDates.length).filter((date) => date >= fromDate).slice(0, maxOccurrences);
+  }
   const dates: Date[] = [];
   const interval = Math.min(365, Math.max(1, Math.floor(Number(rule.interval) || 1)));
   const endsOn = rule.endsOn ? startOfDay(rule.endsOn) : toDate;
@@ -103,6 +110,8 @@ function normalizeInput(input: AppointmentInput): AppointmentInput | string {
   const endsAt = cleanLocalDateTime(input.endsAt);
   if (!title || title.length > 160) return "Enter an appointment title up to 160 characters.";
   if (!startsAt || !endsAt || endsAt < startsAt) return "Choose valid start and end times.";
+  const timeZone = input.timeZone == null ? input.timeZone : canonicalTimeZone(input.timeZone);
+  if (input.timeZone != null && !timeZone) return "Choose a valid named time zone.";
   if (typeof input.calendarId !== "string") return "Choose a calendar.";
   if (input.signupGroupId != null && (typeof input.signupGroupId !== "string" || !/^[0-9a-f-]{36}$/i.test(input.signupGroupId))) return "Choose a valid public-signup group.";
   if (input.responsibleContactId != null && (typeof input.responsibleContactId !== "string" || !/^[0-9a-f-]{36}$/i.test(input.responsibleContactId))) return "Choose a valid responsible person.";
@@ -123,11 +132,17 @@ function normalizeInput(input: AppointmentInput): AppointmentInput | string {
   }
   const tags = Array.isArray(input.tags) ? [...new Set(input.tags.map((tag) => String(tag).trim().slice(0, 40)).filter(Boolean))].slice(0, 30) : [];
   return {
-    ...input, title, startsAt, endsAt, subtitle: String(input.subtitle ?? "").trim().slice(0, 240), description: String(input.description ?? "").trim().slice(0, 8000),
+    ...input, ...(input.timeZone !== undefined ? { timeZone } : {}), title, startsAt, endsAt, subtitle: String(input.subtitle ?? "").trim().slice(0, 240), description: String(input.description ?? "").trim().slice(0, 8000),
     place: String(input.place ?? "").trim().slice(0, 200), url: String(input.url ?? "").trim().slice(0, 1000), tags,
     recurrence: recurrence ? { frequency: recurrence.frequency, interval: Math.min(365, Math.max(1, Math.floor(Number(recurrence.interval) || 1))), weekdays: [...new Set((recurrence.weekdays ?? []).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))], ...(recurrence.frequency === "monthly_weekday" ? { weekday: recurrence.weekday, weekOfMonth: recurrence.weekOfMonth } : {}), endsOn: recurrence.endsOn, count: recurrence.count, dates: recurrence.dates } : null,
   };
 }
+
+function validAppointmentTimes(input: Pick<AppointmentInput, "startsAt" | "endsAt" | "allDay">, timeZone: string | null) {
+  return !timeZone || input.allDay || appointmentInstants(input.startsAt, input.endsAt, timeZone)?.shifted === false;
+}
+
+const invalidAppointmentTime = "A start or end time does not exist in the selected time zone. Choose another clock time.";
 
 function canManageCalendar(request: FastifyRequest, scope: CalendarScope, ownerId: string | null) {
   if (request.activeDepartmentRole === "site_admin") return true;
@@ -204,9 +219,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const feed = await context.pool.query<{ department_id: string; calendar_id: string; calendar_name: string; time_zone: string; local_today: string }>(
       `SELECT feed.department_id,feed.calendar_id,calendar.name AS calendar_name,
-              department.time_zone,to_char(now() AT TIME ZONE department.time_zone,'YYYY-MM-DD') AS local_today
+              COALESCE(zone.name,'UTC') AS time_zone,to_char(now() AT TIME ZONE COALESCE(zone.name,'UTC'),'YYYY-MM-DD') AS local_today
          FROM church_calendar_public_feeds feed
          JOIN departments department ON department.id=feed.department_id
+         LEFT JOIN pg_timezone_names zone ON zone.name=department.time_zone
         JOIN church_calendar_calendars calendar ON calendar.id=feed.calendar_id AND calendar.department_id=feed.department_id
        WHERE feed.token_hash=$1 AND feed.revoked_at IS NULL AND calendar.scope='community' AND calendar.archived_at IS NULL`, [hashFeedToken(request.params.token)]);
     const source = feed.rows[0];
@@ -218,7 +234,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const events = await context.pool.query<AppointmentRow>(
       `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
               to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
-              appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,
+              appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,appointment.time_zone,
               appointment.linked_event_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
               calendar.owner_user_id,calendar.group_id
          FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
@@ -240,7 +256,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Smart-Church//Calendar//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", `X-WR-CALNAME:${icsEscape(source.calendar_name)}`];
     const stamp = icsDateTime(`${localDateTime(new Date())}Z`);
-    const timedOccurrences: Array<{ line: number; startsAt: string; endsAt: string }> = [];
+    const timedOccurrences: Array<{ line: number; startsAt: string; endsAt: string; timeZone: string }> = [];
     for (const row of events.rows) {
       const start = wallDate(row.starts_at);
       const duration = Math.max(0, wallDate(row.ends_at).getTime() - start.getTime());
@@ -267,7 +283,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           const exclusiveEnd = localDateTime(new Date(Math.max(nextStartDay, roundedEnd))).slice(0, 10).replaceAll("-", "");
           lines.push(`DTSTART;VALUE=DATE:${startDate.replaceAll("-", "")}`, `DTEND;VALUE=DATE:${exclusiveEnd}`);
         } else {
-          timedOccurrences.push({ line: lines.length, startsAt, endsAt });
+          timedOccurrences.push({ line: lines.length, startsAt, endsAt, timeZone: row.time_zone ?? source.time_zone });
           lines.push("", "");
         }
         lines.push(`SUMMARY:${icsEscape(title)}`);
@@ -277,23 +293,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         lines.push("END:VEVENT");
       }
     }
-    // Expand wall times using the location zone before exporting UTC instants.
+    // Expand wall times using each appointment's time zone before exporting UTC instants.
     // Batch conversions to keep query size bounded even for large feeds.
     for (let offset = 0; offset < timedOccurrences.length; offset += 2000) {
       const batch = timedOccurrences.slice(offset, offset + 2000);
       const { rows } = await context.pool.query<{ line: number; starts_at: string; ends_at: string }>(
         `SELECT line,
                 to_char(start_instant AT TIME ZONE 'UTC','YYYYMMDD"T"HH24MISS"Z"') AS starts_at,
-                to_char((CASE WHEN end_instant <= start_instant AND local_end > local_start
+                to_char((CASE WHEN local_end > local_start AND (end_instant <= start_instant OR start_instant AT TIME ZONE time_zone <> local_start)
                               THEN start_instant + (local_end - local_start)
                               ELSE end_instant END) AT TIME ZONE 'UTC','YYYYMMDD"T"HH24MISS"Z"') AS ends_at
            FROM (
-             SELECT line,local_start,local_end,
-                    local_start AT TIME ZONE $4 AS start_instant,
-                    local_end AT TIME ZONE $4 AS end_instant
-               FROM unnest($1::int[],$2::timestamp[],$3::timestamp[]) occurrence(line,local_start,local_end)
+             SELECT line,local_start,local_end,time_zone,
+                    local_start AT TIME ZONE time_zone AS start_instant,
+                    local_end AT TIME ZONE time_zone AS end_instant
+               FROM unnest($1::int[],$2::timestamp[],$3::timestamp[],$4::text[]) occurrence(line,local_start,local_end,time_zone)
            ) converted`,
-        [batch.map((item) => item.line), batch.map((item) => item.startsAt), batch.map((item) => item.endsAt), source.time_zone],
+        [batch.map((item) => item.line), batch.map((item) => item.startsAt), batch.map((item) => item.endsAt), batch.map((item) => item.timeZone)],
       );
       for (const row of rows) {
         lines[row.line] = `DTSTART:${row.starts_at}`;
@@ -405,11 +421,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
               to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
               to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
-              appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,
+              appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,appointment.time_zone,department.time_zone AS location_time_zone,
               appointment.linked_event_id,appointment.responsible_contact_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
               calendar.owner_user_id,calendar.group_id,appointment.signup_group_id,CASE WHEN signup_group.public_signup_enabled THEN signup_group.public_signup_token END AS signup_token,signup_group.name AS signup_group_name,
               EXISTS(SELECT 1 FROM church_calendar_appointment_images image WHERE image.appointment_id=appointment.id AND image.department_id=appointment.department_id) AS has_image
          FROM church_calendar_appointments appointment
+         JOIN departments department ON department.id=appointment.department_id
          JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
          LEFT JOIN church_groups signup_group ON signup_group.id=appointment.signup_group_id AND signup_group.department_id=appointment.department_id
         WHERE appointment.department_id=$1 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
@@ -460,6 +477,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     for (const row of resourceLinks.rows) links.set(row.appointment_id, [...(links.get(row.appointment_id) ?? []), row.resource_booking_id]);
     const output: Occurrence[] = [];
     for (const row of appointments) {
+      const seriesTimeZone = row.time_zone ?? null;
+      const timeZone = seriesTimeZone ?? canonicalTimeZone(row.location_time_zone) ?? "UTC";
       const baseStart = wallDate(row.starts_at);
       const baseEnd = wallDate(row.ends_at);
       const duration = Math.max(0, baseEnd.getTime() - baseStart.getTime());
@@ -481,8 +500,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           : localDateTime(new Date(start.getTime() + duration)));
         const end = wallDate(endAt);
         if (end < wallDate(from) || startAt > to) continue;
+        const allDay = (override.allDay ?? row.all_day) === true;
+        const instants = allDay ? null : appointmentInstants(startAt, endAt, timeZone);
         output.push({
-          appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
+          appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, originalOccurrenceStartAt: original, seriesTimeZone, timeZone,
+          startsAtUtc: instants?.startsAtUtc ?? null, endsAtUtc: instants?.endsAtUtc ?? null, timeShifted: instants?.shifted ?? false, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
           calendarName: row.calendar_name, calendarScope: row.calendar_scope, groupId: row.group_id,
           title: override.title ?? row.title, subtitle: override.subtitle ?? row.subtitle, description: override.description ?? row.description,
           allDay: override.allDay ?? row.all_day, place: override.place ?? row.place, url: override.url ?? row.url,
@@ -590,10 +612,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const found = await client.query<AppointmentRow>(
         `SELECT appointment.id,appointment.title,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
                 to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,appointment.recurrence,appointment.all_day,
+                appointment.time_zone,department.time_zone AS location_time_zone,
                 appointment.subtitle,appointment.description,appointment.place,appointment.url,appointment.internal_only,appointment.tags,
                 appointment.linked_event_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
                 calendar.owner_user_id,calendar.group_id
-           FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+           FROM church_calendar_appointments appointment JOIN departments department ON department.id=appointment.department_id
+           JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
           WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL FOR UPDATE OF appointment`,
         [request.params.id, departmentId],
       );
@@ -666,7 +690,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (arrangements.rowCount !== arrangementRows.length) { await client.query("ROLLBACK"); return responseError(reply, 409, "The selected template contains an arrangement that does not belong to its song."); }
       }
       const recurrenceStarts = occurrenceStarts(row, `${startDate}T00:00`, `${throughDate}T23:59`, 501).map(localDateTime);
-      const extraDates = await client.query<{ starts_at: string }>("SELECT to_char(starts_at,'YYYY-MM-DD\"T\"HH24:MI:SS') AS starts_at FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp AND starts_at < ($3::date + 1)::timestamp ORDER BY starts_at LIMIT 501", [row.id, `${startDate}T00:00:00`, throughDate]);
+      const extraDates = await client.query<{ starts_at: string; ends_at: string }>(
+        `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
+           FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp AND starts_at < ($3::date + 1)::timestamp ORDER BY starts_at LIMIT 501`,
+        [row.id, `${startDate}T00:00:00`, throughDate],
+      );
       const starts = [...new Set([...recurrenceStarts, ...extraDates.rows.map((extra) => extra.starts_at.replace(" ", "T"))])].sort();
       if (starts.length > 500) { await client.query("ROLLBACK"); return responseError(reply, 400, "That date range contains more than 500 occurrences. Choose an earlier end date."); }
       if (!starts.length) { await client.query("ROLLBACK"); return responseError(reply, 400, "No generated occurrences fall within that date range."); }
@@ -691,29 +719,41 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return responseError(reply, 400, "Public registration requires a community appointment with no internal occurrences to generate.");
       }
+      const duration = wallDate(row.ends_at).getTime() - wallDate(row.starts_at).getTime();
+      const locationZone = canonicalTimeZone(row.location_time_zone) ?? "UTC";
+      const appointmentZone = row.time_zone ?? locationZone;
+      const extraEnds = new Map(extraDates.rows.map((date) => [date.starts_at, date.ends_at]));
+      const planned: Array<{ original: string; date: string; startTime: string; endTime: string | null; allDay: boolean }> = [];
+      for (const original of pending) {
+        const override = byStart.get(original)?.overrides ?? {};
+        const allDay = (override.allDay ?? row.all_day) === true;
+        const start = cleanLocalDateTime(override.startsAt) ?? original;
+        if (allDay) { planned.push({ original, date: start.slice(0, 10), startTime: "00:00", endTime: null, allDay }); continue; }
+        const end = cleanLocalDateTime(override.endsAt) ?? extraEnds.get(original) ?? localDateTime(new Date(wallDate(original).getTime() + duration));
+        const instants = appointmentInstants(start, end, appointmentZone);
+        if (!instants) { await client.query("ROLLBACK"); return responseError(reply, 400, "The appointment duration is not valid for a service event."); }
+        const localStart = appointmentWallTime(Date.parse(instants.startsAtUtc), locationZone);
+        const localEnd = appointmentWallTime(Date.parse(instants.endsAtUtc), locationZone);
+        const date = localStart.slice(0, 10);
+        if (localEnd.slice(0, 10) !== date) { await client.query("ROLLBACK"); return responseError(reply, 400, "An appointment occurrence crosses midnight in the location time zone and cannot be converted into a service event."); }
+        const startTime = localStart.slice(11, 16);
+        const endTime = localEnd.slice(11, 16);
+        if (endTime <= startTime) { await client.query("ROLLBACK"); return responseError(reply, 400, "The appointment duration is not valid for a service event."); }
+        planned.push({ original, date, startTime, endTime, allDay });
+      }
       if (request.body.preview) {
         await client.query("ROLLBACK");
-        return { preview: true, occurrences: starts.length, planned: pending.length, alreadyLinked: starts.filter((start) => Boolean(effectiveLink(start))).length, skippedCancelled: starts.filter((start) => Boolean(byStart.get(start)?.cancelled)).length, throughDate };
+        return { preview: true, occurrences: starts.length, planned: planned.length, alreadyLinked: starts.filter((start) => Boolean(effectiveLink(start))).length, skippedCancelled: starts.filter((start) => Boolean(byStart.get(start)?.cancelled)).length, throughDate };
       }
-      const startClock = row.all_day ? "00:00" : row.starts_at.slice(11, 16);
-      let durationMs = row.all_day || !row.ends_at ? 0 : wallDate(row.ends_at).getTime() - wallDate(row.starts_at).getTime();
-      if (durationMs < 0 || durationMs > 86_400_000) { await client.query("ROLLBACK"); return responseError(reply, 400, "Appointments crossing more than one day cannot be converted into service events."); }
       let created = 0;
-      for (const start of pending) {
-        const startDateTime = new Date(`${start}Z`);
-        const endDateTime = new Date(startDateTime.getTime() + durationMs);
-        const endDate = localDateTime(endDateTime).slice(0, 10);
-        if (endDate !== start.slice(0, 10)) { await client.query("ROLLBACK"); return responseError(reply, 400, "An appointment occurrence crosses midnight and cannot be converted into a service event."); }
-        const startTime = row.all_day ? "00:00" : start.slice(11, 16);
-        const endTime = row.all_day || !row.ends_at ? null : localDateTime(endDateTime).slice(11, 16);
-        if (endTime && endTime <= startTime) { await client.query("ROLLBACK"); return responseError(reply, 400, "The appointment duration is not valid for a service event."); }
+      for (const { original: start, date, startTime, endTime, allDay } of planned) {
         const eventId = randomUUID();
         const eventLocation = (row.place || row.calendar_name || "Church").slice(0, 160);
         const eventDescription = row.description.slice(0, 2000) || null;
         await client.query(
           `INSERT INTO service_events(id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,asset_ids,positions,time_plan,recurrence_id,registration_enabled,registration_capacity,registration_token)
            VALUES($1,$2,$3,$4,$5::date,$6,$7::time,$8::time,$9,$10,'',ARRAY[]::uuid[],$11::jsonb,$12::jsonb,$13,$14,$15,$16)`,
-          [eventId, departmentId, row.title, request.body.kind, start.slice(0, 10), Boolean(row.all_day), startTime, endTime, eventLocation, eventDescription, JSON.stringify(positionsWithAssignments), JSON.stringify(items), row.id, registrationEnabled, registrationCapacity, registrationEnabled ? randomUUID() : null],
+          [eventId, departmentId, row.title, request.body.kind, date, allDay, startTime, endTime, eventLocation, eventDescription, JSON.stringify(positionsWithAssignments), JSON.stringify(items), row.id, registrationEnabled, registrationCapacity, registrationEnabled ? randomUUID() : null],
         );
         await client.query(
           `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
@@ -803,7 +843,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.post<{ Body: AppointmentInput }>("/api/modules/church-calendar/appointments", { schema: { body: {
     type: "object", additionalProperties: false, required: ["calendarId", "title", "startsAt", "endsAt"],
-    properties: { calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" } },
+    properties: { calendarId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 160 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 8000 }, startsAt: { type: "string", minLength: 16, maxLength: 25 }, endsAt: { type: "string", minLength: 16, maxLength: 25 }, allDay: { type: "boolean" }, place: { type: "string", maxLength: 200 }, url: { type: "string", maxLength: 1000 }, internalOnly: { type: "boolean" }, tags: { type: "array", maxItems: 30, items: { type: "string", maxLength: 40 } }, recurrence: { type: ["object", "null"] }, linkedEventId: { type: ["string", "null"], format: "uuid" }, resourceBookingIds: { type: "array", maxItems: 10, items: { type: "string", format: "uuid" } }, signupGroupId: { type: ["string", "null"], format: "uuid" }, responsibleContactId: { type: ["string", "null"], format: "uuid" }, timeZone: { type: ["string", "null"], maxLength: 80 } },
   } } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -818,10 +858,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!person.rowCount) return responseError(reply, 400, "Choose a People record from this location.");
       }
     }
-    const calendarResult = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>("SELECT scope,owner_user_id FROM church_calendar_calendars WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [normalized.calendarId, departmentId]);
+    const calendarResult = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null; time_zone: string }>(
+      `SELECT calendar.scope,calendar.owner_user_id,department.time_zone
+         FROM church_calendar_calendars calendar JOIN departments department ON department.id=calendar.department_id
+        WHERE calendar.id=$1 AND calendar.department_id=$2 AND calendar.archived_at IS NULL`,
+      [normalized.calendarId, departmentId],
+    );
     const calendar = calendarResult.rows[0];
     if (!calendar) return responseError(reply, 404, "The calendar was not found.");
     if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to add appointments to this calendar.");
+    if (normalized.timeZone !== undefined && !validAppointmentTimes(normalized, normalized.timeZone ?? canonicalTimeZone(calendar.time_zone))) return responseError(reply, 400, invalidAppointmentTime);
     if (normalized.linkedEventId) {
       const event = await context.pool.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2", [normalized.linkedEventId, departmentId]);
       if (!event.rowCount) return responseError(reply, 400, "The linked event does not belong to this location.");
@@ -841,9 +887,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     try {
       await client.query("BEGIN");
       await client.query(
-        `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by)
-         VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18)`,
-        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, normalized.linkedEventId ?? null, normalized.signupGroupId ?? null, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request)],
+        `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
+         VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
+        [id, departmentId, normalized.calendarId, normalized.title, normalized.subtitle, normalized.description, normalized.startsAt, normalized.endsAt, normalized.allDay ?? false, normalized.place, normalized.url, normalized.internalOnly ?? false, normalized.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, normalized.linkedEventId ?? null, normalized.signupGroupId ?? null, canSeePrivatePeople(request) ? normalized.responsibleContactId ?? null : null, userId(request), normalized.timeZone ?? null],
       );
       for (const resourceId of resourceIds) await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3)", [id, resourceId, userId(request)]);
       await client.query("COMMIT");
@@ -898,7 +944,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const normalized = normalizeInput(request.body);
     if (typeof normalized === "string") return responseError(reply, 400, normalized);
     const found = await context.pool.query<AppointmentRow>(
-      `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,appointment.linked_event_id,appointment.signup_group_id,appointment.responsible_contact_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,calendar.owner_user_id,calendar.group_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL`, [request.params.id, departmentId]);
+      `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,appointment.linked_event_id,appointment.signup_group_id,appointment.responsible_contact_id,appointment.time_zone,department.time_zone AS location_time_zone,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,calendar.owner_user_id,calendar.group_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id JOIN departments department ON department.id=appointment.department_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL`, [request.params.id, departmentId]);
     const row = found.rows[0];
     if (!row) return responseError(reply, 404, "The appointment was not found.");
     if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) return responseError(reply, 403, "You do not have permission to edit this appointment.");
@@ -920,6 +966,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const values = normalized;
     const scope = request.query.scope ?? "series";
     let resourceTargetId = row.id;
+    const timeZone = normalized.timeZone === undefined ? row.time_zone ?? null : normalized.timeZone;
+    const effectiveZone = timeZone ?? (normalized.timeZone === null ? canonicalTimeZone(row.location_time_zone) : null);
+    if (!validAppointmentTimes(normalized, effectiveZone)) return responseError(reply, 400, invalidAppointmentTime);
+    if (scope === "occurrence" && row.recurrence && normalized.timeZone !== undefined && timeZone !== (row.time_zone ?? null)) {
+      return responseError(reply, 400, "Change the time zone for the whole series or future occurrences.");
+    }
     const occurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
     const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
     if (resourceIds.length) {
@@ -958,9 +1010,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const shortened = { ...row.recurrence, endsOn: previousDay, count: undefined };
         await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(shortened)]);
         await client.query(
-          `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by)
-           VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18)`,
-          [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, nextStart, nextEnd, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(normalized.recurrence ?? row.recurrence), values.linkedEventId ?? row.linked_event_id, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, userId(request)],
+          `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
+           VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
+          [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, nextStart, nextEnd, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(normalized.recurrence ?? row.recurrence), values.linkedEventId ?? row.linked_event_id, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, userId(request), timeZone],
         );
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -972,8 +1024,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const seriesDuration = Math.max(0, wallDate(normalized.endsAt).getTime() - wallDate(normalized.startsAt).getTime());
       const seriesEndAt = localDateTime(new Date(seriesStart.getTime() + seriesDuration));
       await context.pool.query(
-        `UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,updated_at=now() WHERE id=$1 AND department_id=$2`,
-        [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null],
+        `UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,time_zone=$17,updated_at=now() WHERE id=$1 AND department_id=$2`,
+        [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone],
       );
     }
     await context.pool.query("DELETE FROM church_calendar_resource_links WHERE appointment_id=$1", [resourceTargetId]);
@@ -1037,14 +1089,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!context.validateMutation(request, reply)) return reply;
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const result = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null }>(
-      `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
+    const result = await context.pool.query<{ scope: CalendarScope; owner_user_id: string | null; time_zone: string; all_day: boolean }>(
+      `SELECT calendar.scope,calendar.owner_user_id,COALESCE(appointment.time_zone,department.time_zone) AS time_zone,appointment.all_day
+         FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id
+         JOIN departments department ON department.id=appointment.department_id
+        WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL`, [request.params.id, departmentId]);
     const calendar = result.rows[0];
     if (!calendar) return responseError(reply, 404, "The appointment was not found.");
     if (!canManageCalendar(request, calendar.scope, calendar.owner_user_id)) return responseError(reply, 403, "You do not have permission to edit this appointment.");
     const startsAt = cleanLocalDateTime(request.body.startsAt);
     const endsAt = cleanLocalDateTime(request.body.endsAt);
     if (!startsAt || !endsAt || endsAt < startsAt) return responseError(reply, 400, "Choose valid start and end times.");
+    if (!validAppointmentTimes({ startsAt, endsAt, allDay: calendar.all_day }, canonicalTimeZone(calendar.time_zone))) return responseError(reply, 400, invalidAppointmentTime);
     await context.pool.query("INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by) VALUES($1,$2::timestamp,$3::timestamp,$4) ON CONFLICT(appointment_id,starts_at) DO UPDATE SET ends_at=EXCLUDED.ends_at", [request.params.id, startsAt, endsAt, userId(request)]);
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "extra-date-added", appointmentId: request.params.id });
     return reply.code(201).send({ added: true });
