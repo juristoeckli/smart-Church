@@ -19,7 +19,7 @@ type Appointment = {
   groupId?: string | null; title: string; subtitle: string; description: string; allDay: boolean; place: string; url: string;
   internalOnly: boolean; tags: string[]; recurrence: Recurrence | null; linkedEventId: string | null; resourceBookingIds: string[]; canManage: boolean;
   viewStartsAt?: string; viewTimeZone?: string;
-  reminder?: { minutesBefore: number; delivered: boolean } | null;
+  reminder?: { minutesBefore?: number; clockTime?: string; clockTimeZone?: string; delivered: boolean } | null;
   resourceBookings?: LinkedResourceBooking[];
   resourceWindow?: { startsAt: string; endsAt: string } | null;
   linkedEventCancelled?: boolean; eventRegistration?: EventRegistration | null;
@@ -115,6 +115,8 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [showArchive, setShowArchive] = useState(false);
   const [editing, setEditing] = useState<Appointment | null>(null);
   const [reminderLead, setReminderLead] = useState(30);
+  const [reminderClock, setReminderClock] = useState("09:00");
+  const [reminderClockZone, setReminderClockZone] = useState(viewerZone);
   const [scope, setScope] = useState<"occurrence" | "future" | "series">("occurrence");
   const [draft, setDraft] = useState<Draft>(initialDraft());
   const [calendarName, setCalendarName] = useState("");
@@ -244,7 +246,10 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     setEventRegistrationCapacity("");
     setImageFile(null);
     setPersonSearch(item.responsiblePersonName ?? ""); setPersonChoices(item.responsibleContactId && item.responsiblePersonName ? [{ id: item.responsibleContactId, name: item.responsiblePersonName }] : []);
-    setEditing(item); setReminderLead(item.reminder?.minutesBefore ?? 30); setScope(item.recurrence ? "occurrence" : "series"); setExtraStart(""); setExtraEnd("");
+    setEditing(item); setReminderLead(item.reminder?.minutesBefore ?? 30);
+    setReminderClock(item.reminder?.clockTime ?? "09:00");
+    setReminderClockZone(validNamedZone(item.reminder?.clockTimeZone) ?? viewerZone);
+    setScope(item.recurrence ? "occurrence" : "series"); setExtraStart(""); setExtraEnd("");
     setExtraDates([]);
     const seriesStart = new Date(`${item.seriesStartsAt.slice(0,10)}T00:00:00`);
     const maximumRegistrationDate = new Date(seriesStart); maximumRegistrationDate.setFullYear(maximumRegistrationDate.getFullYear() + 5);
@@ -332,7 +337,8 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
         ? (await api(`${endpoint}?occurrenceStartAt=${encodeURIComponent(original)}`, { method: "DELETE", headers: { ...headers, "x-csrf-token": csrfToken } }), null)
         : await api<NonNullable<Appointment["reminder"]>>(endpoint, {
           method: "PUT", headers: mutationHeaders,
-          body: JSON.stringify({ occurrenceStartAt: original, minutesBefore: reminderLead }),
+          body: JSON.stringify({ occurrenceStartAt: original, ...(editing.allDay
+            ? { clockTime: reminderClock, clockTimeZone: reminderClockZone } : { minutesBefore: reminderLead }) }),
         });
       setEditing((current) => current?.appointmentId === appointmentId && (current.originalOccurrenceStartAt ?? current.occurrenceStartAt) === original
         ? { ...current, reminder } : current);
@@ -460,6 +466,10 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const timeLabel = (item: Appointment) => item.allDay ? "All day" : clockFormatter.format(new Date(`${displayStart(item)}Z`));
   const editedOccurrence = editing && appointments.find((item) => item.appointmentId === editing.appointmentId
     && (item.originalOccurrenceStartAt ?? item.occurrenceStartAt) === (editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt));
+  const canScheduleReminder = editing && department.enabledModules?.includes("notifications") && (editing.allDay
+    ? editing.occurrenceStartAt.slice(0, 10) >= dateInput(todayInZone(viewerZone))
+    : editing.startsAtUtc && Date.parse(editing.startsAtUtc) > Date.now());
+  const reminderZones = [...new Set([reminderClockZone, viewerZone, ...viewerTimeZones])];
   const linkedResourceBookings = editedOccurrence?.resourceBookings ?? editing?.resourceBookings ?? [];
   function appointmentLinks(item: Appointment) {
     const occurrenceBookings = item.resourceBookings?.filter((booking) => booking.scope === "occurrence") ?? [];
@@ -534,17 +544,21 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
       </section></div>
     {showCalendarForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal" role="dialog" aria-modal="true" aria-labelledby="calendar-create-heading"><header><div><span className="eyebrow">CALENDAR SETUP</span><h2 id="calendar-create-heading">New calendar</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowCalendarForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void createCalendar(event)}><label>Calendar name<input required maxLength={120} value={calendarName} onChange={(event) => setCalendarName(event.target.value)} /></label><label>Calendar type<select value={calendarScope} onChange={(event) => setCalendarScope(event.target.value as Scope)}><option value="personal">Personal</option>{canManageShared && <><option value="community">Community</option><option value="group">Group</option></>}</select></label>{calendarScope === "group" && <label>Group<select required value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">Choose group</option>{choices.groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}<label>Color<input type="color" value={calendarColor} onChange={(event) => setCalendarColor(event.target.value)} /></label><footer><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(false)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy || !calendarName.trim()}><Plus size={15} /> Create calendar</button></footer></form></section></div>}
     {showForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal church-calendar-appointment-modal" role="dialog" aria-modal="true" aria-labelledby="appointment-heading"><header><div><span className="eyebrow">{editing ? "APPOINTMENT DETAILS" : "NEW APPOINTMENT"}</span><h2 id="appointment-heading">{editing ? "Edit appointment" : "Create appointment"}</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void saveAppointment(event)}><div className="church-calendar-form-grid">
-      {editing && (editing.reminder || (!editing.allDay && editing.startsAtUtc && Date.parse(editing.startsAtUtc) > Date.now()
-        && department.enabledModules?.includes("notifications"))) && <div className="church-calendar-extra-date wide">
+      {editing && (editing.reminder || canScheduleReminder) && <div className="church-calendar-extra-date wide">
         <strong>Remind me about this occurrence</strong>
         <small>{editing.reminder?.delivered ? "Reminder delivered to your Notifications." : editing.reminder ? "Personal reminder scheduled." : "Receive a reminder in your Notifications."}</small>
         <div>
-          {!editing.allDay && editing.startsAtUtc && Date.parse(editing.startsAtUtc) > Date.now() && department.enabledModules?.includes("notifications") && <>
-            <label>Send reminder<select value={reminderLead} disabled={busy} onChange={(event) => setReminderLead(Number(event.target.value))}>
+          {canScheduleReminder && <>
+            {editing.allDay ? <>
+              <label>Reminder time<input type="time" value={reminderClock} disabled={busy} onChange={(event) => setReminderClock(event.target.value)} /></label>
+              <label>Reminder time zone<select value={reminderClockZone} disabled={busy} onChange={(event) => setReminderClockZone(event.target.value)}>
+                {reminderZones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}
+              </select></label>
+            </> : <label>Send reminder<select value={reminderLead} disabled={busy} onChange={(event) => setReminderLead(Number(event.target.value))}>
               <option value={5}>5 minutes before</option><option value={15}>15 minutes before</option>
               <option value={30}>30 minutes before</option><option value={60}>1 hour before</option><option value={1440}>1 day before</option>
-            </select></label>
-            <button type="button" className="button button-secondary" disabled={busy} onClick={() => void changeReminder()}>{editing.reminder ? "Update reminder" : "Set reminder"}</button>
+            </select></label>}
+            <button type="button" className="button button-secondary" disabled={busy || (editing.allDay && !reminderClock)} onClick={() => void changeReminder()}>{editing.reminder ? "Update reminder" : "Set reminder"}</button>
           </>}
           {editing.reminder && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void changeReminder(true)}>Remove reminder</button>}
         </div>

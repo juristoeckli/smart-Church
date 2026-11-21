@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
-import { calendarReminderOccurrence } from "../../calendar-reminders.js";
+import { calendarReminderOccurrence, calendarReminderWindow, type CalendarReminderSchedule } from "../../calendar-reminders.js";
 import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
 import { addDays, calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, occurrenceStarts, startOfDay, wallDate, type Recurrence } from "../../calendar-occurrences.js";
 
@@ -413,9 +413,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   const reminderParams = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
   const reminderOccurrenceSchema = { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$" } as const;
-  app.put<{ Params: { id: string }; Body: { occurrenceStartAt: string; minutesBefore: number } }>("/api/modules/church-calendar/appointments/:id/reminder", {
-    schema: { params: reminderParams, body: { type: "object", additionalProperties: false, required: ["occurrenceStartAt", "minutesBefore"],
-      properties: { occurrenceStartAt: reminderOccurrenceSchema, minutesBefore: { type: "integer", enum: [5,15,30,60,1440] } } } },
+  app.put<{ Params: { id: string }; Body: { occurrenceStartAt: string; minutesBefore?: number; clockTime?: string; clockTimeZone?: string } }>("/api/modules/church-calendar/appointments/:id/reminder", {
+    schema: { params: reminderParams, body: { type: "object", additionalProperties: false, required: ["occurrenceStartAt"],
+      properties: { occurrenceStartAt: reminderOccurrenceSchema, minutesBefore: { type: "integer", enum: [5,15,30,60,1440] },
+        clockTime: { type: "string", pattern: "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$" }, clockTimeZone: { type: "string", maxLength: 80 } } } },
   }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -424,22 +425,31 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!isServerModuleEnabled("notifications")) return responseError(reply, 409, "Enable Notifications to schedule Calendar reminders.");
     const original = cleanLocalDateTime(request.body.occurrenceStartAt);
     if (!original) return responseError(reply, 400, "Choose a valid saved occurrence.");
+    const { minutesBefore, clockTime, clockTimeZone } = request.body;
+    const zone = canonicalTimeZone(clockTimeZone);
+    let schedule: CalendarReminderSchedule;
+    if (minutesBefore !== undefined && clockTime === undefined && clockTimeZone === undefined) schedule = { minutesBefore };
+    else if (minutesBefore === undefined && clockTime && zone) schedule = { clockTime, clockTimeZone: zone };
+    else return responseError(reply, 400, "Choose either a lead time or a local clock time and named time zone.");
     const user = userId(request);
     const reminder = await calendarReminderOccurrence(context.pool, departmentId, user, request.params.id, original);
-    if (!reminder) return responseError(reply, 404, "This timed occurrence is unavailable.");
+    if (!reminder) return responseError(reply, 404, "This occurrence is unavailable.");
     const preference = await context.pool.query<{ event_reminders_enabled: boolean }>(
       "SELECT event_reminders_enabled FROM module_notification_preferences WHERE department_id=$1 AND user_id=$2", [departmentId, user],
     );
     if (preference.rows[0]?.event_reminders_enabled === false) return responseError(reply, 409, "Enable event reminders in Notifications first.");
-    const due = reminder.startsAt - request.body.minutesBefore * 60_000;
-    if (due <= Date.now()) return responseError(reply, 400, "Choose a reminder time that has not passed.");
+    const window = calendarReminderWindow(reminder, schedule);
+    if (!window) return responseError(reply, 400, reminder.allDay ? "Choose a valid clock time and time zone for the all-day appointment date." : "Choose a lead time for this timed appointment.");
+    if (window.dueAt <= Date.now()) return responseError(reply, 400, "Choose a reminder time that has not passed.");
     await context.pool.query(
-      `INSERT INTO church_calendar_reminders(appointment_id,department_id,user_id,original_start,minutes_before,next_check_at)
-       VALUES($1,$2,$3,$4::timestamp,$5,$6)
-       ON CONFLICT(appointment_id,user_id,original_start) DO UPDATE SET minutes_before=EXCLUDED.minutes_before,next_check_at=EXCLUDED.next_check_at,delivered_at=NULL`,
-      [request.params.id, departmentId, user, original, request.body.minutesBefore, new Date(due)],
+      `INSERT INTO church_calendar_reminders(appointment_id,department_id,user_id,original_start,minutes_before,clock_time,clock_time_zone,next_check_at)
+       VALUES($1,$2,$3,$4::timestamp,$5,$6::time,$7,$8)
+       ON CONFLICT(appointment_id,user_id,original_start) DO UPDATE SET minutes_before=EXCLUDED.minutes_before,
+         clock_time=EXCLUDED.clock_time,clock_time_zone=EXCLUDED.clock_time_zone,next_check_at=EXCLUDED.next_check_at,delivered_at=NULL`,
+      [request.params.id, departmentId, user, original, "minutesBefore" in schedule ? schedule.minutesBefore : null,
+        "clockTime" in schedule ? schedule.clockTime : null, "clockTime" in schedule ? schedule.clockTimeZone : null, new Date(window.dueAt)],
     );
-    return { minutesBefore: request.body.minutesBefore, delivered: false };
+    return { ...schedule, delivered: false };
   });
   app.delete<{ Params: { id: string }; Querystring: { occurrenceStartAt: string } }>("/api/modules/church-calendar/appointments/:id/reminder", {
     schema: { params: reminderParams, querystring: { type: "object", additionalProperties: false, required: ["occurrenceStartAt"], properties: { occurrenceStartAt: reminderOccurrenceSchema } } },
@@ -512,10 +522,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const appointments = result.rows;
     if (!appointments.length) return [];
     const ids = appointments.map((row) => row.id);
-    const reminders = new Map((await context.pool.query<{ appointment_id: string; original: string; minutes_before: number; delivered: boolean }>(
-      `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original,minutes_before,delivered_at IS NOT NULL AS delivered
+    const reminders = new Map((await context.pool.query<{ appointment_id: string; original: string; minutes_before: number | null; clock_time: string | null; clock_time_zone: string | null; delivered: boolean }>(
+      `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original,minutes_before,
+              left(clock_time::text,5) AS clock_time,clock_time_zone,delivered_at IS NOT NULL AS delivered
          FROM church_calendar_reminders WHERE department_id=$1 AND user_id=$2 AND appointment_id=ANY($3::uuid[])`, [departmentId, userId(request), ids],
-    )).rows.map((reminder) => [`${reminder.appointment_id}:${reminder.original}`, { minutesBefore: reminder.minutes_before, delivered: reminder.delivered }]));
+    )).rows.map((reminder) => [`${reminder.appointment_id}:${reminder.original}`, {
+      ...(reminder.minutes_before != null ? { minutesBefore: reminder.minutes_before } : { clockTime: reminder.clock_time, clockTimeZone: reminder.clock_time_zone }),
+      delivered: reminder.delivered,
+    }]));
     const exceptions = await context.pool.query<{ appointment_id: string; original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
       `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides
          FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids],
