@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { ModuleContext } from "../../module-registry";
+import { GroupMembershipFields } from "./GroupMembershipFields";
 import "./styles.css";
 
 type Group = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean };
@@ -78,6 +79,7 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   const canBulkEdit = Boolean(selected && !selected.imported && rosterScope === groupScope && canManageNotes);
   const bulkIds = bulkSelection.scope === groupScope ? bulkSelection.ids.filter((id) => visibleMembers.some((member) => member.contactId === id)) : [];
   useEffect(() => {
+    setEdit(null);
     setBulkSelection({ scope: "", ids: [] });
     setBulkRole("");
     setBulkStatus("");
@@ -222,6 +224,7 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
               <option value="name">Last name</option><option value="role">Role</option><option value="joined">Newest join date</option>
             </select></label>
           </div>
+          {canBulkEdit && <GroupMembershipFields key={groupScope} groupId={selectedId} departmentId={departmentId} csrfToken={csrfToken}/>}
           {canBulkEdit && <section aria-label="Bulk membership editing">
             <label>Role<input value={bulkRole} maxLength={80} placeholder="Keep current role" disabled={bulkSaving} onChange={(event) => setBulkRole(event.target.value)} /></label>
             <label>Status<select value={bulkStatus} disabled={bulkSaving} onChange={(event) => setBulkStatus(event.target.value as "" | Member["status"])}>
@@ -263,6 +266,6 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
           {!history.some((entry) => !membershipHistoryOnly || entry.entityKind === "membership") && <p>No recorded changes yet.</p>}
         </div>
       </> : <div className="gh-panel"><p>{text.empty}</p></div>}</section></div>
-    {edit && <div className="gh-modal-backdrop" role="presentation"><section className="gh-modal" role="dialog" aria-modal="true" aria-labelledby="gh-edit-title"><h2 id="gh-edit-title">Edit membership · {edit.firstName} {edit.lastName}</h2><label>Role<input value={edit.role} onChange={(event) => setEdit({ ...edit, role: event.target.value })} /></label><label>Status<select value={edit.status} onChange={(event) => setEdit({ ...edit, status: event.target.value as Member["status"] })}><option value="active">Active</option><option value="paused">Paused</option><option value="waitlist">Waitlist</option></select></label><label>Joined on<input type="date" value={edit.joinedOn?.slice(0, 10) ?? ""} onChange={(event) => setEdit({ ...edit, joinedOn: event.target.value || null })} /></label><label>Custom fields (JSON)<textarea rows={7} value={customText} onChange={(event) => setCustomText(event.target.value)} /></label><div className="gh-actions"><button onClick={() => setEdit(null)}>Cancel</button><button onClick={() => void saveMember()}>Save membership</button></div></section></div>}
+    {edit && <div className="gh-modal-backdrop" role="presentation"><section className="gh-modal" role="dialog" aria-modal="true" aria-labelledby="gh-edit-title"><h2 id="gh-edit-title">Edit membership · {edit.firstName} {edit.lastName}</h2><label>Role<input value={edit.role} onChange={(event) => setEdit({ ...edit, role: event.target.value })} /></label><label>Status<select value={edit.status} onChange={(event) => setEdit({ ...edit, status: event.target.value as Member["status"] })}><option value="active">Active</option><option value="paused">Paused</option><option value="waitlist">Waitlist</option></select></label><label>Joined on<input type="date" value={edit.joinedOn?.slice(0, 10) ?? ""} onChange={(event) => setEdit({ ...edit, joinedOn: event.target.value || null })} /></label>{canBulkEdit && <GroupMembershipFields key={groupScope+":"+edit.contactId} groupId={selectedId} contactId={edit.contactId} departmentId={departmentId} csrfToken={csrfToken}/>}<details><summary>Legacy custom fields (JSON)</summary><label>Legacy values<textarea rows={7} value={customText} onChange={(event) => setCustomText(event.target.value)} /></label></details><div className="gh-actions"><button onClick={() => setEdit(null)}>Cancel</button><button onClick={() => void saveMember()}>Save membership</button></div></section></div>}
   </main>;
 }
