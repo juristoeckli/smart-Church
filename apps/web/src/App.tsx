@@ -1612,6 +1612,32 @@ function WorkspaceApp() {
       }
     },
   };
+  const globalNavigationActions = [
+    ...navigation.map(({ label }) => ({
+      id: `open:core:${label}`,
+      label: `Open ${navigationLabel(label)}`,
+      run: () => { setPage(label as WorkspacePage); setMenuOpen(false); },
+    })),
+    ...enabledDynamicModules.map((module) => ({
+      id: `open:module:${module.id}`,
+      label: `Open ${moduleTranslation(module.translations, activeLanguage, "name", module.name)}`,
+      run: () => { setPage(modulePage(module.id)); setMenuOpen(false); },
+    })),
+    ...moduleSubMenuItems.flatMap((item) => {
+      const { moduleId, state } = item;
+      if (!moduleId || !state) return [];
+      return [{
+        id: `open:${item.id}`,
+        label: `Open ${item.label}`,
+        description: item.moduleName,
+        run: () => {
+          setModuleState({ moduleId, departmentId: department.id, value: state });
+          setPage(modulePage(moduleId));
+          setMenuOpen(false);
+        },
+      }];
+    }),
+  ];
   const renderNavigationItem = ({ label, icon: Icon }: typeof navigation[number], itemKey = label) => {
     const registered = registeredModules.find((module) => module.name === label);
     const targetPage = registered ? modulePage(registered.id) : label as WorkspacePage;
@@ -1773,7 +1799,7 @@ function WorkspaceApp() {
         <header className="topbar">
           <button className="icon-button mobile-menu-button" type="button" aria-label="Open menu" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
           <div className="breadcrumbs"><span>Workspace</span><span className="breadcrumb-slash">/</span><strong>{moduleForPage(page) ? moduleTranslation(moduleForPage(page)!.translations, activeLanguage, "name", moduleForPage(page)!.name) : page}</strong></div>
-          <div className="topbar-actions"><GlobalSearch key={`${department.id}:${authUser.id}`} departmentId={department.id} userId={authUser.id} onNavigateEntity={moduleContext.onNavigateEntity} quickCreateActions={[...(canManagePeople ? [{ type: "person" as const, label: "Person", description: "Create a person record" }] : []), ...(canManageGroups ? [{ type: "group" as const, label: "Group", description: "Create a group" }] : []), ...(canQuickCreateWiki ? [{ type: "wiki" as const, label: "Wiki page", description: "Create a Wiki page" }] : [])]} onQuickCreate={startGlobalQuickCreate} /><span className="date-label">{today}</span><button className="icon-button topbar-bell" aria-label={translate("nav.notifications")} type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-language-control"><button className="topbar-language-button" type="button" aria-label={translate("language.menu")} aria-haspopup="menu" aria-expanded={isLanguageMenuOpen} onClick={() => setIsLanguageMenuOpen((open) => !open)}><Languages size={16} /><span>{activeLanguage.toUpperCase()}</span><ChevronDown size={13} /></button>{isLanguageMenuOpen && <div className="topbar-language-menu" role="menu" aria-label={translate("language.menu")}><button type="button" role="menuitemradio" aria-checked={!authUser.languageIsCustom} disabled={isSavingLanguage} onClick={() => void selectHeaderLanguage(null)}>{translate("language.browserDefault")} · {browserDefaultLanguage().toUpperCase()}</button>{(["en", "de", "fr", "it"] as const).map((language) => <button key={language} type="button" role="menuitemradio" aria-checked={authUser.languageIsCustom && authUser.language === language} disabled={isSavingLanguage} onClick={() => void selectHeaderLanguage(language)}>{translate(`language.${({ en: "english", de: "german", fr: "french", it: "italian" } as const)[language]}`)}</button>)}</div>}</div><div className="topbar-account"><div className="topbar-avatar" aria-hidden="true">{userInitials}</div><div className="topbar-account-copy"><strong title={authUser.displayName}>{authUser.displayName}</strong><small title={authUser.username}>{authUser.username}</small></div></div><button className="icon-button topbar-sign-out" type="button" aria-label={translate("nav.signOut")} title={translate("nav.signOut")} onClick={() => void signOut()}><LogOut size={16} /></button></div>
+          <div className="topbar-actions"><GlobalSearch key={`${department.id}:${authUser.id}`} departmentId={department.id} userId={authUser.id} onNavigateEntity={moduleContext.onNavigateEntity} quickCreateActions={[...(canManagePeople ? [{ type: "person" as const, label: "Person", description: "Create a person record" }] : []), ...(canManageGroups ? [{ type: "group" as const, label: "Group", description: "Create a group" }] : []), ...(canQuickCreateWiki ? [{ type: "wiki" as const, label: "Wiki page", description: "Create a Wiki page" }] : [])]} onQuickCreate={startGlobalQuickCreate} navigationActions={globalNavigationActions} /><span className="date-label">{today}</span><button className="icon-button topbar-bell" aria-label={translate("nav.notifications")} type="button" onClick={() => setNotice("You’re all caught up.")}><Bell size={19} /></button><div className="topbar-language-control"><button className="topbar-language-button" type="button" aria-label={translate("language.menu")} aria-haspopup="menu" aria-expanded={isLanguageMenuOpen} onClick={() => setIsLanguageMenuOpen((open) => !open)}><Languages size={16} /><span>{activeLanguage.toUpperCase()}</span><ChevronDown size={13} /></button>{isLanguageMenuOpen && <div className="topbar-language-menu" role="menu" aria-label={translate("language.menu")}><button type="button" role="menuitemradio" aria-checked={!authUser.languageIsCustom} disabled={isSavingLanguage} onClick={() => void selectHeaderLanguage(null)}>{translate("language.browserDefault")} · {browserDefaultLanguage().toUpperCase()}</button>{(["en", "de", "fr", "it"] as const).map((language) => <button key={language} type="button" role="menuitemradio" aria-checked={authUser.languageIsCustom && authUser.language === language} disabled={isSavingLanguage} onClick={() => void selectHeaderLanguage(language)}>{translate(`language.${({ en: "english", de: "german", fr: "french", it: "italian" } as const)[language]}`)}</button>)}</div>}</div><div className="topbar-account"><div className="topbar-avatar" aria-hidden="true">{userInitials}</div><div className="topbar-account-copy"><strong title={authUser.displayName}>{authUser.displayName}</strong><small title={authUser.username}>{authUser.username}</small></div></div><button className="icon-button topbar-sign-out" type="button" aria-label={translate("nav.signOut")} title={translate("nav.signOut")} onClick={() => void signOut()}><LogOut size={16} /></button></div>
         </header>
 
         <div className={`page-wrap${moduleForPage(page)?.pageClassName ? ` ${moduleForPage(page)?.pageClassName}` : ""}${moduleForPage(page)?.id === "video-steffisburg" && ["Routing", "Names & locks"].includes(activeModuleState) ? " page-wrap-video-routing" : ""}`}>
