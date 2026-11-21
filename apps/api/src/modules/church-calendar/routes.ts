@@ -126,6 +126,15 @@ function foldIcsLine(value: string) {
   return [...fragments, line].join("\r\n");
 }
 
+async function registrationFormTemplatesInstalled(db: Pick<PoolClient, "query">) {
+  const result = await db.query<{ installed: boolean }>(
+    `SELECT count(*)=3 AS installed FROM pg_attribute
+         WHERE attrelid=to_regclass('public.group_signup_forms') AND NOT attisdropped
+           AND attname IN ('active_seat_limit','waitlist_limit','counted_roles')`,
+  );
+  return Boolean(result.rows[0]?.installed);
+}
+
 async function lockCalendarSeries(db: PoolClient, id: string, departmentId: string) {
   const { rows: [row] } = await db.query<{ starts_at: string; ends_at: string; recurrence: Recurrence | null }>(
     `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,recurrence
@@ -397,7 +406,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ? (await context.pool.query<{ id: string; name: string; positions: Array<{ name: string; category?: string; qualificationIds?: string[] }> }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
       : [];
     const canSelectPeople = canSeePrivatePeople(request);
-    return { groups: groups.rows, signupGroups: signupGroups.rows, events: events.rows, resourceBookings: bookings.rows, servicePlanTemplates, canSelectPeople };
+    const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
+    const registrationFormTemplates = canManageGroups && await registrationFormTemplatesInstalled(context.pool)
+      ? (await context.pool.query<{ id: string; name: string }>(
+        `SELECT groups.id,groups.name FROM church_groups groups
+             JOIN group_signup_forms form ON form.group_id=groups.id AND form.department_id=groups.department_id
+            WHERE groups.department_id=$1 AND groups.status IN ('active','draft') AND groups.source_system IS NULL
+            ORDER BY lower(groups.name),groups.id LIMIT 500`, [departmentId],
+      )).rows : [];
+    return { registrationFormTemplates, groups: groups.rows, signupGroups: signupGroups.rows, events: events.rows, resourceBookings: bookings.rows, servicePlanTemplates, canSelectPeople };
   });
 
   app.get<{ Querystring: { q?: string; staffing?: boolean } }>("/api/modules/church-calendar/people", { schema: {
@@ -849,9 +866,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }).slice(0, 2500);
   });
 
-  app.post<{ Params: { id: string }; Body: { throughDate: string } }>("/api/modules/church-calendar/appointments/:id/registration-groups", { schema: {
+  app.post<{ Params: { id: string }; Body: { throughDate: string; templateGroupId?: string } }>("/api/modules/church-calendar/appointments/:id/registration-groups", { schema: {
     params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["throughDate"], properties: { throughDate: { type: "string", format: "date" } } },
+    body: { type: "object", additionalProperties: false, required: ["throughDate"], properties: { throughDate: { type: "string", format: "date" }, templateGroupId: { type: "string", format: "uuid" } } },
   } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -875,6 +892,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!row) { await client.query("ROLLBACK"); return responseError(reply, 404, "Appointment not found."); }
       if (!canManageCalendar(request, row.calendar_scope, row.owner_user_id)) { await client.query("ROLLBACK"); return responseError(reply, 403, "You cannot change this appointment."); }
       if (!row.recurrence) { await client.query("ROLLBACK"); return responseError(reply, 400, "Registration groups can be generated only for a recurring appointment."); }
+      const templateGroupId = request.body.templateGroupId;
+      if (templateGroupId) {
+        if (!await registrationFormTemplatesInstalled(client)) {
+          await client.query("ROLLBACK"); return responseError(reply, 409, "Registration form templates are unavailable at this site.");
+        }
+        const group = await client.query(
+          "SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status IN ('active','draft') AND source_system IS NULL FOR SHARE",
+          [templateGroupId, departmentId],
+        );
+        const template = group.rowCount
+          ? await client.query("SELECT group_id FROM group_signup_forms WHERE group_id=$1 AND department_id=$2 FOR SHARE", [templateGroupId, departmentId])
+          : null;
+        if (!template?.rowCount) {
+          await client.query("ROLLBACK"); return responseError(reply, 404, "Signup form template not found in this location.");
+        }
+      }
       const startDate = row.starts_at.slice(0, 10);
       const throughDate = request.body.throughDate;
       const maximum = new Date(`${startDate}T00:00:00Z`); maximum.setUTCFullYear(maximum.getUTCFullYear() + 5);
@@ -895,7 +928,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const byStart = new Map(existing.rows.map((item) => [item.original_start.replace(" ", "T"), item]));
       const pending = starts.filter((start) => !byStart.get(start)?.cancelled && !byStart.get(start)?.overrides?.signupGroupId);
       await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [userId(request)]);
-      let created = 0;
+      const createdGroupIds: string[] = [];
       for (const start of pending) {
         const groupId = randomUUID();
         const occurrenceDate = start.slice(0, 10);
@@ -914,8 +947,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=false,overrides=church_calendar_appointment_exceptions.overrides || EXCLUDED.overrides,updated_by=EXCLUDED.updated_by,updated_at=now()`,
           [row.id, start, groupId, userId(request)],
         );
-        created += 1;
+        createdGroupIds.push(groupId);
       }
+      if (templateGroupId && createdGroupIds.length) {
+        // Copy reusable form settings only. New groups keep the default review mode and no signup window.
+        await client.query(
+          `INSERT INTO group_signup_forms(group_id,department_id,revision,questions,default_role,heading,active_seat_limit,waitlist_limit,counted_roles)
+           SELECT generated.group_id,template.department_id,gen_random_uuid(),template.questions,template.default_role,template.heading,
+                  template.active_seat_limit,template.waitlist_limit,template.counted_roles
+             FROM group_signup_forms template CROSS JOIN unnest($3::uuid[]) generated(group_id)
+            WHERE template.group_id=$1 AND template.department_id=$2`, [templateGroupId, departmentId, createdGroupIds],
+        );
+      }
+      const created = createdGroupIds.length;
       await client.query("COMMIT");
       context.realtime.publish("module:church-calendar:changed", departmentId, { action: "registration-groups-generated", appointmentId: row.id, created });
       return { created, alreadyLinked: starts.filter((start) => Boolean(byStart.get(start)?.overrides?.signupGroupId)).length, skippedCancelled: starts.filter((start) => byStart.get(start)?.cancelled).length, throughDate };
