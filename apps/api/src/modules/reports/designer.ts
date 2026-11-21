@@ -15,7 +15,7 @@ const MAX_PREVIEW = 500;
 const datasetDefinitions: DataSet[] = [
   { key: "people", title: "People", permission: "people", description: "Private contact directory fields.", fields: [
     { key: "firstName", label: "First name", type: "text" }, { key: "lastName", label: "Last name", type: "text" }, { key: "email", label: "Email", type: "text" }, { key: "phone", label: "Phone", type: "text" }, { key: "status", label: "Status", type: "text" }, { key: "createdDate", label: "Created date", type: "date" },
-  ], sql: `SELECT first_name AS "firstName",last_name AS "lastName",COALESCE(email,'') AS email,COALESCE(phone,'') AS phone,status,created_at::date::text AS "createdDate" FROM contacts WHERE department_id=$1 ORDER BY last_name,first_name LIMIT ${MAX_ROWS}` },
+  ], sql: `SELECT first_name AS "firstName",last_name AS "lastName",COALESCE(email,'') AS email,COALESCE(phone,'') AS phone,status,created_at::date::text AS "createdDate" FROM contacts c WHERE c.department_id=$1 ORDER BY c.last_name,c.first_name LIMIT ${MAX_ROWS}` },
   { key: "groups", title: "Groups", permission: "groups", description: "Group directory fields.", fields: [
     { key: "groupName", label: "Group name", type: "text" }, { key: "createdDate", label: "Created date", type: "date" },
   ], sql: `SELECT name AS "groupName",created_at::date::text AS "createdDate" FROM church_groups WHERE department_id=$1 ORDER BY name LIMIT ${MAX_ROWS}` },

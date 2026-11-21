@@ -9,6 +9,7 @@ function plainText(value: string) {
     .replace(/<li\b[^>]*>/gi, "\n  * ")
     .replace(/<\/(?:p|div|blockquote|pre|h[1-6]|tr|ul|ol|table)\s*>/gi, "\n")
     .replace(/<br\s*>/gi, "\n")
+    .replace(/<hr\s*\/?>/gi, "\n----------------------------------------\n")
     .replace(/<[^>]*>/g, "")
     .replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/gi, (_entity, code: string) => {
       const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };

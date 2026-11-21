@@ -33,6 +33,11 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
+  const [rosterScope, setRosterScope] = useState("");
+  const [bulkSelection, setBulkSelection] = useState<{ scope: string; ids: string[] }>({ scope: "", ids: [] });
+  const [bulkRole, setBulkRole] = useState("");
+  const [bulkStatus, setBulkStatus] = useState<"" | Member["status"]>("");
+  const [bulkSaving, setBulkSaving] = useState(false);
   const [history, setHistory] = useState<History[]>([]);
   const [membershipHistoryOnly, setMembershipHistoryOnly] = useState(false);
   const [notes, setNotes] = useState<GroupNote[]>([]);
@@ -51,6 +56,14 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   const [customText, setCustomText] = useState("{}");
   const [leaders, setLeaders] = useState<Leader[] | null>(null);
   const selected = groups.find((group) => group.id === selectedId) ?? null;
+  const groupScope = `${departmentId}:${selectedId}`;
+  const canBulkEdit = Boolean(selected && !selected.imported && rosterScope === groupScope && canManageNotes);
+  const bulkIds = bulkSelection.scope === groupScope ? bulkSelection.ids.filter((id) => members.some((member) => member.contactId === id)) : [];
+  useEffect(() => {
+    setBulkSelection({ scope: "", ids: [] });
+    setBulkRole("");
+    setBulkStatus("");
+  }, [groupScope]);
   const headers = useMemo(() => ({ "x-department-id": departmentId }), [departmentId]);
   const load = useCallback(async () => {
     setError("");
@@ -70,7 +83,9 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
       fetch(`/api/modules/group-hierarchy/groups/${id}/invitations`, { headers }),
     ]);
     if (!memberResponse.ok || !historyResponse.ok || !ruleResponse.ok || !noteResponse.ok || !invitationResponse.ok) throw new Error("Could not load group details.");
-    setMembers(await memberResponse.json() as Member[]);
+    const roster = await memberResponse.json() as Member[];
+    setMembers(roster);
+    setRosterScope(`${headers["x-department-id"]}:${id}`);
     setHistory(await historyResponse.json() as History[]);
     setRules(await ruleResponse.json() as Array<{ contactStatus: "member" | "visitor"; enabled: boolean }>);
     const noteData = await noteResponse.json() as { notes: GroupNote[]; canManage: boolean };
@@ -108,6 +123,22 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
       await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/members/${edit.contactId}`, "PUT", { role: edit.role, status: edit.status, joinedOn: edit.joinedOn || null, customFields });
       setEdit(null); await loadDetails(selectedId); setMessage("Membership saved.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Custom fields must be valid JSON."); }
+  };
+  const saveBulkMembers = async () => {
+    if (!canBulkEdit || bulkSaving || !bulkIds.length || (!bulkRole.trim() && !bulkStatus)) return;
+    if (!window.confirm(`Update ${bulkIds.length} selected memberships?`)) return;
+    setBulkSaving(true);
+    try {
+      await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/members`, "PATCH", {
+        contactIds: bulkIds,
+        ...(bulkRole.trim() ? { role: bulkRole.trim() } : {}),
+        ...(bulkStatus ? { status: bulkStatus } : {}),
+      });
+      setBulkSelection({ scope: "", ids: [] });
+      await loadDetails(selectedId);
+      setMessage("Selected memberships updated.");
+    } catch (reason) { setError((reason as Error).message); }
+    finally { setBulkSaving(false); }
   };
   const sendInvite = async () => {
     try { const result = await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/invitations`, "POST", { contactId: inviteContactId }) as { invitationToken: string };
@@ -157,7 +188,23 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
           <label>Parent group<select value={parentId} disabled={selected.imported} onChange={(event) => setParentId(event.target.value)}><option value="">No parent</option>{groups.filter((group) => group.id !== selected.id).map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
           <button disabled={selected.imported} onClick={() => void saveParent()}>Save hierarchy</button>
         </div>
-        <div className="gh-panel"><h2>{text.members} <small>({members.length})</small></h2><div className="gh-member-list">{members.map((member) => <article key={member.contactId} className="gh-member"><div><strong>{member.firstName} {member.lastName}</strong><small>{member.email || ""} · {member.role} · {member.status}</small></div><button disabled={selected.imported} onClick={() => { setEdit(member); setCustomText(JSON.stringify(member.customFields, null, 2)); }}>Edit</button></article>)}</div>
+        <div className="gh-panel"><h2>{text.members} <small>({members.length})</small></h2>
+          {canBulkEdit && <section aria-label="Bulk membership editing">
+            <label>Role<input value={bulkRole} maxLength={80} placeholder="Keep current role" disabled={bulkSaving} onChange={(event) => setBulkRole(event.target.value)} /></label>
+            <label>Status<select value={bulkStatus} disabled={bulkSaving} onChange={(event) => setBulkStatus(event.target.value as "" | Member["status"])}>
+              <option value="">Keep current status</option><option value="active">Active</option><option value="paused">Paused</option><option value="waitlist">Waitlist</option>
+            </select></label>
+            <button type="button" disabled={bulkSaving || !bulkIds.length || (!bulkRole.trim() && !bulkStatus)} onClick={() => void saveBulkMembers()}>
+              {bulkSaving ? "Updating…" : `Update selected (${bulkIds.length}/100)`}
+            </button>
+          </section>}
+          <div className="gh-member-list">{members.map((member) => <article key={member.contactId} className="gh-member">
+            {canBulkEdit && <input type="checkbox" aria-label={`Select ${member.firstName} ${member.lastName}`} checked={bulkIds.includes(member.contactId)}
+              disabled={bulkSaving || (bulkIds.length >= 100 && !bulkIds.includes(member.contactId))}
+              onChange={(event) => setBulkSelection({ scope: groupScope, ids: event.target.checked ? [...bulkIds, member.contactId] : bulkIds.filter((id) => id !== member.contactId) })} />}
+            <div><strong>{member.firstName} {member.lastName}</strong><small>{member.email || ""} · {member.role} · {member.status}</small></div>
+            <button disabled={selected.imported} onClick={() => { setEdit(member); setCustomText(JSON.stringify(member.customFields, null, 2)); }}>Edit</button>
+          </article>)}</div>
           <div className="gh-invite"><label>Invite existing person by contact ID<input value={inviteContactId} onChange={(event) => setInviteContactId(event.target.value)} placeholder="Contact UUID" /></label><button disabled={!inviteContactId || selected.imported} onClick={() => void sendInvite()}>Create invitation</button>{inviteLink && <input readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()} />}</div>
           {canManageInvitations && <section className="gh-invitations"><h3>Invitation history <small>({invitations.length})</small></h3>{invitations.length ? <div className="gh-member-list">{invitations.map((invitation) => <article className="gh-member" key={invitation.id}><div><strong>{invitation.firstName} {invitation.lastName}</strong><small>{invitation.status} · Created {new Date(invitation.createdAt).toLocaleString()} · Expires {new Date(invitation.expiresAt).toLocaleDateString()}</small></div>{invitation.status === "pending" && <button onClick={() => void revokeInvite(invitation)}>Revoke</button>}</article>)}</div> : <p>No invitations have been created for this group.</p>}</section>}
         </div>

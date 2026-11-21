@@ -292,6 +292,72 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { ...result.rows[0], customFields: fields };
   });
 
+  app.patch<{ Params: { groupId: string }; Body: { contactIds: string[]; role?: string; status?: "active" | "paused" | "waitlist" } }>("/api/modules/group-hierarchy/groups/:groupId/members", {
+    schema: {
+      params: { type: "object", required: ["groupId"], properties: { groupId: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["contactIds"], properties: {
+        contactIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },
+        role: { type: "string", minLength: 1, maxLength: 80 },
+        status: { type: "string", enum: ["active", "paused", "waitlist"] },
+      } },
+    },
+  }, async (request, reply) => {
+    if (!pool || !isDatabaseReady()) return unavailable(reply);
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const { groupId } = request.params;
+    const { contactIds, status } = request.body;
+    const role = request.body.role?.trim();
+    if (role === "" || (role === undefined && status === undefined)) {
+      return reply.code(400).send({ error: "Choose a role, a status, or both." });
+    }
+    if (!await canManageGroup(request, groupId, departmentId)) {
+      return reply.code(403).send({ error: "Group management access is required." });
+    }
+    const client = await pool.connect();
+    let updated = 0;
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is not available for writing." });
+      }
+      const group = await client.query<{ source_system: string | null }>(
+        "SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR SHARE",
+        [groupId, departmentId],
+      );
+      if (!group.rowCount || group.rows[0].source_system === "churchtools" || group.rows[0].source_system === "elvanto") {
+        await client.query("ROLLBACK");
+        return reply.code(group.rowCount ? 403 : 404).send({ error: group.rowCount ? "This group is managed by an external sync." : "Group not found." });
+      }
+      const members = await client.query(
+        `SELECT member.contact_id FROM group_members member JOIN contacts person ON person.id=member.contact_id
+          WHERE member.group_id=$1 AND person.department_id=$2 AND member.contact_id=ANY($3::uuid[])
+          ORDER BY member.contact_id FOR UPDATE OF member`,
+        [groupId, departmentId, contactIds],
+      );
+      if (members.rowCount !== contactIds.length) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Some selected memberships are no longer in this group. Refresh the roster and try again." });
+      }
+      // The membership audit trigger captures each changed row and the transaction actor.
+      await setActor(client, departmentId, request.authenticatedUser!.id);
+      const result = await client.query(
+        `UPDATE group_members SET role=COALESCE($3::text,role),status=COALESCE($4::text,status),auto_managed=FALSE
+          WHERE group_id=$1 AND contact_id=ANY($2::uuid[])
+            AND (($3::text IS NOT NULL AND role IS DISTINCT FROM $3::text)
+              OR ($4::text IS NOT NULL AND status IS DISTINCT FROM $4::text))`,
+        [groupId, contactIds, role ?? null, status ?? null],
+      );
+      updated = result.rowCount ?? 0;
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    if (updated) realtime.publish("core:groups:changed", departmentId, { groupId, action: "membership-bulk-updated" });
+    return { updated };
+  });
+
   app.put<{ Params: { id: string }; Body: { rules: Array<{ contactStatus: "member" | "visitor"; enabled: boolean }> } }>("/api/modules/group-hierarchy/groups/:id/membership-rules", {
     schema: {
       params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
