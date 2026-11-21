@@ -1,4 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
+import { registerMyResourceBookings } from "./my-resource-bookings.js";
 import { resourceBookedDayReport } from "./booked-day-report.js";
 import { canViewResource, isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
@@ -397,6 +398,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       [departmentId, isManager(request), request.authenticatedUser!.id, from, through, timeZone, resourceId ?? null, markedOnly ?? false]);
     return reply.header("Cache-Control", "private, no-store").send({ from, through, timeZone, calendarDays, resources: report.rows });
   });
+
+  registerMyResourceBookings(app, context, location);
 
   app.get("/api/modules/resource-scheduler/home-bookings", async (request, reply) => {
     const departmentId = await location(request, reply);
