@@ -132,9 +132,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const host = result.rows[0]?.host;
     if (!host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
     try {
-      const channels = await readIcspDeviceChannels(host, { device: 10001, port: 1, system: 1 });
-      const activeRooms = roomStatusChannels.filter(([channel]) => channels.includes(channel)).map(([, name]) => name);
-      return { currentRoom: activeRooms.length === 1 ? activeRooms[0] : null, activeRooms, channels, updatedAt: new Date().toISOString() };
+      const [portOneChannels, portTwoChannels] = await Promise.all([
+        readIcspDeviceChannels(host, { device: 10001, port: 1, system: 1 }),
+        readIcspDeviceChannels(host, { device: 10001, port: 2, system: 1 }),
+      ]);
+      const activeRooms = roomStatusChannels.filter(([channel]) => portOneChannels.includes(channel)).map(([, name]) => name);
+      return {
+        currentRoom: activeRooms.length === 1 ? activeRooms[0] : null,
+        activeRooms,
+        channels: portOneChannels,
+        channelsByPort: { 1: portOneChannels, 2: portTwoChannels },
+        updatedAt: new Date().toISOString(),
+      };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read current AMX mode." });
     }
