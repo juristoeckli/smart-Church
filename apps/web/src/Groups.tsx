@@ -103,6 +103,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [groupTypeFilter, setGroupTypeFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState<GroupSourceFilter>("all");
   const [sortOrder, setSortOrder] = useState<GroupSortOrder>("name_asc");
+  const [directorySelection, setDirectorySelection] = useState<Set<string>>(() => new Set());
   const [displayMode, setDisplayMode] = useState<"list" | "table">("list");
   const [visibleColumns, setVisibleColumns] = useState<GroupColumn[]>(defaultGroupColumns);
   const displayedColumns = groupColumns.filter(({ key }) => visibleColumns.includes(key));
@@ -175,6 +176,19 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     : 1;
   const directoryOffset = (directoryPage - 1) * directoryPageSize;
   const pageGroups = visibleGroups.slice(directoryOffset, directoryOffset + directoryPageSize);
+  const selectedDirectoryGroups = visibleGroups.filter((group) => directorySelection.has(group.id));
+  const selectedOnPage = pageGroups.filter((group) => directorySelection.has(group.id)).length;
+  function selectDirectoryRows(groups: ChurchGroup[], checked: boolean) {
+    if (loading || loadedDepartmentId !== departmentId) return;
+    setDirectorySelection((current) => {
+      const next = new Set(current);
+      for (const { id } of groups) {
+        if (checked) next.add(id);
+        else next.delete(id);
+      }
+      return next;
+    });
+  }
   const changeDirectoryPage = (page: number) => setDirectoryPagination({ filterKey: directoryFilterKey, page });
 
   const selected = visibleGroups.find((group) => group.id === selectedId) ?? null;
@@ -245,6 +259,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   useEffect(() => {
     const controller = new AbortController();
     void loadGroups(controller.signal);
+    setDirectorySelection(new Set());
     setDirectorySearch(""); setStatusFilter("all"); setGroupTypeFilter(""); setSortOrder("name_asc"); setDisplayMode("list"); setVisibleColumns(defaultGroupColumns); setSavedViews([]); setSelectedSavedViewId(""); setSavedViewName("");
     void fetch("/api/groups/views", { headers: { "x-department-id": departmentId }, signal: controller.signal })
       .then(async (response) => {
@@ -555,12 +570,13 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     downloadCsv(rows, `group-attendance-${meeting.date}.csv`);
   }
 
-  function downloadGroupDirectory() {
-    if (loading || loadedDepartmentId !== departmentId || visibleGroups.length === 0) return;
+  function downloadGroupDirectory(selectedOnly = false) {
+    const rows = selectedOnly ? selectedDirectoryGroups : visibleGroups;
+    if (loading || loadedDepartmentId !== departmentId || rows.length === 0) return;
     downloadCsv([
       [translate("groups.name"), ...displayedColumns.map(({ label }) => label)],
-      ...visibleGroups.map((group) => [group.name, ...displayedColumns.map(({ value }) => value(group) ?? "")]),
-    ], "groups-directory.csv");
+      ...rows.map((group) => [group.name, ...displayedColumns.map(({ value }) => value(group) ?? "")]),
+    ], selectedOnly ? "groups-selected.csv" : "groups-directory.csv");
   }
 
   async function deleteGroup(group: ChurchGroup) {
@@ -582,7 +598,13 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
         <div className="community-group-directory-tools"><label className="search-field"><Search size={15} /><input type="search" value={directorySearch} onChange={(event) => { setDirectorySearch(event.target.value); }} placeholder="Search groups by name, type or description" aria-label="Search groups by name, type or description" /></label><label><input type="checkbox" checked={myGroupsOnly} onChange={(event) => setMyGroupsOnly(event.target.checked)} /> My groups only</label><label className="community-group-status-filter">Group status<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as GroupStatusFilter); }}><option value="all">All statuses</option>{availableStatuses.map((status) => <option key={status} value={status}>{status[0].toUpperCase() + status.slice(1)}</option>)}</select></label><label className="community-group-status-filter">Group type<select value={groupTypeFilter} onChange={(event) => { setGroupTypeFilter(event.target.value); }}><option value="">All types</option>{availableGroupTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label className="community-group-status-filter">Group source<select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as GroupSourceFilter)}><option value="all">All sources</option><option value="local">Local</option><option value="churchtools">ChurchTools</option><option value="elvanto">Elvanto</option></select></label><label className="community-group-status-filter">Sort groups<select value={sortOrder} onChange={(event) => { setSortOrder(event.target.value as GroupSortOrder); }}><option value="name_asc">Name A–Z</option><option value="name_desc">Name Z–A</option><option value="members_desc">Most members</option><option value="start_desc">Newest start date</option></select></label></div>
         <div className="community-saved-group-views"><select aria-label="Load a saved group view" value={selectedSavedViewId} onChange={(event) => applySavedView(event.target.value)}><option value="">Saved views</option>{savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select><input value={savedViewName} maxLength={80} onChange={(event) => setSavedViewName(event.target.value)} placeholder="View name" aria-label="Saved view name" /><button className="button button-secondary" type="button" disabled={saving || !savedViewName.trim()} onClick={() => void saveDirectoryView()}>{saving ? "Saving..." : "Save view"}</button>{selectedSavedViewId && <><button className="button button-secondary" type="button" disabled={saving || !savedViewName.trim()} onClick={() => void saveDirectoryView("update")}>Update view</button><button className="button button-secondary" type="button" disabled={saving || !savedViewName.trim()} onClick={() => void saveDirectoryView("rename")}>Rename</button><button className="button button-secondary" type="button" disabled={saving} onClick={() => void deleteSavedView()}>Delete</button></>}</div>
         <div className="community-group-directory-tools">
-          <button className="button button-secondary" type="button" disabled={loading || loadedDepartmentId !== departmentId || visibleGroups.length === 0} onClick={downloadGroupDirectory}><Download size={14} />Export directory CSV</button>
+          <button className="button button-secondary" type="button" disabled={loading || loadedDepartmentId !== departmentId || visibleGroups.length === 0} onClick={() => downloadGroupDirectory()}><Download size={14} />Export directory CSV</button>
+          {displayMode === "table" && loadedDepartmentId === departmentId && selectedDirectoryGroups.length > 0 && <>
+            <button className="button button-secondary" type="button" disabled={loading} onClick={() => downloadGroupDirectory(true)}>
+              <Download size={14} />Export selected ({selectedDirectoryGroups.length})
+            </button>
+            <button className="button button-secondary" type="button" onClick={() => setDirectorySelection(new Set())}>Clear selection</button>
+          </>}
           <label className="community-group-status-filter">Layout
             <select value={displayMode} onChange={(event) => { setDisplayMode(event.target.value === "table" ? "table" : "list"); }}>
               <option value="list">List</option><option value="table">Table</option>
@@ -618,8 +640,15 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
         {loading ? <p className="community-empty">{translate("groups.loading")}</p> : visibleGroups.length ? displayMode === "table" ? (
           <div className="table-scroll">
             <table className="people-table" aria-label="Groups directory">
-              <thead><tr><th scope="col">Group</th>{displayedColumns.map(({ key, label }) => <th scope="col" key={key}>{label}</th>)}</tr></thead>
+              <thead><tr><th scope="col"><input type="checkbox" aria-label="Select all groups on this page"
+                disabled={loading || loadedDepartmentId !== departmentId} checked={selectedOnPage === pageGroups.length}
+                ref={(input) => { if (input) input.indeterminate = selectedOnPage > 0 && selectedOnPage < pageGroups.length; }}
+                onChange={(event) => selectDirectoryRows(pageGroups, event.target.checked)} />
+              </th><th scope="col">Group</th>{displayedColumns.map(({ key, label }) => <th scope="col" key={key}>{label}</th>)}</tr></thead>
               <tbody>{pageGroups.map((group) => <tr key={group.id}>
+                <td><input type="checkbox" aria-label={"Select " + group.name}
+                  disabled={loading || loadedDepartmentId !== departmentId} checked={directorySelection.has(group.id)}
+                  onChange={(event) => selectDirectoryRows([group], event.target.checked)} /></td>
                 <td><button type="button" className="button button-secondary" onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}>{group.name}</button></td>
                 {displayedColumns.map(({ key, value }) => <td key={key}>{value(group) ?? "—"}</td>)}
               </tr>)}</tbody>
