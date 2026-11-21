@@ -32,7 +32,7 @@ function csvCell(value: unknown) {
   const safeText = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
   return `"${safeText.replace(/"/g, '""')}"`;
 }
-function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filename: string, header: string[], rows: unknown[][]) {
+function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filename: string, header: string[], rows: unknown[][], integerColumns: readonly number[] = []) {
   if ((request.params as { format?: string }).format === "pdf") {
     return reply.type("application/pdf")
       .header("Cache-Control", "private, no-store")
@@ -62,7 +62,10 @@ function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filenam
         </head><body><main><h1>${escape(title)}</h1><p class="hint">Use your browser’s Print command to print or save as PDF.</p>
         <table><thead><tr>${columns}</tr></thead><tbody>${body}</tbody></table>${rows.length ? "" : "<p>No matching entries.</p>"}</main></body></html>`);
   }
-  const csv = [header, ...rows].map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const csv = [header, ...rows].map((row) => row.map((value, index) => {
+    const text = String(value ?? "");
+    return integerColumns.includes(index) && /^-?\d+$/.test(text) ? text : csvCell(value);
+  }).join(",")).join("\r\n");
   return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename=${filename}.csv`).send(`\uFEFF${csv}`);
 }
 function asMoney(value: string | number) { const number = Number(value); return Number.isSafeInteger(number) ? number : 0; }
@@ -129,6 +132,28 @@ const transactionDonorFilter = "AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM f
 const transactionAccountFilter = "AND ($7::uuid IS NULL OR EXISTS (SELECT 1 FROM finance_transaction_lines account_line JOIN finance_accounts account ON account.department_id=account_line.department_id AND account.id=account_line.account_id WHERE account_line.department_id=t.department_id AND account_line.transaction_id=t.id AND account.id=$7))";
 const transactionCostCenterFilter = "AND ($8::uuid IS NULL OR EXISTS (SELECT 1 FROM finance_transaction_lines center_line JOIN finance_cost_centers center ON center.department_id=center_line.department_id AND center.id=center_line.cost_center_id WHERE center_line.department_id=t.department_id AND center_line.transaction_id=t.id AND center.id=$8))";
 const transactionPostedFilter = "AND (NOT $9::boolean OR t.status='posted')";
+type PeriodTurnoverQuery = { year: string; interval: "month" | "quarter"; accountType?: string; page?: number };
+const periodTurnoverProperties = {
+  year: { type: "string", pattern: "^[0-9]{4}$" },
+  interval: { type: "string", enum: ["month", "quarter"] },
+  accountType: { type: "string", enum: ["asset", "liability", "equity", "income", "expense"] },
+} as const;
+const periodTurnoverQuery = { type: "object", required: ["year", "interval"], additionalProperties: false } as const;
+const periodTurnoverSql = `SELECT to_char(date_trunc($3::text,t.booking_date::timestamp),'YYYY-MM-DD') AS "periodStart",
+       a.id AS "accountId",a.code,a.name,a.account_type AS "accountType",
+       sum(l.debit_cents)::text AS "debitCents",sum(l.credit_cents)::text AS "creditCents",
+       sum(l.debit_cents::numeric-l.credit_cents)::text AS "netCents"
+  FROM finance_transactions t
+  JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
+  JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id
+ WHERE t.department_id=$1 AND t.accounting_year=$2 AND t.status='posted'
+   AND ($4::text IS NULL OR a.account_type=$4)
+ GROUP BY "periodStart",a.id ORDER BY "periodStart",a.account_type,a.code,a.id LIMIT $5 OFFSET $6`;
+function turnoverCell(cents: string) {
+  const numeric = Number(cents);
+  return Number.isSafeInteger(numeric) && Math.abs(numeric) < 1e15 ? numeric : cents;
+}
+
 type TransactionOrderQuery = { sort?: string; direction?: string };
 function transactionOrder(query: TransactionOrderQuery, forExport: boolean) {
   const group = forExport ? " OVER (PARTITION BY t.id)" : "";
@@ -800,6 +825,33 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE c.department_id=$1 GROUP BY c.id ORDER BY c.code`, [departmentId, year]);
     const header = ["accounting_year", "cost_center_code", "cost_center_name", "debit_cents", "credit_cents", "transaction_count"];
     return sendFinanceExport(request, reply, `finance-cost-centers-${year}`, header, result.rows.map((row) => [year, row.code, row.name, row.debit_cents, row.credit_cents, row.transaction_count]));
+  });
+
+  app.get<{ Querystring: PeriodTurnoverQuery }>("/api/modules/finance/reports/period-turnover", {
+    schema: { querystring: { ...periodTurnoverQuery, properties: {
+      ...periodTurnoverProperties, page: { type: "integer", minimum: 1, maximum: 250 },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    const { year, interval, accountType, page = 1 } = request.query;
+    const pageSize = 100;
+    const result = await pool!.query(periodTurnoverSql, [departmentId, year, interval, accountType ?? null, pageSize + 1, (page - 1) * pageSize]);
+    return reply.header("Cache-Control", "private, no-store").send({ page, hasNext: page < 250 && result.rows.length > pageSize, rows: result.rows.slice(0, pageSize) });
+  });
+
+  app.get<{ Params: { format: string }; Querystring: PeriodTurnoverQuery }>("/api/modules/finance/reports/period-turnover/export.:format", {
+    schema: { querystring: { ...periodTurnoverQuery, properties: periodTurnoverProperties } },
+  }, async (request, reply) => {
+    if (!["csv", "xlsx", "html", "pdf"].includes(request.params.format)) return reply.code(404).send({ error: "Export format not found." });
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const { year, interval, accountType } = request.query;
+    const maximumRows = 25_000;
+    const result = await pool!.query(periodTurnoverSql, [departmentId, year, interval, accountType ?? null, maximumRows + 1, 0]);
+    if (result.rows.length > maximumRows) return reply.code(413).send({ error: "Choose an account type to narrow the turnover export." });
+    const header = ["accounting_year", "interval", "period_start", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
+    const rows = result.rows.map((row) => [year, interval, row.periodStart, row.code, row.name, row.accountType,
+      turnoverCell(row.debitCents), turnoverCell(row.creditCents), turnoverCell(row.netCents)]);
+    return sendFinanceExport(request, reply.header("Cache-Control", "private, no-store"), "finance-period-turnover-" + year + "-" + interval, header, rows, [6, 7, 8]);
   });
 
   app.get<{ Querystring: { year?: string; report?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
