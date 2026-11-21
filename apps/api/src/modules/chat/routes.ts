@@ -360,7 +360,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         INSERT INTO module_chat_conversation_members(conversation_id,department_id,user_id,member_role)
         SELECT link.conversation_id,link.department_id,membership.user_id,
                CASE WHEN conversation.created_by=membership.user_id THEN 'owner'
-                    WHEN lower(regexp_replace(group_member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager') THEN 'admin'
+                    WHEN regexp_replace(lower(group_member.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager') THEN 'admin'
                     ELSE 'member' END
           FROM module_chat_group_links link
           JOIN module_chat_conversations conversation ON conversation.id=link.conversation_id AND conversation.department_id=link.department_id
@@ -483,7 +483,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query(`
         SELECT church_group.id,church_group.name,group_member.role,
                EXISTS(SELECT 1 FROM module_chat_group_links link WHERE link.group_id=church_group.id AND link.department_id=church_group.department_id) AS "hasChat",
-               ($3::boolean OR lower(regexp_replace(group_member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager')) AS "canCreate"
+               ($3::boolean OR regexp_replace(lower(group_member.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager')) AS "canCreate"
           FROM group_members group_member
           JOIN contacts person ON person.id=group_member.contact_id AND person.department_id=$1
           JOIN church_groups church_group ON church_group.id=group_member.group_id AND church_group.department_id=$1 AND church_group.source_system IS NULL

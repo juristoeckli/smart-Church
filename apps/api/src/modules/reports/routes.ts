@@ -226,8 +226,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            JOIN contacts contact ON contact.id=group_member.contact_id AND contact.department_id=church_group.department_id
           WHERE church_group.department_id=$1 AND church_group.status='active'
             AND ($2::uuid IS NULL OR church_group.id=$2)
-            AND lower(regexp_replace(group_member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager')
-          ORDER BY church_group.name,lower(regexp_replace(group_member.role,'[^a-z]','','g')),contact.last_name,contact.first_name
+            AND regexp_replace(lower(group_member.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager')
+          ORDER BY church_group.name,regexp_replace(lower(group_member.role),'[^a-z]','','g'),contact.last_name,contact.first_name
           LIMIT 5000`,
         [departmentId, filters.groupId ?? null],
       );
