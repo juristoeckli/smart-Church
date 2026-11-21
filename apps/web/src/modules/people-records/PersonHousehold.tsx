@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { ModuleContext } from "../../module-registry";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
+import { FormLetterComposer } from "./FormLetterComposer";
 
 type PersonRequest = <T>(url: string, init?: RequestInit) => Promise<T>;
 type HouseholdMember = { id: string; name: string; archived: boolean };
@@ -173,12 +174,13 @@ export function MailingRecipientsExport({ contactIds, departmentId }: { contactI
   }
 
   return <details>
-    <summary>Mailing recipients</summary>
+    <summary>Mailing recipients and form letters</summary>
     <form className="module-toolbar" onSubmit={(event) => void download(event)}>
       <label><input type="checkbox" checked={combine} onChange={(event) => setCombine(event.target.checked)} /> One recipient per household</label>
       <label><input type="checkbox" checked={skipIncomplete} onChange={(event) => setSkipIncomplete(event.target.checked)} /> Skip incomplete addresses</label>
       <button type="submit" disabled={busy || !contactIds.length}>Export recipients CSV</button>
       {feedback && <p role={feedback.error ? "alert" : "status"}>{feedback.message}</p>}
     </form>
+    <FormLetterComposer contactIds={contactIds} departmentId={departmentId} combineHouseholds={combine} skipIncomplete={skipIncomplete} />
   </details>;
 }

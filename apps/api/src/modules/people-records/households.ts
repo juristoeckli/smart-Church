@@ -9,6 +9,8 @@ type HouseholdInput = { label: string; salutation?: string; postalAddress?: Post
 type HouseholdRow = { id: string; label: string; salutation: string; postal_address: PostalAddress };
 type MutationResult = { status: number; payload: object };
 type DepartmentResolver = (request: FastifyRequest, reply: FastifyReply, write?: boolean) => Promise<string | null>;
+type MailingQuery = { contactIds: string; combineHouseholds?: boolean; skipIncomplete?: boolean };
+type MailingRecipient = { name: string; salutation: string; postalAddress: PostalAddress; complete: boolean };
 
 const uuid = { type: "string", format: "uuid" } as const;
 const uuidPattern = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
@@ -20,6 +22,9 @@ const householdBody = { type: "object", required: ["label"], additionalPropertie
 } };
 const maxHouseholdMembers = 50;
 const addressKeys = Object.keys(postalAddressLimits) as Array<keyof PostalAddress>;
+const mailingSchema = { querystring: { type: "object", required: ["contactIds"], additionalProperties: false, properties: {
+  contactIds: { type: "string", minLength: 36, maxLength: 3699 }, combineHouseholds: { type: "boolean" }, skipIncomplete: { type: "boolean" },
+} } };
 
 function csvCell(value: string | undefined) {
   const text = value ?? "";
@@ -181,16 +186,13 @@ export function registerPeopleHouseholds(routes: FastifyInstance, context: Modul
     });
   });
 
-  routes.get<{ Querystring: { contactIds: string; combineHouseholds?: boolean; skipIncomplete?: boolean } }>("/api/people-records/mailing-recipients.csv", {
-    schema: { querystring: { type: "object", required: ["contactIds"], additionalProperties: false, properties: {
-      contactIds: { type: "string", minLength: 36, maxLength: 3699 }, combineHouseholds: { type: "boolean" }, skipIncomplete: { type: "boolean" },
-    } } },
-  }, async (request, reply) => {
+  async function selectMailingRecipients(request: FastifyRequest<{ Querystring: MailingQuery }>, reply: FastifyReply) {
     const departmentId = await department(request, reply);
-    if (!departmentId) return reply;
+    if (!departmentId) return null;
     const contactIds = request.query.contactIds.toLowerCase().split(",");
     if (contactIds.length > 100 || new Set(contactIds).size !== contactIds.length || contactIds.some((id) => !uuidPattern.test(id))) {
-      return reply.code(400).send({ error: "Select up to 100 different people." });
+      reply.code(400).send({ error: "Select up to 100 different people." });
+      return null;
     }
     const { combineHouseholds = true, skipIncomplete = true } = request.query;
     const result = await pool!.query<{ name: string; household_id: string | null; household_label: string | null; salutation: string | null; address: PostalAddress; household_address: PostalAddress | null }>(
@@ -202,24 +204,41 @@ export function registerPeopleHouseholds(routes: FastifyInstance, context: Modul
         WHERE contact.department_id=$1 AND contact.id=ANY($2::uuid[]) AND contact.archived_at IS NULL
         ORDER BY lower(contact.last_name),lower(contact.first_name),contact.id`, [departmentId, contactIds],
     );
-    if (result.rows.length !== contactIds.length) return reply.code(404).send({ error: "Select active people at this location." });
+    if (result.rows.length !== contactIds.length) {
+      reply.code(404).send({ error: "Select active people at this location." });
+      return null;
+    }
     const seen = new Set<string>();
-    const lines = [["Recipient", "Salutation", "Street", "Additional line", "City", "Region", "Postal code", "Country"].map(csvCell).join(",")];
+    const recipients: MailingRecipient[] = [];
     let skipped = 0;
     for (const recipient of result.rows) {
       const householdId = combineHouseholds ? recipient.household_id : null;
       if (householdId && seen.has(householdId)) continue;
       if (householdId) seen.add(householdId);
-      const address = normalizePostalAddress(householdId ? recipient.household_address : recipient.address);
-      if (skipIncomplete && !completePostalAddress(address)) { skipped += 1; continue; }
-      lines.push([
-        householdId ? recipient.household_label ?? recipient.name : recipient.name,
-        householdId ? recipient.salutation ?? "" : "",
-        ...addressKeys.map((key) => address[key]),
-      ].map(csvCell).join(","));
+      const postalAddress = normalizePostalAddress(householdId ? recipient.household_address : recipient.address);
+      const complete = completePostalAddress(postalAddress);
+      if (skipIncomplete && !complete) { skipped += 1; continue; }
+      recipients.push({ name: householdId ? recipient.household_label ?? recipient.name : recipient.name,
+        salutation: householdId ? recipient.salutation ?? "" : "", postalAddress, complete });
     }
+    return { recipients, skipped };
+  }
+
+  routes.get<{ Querystring: MailingQuery }>("/api/people-records/mailing-recipients", { schema: mailingSchema }, async (request, reply) => {
+    const selection = await selectMailingRecipients(request, reply);
+    if (!selection) return reply;
+    return reply.header("cache-control", "private, no-store").send(selection);
+  });
+
+  routes.get<{ Querystring: MailingQuery }>("/api/people-records/mailing-recipients.csv", { schema: mailingSchema }, async (request, reply) => {
+    const selection = await selectMailingRecipients(request, reply);
+    if (!selection) return reply;
+    const lines = [
+      ["Recipient", "Salutation", "Street", "Additional line", "City", "Region", "Postal code", "Country"].map(csvCell).join(","),
+      ...selection.recipients.map(({ name, salutation, postalAddress }) => [name, salutation, ...addressKeys.map((key) => postalAddress[key])].map(csvCell).join(",")),
+    ];
     return reply.type("text/csv; charset=utf-8").header("content-disposition", "attachment; filename=mailing-recipients.csv")
-      .header("cache-control", "private, no-store").header("x-exported-recipients", String(lines.length - 1))
-      .header("x-skipped-recipients", String(skipped)).send("\uFEFF" + lines.join("\r\n"));
+      .header("cache-control", "private, no-store").header("x-exported-recipients", String(selection.recipients.length))
+      .header("x-skipped-recipients", String(selection.skipped)).send("\uFEFF" + lines.join("\r\n"));
   });
 }

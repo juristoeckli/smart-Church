@@ -64,7 +64,9 @@ The profile History tab combines the person's recorded changes with accessible g
 
 People managers can create a mailing household on an active profile, assign up to 50 active people at the same location, and manage a shared recipient label, salutation and postal address. Household membership is explicit and stays separate from personal addresses, stored relationships and source-import hints. A person can belong to one household. Archiving retains membership, a duplicate merge keeps the shared household or transfers a lone membership, and conflicting households must be resolved before merging. Removing the last member removes the empty household.
 
-Select active directory rows to export mailing recipients as CSV. The export can group selected members into a single household recipient or use their individual addresses, and can exclude rows missing a street, city or postal code. It needs private People access and produces an address list for use in mail merge or labels. It does not create or send letters.
+Select active directory rows to export mailing recipients as CSV or compose form letters. Both workflows can group selected members into a single household recipient or use their individual addresses, and can exclude rows missing a street, city or postal code. They require private People access at the selected location.
+
+Form letters support text and recipient name, salutation, and postal address placeholders. Preview the selected recipients, then print through the browser or download standalone printable HTML. Recipients are rechecked at output, with a refreshed preview when their data changes. Letter text stays in the browser and the workflow has no outbound delivery.
 
 Managers with People and Groups management permissions can add selected active contacts to an active local group from the directory. The action takes a role and membership status, preserves existing memberships, and records new memberships through the installed group audit trigger.
 
