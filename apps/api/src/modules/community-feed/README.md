@@ -6,6 +6,8 @@ Feed notifications cover published posts in groups the recipient follows (or mem
 
 Community Feed email alerts have separate per-location settings for new posts, reactions, and comments. These event-kind settings are subordinate to the explicit location-level Email notifications opt-in in Notifications: both the relevant Community Feed email setting and the master opt-in must be enabled when the alert is created, and the shared delivery worker rechecks the master opt-in before sending. In-app Community Feed settings remain separate and continue to control the Community Feed inbox. The master opt-in also remains responsible for email address, administrator delivery configuration, and bounce/complaint suppression. Email messages use generic content and do not include post text, titles, or group names. The shared queue retains its retry behavior; delivery status appears in Notifications when the corresponding in-app alert is enabled. Community Feed snapshots are version 8 and include notification, report and preference records; restore accepts versions 1 through 8 and defaults pre-v8 email alert preferences to enabled to preserve the previous behavior.
 
+Users can opt in to a weekly post digest for each location by selecting a weekday in Community Feed notification preferences. It queues at 08:00 local time when new visible posts are available and requires the location's master Email notifications opt-in. The email prompts users to sign in and view the posts they can access. The digest setting is separate from individual post alerts.
+
 Group subscription, post destination, filter, and linked-group selectors show active groups only. The API validates new subscriptions, destinations, and group links as active. Existing posts and group links remain stored and continue to follow their existing visibility rules when a group later becomes inactive; users can still unsubscribe from an older group subscription.
 
 ## Post reports
@@ -24,5 +26,5 @@ Location site admins can grant the Community Feed `Review post reports` module p
 ## Known gaps
 
 - Attachments are limited to five 1 MiB files per post and the accepted MIME list above; there is no image resizing, video, audio, or virus scanning.
-- Moderators can resolve reports only for posts visible to them; there is no automatic post removal. Push notifications and email digests are not implemented. Community Feed emails are individual generic alerts, not digests.
+- Moderators can resolve reports only for posts visible to them; there is no automatic post removal. Push notifications are not implemented.
 - Song search is available when the Worship Planning table exists; Wiki search is available when the Wiki tables exist. The current module-only implementation catches missing optional Wiki/Song tables and returns no matches.

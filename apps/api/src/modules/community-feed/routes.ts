@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { DIGEST_TITLE, queueDueCommunityDigests } from "./digests.js";
 
 function canonical(value: unknown): string {
   if (value instanceof Date) return JSON.stringify(value.toISOString());
@@ -15,8 +16,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   let scheduledMentionTimer: ReturnType<typeof setInterval> | undefined;
   let scheduledMentionJobRunning = false;
   let scheduledExpiryJobRunning = false;
+  let scheduledDigestJobRunning = false;
   context.replication.register({
-    schemaVersion: "12",
+    schemaVersion: "13",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Community Feed database is unavailable."], recordCount: 0 };
       const result = await pool.query<{ posts: string; likes: string; comments: string; commentMentions: string; lifecycleAudit: string; attachments: string; links: string; notifications: string; reports: string; preferences: string }>(
@@ -44,10 +46,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const notifications = await client.query("SELECT * FROM community_post_notifications WHERE department_id=$1 ORDER BY id", [departmentId]);
       const reports = await client.query("SELECT * FROM community_post_reports WHERE department_id=$1 ORDER BY id", [departmentId]);
       const preferences = await client.query("SELECT * FROM community_post_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId]);
-      return { version: 12, posts: posts.rows, likes: likes.rows, comments: comments.rows, commentMentions: commentMentions.rows, lifecycleAudit: lifecycleAudit.rows, attachments: attachments.rows, links: links.rows, notifications: notifications.rows, reports: reports.rows, preferences: preferences.rows };
+      return { version: 13, posts: posts.rows, likes: likes.rows, comments: comments.rows, commentMentions: commentMentions.rows, lifecycleAudit: lifecycleAudit.rows, attachments: attachments.rows, links: links.rows, notifications: notifications.rows, reports: reports.rows, preferences: preferences.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(Number((input as { version?: unknown }).version)) || !Array.isArray((input as { posts?: unknown }).posts) || !Array.isArray((input as { likes?: unknown }).likes) || !Array.isArray((input as { comments?: unknown }).comments)) throw new Error("The Community Feed snapshot is invalid.");
+      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(Number((input as { version?: unknown }).version)) || !Array.isArray((input as { posts?: unknown }).posts) || !Array.isArray((input as { likes?: unknown }).likes) || !Array.isArray((input as { comments?: unknown }).comments)) throw new Error("The Community Feed snapshot is invalid.");
       const snapshot = input as { posts: Array<Record<string, unknown>>; likes: Array<Record<string, unknown>>; comments: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; lifecycleAudit?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
       await client.query("DELETE FROM community_post_reports WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_post_notification_preferences WHERE department_id=$1", [departmentId]);
@@ -72,12 +74,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const reports = snapshot.reports ?? [];
       for (const report of reports) await client.query("INSERT INTO community_post_reports(id,department_id,post_id,reporter_user_id,reason,details,status,reviewed_by,reviewed_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [report.id, departmentId, report.post_id, restoreContext.userIdMap.get(String(report.reporter_user_id)) ?? report.reporter_user_id, report.reason, report.details ?? "", report.status ?? "open", report.reviewed_by == null ? null : restoreContext.userIdMap.get(String(report.reviewed_by)) ?? report.reviewed_by, report.reviewed_at ?? null, report.created_at]);
       const preferences = snapshot.preferences ?? [];
-      for (const preference of preferences) await client.query("INSERT INTO community_post_notification_preferences(department_id,user_id,notify_posts,notify_reactions,notify_comments,notify_email_posts,notify_email_reactions,notify_email_comments,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [departmentId, restoreContext.userIdMap.get(String(preference.user_id)) ?? preference.user_id, preference.notify_posts ?? true, preference.notify_reactions ?? true, preference.notify_comments ?? true, preference.notify_email_posts ?? true, preference.notify_email_reactions ?? true, preference.notify_email_comments ?? true, preference.updated_at ?? new Date()]);
+      for (const preference of preferences) await client.query("INSERT INTO community_post_notification_preferences(department_id,user_id,notify_posts,notify_reactions,notify_comments,notify_email_posts,notify_email_reactions,notify_email_comments,updated_at,digest_weekday,digest_next_at,digest_window_start) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [departmentId, restoreContext.userIdMap.get(String(preference.user_id)) ?? preference.user_id, preference.notify_posts ?? true, preference.notify_reactions ?? true, preference.notify_comments ?? true, preference.notify_email_posts ?? true, preference.notify_email_reactions ?? true, preference.notify_email_comments ?? true, preference.updated_at ?? new Date(), preference.digest_weekday ?? null, preference.digest_next_at ?? null, preference.digest_window_start ?? null]);
       const lifecycleAudit = snapshot.lifecycleAudit ?? [];
       return { recordCount: snapshot.posts.length + snapshot.likes.length + snapshot.comments.length + commentMentions.length + lifecycleAudit.length + attachments.length + links.length + notifications.length + reports.length + preferences.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].includes(Number((input as { version?: unknown }).version))) return { ready: false, blockers: ["No verified Community Feed snapshot is available."] };
+      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].includes(Number((input as { version?: unknown }).version))) return { ready: false, blockers: ["No verified Community Feed snapshot is available."] };
       const snapshot = input as { posts?: Array<Record<string, unknown>>; likes?: Array<Record<string, unknown>>; comments?: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; lifecycleAudit?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
       const actualPosts = (await client.query("SELECT * FROM community_posts WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualLikes = (await client.query("SELECT * FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY post_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
@@ -109,6 +111,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       if (snapshotVersion < 12) {
         for (const post of snapshot.posts ?? []) post.body_format ??= "plain";
+      }
+      if (snapshotVersion < 13) {
+        for (const preference of snapshot.preferences ?? []) {
+          preference.digest_weekday ??= null;
+          preference.digest_next_at ??= null;
+          preference.digest_window_start ??= null;
+        }
       }
       const compare = (name: string, source: Array<Record<string, unknown>>, actual: Array<Record<string, unknown>>, userColumns: string[]) => {
         if (source.length !== actual.length) return `${name} row count differs.`;
@@ -368,15 +377,89 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } finally { scheduledExpiryJobRunning = false; }
   }
 
+  async function runScheduledDigests() {
+    if (!pool || !isDatabaseReady() || !context.activation.isEnabled() || scheduledDigestJobRunning) return;
+    scheduledDigestJobRunning = true;
+    try {
+      const due = await pool.query<{ department_id: string }>(
+        "SELECT DISTINCT department_id FROM community_post_notification_preferences WHERE digest_next_at<=now()",
+      );
+      for (const { department_id: departmentId } of due.rows) {
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          if (await context.lockDepartmentForWrite(client, departmentId)) await queueDueCommunityDigests(client, departmentId);
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK").catch(() => undefined);
+          app.log.error({ err: error, departmentId }, "Could not queue Community Feed email digests.");
+        } finally { client.release(); }
+      }
+    } catch (error) {
+      app.log.error({ err: error }, "Could not check scheduled Community Feed email digests.");
+    } finally { scheduledDigestJobRunning = false; }
+  }
+
   app.addHook("onReady", async () => {
     if (!pool || !isDatabaseReady()) return;
-    await Promise.all([runScheduledMentionNotifications(), runScheduledPostExpirations()]);
+    await Promise.all([runScheduledMentionNotifications(), runScheduledPostExpirations(), runScheduledDigests()]);
     scheduledMentionTimer = setInterval(() => {
-      void Promise.all([runScheduledMentionNotifications(), runScheduledPostExpirations()]);
+      void Promise.all([runScheduledMentionNotifications(), runScheduledPostExpirations(), runScheduledDigests()]);
     }, 60_000);
     scheduledMentionTimer.unref?.();
   });
   app.addHook("onClose", async () => { if (scheduledMentionTimer) clearInterval(scheduledMentionTimer); });
+
+  app.get("/api/modules/community-feed/digest-preferences", async (request, reply) => {
+    if (!pool || !isDatabaseReady()) return unavailable(reply);
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await pool.query<{ digest_weekday: number | null }>(
+      "SELECT digest_weekday FROM community_post_notification_preferences WHERE department_id=$1 AND user_id=$2",
+      [departmentId, request.authenticatedUser!.id],
+    );
+    return { weekday: result.rows[0]?.digest_weekday ?? null };
+  });
+
+  app.put<{ Body: { weekday: number | null } }>("/api/modules/community-feed/digest-preferences", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["weekday"], properties: { weekday: { anyOf: [{ type: "integer", minimum: 1, maximum: 7 }, { type: "null" }] } } } },
+  }, async (request, reply) => {
+    if (!pool || !isDatabaseReady()) return unavailable(reply);
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const weekday = request.body.weekday;
+    const userId = request.authenticatedUser!.id;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      await client.query(
+        `INSERT INTO community_post_notification_preferences AS preference(department_id,user_id,digest_weekday,digest_next_at,digest_window_start)
+         SELECT id,$2,$3::smallint,community_feed_next_digest($3,time_zone,now()),CASE WHEN $3 IS NOT NULL THEN now() END
+         FROM departments WHERE id=$1
+         ON CONFLICT (department_id,user_id) DO UPDATE SET digest_weekday=EXCLUDED.digest_weekday,
+           digest_next_at=CASE WHEN preference.digest_weekday IS NOT DISTINCT FROM EXCLUDED.digest_weekday THEN preference.digest_next_at ELSE EXCLUDED.digest_next_at END,
+           digest_window_start=CASE WHEN EXCLUDED.digest_weekday IS NULL THEN NULL ELSE COALESCE(preference.digest_window_start,EXCLUDED.digest_window_start) END,
+           updated_at=now()`, [departmentId, userId, weekday],
+      );
+      if (weekday === null) {
+        await client.query(
+          `UPDATE module_notifications SET email_enabled=false WHERE department_id=$1 AND recipient_user_id=$2
+             AND kind='community_feed' AND title=$3 AND NOT in_app_enabled AND email_enabled`,
+          [departmentId, userId, DIGEST_TITLE],
+        );
+      }
+      await client.query("COMMIT");
+      return { weekday };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  });
 
   app.get("/api/modules/community-feed/notification-preferences", async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
