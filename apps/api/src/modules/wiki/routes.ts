@@ -56,6 +56,24 @@ function safeHtml(value: string, pageId?: string): string {
   return html;
 }
 
+function addExportContents(sanitizedHtml: string, pageId: string) {
+  const entries: string[] = [];
+  let index = 0;
+  const content = sanitizedHtml.replace(/<h([1-6])>((?:(?!<\/?h[1-6]>)[\s\S])*)<\/h\1>/g, (heading, level: string, body: string) => {
+    const id = `wiki-heading-${pageId}-${++index}`;
+    // Preserve existing character references while ensuring labels contain only text.
+    const label = body.replace(/<[^>]*>/g, "").trim();
+    if (!label.replace(/&(?:nbsp|#160|#xa0);/gi, "").trim()) return heading;
+    const escapedLabel = label.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    entries.push(`<li class="wiki-contents-level-${level}"><a href="#${id}">${escapedLabel}</a></li>`);
+    return `<h${level} id="${id}">${body}</h${level}>`;
+  });
+  const contents = entries.length
+    ? `<nav class="wiki-contents" aria-label="Wiki table of contents"><strong>Contents</strong><ul>${entries.join("")}</ul></nav>`
+    : "";
+  return contents + content;
+}
+
 function inlineWikiImageRefs(html: string, pageId: string): Array<{ fileId: string; alt: string }> {
   const refs: Array<{ fileId: string; alt: string }> = [];
   const seen = new Set<string>();
@@ -712,7 +730,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
     result.rows[0].content_html = await hideUnreadableWikiEntityLinks(result.rows[0].content_html, request, departmentId);
     const title = result.rows[0].title.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
-    return reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'").header("X-Content-Type-Options", "nosniff").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:3rem auto;padding:0 1rem;color:#17212b}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:.4rem}</style><main><h1>${title}</h1>${safeHtml(result.rows[0].content_html, request.params.id)}</main></html>`);
+    const content = addExportContents(safeHtml(result.rows[0].content_html, request.params.id), request.params.id);
+    return reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "private, no-store").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:3rem auto;padding:0 1rem;color:#17212b}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:.4rem}.wiki-contents ul{list-style:none;padding:0}.wiki-contents-level-2{margin-inline-start:1rem}.wiki-contents-level-3{margin-inline-start:2rem}.wiki-contents-level-4{margin-inline-start:3rem}.wiki-contents-level-5{margin-inline-start:4rem}.wiki-contents-level-6{margin-inline-start:5rem}</style><main><h1>${title}</h1>${content}</main></html>`);
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/export/pdf", async (request, reply) => {
