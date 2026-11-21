@@ -37,7 +37,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT 1 FROM department_memberships account
        JOIN group_members member ON member.contact_id=account.contact_id AND member.group_id=$1
        WHERE account.user_id=$2 AND account.department_id=$3 AND member.status='active'
-         AND lower(regexp_replace(member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager') LIMIT 1`,
+         AND regexp_replace(lower(member.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager') LIMIT 1`,
       [groupId, request.authenticatedUser!.id, departmentId],
     );
     return Boolean(result.rowCount);
@@ -61,7 +61,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN contacts person ON person.id=member.contact_id AND person.department_id=$1
          LEFT JOIN church_groups parent ON parent.id=group_row.parent_group_id AND parent.department_id=$1
         WHERE member.status='active'
-          AND lower(regexp_replace(member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager')
+          AND regexp_replace(lower(member.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager')
         ORDER BY lower(group_row.name),lower(member.role),lower(person.last_name),lower(person.first_name),person.id
         LIMIT 5000`,
       [departmentId, canSeePrivatePeople],
