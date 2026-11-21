@@ -905,9 +905,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       });
     });
 
-    routes.get<{ Querystring: { audience?: AnnouncementAudience; page?: number } }>("/api/modules/notifications/announcements/history", {
+    routes.get<{ Querystring: { audience?: AnnouncementAudience; disposition?: string; q?: string; page?: number } }>("/api/modules/notifications/announcements/history", {
       schema: { querystring: { type: "object", additionalProperties: false, properties: {
         audience: { type: "string", enum: ["location", "groups", "people"] }, page: { type: "integer", minimum: 1, maximum: 2000 },
+        disposition: { type: "string", enum: ["failed", "pending", "sent", "delayed", "delivered", "suppressed", "skipped"] },
+        q: { type: "string", maxLength: 120 },
       } } },
     }, async (request, reply) => {
       const departmentId = await department(request, reply);
@@ -917,11 +919,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const page = request.query.page ?? 1;
       const pageSize = 25;
+      const disposition = request.query.disposition;
+      const statuses = disposition === "failed" ? ["failed", "bounced", "complained"] : disposition ? [disposition] : null;
+      const search = request.query.q?.trim() ?? "";
       const { rows } = await pool!.query(
         `WITH history AS (
            SELECT id, department_id, sent_at, sender_name, title, audience, group_names, recipient_count, email_queued_count
              FROM module_notification_announcement_batches batch
             WHERE batch.department_id=$1 AND ($2::text IS NULL OR batch.audience=$2)
+              AND ($6::text='' OR strpos(lower(batch.title),lower($6))>0 OR strpos(lower(batch.sender_name),lower($6))>0)
+              AND ($7::text[] IS NULL OR EXISTS (
+                SELECT 1 FROM module_notifications n
+                JOIN module_notification_email_deliveries d ON d.notification_id=n.id
+                 WHERE n.department_id=batch.department_id AND n.announcement_batch_id=batch.id
+                   AND d.status = ANY($7::text[])
+              ))
               AND EXISTS (
                 SELECT 1 FROM department_memberships member JOIN app_users account ON account.id=member.user_id
                  WHERE member.department_id=batch.department_id AND member.user_id=$3 AND member.role='site_admin'
@@ -941,7 +953,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   ) totals
                 ), '{}'::jsonb) AS "emailStatuses"
            FROM history ORDER BY history.sent_at DESC, history.id DESC`,
-        [departmentId, request.query.audience ?? null, request.authenticatedUser!.id, pageSize + 1, (page - 1) * pageSize],
+        [departmentId, request.query.audience ?? null, request.authenticatedUser!.id, pageSize + 1, (page - 1) * pageSize, search, statuses],
       );
       return reply.header("Cache-Control", "private, no-store").send({ page, hasNext: rows.length > pageSize && page < 2000, batches: rows.slice(0, pageSize) });
     });
