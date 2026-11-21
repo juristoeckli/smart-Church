@@ -17,6 +17,22 @@ type RecentEventFact = { eventDate: string; title: string; adults: number; child
 const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests"] as const;
 type DashboardWidgetId = typeof dashboardWidgetIds[number];
 const defaultDashboardWidgets = { order: [...dashboardWidgetIds], visible: [...dashboardWidgetIds] };
+type WidgetLayout = typeof defaultDashboardWidgets;
+type DashboardSettings = WidgetLayout & { source: "personal" | "location"; locationDefault: WidgetLayout };
+
+function readWidgetLayout(value: unknown): WidgetLayout {
+  if (!value || typeof value !== "object") return defaultDashboardWidgets;
+  const layout = value as { order?: unknown; visible?: unknown };
+  const known = (entry: unknown): entry is DashboardWidgetId => typeof entry === "string" && dashboardWidgetIds.includes(entry as DashboardWidgetId);
+  const order = Array.isArray(layout.order) ? layout.order.filter(known) : [];
+  const visible = Array.isArray(layout.visible) ? layout.visible.filter(known) : [];
+  return { order: [...new Set([...order, ...dashboardWidgetIds])], visible: [...new Set(visible)] };
+}
+
+function readDashboardSettings(value: unknown): DashboardSettings {
+  const data = value as { source?: string; locationDefault?: unknown } | undefined;
+  return { ...readWidgetLayout(value), source: data?.source === "personal" ? "personal" : "location", locationDefault: readWidgetLayout(data?.locationDefault) };
+}
 const dashboardWidgetLabels: Record<DashboardWidgetId, TranslationKey> = {
   stats: "overview.widgetStats", events: "overview.widgetEvents", birthdays: "overview.widgetBirthdays",
   anniversaries: "overview.widgetAnniversaries", groupAppointments: "overview.widgetGroupAppointments",
@@ -66,9 +82,13 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
   const [recentEventFacts, setRecentEventFacts] = useState<RecentEventFact[] | null>(null);
   const [priorEventFacts, setPriorEventFacts] = useState<RecentEventFact[] | null>(null);
   const [detailsEvent, setDetailsEvent] = useState<ServiceEvent | null>(null);
-  const [dashboardWidgets, setDashboardWidgets] = useState(defaultDashboardWidgets);
+  const [dashboardWidgets, setDashboardWidgets] = useState<DashboardSettings>({
+    ...defaultDashboardWidgets, source: "location", locationDefault: defaultDashboardWidgets,
+  });
   const [dashboardDraft, setDashboardDraft] = useState(defaultDashboardWidgets);
+  const [dashboardScope, setDashboardScope] = useState<"personal" | "location">("personal");
   const [dashboardSettingsOpen, setDashboardSettingsOpen] = useState(false);
+  const [dashboardLoaded, setDashboardLoaded] = useState(false);
   const [dashboardSaving, setDashboardSaving] = useState(false);
   const [dashboardFeedback, setDashboardFeedback] = useState("");
   const [error, setError] = useState("");
@@ -149,17 +169,12 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
     void fetch("/api/modules/notifications/home-widgets", { headers: { "x-department-id": departmentId }, signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) return;
-        const result = await response.json() as { order?: unknown; visible?: unknown };
-        const order = Array.isArray(result.order) ? result.order.filter((id): id is DashboardWidgetId => typeof id === "string" && dashboardWidgetIds.includes(id as DashboardWidgetId)) : [];
-        const visible = Array.isArray(result.visible) ? result.visible.filter((id): id is DashboardWidgetId => typeof id === "string" && dashboardWidgetIds.includes(id as DashboardWidgetId)) : [];
-        const normalizedOrder = [...new Set([...order, ...dashboardWidgetIds])];
-        const normalizedVisible = [...new Set(visible)];
+        const result = readDashboardSettings(await response.json());
         if (!controller.signal.aborted) {
-          const preferences = { order: normalizedOrder, visible: normalizedVisible };
-          setDashboardWidgets(preferences);
-          setDashboardDraft(preferences);
+          setDashboardWidgets(result);
+          setDashboardDraft(result);
         }
-      }).catch(() => undefined);
+      }).catch(() => undefined).finally(() => { if (!controller.signal.aborted) setDashboardLoaded(true); });
     return () => controller.abort();
   }, [departmentId]);
 
@@ -172,17 +187,24 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
     { label: translate("overview.resources"), value: resources.filter((resource) => resource.active).length, detail: translate("overview.sharedResources"), icon: Building2, page: "Resources" as const },
   ];
 
-  async function saveDashboardWidgets() {
+  function chooseDashboardScope(scope: "personal" | "location") {
+    setDashboardScope(scope);
+    setDashboardDraft(scope === "location" ? dashboardWidgets.locationDefault : dashboardWidgets);
+  }
+
+  async function saveDashboardWidgets(reset = false) {
+    if (dashboardScope === "location" && !canManageSite) return;
     setDashboardSaving(true);
     setDashboardFeedback("");
     try {
-      const response = await fetch("/api/modules/notifications/home-widgets", {
-        method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
-        body: JSON.stringify({ order: dashboardDraft.order, visible: dashboardDraft.visible }),
+      const response = await fetch(`/api/modules/notifications/home-widgets${dashboardScope === "location" ? "/defaults" : ""}`, {
+        method: reset ? "DELETE" : "PUT",
+        headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken, ...(!reset ? { "content-type": "application/json" } : {}) },
+        body: reset ? undefined : JSON.stringify({ order: dashboardDraft.order, visible: dashboardDraft.visible }),
       });
       const result = await response.json().catch(() => ({})) as { error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not save dashboard preferences.");
-      setDashboardWidgets(dashboardDraft);
+      setDashboardWidgets(readDashboardSettings(result));
       setDashboardSettingsOpen(false);
       setDashboardFeedback(translate("overview.dashboardSaved"));
     } catch (reason) {
@@ -253,10 +275,17 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
   return <>
     <div className={`demo-notice ${error ? "demo-notice-error" : ""}`}><span className="demo-dot" />{error ? translateModuleUiOverrideMessage("core-admin", getActiveLanguage(), error) : translate("overview.churchAt").replace("{location}", departmentLocation)}</div>
     <HomeWelcome departmentId={departmentId} csrfToken={csrfToken} canEdit={canManageSite}
-      actions={<button className="button button-secondary" type="button" onClick={() => { setDashboardDraft(dashboardWidgets); setDashboardSettingsOpen(true); }}><Settings2 size={15} />{translate("overview.customizeHome")}</button>} />
-    {dashboardWidgets.order.map((id) => dashboardWidgets.visible.includes(id) ? <div key={id}>{widgetContent[id]}</div> : null)}
+      actions={<button className="button button-secondary" type="button" disabled={!dashboardLoaded} onClick={() => { chooseDashboardScope("personal"); setDashboardSettingsOpen(true); }}><Settings2 size={15} />{translate("overview.customizeHome")}</button>} />
+    {dashboardLoaded && dashboardWidgets.order.map((id) => dashboardWidgets.visible.includes(id) ? <div key={id}>{widgetContent[id]}</div> : null)}
     {dashboardFeedback && <p role="status" className="community-empty">{dashboardFeedback}</p>}
-    {dashboardSettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDashboardSettingsOpen(false)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="overview-dashboard-settings-title"><div className="modal-heading"><div><span className="eyebrow">{translate("overview.eyebrow")}</span><h2 id="overview-dashboard-settings-title">{translate("overview.customizeHome")}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDashboardSettingsOpen(false)}><X size={19} /></button></div><p>{translate("overview.customizeHomeHelp")}</p><div className="dashboard-widget-settings">{dashboardDraft.order.map((id, index) => <div className="dashboard-widget-setting" key={id}><label><input type="checkbox" checked={dashboardDraft.visible.includes(id)} onChange={(event) => setDashboardDraft((current) => ({ ...current, visible: event.target.checked ? [...current.visible, id] : current.visible.filter((visibleId) => visibleId !== id) }))} /><span>{translate(dashboardWidgetLabels[id])}</span></label><span><button className="icon-button" type="button" aria-label={translate("overview.moveWidgetUp")} disabled={index === 0} onClick={() => setDashboardDraft((current) => { const order = [...current.order]; [order[index - 1], order[index]] = [order[index], order[index - 1]]; return { ...current, order }; })}><ArrowUp size={16} /></button><button className="icon-button" type="button" aria-label={translate("overview.moveWidgetDown")} disabled={index === dashboardDraft.order.length - 1} onClick={() => setDashboardDraft((current) => { const order = [...current.order]; [order[index + 1], order[index]] = [order[index], order[index + 1]]; return { ...current, order }; })}><ArrowDown size={16} /></button></span></div>)}</div><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDashboardSettingsOpen(false)}>{translate("events.cancel")}</button><button className="button button-primary" type="button" disabled={dashboardSaving} onClick={() => void saveDashboardWidgets()}>{dashboardSaving ? translate("events.saving") : translate("events.saveChanges")}</button></div></section></div>}
+    {dashboardSettingsOpen && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDashboardSettingsOpen(false)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="overview-dashboard-settings-title"><div className="modal-heading"><div><span className="eyebrow">{translate("overview.eyebrow")}</span><h2 id="overview-dashboard-settings-title">{translate("overview.customizeHome")}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDashboardSettingsOpen(false)}><X size={19} /></button></div>{canManageSite && <div className="dashboard-layout-scope" role="group" aria-label={translate("overview.customizeHome")}>
+      <button className="button button-secondary" type="button" disabled={dashboardSaving} aria-pressed={dashboardScope === "personal"} onClick={() => chooseDashboardScope("personal")}>{translate("overview.personalLayout")}</button>
+      <button className="button button-secondary" type="button" disabled={dashboardSaving} aria-pressed={dashboardScope === "location"} onClick={() => chooseDashboardScope("location")}>{translate("overview.locationLayout")}</button>
+      </div>}
+      <p>{translate(dashboardScope === "location" ? "overview.locationLayoutHelp" : "overview.customizeHomeHelp")}</p>
+      {dashboardScope === "personal" && <p>{translate(dashboardWidgets.source === "personal" ? "overview.usingPersonalLayout" : "overview.usingLocationLayout")}</p>}
+      <div className="dashboard-widget-settings">{dashboardDraft.order.map((id, index) => <div className="dashboard-widget-setting" key={id}><label><input type="checkbox" checked={dashboardDraft.visible.includes(id)} disabled={dashboardSaving} onChange={(event) => setDashboardDraft((current) => ({ ...current, visible: event.target.checked ? [...current.visible, id] : current.visible.filter((visibleId) => visibleId !== id) }))} /><span>{translate(dashboardWidgetLabels[id])}</span></label><span><button className="icon-button" type="button" aria-label={translate("overview.moveWidgetUp")} disabled={dashboardSaving || index === 0} onClick={() => setDashboardDraft((current) => { const order = [...current.order]; [order[index - 1], order[index]] = [order[index], order[index - 1]]; return { ...current, order }; })}><ArrowUp size={16} /></button><button className="icon-button" type="button" aria-label={translate("overview.moveWidgetDown")} disabled={dashboardSaving || index === dashboardDraft.order.length - 1} onClick={() => setDashboardDraft((current) => { const order = [...current.order]; [order[index + 1], order[index]] = [order[index], order[index + 1]]; return { ...current, order }; })}><ArrowDown size={16} /></button></span></div>)}</div><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDashboardSettingsOpen(false)}>{translate("events.cancel")}</button>{(dashboardScope === "location" || dashboardWidgets.source === "personal") && <button className="button button-secondary" type="button" disabled={dashboardSaving} onClick={() => void saveDashboardWidgets(true)}>{translate(dashboardScope === "location" ? "overview.restoreBuiltInLayout" : "overview.restoreLocationLayout")}</button>}
+      <button className="button button-primary" type="button" disabled={dashboardSaving} onClick={() => void saveDashboardWidgets()}>{dashboardSaving ? translate("events.saving") : translate("events.saveChanges")}</button></div></section></div>}
     {detailsEvent && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsEvent(null)}><section className="modal event-details-modal" role="dialog" aria-modal="true" aria-labelledby="overview-event-details-title"><div className="modal-heading"><div><span className={`event-kind event-kind-${detailsEvent.kind}`}>{detailsEvent.kind === "service" ? translate("overview.service") : detailsEvent.kind}</span><h2 id="overview-event-details-title">{detailsEvent.title}</h2></div><button className="icon-button" type="button" aria-label={translate("events.closeDialog")} onClick={() => setDetailsEvent(null)}><X size={19} /></button></div><dl className="event-details-grid"><div><dt>{translate("events.date")}</dt><dd>{formatUserDate(detailsEvent.eventDate)}</dd></div><div><dt>{translate("events.time")}</dt><dd>{detailsEvent.isAllDay ? translate("events.allDay") : `${detailsEvent.startTime}${detailsEvent.endTime ? `–${detailsEvent.endTime}` : ""}`}</dd></div><div><dt>{translate("events.location")}</dt><dd>{detailsEvent.location}{detailsEvent.room ? ` · ${detailsEvent.room}` : ""}</dd></div></dl>{detailsEvent.description && <p className="event-details-description">{detailsEvent.description}</p>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsEvent(null)}>{translate("events.close")}</button><button className="button button-primary" type="button" onClick={() => { setDetailsEvent(null); onNavigate("Services & events"); }}>{translate("overview.openCalendar")} <ArrowRight size={14} /></button></div></section></div>}
     <footer className="page-footer"><span>{translate("overview.footer")}</span><span>© 2026 Smart Church</span></footer>
   </>;

@@ -85,6 +85,8 @@ Request/response TypeScript contracts, including `Contact`, `ContactProfileData`
 | `PUT` | `/api/events/:id/positions/:positionIndex/response` | Save an assigned person's pending/accepted/declined response. |
 | `GET` | `/api/modules/notifications/home-duty-requests` | Show the current member's upcoming pending assignments and incoming swaps at the selected location. Each list is limited to 20. |
 | `GET`, `PUT` | `/api/modules/notifications/home-welcome` | Members can read the selected location's welcome text. Site administrators can update the plain-text `heading` and `subtitle`. Empty values use the translated defaults. |
+| `GET`, `PUT`, `DELETE` | `/api/modules/notifications/home-widgets` | Read the effective widget layout, save personal `order` and `visible` arrays, or reset personal preferences to the location default. |
+| `PUT`, `DELETE` | `/api/modules/notifications/home-widgets/defaults` | Site administrators can save the selected location's default layout or restore application defaults. Saved personal preferences take precedence. |
 | `PUT` | `/api/events/:id/attendance` | Save adult and child attendance totals. |
 | `GET`, `PUT`, `DELETE` | `/api/events/:id/check-ins` and `/api/events/:id/check-ins/:contactId` | List, record, or remove individual check-ins. |
 | `GET` | `/api/events/:id/registrations` | List registrations and waitlist for an event. |

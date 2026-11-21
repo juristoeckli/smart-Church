@@ -7,6 +7,8 @@
 .community-upcoming-list{padding:0 20px 8px}
 .home-welcome-actions{display:flex;justify-content:flex-end;gap:7px;flex-wrap:wrap}
 .home-welcome-copy{min-width:0;overflow-wrap:anywhere}
+.dashboard-layout-scope{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px}
+.dashboard-layout-scope button[aria-pressed=true]{background:var(--green-soft);color:var(--green)}
 .home-welcome-form{display:grid;gap:8px;margin-bottom:12px;padding:14px}
 .home-welcome-form label{display:grid;gap:4px}.home-welcome-form input{width:100%;padding:8px;border:1px solid var(--line);border-radius:7px;color:var(--ink);background:var(--panel)}
 .home-duty-list{list-style:none;margin:0}.community-upcoming-item.home-duty-item small{white-space:normal;overflow-wrap:anywhere}.community-upcoming-item>.home-duty-actions{flex-direction:row;flex-wrap:wrap}
