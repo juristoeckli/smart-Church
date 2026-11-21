@@ -5,6 +5,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { registerChurchToolsSyncReplication } from "./replication.js";
 import { parseChurchToolsEventDateTime } from "./event-time.js";
 import { bookingSourceId, normalizeChurchToolsBookingHistory, type ChurchToolsBookingHistory } from "./booking-history.js";
+import { churchToolsSongCrosswalkId, importChurchToolsSong, readChurchToolsSongCatalog, type ChurchToolsSong } from "./song-catalog.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -1165,7 +1166,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     }
 
     if (integration === "churchtools") {
-    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" } } } } }, async (request, reply) => {
+    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
       const config = await settings(dept); if (!config) return reply.code(404).send({ error: "Configure ChurchTools before preparing a migration." });
@@ -1173,10 +1174,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       running.add(dept);
       try {
         const token = decrypt(config.encrypted_login_token);
-        const [peopleResult, groupsResult, resourcesResult, eventsResult, relationshipsPayload] = await Promise.all([
+        const [peopleResult, groupsResult, resourcesResult, eventsResult, relationshipsPayload, songCatalog] = await Promise.all([
           listComplete(config.instance_url, token, "persons"), listComplete(config.instance_url, token, "groups"), listComplete(config.instance_url, token, "resources"),
           listComplete(config.instance_url, token, `events?from=${encodeURIComponent(request.body.startDate)}&to=${encodeURIComponent(request.body.endDate)}`),
           get(config.instance_url, token, "persons/relationships"),
+          request.body.includeSongCatalog ? readChurchToolsSongCatalog((page, limit) => {
+            const query = new URLSearchParams({ "include[]": "arrangements", page: String(page), limit: String(limit) });
+            return get(config.instance_url, token, `songs?${query}`);
+          }) : null,
         ]);
         if (![peopleResult, groupsResult, resourcesResult, eventsResult].every((result) => result.complete)) return reply.code(413).send({ error: "At least one ChurchTools list exceeds the complete preview limit of 20,000 records. Narrow the migration date range and preview again." });
         const bookingHistory = request.body.includeBookingHistory
@@ -1187,6 +1192,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           [dept, config.instance_url, request.body.startDate, request.body.endDate],
         ) : null;
         const existingBookingIds = new Set(existingBookings?.rows.map((row) => row.source_id));
+        const localSongs = songCatalog?.length ? await pool!.query<{ source_id: string | null; title: string; authors: string }>(`
+          SELECT song.title,song.authors,link.source_id FROM worship_songs song
+          LEFT JOIN churchtools_migration_links link ON link.department_id=song.department_id AND link.area='song' AND link.local_record_id=song.id
+          WHERE song.department_id=$1`, [dept]) : null;
+        const songInstancePrefix = churchToolsSongCrosswalkId(config.instance_url, "");
+        const linkedSongs = new Set((localSongs?.rows ?? []).filter((row) => row.source_id?.startsWith(songInstancePrefix)).map((row) => row.source_id));
+        const songNameKey = (title: string, authors: string) => JSON.stringify([title.toLocaleLowerCase(), authors.toLocaleLowerCase()]);
+        const localSongNames = new Set((localSongs?.rows ?? []).filter((row) => !row.source_id?.startsWith(songInstancePrefix)).map((row) => songNameKey(row.title, row.authors)));
         const relationshipRows = rows(relationshipsPayload);
         if (relationshipRows.length > 200000) return reply.code(413).send({ error: "ChurchTools returned more than 200,000 person relationships. No migration preview was saved." });
         const relationshipsByPerson = churchToolsRelationshipsByPerson(relationshipRows);
@@ -1219,6 +1232,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           }),
           ...mappedEvents.map((event) => ({ area: "event", ...event })),
           ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
+          ...(songCatalog ?? []).map((song) => ({ area: "song", sourceId: song.sourceId, title: song.title, song, instanceUrl: config.instance_url })),
           ...(bookingHistory ?? []).map((booking) => ({
             area: "booking", sourceId: booking.sourceId, title: booking.title ?? "Private booking",
             date: booking.occurrences[0].startDate,
@@ -1268,6 +1282,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           } else if (record.area === "booking") {
             if (existingBookingIds.has(String(record.sourceId))) { record.action = "update"; update += 1; }
             else { record.action = "create"; create += 1; }
+          } else if (record.area === "song") {
+            const song = record.song as ChurchToolsSong;
+            if (linkedSongs.has(churchToolsSongCrosswalkId(config.instance_url, song.sourceId))) { record.action = "update"; update += 1; }
+            else if (localSongNames.has(songNameKey(song.title, song.authors))) { record.action = "review_song_conflict"; review += 1; }
+            else { record.action = "create"; create += 1; }
           }
         }
         const encryptedSnapshot = encrypt(JSON.stringify(records));
@@ -1276,7 +1295,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           WHERE churchtools_migration_snapshots.migration_running=FALSE OR churchtools_migration_snapshots.migration_started_at < now()-interval '15 minutes'`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Another migration batch is already running for this location." });
         reply.header("Cache-Control", "private, no-store");
-        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, songCatalog: songCatalog && { songs: songCatalog.length, arrangements: songCatalog.reduce((total, song) => total + song.arrangements.length, 0), conflicts: records.filter((record) => record.action === "review_song_conflict").length }, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
     });
@@ -1394,6 +1413,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 const inserted = await db.query<{ id: string }>("INSERT INTO bookable_resources (id,department_id,name,category,description,location,capacity,requires_approval,active) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 8));
                 if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'resource',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
               }
+            } else if (record.area === "song") {
+              const outcome = await importChurchToolsSong(db, dept, record.instanceUrl, record.song as ChurchToolsSong);
+              if (outcome === "created") batchCreated += 1;
+              else if (outcome === "updated") batchUpdated += 1;
+              else batchSkipped += 1;
             } else if (record.area === "booking") {
               const booking = record.booking as ChurchToolsBookingHistory;
               const args = [dept, record.instanceUrl, record.windowStart, record.windowEnd, sourceId, booking.resourceSourceId, booking.occurrences.length, encrypt(JSON.stringify(booking), bookingArchiveKey)];
