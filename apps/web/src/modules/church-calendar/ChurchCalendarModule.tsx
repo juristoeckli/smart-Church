@@ -2,6 +2,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSPr
 import { CalendarDays, ChevronLeft, ChevronRight, MapPin, Plus, Repeat2, RotateCcw, Trash2, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { CalendarResourceRequest } from "./CalendarResourceRequest";
+import { CalendarGroupMeeting } from "./CalendarGroupMeeting";
+import { GroupMeetingAttendance, type GroupMeetingTarget } from "../check-in/GroupMeetingAttendance";
 import "./church-calendar.css";
 
 type Scope = "community" | "group" | "personal";
@@ -122,6 +124,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [calendarName, setCalendarName] = useState("");
   const [calendarScope, setCalendarScope] = useState<Scope>("personal");
   const [groupId, setGroupId] = useState("");
+  const [attendance, setAttendance] = useState<{ departmentId: string; target: GroupMeetingTarget }>();
   const [calendarColor, setCalendarColor] = useState("#3b82f6");
   const [extraStart, setExtraStart] = useState("");
   const [extraEnd, setExtraEnd] = useState("");
@@ -508,6 +511,10 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     );
   }
 
+  if (canManageGroups && attendance?.departmentId === departmentId) {
+    return <GroupMeetingAttendance key={departmentId + ":" + attendance.target.id} target={attendance.target}
+      departmentId={departmentId} csrfToken={csrfToken} onBack={() => setAttendance(undefined)} />;
+  }
   return <main className="church-calendar-page">
     <header className="church-calendar-header"><div><span className="eyebrow">PLANNING</span><h1>Calendar</h1><p>Appointments across your community, groups and personal calendars.</p></div><div className="church-calendar-header-actions"><button type="button" className="button button-secondary" onClick={() => void toggleArchive()}>{showArchive ? "Hide archive" : "Archive"}</button><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(true)}><Plus size={15} /> New calendar</button><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div></header>
     {error && <div className="church-calendar-message church-calendar-error" role="alert">{error}</div>}{notice && <div className="church-calendar-message church-calendar-success" role="status">{notice}</div>}
@@ -563,6 +570,11 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
           {editing.reminder && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void changeReminder(true)}>Remove reminder</button>}
         </div>
       </div>}
+      {editing?.calendarScope === "group" && editing.groupId && canManageGroups && <CalendarGroupMeeting
+        key={departmentId + ":" + editing.appointmentId + ":" + (editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt)}
+        appointmentId={editing.appointmentId} originalStart={editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}
+        departmentId={departmentId} csrfToken={csrfToken} onOpen={(target) => setAttendance({ departmentId, target })}
+      />}
       {linkedResourceBookings.length > 0 && <div className="church-calendar-extra-date wide">
         <strong>Resource bookings</strong>
         <ul className="church-calendar-extra-date-list">{linkedResourceBookings.map((booking) => <li key={booking.id}>

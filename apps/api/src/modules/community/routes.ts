@@ -467,13 +467,13 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         if (group.rows[0].source_system === "churchtools" || group.rows[0].source_system === "elvanto") { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Imported group attendance is managed in the source system." }); }
         const inserted = await client.query(
           `INSERT INTO group_meetings (id, department_id, group_id, meeting_date, title)
-           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (group_id,meeting_date,title) DO NOTHING
-           RETURNING id,meeting_date,title`,
+           VALUES ($1,$2,$3,$4,$5) ON CONFLICT (group_id,meeting_date,title) WHERE calendar_appointment_id IS NULL DO NOTHING
+           RETURNING id,meeting_date::text AS meeting_date,title`,
           [randomUUID(), departmentId, request.params.id, request.body.date, request.body.title?.trim() ?? ""],
         );
         let meeting = inserted.rows[0];
         if (!meeting) {
-          meeting = (await client.query("SELECT id,meeting_date,title FROM group_meetings WHERE group_id=$1 AND meeting_date=$2 AND title=$3", [request.params.id, request.body.date, request.body.title?.trim() ?? ""])).rows[0];
+          meeting = (await client.query("SELECT id,meeting_date::text AS meeting_date,title FROM group_meetings WHERE group_id=$1 AND meeting_date=$2 AND title=$3 AND calendar_appointment_id IS NULL", [request.params.id, request.body.date, request.body.title?.trim() ?? ""])).rows[0];
         } else {
           await client.query(
             `INSERT INTO group_meeting_attendance (meeting_id,contact_id)

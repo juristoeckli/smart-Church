@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Search } from "lucide-react";
+import "./module.css";
 import { groupAttendanceChanges, type GroupAttendanceEntry, type GroupAttendanceStatus } from "../../group-attendance";
 
 type Group = { id: string; name: string; importedFrom?: string };
 type Meeting = { id: string; date: string; title: string };
+export type GroupMeetingTarget = Meeting & { groupId: string };
 const statuses = { present: "Present", absent: "Absent", excused: "Excused" } as const;
 const statusKeys = Object.keys(statuses) as GroupAttendanceStatus[];
 
@@ -33,18 +35,19 @@ function useList<T>(path: string, departmentId: string, label: string) {
   };
 }
 
-export function GroupMeetingAttendance({ departmentId, csrfToken, onBack }: {
+export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target }: {
   departmentId: string;
   csrfToken: string;
   onBack: () => void;
+  target?: GroupMeetingTarget;
 }) {
   const [groupId, selectGroup] = useState("");
-  const groups = useList<Group>("/api/groups", departmentId, "groups");
+  const groups = useList<Group>(target ? "" : "/api/groups", departmentId, "groups");
   const localGroups = groups.rows.filter((group) => !group.importedFrom);
   const group = localGroups.find((value) => value.id === groupId);
   const meetings = useList<Meeting>(group ? "/api/groups/" + group.id + "/meetings" : "", departmentId, "group meetings");
   const [meetingId, selectMeeting] = useState("");
-  const meeting = meetings.rows.find((value) => value.id === meetingId);
+  const meeting = target ?? meetings.rows.find((value) => value.id === meetingId);
   const roster = useList<GroupAttendanceEntry>(meeting ? "/api/group-meetings/" + meeting.id + "/attendance" : "", departmentId, "attendance");
   const [draft, setDraft] = useState<Record<string, GroupAttendanceStatus>>({});
   const [query, setQuery] = useState("");
@@ -91,10 +94,10 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack }: {
 
   return <main className="checkin-module">
     <header className="checkin-heading">
-      <div><h1>Group meeting attendance</h1></div>
-      <button className="checkin-print" disabled={busy} type="button" onClick={onBack}>Back to service check-in</button>
+      <div><h1>Group meeting attendance</h1>{target && <p>{target.date} · {target.title}</p>}</div>
+      <button className="checkin-print" disabled={busy} type="button" onClick={onBack}>{target ? "Back to Calendar" : "Back to service check-in"}</button>
     </header>
-    <section className="checkin-setup">
+    {!target && <section className="checkin-setup">
       <label>Group<select value={groupId} disabled={busy || groups.pending} onChange={(event) => {
         selectGroup(event.target.value);
         selectMeeting("");
@@ -115,7 +118,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack }: {
         <option value="">Select a group meeting…</option>
         {meetings.rows.map((value) => <option key={value.id} value={value.id}>{value.date}{value.title ? " · " + value.title : ""}</option>)}
       </select></label>
-    </section>
+    </section>}
     {(error || loadError) && <p className="checkin-error" role="alert">{error || loadError}</p>}
     {notice && <p role="status">{notice}</p>}
     {loadError && <button className="checkin-print" type="button" onClick={groups.error ? groups.reload : meetings.error ? meetings.reload : roster.reload}>Retry</button>}

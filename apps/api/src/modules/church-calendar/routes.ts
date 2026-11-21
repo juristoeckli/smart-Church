@@ -413,6 +413,102 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   const reminderParams = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
   const reminderOccurrenceSchema = { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$" } as const;
+  app.route<{ Params: { id: string; originalStart: string } }>({
+    method: ["GET", "POST"],
+    url: "/api/modules/church-calendar/appointments/:id/group-meetings/:originalStart",
+    schema: { params: {
+      type: "object", additionalProperties: false, required: ["id", "originalStart"], properties: {
+        id: { type: "string", format: "uuid" }, originalStart: reminderOccurrenceSchema,
+      },
+    } },
+    async handler(request, reply) {
+      if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+      const create = request.method === "POST";
+      if (create && !context.validateMutation(request, reply)) return reply;
+      const departmentId = await context.resolveDepartmentId(request, reply);
+      if (!departmentId) return reply;
+      if (request.activeDepartmentRole !== "site_admin" && !(request.activeDepartmentPermissions ?? []).includes("groups_manage")) {
+        return responseError(reply, 403, "Managing group attendance requires Groups management access.");
+      }
+      const original = cleanLocalDateTime(request.params.originalStart);
+      if (!original) return responseError(reply, 400, "Choose a valid saved occurrence.");
+
+      const client = await context.pool.connect();
+      try {
+        await client.query("BEGIN");
+        const source = await client.query<{
+          group_id: string; source_system: string | null; title: string; starts_at: string; recurrence: Recurrence | null;
+        }>(
+          `SELECT church_group.id AS group_id, church_group.source_system, appointment.title, appointment.recurrence,
+                  to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at
+             FROM church_calendar_appointments appointment
+             JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+             JOIN church_groups church_group ON church_group.id=calendar.group_id AND church_group.department_id=calendar.department_id
+            WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL
+              AND calendar.archived_at IS NULL AND calendar.scope='group'
+            ${create ? "FOR UPDATE OF appointment, church_group" : ""}`,
+          [request.params.id, departmentId],
+        );
+        const row = source.rows[0];
+        if (!row) { await client.query("ROLLBACK"); return responseError(reply, 404, "Group appointment not found."); }
+        if (row.source_system === "churchtools" || row.source_system === "elvanto") {
+          await client.query("ROLLBACK");
+          return responseError(reply, 403, "Imported group attendance is managed in the source system.");
+        }
+        const exception = (await client.query<{ cancelled: boolean; overrides: Record<string, unknown> }>(
+          "SELECT cancelled,overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp",
+          [request.params.id, original],
+        )).rows[0];
+        const regular = calendarOccurrenceExists(row, original);
+        const extra = !regular && (await client.query(
+          "SELECT 1 FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp",
+          [request.params.id, original],
+        )).rowCount;
+        if (exception?.cancelled || (!regular && !extra)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 404, "This group appointment occurrence is unavailable.");
+        }
+
+        // A one-off keeps its link when rescheduled. A series or added date uses its original wall start.
+        const occurrenceKey = !row.recurrence && regular ? "single" : original;
+        type LinkedMeeting = { id: string; groupId: string; date: string; title: string };
+        const matching = await client.query<LinkedMeeting>(
+          `SELECT id,group_id AS "groupId",meeting_date::text AS date,title FROM group_meetings
+            WHERE department_id=$1 AND group_id=$2 AND calendar_appointment_id=$3 AND calendar_occurrence_key=$4`,
+          [departmentId, row.group_id, request.params.id, occurrenceKey],
+        );
+        let meeting = matching.rows[0] ?? null;
+        const created = !meeting && create;
+        if (created) {
+          const start = cleanLocalDateTime(exception?.overrides?.startsAt) ?? original;
+          const title = typeof exception?.overrides?.title === "string" ? exception.overrides.title : row.title;
+          const inserted = await client.query<LinkedMeeting>(
+            `INSERT INTO group_meetings (id,department_id,group_id,meeting_date,title,calendar_appointment_id,calendar_occurrence_key)
+             VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,group_id AS "groupId",meeting_date::text AS date,title`,
+            [randomUUID(), departmentId, row.group_id, start.slice(0, 10), title, request.params.id, occurrenceKey],
+          );
+          meeting = inserted.rows[0];
+          await client.query(
+            `INSERT INTO group_meeting_attendance (meeting_id,contact_id)
+             SELECT $1,member.contact_id FROM group_members member
+             JOIN contacts contact ON contact.id=member.contact_id AND contact.department_id=$2
+             WHERE member.group_id=$3 AND member.status='active'`,
+            [meeting.id, departmentId, row.group_id],
+          );
+        }
+        await client.query("COMMIT");
+        if (created) context.realtime.publish("core:groups:changed", departmentId, { action: "meeting-created", groupId: row.group_id, meetingId: meeting?.id });
+        return reply.code(created ? 201 : 200).send({ meeting });
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
+  });
+
+
   app.put<{ Params: { id: string }; Body: { occurrenceStartAt: string; minutesBefore?: number; clockTime?: string; clockTimeZone?: string } }>("/api/modules/church-calendar/appointments/:id/reminder", {
     schema: { params: reminderParams, body: { type: "object", additionalProperties: false, required: ["occurrenceStartAt"],
       properties: { occurrenceStartAt: reminderOccurrenceSchema, minutesBefore: { type: "integer", enum: [5,15,30,60,1440] },
