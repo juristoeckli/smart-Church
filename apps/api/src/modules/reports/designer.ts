@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { canManagePeopleFields } from "../people-records/field-privacy.js";
 
 type FieldType = "text" | "number" | "date";
 type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance" | "resourceBookings";
@@ -258,9 +259,12 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
                 AND to_regclass('public.resource_bookings') IS NOT NULL AS resources`,
     );
     const present = presence.rows[0];
+    const canManageFields = canManagePeopleFields(request);
     const customFields = permitted(request, "people") && present?.people
       ? await database.query<{ id: string; label: string; field_type: string }>(
-        "SELECT id::text,label,field_type FROM people_record_fields WHERE department_id=$1 AND active=true ORDER BY position,label LIMIT 40", [departmentId],
+        `SELECT field.id::text,field.label,field.field_type FROM people_record_fields field
+          WHERE field.department_id=$1 AND field.active AND ($2::boolean OR COALESCE(to_jsonb(field)->>'visibility','private_people')='private_people')
+          ORDER BY field.position,field.label LIMIT 40`, [departmentId, canManageFields],
       )
       : { rows: [] };
     const membershipCustomKeys = permitted(request, "people") && present?.memberships
@@ -281,7 +285,10 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       const fields = customFields.rows.filter((field) => /^[0-9a-f-]{36}$/i.test(field.id));
       const additions = fields.map((field) => ({ key: `custom_${field.id.replace(/-/g, "")}`, label: `Custom: ${field.label}`, type: field.field_type === "date" ? "date" as const : "text" as const }));
       if (!additions.length) return item;
-      const expressions = fields.map((field) => `(SELECT value #>> '{}' FROM people_record_values WHERE department_id=c.department_id AND contact_id=c.id AND field_id='${field.id}'::uuid) AS "custom_${field.id.replace(/-/g, "")}"`);
+      const fieldVisibility = canManageFields ? "TRUE" : "COALESCE(to_jsonb(field)->>'visibility','private_people')='private_people'";
+      const expressions = fields.map((field) => `(SELECT record.value #>> '{}' FROM people_record_values record
+        JOIN people_record_fields field ON field.id=record.field_id AND field.department_id=record.department_id
+        WHERE record.department_id=c.department_id AND record.contact_id=c.id AND record.field_id='${field.id}'::uuid AND field.active AND ${fieldVisibility}) AS "custom_${field.id.replace(/-/g, "")}"`);
       return { ...item, fields: [...item.fields, ...additions], sql: item.sql.replace(" FROM contacts", `,${expressions.join(",")} FROM contacts`) };
     });
     return definitions.filter((item) => permitted(request, item.permission)
@@ -322,9 +329,12 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   });
   app.get("/api/modules/reports/designer/saved", async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
-    const keys = (await datasets(request, departmentId)).map((item) => item.key);
-    const result = await pool!.query("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\", CASE WHEN owner_user_id=$2 THEN schedule_days END AS \"scheduleDays\", CASE WHEN owner_user_id=$2 THEN notify_when_ready END AS \"notifyWhenReady\", CASE WHEN owner_user_id=$2 THEN next_run_at END AS \"nextRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_at END AS \"lastRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_status END AS \"lastRunStatus\", CASE WHEN owner_user_id=$2 THEN run_history END AS \"runHistory\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
-    return result.rows;
+    const byDataset = new Map((await datasets(request, departmentId)).map((item) => [item.key, item]));
+    const result = await pool!.query<{ definition: Record<string, unknown> }>("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\", CASE WHEN owner_user_id=$2 THEN schedule_days END AS \"scheduleDays\", CASE WHEN owner_user_id=$2 THEN notify_when_ready END AS \"notifyWhenReady\", CASE WHEN owner_user_id=$2 THEN next_run_at END AS \"nextRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_at END AS \"lastRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_status END AS \"lastRunStatus\", CASE WHEN owner_user_id=$2 THEN run_history END AS \"runHistory\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, [...byDataset.keys()]]);
+    return result.rows.filter(({ definition }) => {
+      const dataset = byDataset.get(definition.dataset as DatasetKey);
+      return dataset && typeof cleanDefinition(definition, dataset.fields) !== "string";
+    });
   });
   app.post<{ Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
