@@ -1,3 +1,4 @@
+import { exportFormatQuery, sendReportWorkbook, type ExportFormatQuery } from "./xlsx.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
@@ -513,8 +514,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!hasPermission(request, "groups")) return denied(reply);
     return (await pool!.query("SELECT id,name FROM church_groups WHERE department_id=$1 ORDER BY name LIMIT 2000", [departmentId])).rows;
   });
-  app.get<{ Querystring: { reportKey?: ReportKey; from?: string; to?: string; groupId?: string; status?: ReportFilters["status"]; followUpStatus?: ReportFilters["followUpStatus"]; accountingYear?: number } }>("/api/modules/reports/run", {
-    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 } } } },
+  app.get<{ Querystring: ExportFormatQuery & { reportKey?: ReportKey; from?: string; to?: string; groupId?: string; status?: ReportFilters["status"]; followUpStatus?: ReportFilters["followUpStatus"]; accountingYear?: number } }>("/api/modules/reports/run", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
@@ -522,9 +523,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!(await installedReports(request)).some((item) => item.key === reportKey)) return denied(reply);
     const filterInput: Record<string, unknown> = { ...request.query };
     delete filterInput.reportKey;
+    delete filterInput.format;
     const filters = normalizeFilters(filterInput);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
-    try { return await runReport(departmentId, reportKey, filters); }
+    try {
+      const report = await runReport(departmentId, reportKey, filters);
+      return request.query.format === "xlsx" ? sendReportWorkbook(reply, report, reportKey) : report;
+    }
     catch (error) { return reply.code(error instanceof Error && error.message.startsWith("Choose") ? 400 : 503).send({ error: error instanceof Error ? error.message : "The report could not be generated." }); }
   });
   app.get("/api/modules/reports/saved", async (request, reply) => {
@@ -607,8 +612,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   });
 
-  app.get<{ Params: { id: string } }>("/api/modules/reports/saved/:id/scheduled-result", {
-    schema: { params: { type: "object", required: ["id"], properties: { id: uuid } } },
+  app.get<{ Params: { id: string }; Querystring: ExportFormatQuery }>("/api/modules/reports/saved/:id/scheduled-result", {
+    schema: { querystring: exportFormatQuery, params: { type: "object", required: ["id"], properties: { id: uuid } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
@@ -624,6 +629,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       // Stored attendee result rows omit identity, so older results cannot distinguish anonymous submissions.
       report.rows = report.rows.map((row) => row.responseType === "Attendee" ? { ...row, submittedAt: null } : row);
     }
+    if (request.query.format === "xlsx") return sendReportWorkbook(reply, report, report.reportKey);
     return reply.header("cache-control", "private, no-store").send(report);
   });
 

@@ -56,6 +56,32 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
   const [designerRunning, setDesignerRunning] = useState(false);
   const canManageReports = canManageSite || (department.modulePermissions?.reports ?? []).includes("manage");
 
+  type WorkbookSource = { url: string; body?: string };
+  const reportWorkbook = useRef<WorkbookSource | null>(null);
+  const designerWorkbook = useRef<WorkbookSource | null>(null);
+  const [exportingWorkbook, setExportingWorkbook] = useState(false);
+
+  async function downloadWorkbook(source: WorkbookSource | null, fileName: string) {
+    if (!source || exportingWorkbook) return;
+    setError(""); setExportingWorkbook(true);
+    try {
+      const response = await fetch(source.url + (source.url.includes("?") ? "&" : "?") + "format=xlsx", {
+        method: source.body ? "POST" : "GET",
+        headers: { "x-department-id": departmentId, ...(source.body ? { "content-type": "application/json", "x-csrf-token": csrfToken } : {}) },
+        body: source.body,
+        cache: "no-store",
+      });
+      if (!response.ok) throw new Error("The workbook could not be exported.");
+      const link = document.createElement("a");
+      const objectUrl = URL.createObjectURL(await response.blob());
+      link.href = objectUrl;
+      link.download = fileName + ".xlsx";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "The workbook could not be exported."); }
+    finally { setExportingWorkbook(false); }
+  }
+
   const request = useCallback(async <T,>(url: string, init: RequestInit = {}): Promise<T> => {
     const response = await fetch(url, {
       ...init,
@@ -102,7 +128,10 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     try {
       const parameters = new URLSearchParams({ reportKey });
       for (const [key, value] of Object.entries(filters)) if (value) parameters.set(key, value);
-      setResult(await request<ReportResult>("/api/modules/reports/run?" + parameters.toString()));
+      const url = "/api/modules/reports/run?" + parameters.toString();
+      const report = await request<ReportResult>(url);
+      reportWorkbook.current = { url };
+      setResult(report);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "The report could not be generated."); }
     finally { setRunning(false); }
   }
@@ -139,7 +168,9 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
   async function openScheduledResult(item: SavedReport) {
     setError("");
     try {
-      const report = await request<ReportResult>(`/api/modules/reports/saved/${item.id}/scheduled-result`);
+      const url = `/api/modules/reports/saved/${item.id}/scheduled-result`;
+      const report = await request<ReportResult>(url);
+      reportWorkbook.current = { url };
       setReportKey(item.reportKey);
       setFilters(item.filters ?? {});
       setResult(report);
@@ -193,7 +224,13 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
   async function previewDesigner() {
     const definition = definitionForDesigner(); if (!definition) return;
     setDesignerRunning(true); setError(""); setMessage(""); setResult(null);
-    try { setDesignerResult(await request<DesignerResult>("/api/modules/reports/designer/preview", { method: "POST", body: JSON.stringify({ definition }) })); }
+    try {
+      const url = "/api/modules/reports/designer/preview";
+      const body = JSON.stringify({ definition });
+      const report = await request<DesignerResult>(url, { method: "POST", body });
+      designerWorkbook.current = { url, body };
+      setDesignerResult(report);
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not run the report designer."); }
     finally { setDesignerRunning(false); }
   }
@@ -237,7 +274,12 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
 
   async function openScheduledDesignerResult(item: SavedDesignerReport) {
     setError("");
-    try { setDesignerResult(await request<DesignerResult>(`/api/modules/reports/designer/saved/${item.id}/scheduled-result`)); }
+    try {
+      const url = `/api/modules/reports/designer/saved/${item.id}/scheduled-result`;
+      const report = await request<DesignerResult>(url);
+      designerWorkbook.current = { url };
+      setDesignerResult(report);
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not open the scheduled result."); }
   }
 
@@ -281,7 +323,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
         </section>
         <aside className="reports-panel reports-saved"><h2>Saved designs</h2>{savedDesigner.length ? <ul>{savedDesigner.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => loadDesigner(item)}>{item.name}<small>{designerCatalog.find((dataset) => dataset.key === item.definition.dataset)?.title ?? item.definition.dataset} · {item.shareScope === "department" ? "Shared with dataset-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDesignerSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void removeDesigner(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved designs are private to your account unless you choose to share them.</p>}<ScheduleList items={savedDesigner.filter((item) => item.canEdit && (canManageReports || item.scheduleDays))} canManage={canManageReports} onRefresh={refreshDesignerRunStatus} onChange={changeDesignerSchedule} onOpen={openScheduledDesignerResult} /></aside>
       </div>}
-      {designerResult && <section className="reports-results"><div className="reports-results-heading"><div><h2>{designerResult.title}</h2><p>{designerResult.totalRows} rows · previewing {designerResult.rows.length} · generated {new Date(designerResult.generatedAt).toLocaleString()}{designerResult.capped ? " · dataset capped at 5,000 source rows" : ""}</p></div><button className="button button-secondary" type="button" onClick={downloadDesignerCsv}><Download size={16} />Export preview CSV</button></div>{designerResult.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{designerResult.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{designerResult.rows.map((row, index) => <tr key={index}>{designerResult.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match this report.</p>}</section>}
+      {designerResult && <section className="reports-results"><div className="reports-results-heading"><div><h2>{designerResult.title}</h2><p>{designerResult.totalRows} rows · previewing {designerResult.rows.length} · generated {new Date(designerResult.generatedAt).toLocaleString()}{designerResult.capped ? " · dataset capped at 5,000 source rows" : ""}</p></div><div className="reports-export-actions"><button className="button button-secondary" type="button" onClick={downloadDesignerCsv}><Download size={16} />Export preview CSV</button><button className="button button-secondary" type="button" disabled={exportingWorkbook} onClick={() => void downloadWorkbook(designerWorkbook.current, "ad-hoc-" + designerResult.dataset)}>Export XLSX</button></div></div>{designerResult.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{designerResult.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{designerResult.rows.map((row, index) => <tr key={index}>{designerResult.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match this report.</p>}</section>}
     </> : definitions.length === 0 ? <p className="reports-empty">No reports are available for your permissions. Ask an administrator for Reports access and the relevant People, Groups, Events or Finance permissions.</p> : <div className="reports-layout">
       <section className="reports-panel">
         <h2>Choose a report</h2>
@@ -297,7 +339,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
       </section>
       <aside className="reports-panel reports-saved"><h2>Saved reports</h2>{saved.length ? <ul>{saved.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => { setReportKey(item.reportKey); setFilters(item.filters ?? {}); setResult(null); }}>{item.name}<small>{definitions.find((definition) => definition.key === item.reportKey)?.title} · {item.shareScope === "department" ? "Shared with report-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDefinitionSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void deleteDefinition(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved report definitions will appear here.</p>}<ScheduleList items={saved.filter((item) => item.scheduleDays !== undefined && (canManageReports || item.scheduleDays))} canManage={canManageReports} onRefresh={refreshRunStatus} onChange={changeSchedule} onOpen={openScheduledResult} /></aside>
     </div>}
-    {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
+    {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><div className="reports-export-actions"><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button><button className="button button-secondary" type="button" disabled={exportingWorkbook} onClick={() => void downloadWorkbook(reportWorkbook.current, result.reportKey)}>Export XLSX</button></div></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
   </main>;
 }
 

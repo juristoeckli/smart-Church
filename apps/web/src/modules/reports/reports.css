@@ -36,3 +36,4 @@
 .reports-schedules { margin-top: 1.25rem; }
 .reports-schedules > div { padding-block: 8px; border-top: 1px solid var(--line); }
 .reports-schedules small { color: var(--muted); }
+.reports-export-actions { display: flex; flex-wrap: wrap; gap: 8px; }

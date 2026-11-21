@@ -51,11 +51,28 @@ function zipFiles(files: Record<string, string>) {
 
 export function financeWorkbook(header: string[], rows: unknown[][]) {
   const numericColumns = header.map((column) => column.endsWith("_cents") || column === "transaction_count");
+  return createWorkbook("Finance", header, rows, (value, column) => {
+    const content = String(value ?? "");
+    // Excel retains only 15 significant decimal digits. Keep longer values as exact text.
+    return numericColumns[column] && /^-?\d{1,15}$/.test(content) ? "<c><v>" + content + "</v></c>" : null;
+  });
+}
+
+export function createWorkbook(
+  sheetName: "Finance" | "Report",
+  header: string[],
+  rows: unknown[][],
+  typedCell = (value: unknown, _column: number): string | null => {
+    if (typeof value === "boolean") return '<c t="b"><v>' + Number(value) + '</v></c>';
+    if (typeof value === "number" && Number.isFinite(value) && Math.abs(value) < 1e15) return '<c><v>' + value + '</v></c>';
+    if (value == null) return "<c/>";
+    return null;
+  },
+) {
   const table = [header, ...rows].map((row, index) => {
     const cells = row.map((value, column) => {
-      const content = String(value ?? "");
-      // Excel retains only 15 significant decimal digits. Keep longer values as exact text.
-      if (index && numericColumns[column] && /^-?\d{1,15}$/.test(content)) return "<c><v>" + content + "</v></c>";
+      const typed = index ? typedCell(value, column) : null;
+      if (typed !== null) return typed;
       return '<c t="inlineStr"><is><t xml:space="preserve">' + textCell(value) + "</t></is></c>";
     }).join("");
     return "<row>" + cells + "</row>";
@@ -64,7 +81,7 @@ export function financeWorkbook(header: string[], rows: unknown[][]) {
   return zipFiles({
     "[Content_Types].xml": xml + '<Types xmlns="' + packageNs + '/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>',
     "_rels/.rels": xml + '<Relationships xmlns="' + packageNs + '/relationships"><Relationship Id="rId1" Type="' + officeNs + '/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-    "xl/workbook.xml": xml + '<workbook xmlns="' + sheetNs + '" xmlns:r="' + officeNs + '"><sheets><sheet name="Finance" sheetId="1" r:id="rId1"/></sheets></workbook>',
+    "xl/workbook.xml": xml + '<workbook xmlns="' + sheetNs + '" xmlns:r="' + officeNs + '"><sheets><sheet name="' + sheetName + '" sheetId="1" r:id="rId1"/></sheets></workbook>',
     "xl/_rels/workbook.xml.rels": xml + '<Relationships xmlns="' + packageNs + '/relationships"><Relationship Id="rId1" Type="' + officeNs + '/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
     "xl/worksheets/sheet1.xml": xml + '<worksheet xmlns="' + sheetNs + '"><sheetData>' + table + '</sheetData></worksheet>',
   });

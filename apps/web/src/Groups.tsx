@@ -96,6 +96,42 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     })
   ));
 
+  const [bulkType, setBulkType] = useState("");
+  const [bulkSelection, setBulkSelection] = useState<string[]>([]);
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const localVisibleGroups = visibleGroups.filter((group) => !group.importedFrom);
+  const bulkSelectedIds = localVisibleGroups.filter((group) => bulkSelection.includes(group.id)).map((group) => group.id);
+
+  useEffect(() => {
+    setBulkSelection([]);
+    setBulkType("");
+  }, [departmentId]);
+
+  async function updateSelectedGroupTypes(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canManage || !bulkSelectedIds.length || bulkSaving) return;
+    const type = bulkType.trim();
+    if (!window.confirm(type ? `Set the group type to "${type}" for ${bulkSelectedIds.length} groups?` : `Clear the group type for ${bulkSelectedIds.length} groups?`)) return;
+    setError("");
+    setBulkSaving(true);
+    try {
+      const response = await fetch("/api/groups/bulk-type", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ groupIds: bulkSelectedIds, groupType: type }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not update group types.");
+      setBulkSelection([]);
+      setDetailsGroup(null);
+      await loadGroups();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update group types.");
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
   async function loadGroups(signal?: AbortSignal) {
     setLoading(true);
     setError("");
@@ -398,6 +434,23 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
             </label>)}
           </details>}
         </div>
+        {canManage && !loading && localVisibleGroups.length > 0 && <details>
+          <summary>Change group types in bulk</summary>
+          <form className="community-group-form" onSubmit={(event) => void updateSelectedGroupTypes(event)}>
+            <label>Groups to update <span className="optional-label">Select up to 100</span>
+              <select multiple size={Math.min(6, Math.max(2, localVisibleGroups.length))} value={bulkSelectedIds} disabled={bulkSaving}
+                onChange={(event) => setBulkSelection(Array.from(event.target.selectedOptions, (option) => option.value))}>
+                {localVisibleGroups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+              </select>
+            </label>
+            <label>New type <span className="optional-label">Leave blank to clear</span>
+              <input value={bulkType} maxLength={80} disabled={bulkSaving} onChange={(event) => setBulkType(event.target.value)} />
+            </label>
+            <button className="button button-secondary" type="submit" disabled={bulkSaving || !bulkSelectedIds.length || bulkSelectedIds.length > 100}>
+              Update type for {bulkSelectedIds.length} groups
+            </button>
+          </form>
+        </details>}
         {loading ? <p className="community-empty">{translate("groups.loading")}</p> : visibleGroups.length ? displayMode === "table" ? (
           <div className="table-scroll">
             <table className="people-table" aria-label="Groups directory">

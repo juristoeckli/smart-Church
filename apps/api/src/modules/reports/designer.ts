@@ -1,3 +1,4 @@
+import { exportFormatQuery, sendReportWorkbook, type ExportFormatQuery } from "./xlsx.js";
 import type { Pool, PoolClient } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -192,7 +193,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     return (await datasets(request, departmentId)).map(({ key, title, description, fields }) => ({ key, title, description, fields }));
   });
-  app.post<{ Body: { definition: unknown } }>("/api/modules/reports/designer/preview", { schema: { body: { type: "object", additionalProperties: false, required: ["definition"], properties: { definition: { type: "object", additionalProperties: true } } } } }, async (request, reply) => {
+  app.post<{ Body: { definition: unknown }; Querystring: ExportFormatQuery }>("/api/modules/reports/designer/preview", { schema: { querystring: exportFormatQuery, body: { type: "object", additionalProperties: false, required: ["definition"], properties: { definition: { type: "object", additionalProperties: true } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     const available = await datasets(request, departmentId);
@@ -204,7 +205,8 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     try {
       const raw = await pool!.query(dataset.sql, [departmentId]);
       const result = applyDefinition(raw.rows as Array<Record<string, unknown>>, definition, dataset);
-      return { dataset: dataset.key, title: `${dataset.title} report`, generatedAt: new Date().toISOString(), ...result };
+      const report = { dataset: dataset.key, title: `${dataset.title} report`, generatedAt: new Date().toISOString(), ...result };
+      return request.query.format === "xlsx" ? sendReportWorkbook(reply, report, "ad-hoc-" + dataset.key) : report;
     } catch { return reply.code(503).send({ error: "The report could not be generated from the available data." }); }
   });
   app.get("/api/modules/reports/designer/saved", async (request, reply) => {
@@ -294,10 +296,10 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       client.release();
     }
   });
-  app.get<{ Params: { id: string } }>(`${schedulePath}/scheduled-result`, { schema: { params: savedIdSchema } }, async (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: ExportFormatQuery }>(`${schedulePath}/scheduled-result`, { schema: { querystring: exportFormatQuery, params: savedIdSchema } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     const available = await datasets(request, departmentId);
-    const query = await pool!.query<{ definition: Record<string, unknown>; scheduled_result: unknown }>(
+    const query = await pool!.query<{ definition: Record<string, unknown>; scheduled_result: Awaited<ReturnType<typeof runSavedDesign>> | null }>(
       "SELECT definition,scheduled_result FROM saved_designer_reports WHERE id=$1 AND department_id=$2 AND owner_user_id=$3",
       [request.params.id, departmentId, request.authenticatedUser!.id],
     );
@@ -306,6 +308,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     if (!saved?.scheduled_result || !dataset || typeof cleanDefinition(saved.definition, dataset.fields) === "string") {
       return reply.code(404).send({ error: "No scheduled result is available." });
     }
+    if (request.query.format === "xlsx") return sendReportWorkbook(reply, saved.scheduled_result, "ad-hoc-" + dataset.key);
     return reply.header("cache-control", "private, no-store").send(saved.scheduled_result);
   });
   return { runSavedDesign };

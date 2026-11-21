@@ -55,3 +55,5 @@ Managers can schedule their own saved catalog reports to run immediately on the 
 
 Saved ad hoc designs also support owner-managed daily or weekly runs. The shared scheduler revalidates dataset and field access at execution. The latest result is available only if the run succeeded and the owner still has dataset access. Editing the design invalidates its previous result and queues a replacement. Scheduled results can include up to 5,000 source rows and must fit the 2 MB result limit.
 `Notify me in the inbox when a result is ready` can be enabled per active catalog or ad hoc schedule. Successful runs create an in-app alert for the owner with generic copy and no report details. Email stays disabled for these alerts.
+
+Reports offer CSV and XLSX export. CSV contains the displayed result. XLSX re-runs the displayed catalog filters or ad hoc definition, or loads the latest available scheduled result, using the existing access checks and result caps. Workbook cells preserve numbers and booleans and handle strings as text, including strings that resemble formulas.

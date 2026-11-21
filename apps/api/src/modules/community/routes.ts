@@ -162,6 +162,52 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       }
     });
 
+    routes.patch<{ Body: { groupIds: string[]; groupType: string } }>("/api/groups/bulk-type", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["groupIds", "groupType"], properties: {
+        groupIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },
+        groupType: { type: "string", maxLength: 80 },
+      } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const groupType = request.body.groupType.trim();
+      const client = await pool!.connect();
+      let updated = 0;
+      try {
+        await client.query("BEGIN");
+        if (!await dependencies.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const selected = await client.query<{ id: string; source_system: string | null; group_type: string | null }>(
+          "SELECT id, source_system, group_type FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE",
+          [departmentId, request.body.groupIds],
+        );
+        if (selected.rows.length !== request.body.groupIds.length || selected.rows.some((group) => group.source_system)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Only existing local groups in this location can be updated together." });
+        }
+        for (const group of selected.rows) {
+          if ((group.group_type ?? "") === groupType) continue;
+          await client.query("UPDATE church_groups SET group_type=$3, updated_at=now() WHERE id=$1 AND department_id=$2", [group.id, departmentId, groupType]);
+          await client.query(
+            "INSERT INTO group_directory_type_history (id, department_id, group_id, actor_user_id, previous_type, new_type) VALUES ($1,$2,$3,$4,$5,$6)",
+            [randomUUID(), departmentId, group.id, request.authenticatedUser!.id, group.group_type, groupType],
+          );
+          updated++;
+        }
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+      if (updated) realtime.publish("core:groups:changed", departmentId, { action: "types-updated" });
+      return { updated };
+    });
+
     routes.put<{ Params: { id: string }; Body: { members: { contactId: string; role: string; status: "active" | "paused" | "waitlist"; joinedOn?: string }[] } }>("/api/groups/:id/members", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       body: { type: "object", additionalProperties: false, required: ["members"], properties: { members: { type: "array", maxItems: 2000, items: { type: "object", additionalProperties: false, required: ["contactId", "role", "status"], properties: { contactId: { type: "string", format: "uuid" }, role: { type: "string", minLength: 1, maxLength: 80 }, status: { type: "string", enum: ["active", "paused", "waitlist"] }, joinedOn: { type: "string", format: "date" } } } } } },
