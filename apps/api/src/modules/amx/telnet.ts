@@ -152,24 +152,51 @@ export async function sendTelnetChannel(settings: TelnetSettings, address: Devic
   } finally { terminal.close(); }
 }
 
-export async function readTelnetDeviceChannels(settings: TelnetSettings, address: DeviceAddress) {
+function parseDeviceStatus(body: string, address: DeviceAddress) {
+  if (/unknown device|device not found|not connected|invalid device/i.test(body)) {
+    throw new Error(`NetLinx did not return status for ${address.device}:${address.port}:${address.system}.`);
+  }
+  const channels = new Set<number>();
+  let sawChannelStatus = false;
+  for (const line of body.split("\n")) {
+    const onList = line.match(/(?:input|output)?\s*channels?\s+(?:are\s+)?on\s*:\s*(.*)$/i);
+    if (onList) {
+      sawChannelStatus = true;
+      if (!/^(?:none|off|0)\b/i.test(onList[1]!.trim())) {
+        for (const match of onList[1]!.matchAll(/\b(\d{1,5})\b/g)) channels.add(Number(match[1]));
+      }
+      continue;
+    }
+    const activeList = line.match(/\b(?:active\s+)?channels?\b\s*[:=]\s*(.*)$/i);
+    if (activeList) {
+      sawChannelStatus = true;
+      if (!/^(?:none|off|0)\b/i.test(activeList[1]!.trim())) {
+        for (const match of activeList[1]!.matchAll(/\b(\d{1,5})\b/g)) channels.add(Number(match[1]));
+      }
+    }
+  }
+  const levels: Record<number, number> = {};
+  for (const line of body.split("\n")) {
+    const match = line.match(/^\s*Level\s+(\d+)\s*=\s*(-?\d+(?:\.\d+)?)/i);
+    if (match) levels[Number(match[1])] = Number(match[2]);
+  }
+  if (!sawChannelStatus && !Object.keys(levels).length) {
+    throw new Error("NetLinx returned device status in an unrecognized format; no channel or level state was assumed.");
+  }
+  return { channels: [...channels].filter((channel) => channel > 0).sort((a, b) => a - b), levels };
+}
+
+/** Read channel and level state using the master's read-only Telnet status command. */
+export async function readTelnetDeviceStatus(settings: TelnetSettings, address: DeviceAddress) {
   const terminal = new NetLinxTerminal();
   try {
     await terminal.connect(settings);
     const response = await terminal.command(`DEVICE STATUS [${address.device}:${address.port}:${address.system}]`);
     const body = response.replace(/^.*?DEVICE STATUS[^\n]*\n/i, "").replace(/(?:^|\n)\s*>\s*$/i, "");
-    if (/unknown device|device not found|not connected|invalid device/i.test(body)) throw new Error(`NetLinx did not return status for ${address.device}:${address.port}:${address.system}.`);
-    const channels = new Set<number>();
-    const channelLines = body.split("\n").filter((line) => /\bchannels?\b/i.test(line));
-    for (const line of channelLines) {
-      for (const match of line.matchAll(/\b(?:channel|chan)\s*[:=#]?\s*(\d{1,5})\b/gi)) channels.add(Number(match[1]));
-      const list = line.match(/\b(?:active\s+)?channels?\b\s*[:=]?\s*([\d][\d\s,;.-]*)/i)?.[1];
-      if (list) for (const match of list.matchAll(/\b(\d{1,5})\b/g)) channels.add(Number(match[1]));
-    }
-    if (!channels.size && !/no active channels|channels?\s*[:=]?\s*(?:none|off|0)\b/i.test(body)) {
-      throw new Error("NetLinx returned device status in an unrecognized format; no channel state was assumed.");
-    }
-    return [...channels].filter((channel) => channel > 0).sort((a, b) => a - b);
+    return parseDeviceStatus(body, address);
   } finally { terminal.close(); }
 }
 
+export async function readTelnetDeviceChannels(settings: TelnetSettings, address: DeviceAddress) {
+  return (await readTelnetDeviceStatus(settings, address)).channels;
+}
