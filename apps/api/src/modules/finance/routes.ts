@@ -880,7 +880,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply.header("Cache-Control", "private, no-store"), "finance-period-turnover-" + year + "-" + interval, header, rows, [6, 7, 8]);
   });
 
-  app.get<{ Querystring: FinancialReportQuery & { exclude?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
+  app.get<{ Querystring: FinancialReportQuery & { exclude?: string; group?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
     if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
@@ -890,6 +890,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validFinancialReportDates(request.query)) {
       return reply.code(400).send({ error: "Choose valid report dates. Balance Sheet and Trial Balance use only an as-of date." });
     }
+    const group = request.query.group;
+    if (group !== undefined && group !== "account-type") return reply.code(400).send({ error: "Choose a valid report grouping." });
     const rawExcluded = request.query.exclude;
     if (rawExcluded !== undefined && (typeof rawExcluded !== "string" || rawExcluded.length > 3699)) {
       return reply.code(400).send({ error: "Choose up to 100 valid excluded accounts." });
@@ -904,11 +906,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents-l.credit_cents ELSE 0 END),0) AS net_cents
          FROM finance_accounts a LEFT JOIN finance_transaction_lines l ON l.department_id=a.department_id AND l.account_id=a.id
          LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2 ${financialReportDateCondition}
-        WHERE a.department_id=$1 AND NOT (a.id=ANY($5::uuid[])) GROUP BY a.id ORDER BY a.code`, [departmentId, year, from ?? null, to ?? null, excluded]);
+        WHERE a.department_id=$1 AND NOT (a.id=ANY($5::uuid[])) GROUP BY a.id
+        ORDER BY CASE WHEN $6::boolean THEN a.account_type END, a.code, a.id`, [departmentId, year, from ?? null, to ?? null, excluded, group === "account-type"]);
     const rows = report === "balance-sheet" ? result.rows.filter((row) => ["asset", "liability", "equity"].includes(row.account_type)) : report === "profit-loss" ? result.rows.filter((row) => ["income", "expense"].includes(row.account_type)) : result.rows;
     const header = ["accounting_year", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
     const filename = "finance-turnover-" + report + "-" + year + (from ? "-from-" + from : "")
-      + (to ? (report === "profit-loss" ? "-through-" : "-as-of-") + to : "") + (excluded.length ? "-filtered" : "");
+      + (to ? (report === "profit-loss" ? "-through-" : "-as-of-") + to : "") + (excluded.length ? "-filtered" : "") + (group ? "-by-account-type" : "");
     return sendFinanceExport(request, reply, filename, header, rows.map((row) => [year, row.code, row.name, row.account_type,
       turnoverCell(row.debit_cents), turnoverCell(row.credit_cents), turnoverCell(row.net_cents)]), [4, 5, 6]);
   });

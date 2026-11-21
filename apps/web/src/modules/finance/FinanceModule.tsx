@@ -26,6 +26,21 @@ function readFinanceRecordId(key: "Donor" | "Account" | "CostCenter") {
 }
 
 type FinancialReportAccount = { id: string; code: string; name: string; accountType: string; debitCents: number | string; creditCents: number | string; netCents: number | string };
+const financialAccountTypeLabels: Record<string, string> = {
+  asset: "Assets", equity: "Equity", expense: "Expenses", income: "Income", liability: "Liabilities",
+};
+function groupFinancialReportAccounts(accounts: FinancialReportAccount[]) {
+  const groups = new Map<string, { accounts: FinancialReportAccount[]; debit: bigint; credit: bigint; net: bigint }>();
+  for (const account of accounts) {
+    const group = groups.get(account.accountType) ?? { accounts: [], debit: 0n, credit: 0n, net: 0n };
+    group.accounts.push(account);
+    group.debit += BigInt(account.debitCents);
+    group.credit += BigInt(account.creditCents);
+    group.net += BigInt(account.netCents);
+    groups.set(account.accountType, group);
+  }
+  return [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
+}
 type FinancialReportDates = { from: string; to: string };
 const standardFinancialDates: FinancialReportDates = { from: "", to: "" };
 
@@ -63,6 +78,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [financialReportDates, setFinancialReportDates] = useState<Record<string, FinancialReportDates>>({});
   const [costCenterReport, setCostCenterReport] = useState<Array<{ id: string; code: string; name: string; debitCents: number; creditCents: number; transactionCount: number }>>([]);
   const [reportType, setReportType] = useState<"trial-balance" | "balance-sheet" | "profit-loss">("trial-balance");
+  const [groupReportAccounts, setGroupReportAccounts] = useState(false);
   const [hiddenReportAccounts, setHiddenReportAccounts] = useState<Partial<Record<typeof reportType, string[]>>>({});
   const [year, setYear] = useState(() => { const value = readFinanceQuery("Year"); return /^\d{4}$/.test(value) ? value : String(new Date().getFullYear()); });
   const [currencyDraft, setCurrencyDraft] = useState("CHF");
@@ -508,9 +524,10 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     if (financialDateError) return;
     const params = new URLSearchParams(financialQuery);
     if (activeExclusions.length) params.set("exclude", activeExclusions.join(","));
+    if (groupReportAccounts) params.set("group", "account-type");
     const filename = "finance-" + reportType + "-" + year + (financialDates.from ? "-from-" + financialDates.from : "")
       + (financialDates.to ? (reportType === "profit-loss" ? "-through-" : "-as-of-") + financialDates.to : "")
-      + (activeExclusions.length ? "-filtered" : "") + ".csv";
+      + (activeExclusions.length ? "-filtered" : "") + (groupReportAccounts ? "-by-account-type" : "") + ".csv";
     await downloadReportCsv("/api/modules/finance/reports/turnover.csv?" + params, filename);
   }
 
@@ -526,8 +543,14 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const reportAccounts = useMemo(() => reportType === "balance-sheet" ? trialBalance.filter((row) => ["asset", "liability", "equity"].includes(row.accountType)) : reportType === "profit-loss" ? trialBalance.filter((row) => ["income", "expense"].includes(row.accountType)) : trialBalance, [trialBalance, reportType]);
   const hiddenAccounts = hiddenReportAccounts[reportType] ?? [];
   const visibleReportAccounts = reportAccounts.filter((account) => !hiddenAccounts.includes(account.id));
+  const financialAccountGroups = groupReportAccounts ? groupFinancialReportAccounts(visibleReportAccounts) : [];
   const activeExclusions = reportAccounts.filter((account) => hiddenAccounts.includes(account.id)).map((account) => account.id);
   const statementMoney = new Intl.NumberFormat(language, { style: "currency", currency: bootstrap.currency, minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function renderFinancialAccount(item: FinancialReportAccount) {
+    return <tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{item.accountType}</td>
+      <td>{formatLedgerCents(item.debitCents, statementMoney)}</td><td>{formatLedgerCents(item.creditCents, statementMoney)}</td><td>{formatLedgerCents(item.netCents, statementMoney)}</td></tr>;
+  }
+
   const reportTitle = reportType === "balance-sheet" ? "Balance sheet" : reportType === "profit-loss" ? "Profit and loss" : t("Trial balance");
   const tabs: Array<{ id: Tab; label: string; icon: typeof BookOpenCheck }> = [{ id: "transactions", label: t("Transactions"), icon: BookOpenCheck }, { id: "accounts", label: t("Accounts"), icon: WalletCards }, { id: "donors", label: t("Donors"), icon: Users }, { id: "budgets", label: t("Budgets"), icon: CircleDollarSign }, ...(canManage ? [{ id: "accounting-years" as const, label: "Accounting years", icon: FileText }] : []), { id: "bank-statements", label: "Bank statements", icon: Landmark }, { id: "receipts", label: "Donation receipts", icon: FileText }, { id: "reports", label: t("Reports"), icon: FileText }];
 
@@ -587,6 +610,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         <label>{reportType === "profit-loss" ? "Through" : "As of"}<input type="date" value={financialDates.to}
           min={financialYear?.startDate.slice(0, 10)} max={financialYear?.endDate.slice(0, 10)}
           onChange={(event) => changeFinancialDates({ ...financialDates, to: event.target.value })} /></label>
+        <label><input type="checkbox" checked={groupReportAccounts} onChange={(event) => setGroupReportAccounts(event.target.checked)} />Group by account type</label>
         {(financialDates.from || financialDates.to) && <button className="button button-secondary" type="button"
           onClick={() => changeFinancialDates(standardFinancialDates)}>Use full accounting year</button>}
       </div>
@@ -595,8 +619,13 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         : !currentFinancialReport && <p role="status">Loading report…</p>}
       {reportAccounts.length > 0 && <FinanceReportAccountFilter key={departmentId + ":" + reportType} accounts={reportAccounts}
       hiddenIds={activeExclusions} onChange={(ids) => setHiddenReportAccounts((current) => ({ ...current, [reportType]: ids }))} />}
-      {visibleReportAccounts.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Account code")}</th><th>{t("Name")}</th><th>Class</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Net (debit − credit)</th></tr></thead><tbody>{visibleReportAccounts.map((item) => <tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{item.accountType}</td>
-        <td>{formatLedgerCents(item.debitCents, statementMoney)}</td><td>{formatLedgerCents(item.creditCents, statementMoney)}</td><td>{formatLedgerCents(item.netCents, statementMoney)}</td></tr>)}</tbody></table></div> : currentFinancialReport && <p className="finance-empty">{activeExclusions.length ? "All accounts are hidden." : "No accounts match this report."}</p>}<div className="finance-section-heading"><h3>Cost-center statement · {year}</h3>{canManage && <button className="button button-secondary" type="button" onClick={() => void downloadReportCsv("/api/modules/finance/reports/cost-center-statement.csv?year=" + encodeURIComponent(year), "finance-cost-centers-" + year + ".csv")}><ArrowDownToLine size={15} />{exportFormat === "pdf" ? "Download PDF" : exportFormat === "html" ? "Download printable document" : exportFormat === "xlsx" ? "Export XLSX" : "Export CSV"}</button>}</div>{costCenterReport.length > 0 && <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>Code</th><th>{t("Cost center")}</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Transactions</th></tr></thead><tbody>{costCenterReport.map((item) => <tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{money(item.debitCents, bootstrap.currency)}</td><td>{money(item.creditCents, bootstrap.currency)}</td><td>{item.transactionCount > 0 ? <button className="finance-text-button" type="button"
+      {visibleReportAccounts.length ? <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Account code")}</th><th>{t("Name")}</th><th>Class</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Net (debit − credit)</th></tr></thead>{groupReportAccounts ? financialAccountGroups.map(([accountType, group]) => <tbody key={accountType}>
+        <tr><th scope="rowgroup" colSpan={3}>{financialAccountTypeLabels[accountType] ?? accountType}</th>
+          <td><strong>{formatLedgerCents(String(group.debit), statementMoney)}</strong></td>
+          <td><strong>{formatLedgerCents(String(group.credit), statementMoney)}</strong></td>
+          <td><strong>{formatLedgerCents(String(group.net), statementMoney)}</strong></td></tr>
+        {group.accounts.map(renderFinancialAccount)}
+      </tbody>) : <tbody>{visibleReportAccounts.map(renderFinancialAccount)}</tbody>}</table></div> : currentFinancialReport && <p className="finance-empty">{activeExclusions.length ? "All accounts are hidden." : "No accounts match this report."}</p>}<div className="finance-section-heading"><h3>Cost-center statement · {year}</h3>{canManage && <button className="button button-secondary" type="button" onClick={() => void downloadReportCsv("/api/modules/finance/reports/cost-center-statement.csv?year=" + encodeURIComponent(year), "finance-cost-centers-" + year + ".csv")}><ArrowDownToLine size={15} />{exportFormat === "pdf" ? "Download PDF" : exportFormat === "html" ? "Download printable document" : exportFormat === "xlsx" ? "Export XLSX" : "Export CSV"}</button>}</div>{costCenterReport.length > 0 && <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>Code</th><th>{t("Cost center")}</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Transactions</th></tr></thead><tbody>{costCenterReport.map((item) => <tr key={item.id}><td>{item.code}</td><td>{item.name}</td><td>{money(item.debitCents, bootstrap.currency)}</td><td>{money(item.creditCents, bootstrap.currency)}</td><td>{item.transactionCount > 0 ? <button className="finance-text-button" type="button"
         onClick={() => openCostCenterTransactions(item.id)} aria-label={"Open transactions for " + item.name}>{item.transactionCount}</button> : 0}</td></tr>)}</tbody></table></div>}<div className="finance-statement-toolbar"><h3>{t("Account statement")}</h3><select aria-label={t("Choose account")} value={statementAccount} onChange={(event) => setStatementAccount(event.target.value)}><option value="">{t("Choose account")}</option>{bootstrap.accounts.map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select><label>From<input type="date" value={statementFrom} onChange={(event) => { setStatementFrom(event.target.value); setStatement([]); }} /></label><label>To<input type="date" value={statementTo} onChange={(event) => { setStatementTo(event.target.value); setStatement([]); }} /></label><button className="button button-secondary" type="button" onClick={() => void openStatement()} disabled={!statementAccount || Boolean(statementFrom && statementTo && statementFrom > statementTo)}>{t("Account statement")}</button>{canManage && <button className="button button-secondary" type="button" onClick={() => void exportStatementCsv()} disabled={!statementAccount || Boolean(statementFrom && statementTo && statementFrom > statementTo)}><ArrowDownToLine size={15} />{exportFormat === "pdf" ? "Download PDF" : exportFormat === "html" ? "Download printable document" : exportFormat === "xlsx" ? "Export XLSX" : "Export CSV"}</button>}</div>{statement.length > 0 && <div className="finance-table-wrap"><table className="finance-table"><thead><tr><th>{t("Booking date")}</th><th>{t("Receipt number")}</th><th>{t("Booking text")}</th><th>{t("Debit")}</th><th>{t("Credit")}</th><th>Balance</th></tr></thead><tbody>{statement.map((line, index) => <tr key={`${line.id}-${index}`}><td>{new Date(`${line.bookingDate}T00:00:00`).toLocaleDateString()}</td><td>{line.receiptNumber}</td><td>{line.lineText || line.bookingText}</td><td>{money(line.debitCents, bootstrap.currency)}</td><td>{money(line.creditCents, bootstrap.currency)}</td><td>{money(line.runningBalanceCents, bootstrap.currency)}</td></tr>)}</tbody></table></div>}</section>}
 
     {tab === "reports" && <FinancePeriodTurnover key={departmentId + ":" + year} departmentId={departmentId}
