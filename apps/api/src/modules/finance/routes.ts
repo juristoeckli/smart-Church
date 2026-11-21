@@ -124,6 +124,8 @@ function statementAmount(value: string): number | null {
   return Number.isSafeInteger(cents) && cents !== 0 ? cents : null;
 }
 
+const transactionDonorIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const transactionDonorFilter = "AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM finance_transaction_lines donor_line JOIN finance_donors donor ON donor.department_id=donor_line.department_id AND donor.id=donor_line.donor_id WHERE donor_line.department_id=t.department_id AND donor_line.transaction_id=t.id AND donor.id=$6))";
 type TransactionOrderQuery = { sort?: string; direction?: string };
 function transactionOrder(query: TransactionOrderQuery, forExport: boolean) {
   const group = forExport ? " OVER (PARTITION BY t.id)" : "";
@@ -603,7 +605,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply, `finance-donor-statement-${request.params.id}`, header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.donor_name, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.line_text, row.amount_cents, row.currency_code]));
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; page?: string; pageSize?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; donorId?: string; page?: string; pageSize?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to))) return reply.code(400).send({ error: "Choose valid start and end dates." });
     const from = request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null;
@@ -613,13 +615,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const q = cleanText(request.query.q ?? "").slice(0, 100);
     const page = Math.max(1, Math.min(100_000, Number.parseInt(request.query.page ?? "1", 10) || 1));
     const pageSize = Math.max(10, Math.min(100, Number.parseInt(request.query.pageSize ?? "50", 10) || 50));
-    const filters = [departmentId, from, to, year, q];
+    const donorId = request.query.donorId;
+    if (donorId !== undefined && (typeof donorId !== "string" || !transactionDonorIdPattern.test(donorId))) {
+      return reply.code(400).send({ error: "Choose a valid Finance donor." });
+    }
+    const filters = [departmentId, from, to, year, q, donorId ?? null];
     const count = await pool!.query<{ total: string }>(`SELECT count(*)::text AS total FROM finance_transactions t
-      WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%')`, filters);
+      WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ${transactionDonorFilter}`, filters);
     const result = await pool!.query(`SELECT t.id,t.booking_date AS "bookingDate",t.accounting_year AS "accountingYear",t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",t.status,t.reverses_transaction_id AS "reversesTransactionId",t.created_at AS "createdAt",COALESCE(sum(l.debit_cents),0)::text AS "debitCents",COALESCE(sum(l.credit_cents),0)::text AS "creditCents",count(l.id)::int AS "lineCount"
       FROM finance_transactions t LEFT JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
-      WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%')
-      GROUP BY t.id ORDER BY ${transactionOrder(request.query, false)} LIMIT $6 OFFSET $7`, [...filters, pageSize, (page - 1) * pageSize]);
+      WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ${transactionDonorFilter}
+      GROUP BY t.id ORDER BY ${transactionOrder(request.query, false)} LIMIT $7 OFFSET $8`, [...filters, pageSize, (page - 1) * pageSize]);
     return { items: result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) })), total: Number(count.rows[0]?.total ?? 0), page, pageSize };
   });
 
@@ -805,11 +811,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply, `finance-turnover-${report}-${year}`, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; donorId?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {
     if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid date range." });
-    const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,a.code AS account_code,a.name AS account_name,c.code AS cost_center_code,d.display_name AS donor_name,l.debit_cents,l.credit_cents,l.line_text FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id LEFT JOIN finance_cost_centers c ON c.department_id=l.department_id AND c.id=l.cost_center_id LEFT JOIN finance_donors d ON d.department_id=l.department_id AND d.id=l.donor_id WHERE t.department_id=$1 AND t.status='posted' AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ORDER BY ${transactionOrder(request.query, true)}`, [departmentId, request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null, request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null, request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null, cleanText(request.query.q ?? "").slice(0, 100)]);
+    const donorId = request.query.donorId;
+    if (donorId !== undefined && (typeof donorId !== "string" || !transactionDonorIdPattern.test(donorId))) {
+      return reply.code(400).send({ error: "Choose a valid Finance donor." });
+    }
+    const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,a.code AS account_code,a.name AS account_name,c.code AS cost_center_code,d.display_name AS donor_name,l.debit_cents,l.credit_cents,l.line_text FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id LEFT JOIN finance_cost_centers c ON c.department_id=l.department_id AND c.id=l.cost_center_id LEFT JOIN finance_donors d ON d.department_id=l.department_id AND d.id=l.donor_id WHERE t.department_id=$1 AND t.status='posted' AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ${transactionDonorFilter} ORDER BY ${transactionOrder(request.query, true)}`, [departmentId, request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null, request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null, request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null, cleanText(request.query.q ?? "").slice(0, 100), donorId ?? null]);
     const header = ["booking_date", "accounting_year", "receipt_number", "booking_text", "account_code", "account_name", "cost_center_code", "donor_name", "debit_cents", "credit_cents", "line_text"];
     return sendFinanceExport(request, reply, "finance-transactions", header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.donor_name, row.debit_cents, row.credit_cents, row.line_text]));
   });
