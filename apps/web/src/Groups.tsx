@@ -9,7 +9,8 @@ type GroupMeeting = { id: string; date: string; title: string; attendeeCount: nu
 type AttendanceEntry = { contactId: string; firstName: string; lastName: string; status: "present" | "absent" | "excused" };
 type GroupJoinRequest = { id: string; groupId: string; firstName: string; lastName: string; email: string; status: "pending"; createdAt: string };
 type GroupStatusFilter = "all" | GroupLifecycleStatus;
-type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; createdAt: string; updatedAt: string };
+type GroupSortOrder = "name_asc" | "name_desc" | "members_desc" | "start_desc";
+type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sortOrder?: GroupSortOrder; createdAt: string; updatedAt: string };
 
 function csvCell(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
@@ -20,6 +21,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [directorySearch, setDirectorySearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<GroupStatusFilter>("all");
   const [groupTypeFilter, setGroupTypeFilter] = useState("");
+  const [sortOrder, setSortOrder] = useState<GroupSortOrder>("name_asc");
   const [savedViews, setSavedViews] = useState<SavedGroupView[]>([]);
   const [selectedSavedViewId, setSelectedSavedViewId] = useState("");
   const [savedViewName, setSavedViewName] = useState("");
@@ -53,8 +55,14 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     const normalized = directorySearch.trim().toLocaleLowerCase();
     return groups.filter((group) => {
       return (statusFilter === "all" || group.status === statusFilter) && (!groupTypeFilter || group.groupType === groupTypeFilter) && (!normalized || `${group.name} ${group.groupType ?? ""}`.toLocaleLowerCase().includes(normalized));
+    }).sort((left, right) => {
+      const compareName = left.name.localeCompare(right.name);
+      if (sortOrder === "name_desc") return -compareName;
+      if (sortOrder === "members_desc") return right.memberCount - left.memberCount || compareName;
+      if (sortOrder === "start_desc") return (right.startsOn ?? "").localeCompare(left.startsOn ?? "") || compareName;
+      return compareName;
     });
-  }, [directorySearch, groupTypeFilter, groups, statusFilter]);
+  }, [directorySearch, groupTypeFilter, groups, sortOrder, statusFilter]);
   const availableGroupTypes = useMemo(() => [...new Set([
     ...groups.map((group) => group.groupType?.trim()).filter((type): type is string => Boolean(type)),
     ...savedViews.map((view) => view.groupTypeFilter?.trim()).filter((type): type is string => Boolean(type)),
@@ -91,7 +99,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   useEffect(() => {
     const controller = new AbortController();
     void loadGroups(controller.signal);
-    setDirectorySearch(""); setStatusFilter("all"); setGroupTypeFilter(""); setSavedViews([]); setSelectedSavedViewId(""); setSavedViewName("");
+    setDirectorySearch(""); setStatusFilter("all"); setGroupTypeFilter(""); setSortOrder("name_asc"); setSavedViews([]); setSelectedSavedViewId(""); setSavedViewName("");
     void fetch("/api/groups/views", { headers: { "x-department-id": departmentId }, signal: controller.signal })
       .then(async (response) => {
         const result = await response.json() as SavedGroupView[] | { error?: string };
@@ -126,7 +134,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     if (!savedViewName.trim()) { setError("Enter a name for this saved view."); return; }
     setSaving(true); setError(""); setFeedback("");
     try {
-      const response = await fetch("/api/groups/views", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ name: savedViewName.trim(), searchText: directorySearch, statusFilter, groupTypeFilter }) });
+      const response = await fetch("/api/groups/views", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ name: savedViewName.trim(), searchText: directorySearch, statusFilter, groupTypeFilter, sortOrder }) });
       const result = await response.json() as SavedGroupView | { error?: string };
       if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save this view." : "Could not save this view.");
       setSavedViews((current) => [...current.filter((view) => view.id !== result.id), result].sort((a, b) => a.name.localeCompare(b.name)));
@@ -150,7 +158,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
 
   function applySavedView(id: string) {
     const view = savedViews.find((item) => item.id === id);
-    setSelectedSavedViewId(id); setSavedViewName(view?.name ?? ""); setDirectorySearch(view?.searchText ?? ""); setStatusFilter(view?.statusFilter ?? "all"); setGroupTypeFilter(view?.groupTypeFilter ?? "");
+    setSelectedSavedViewId(id); setSavedViewName(view?.name ?? ""); setDirectorySearch(view?.searchText ?? ""); setStatusFilter(view?.statusFilter ?? "all"); setGroupTypeFilter(view?.groupTypeFilter ?? ""); setSortOrder(view?.sortOrder ?? "name_asc");
   }
 
   useEffect(() => {
@@ -356,7 +364,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     <section className="page-heading"><div><div className="eyebrow">{translate("groups.eyebrow")}</div><h1>{translate("groups.title")}</h1><p className="page-subtitle">{translate("groups.subtitle")}</p></div>{canManage && <button className="button button-primary" type="button" onClick={() => { setSelectedId(""); setName(""); setDescription(""); setGroupType(""); setGroupStatus("active"); setStartsOn(""); setEndsOn(""); setEditing(false); }}><Plus size={17} />{" "}{translate("groups.new")}</button>}</section>
     <section className="community-groups-layout">
       <section className="directory-card community-group-list"><div className="directory-heading"><div><h2>{translate("groups.listTitle")}</h2><p>{(visibleGroups.length === 1 ? translate("groups.countOne") : translate("groups.count")).replace("{count}", String(visibleGroups.length))}</p></div></div>
-        <div className="community-group-directory-tools"><label className="search-field"><Search size={15} /><input type="search" value={directorySearch} onChange={(event) => { setDirectorySearch(event.target.value); setSelectedSavedViewId(""); }} placeholder="Search groups by name or type" aria-label="Search groups by name or type" /></label><label className="community-group-status-filter">Group status<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as GroupStatusFilter); setSelectedSavedViewId(""); }}><option value="all">All statuses</option>{availableStatuses.map((status) => <option key={status} value={status}>{status[0].toUpperCase() + status.slice(1)}</option>)}</select></label><label className="community-group-status-filter">Group type<select value={groupTypeFilter} onChange={(event) => { setGroupTypeFilter(event.target.value); setSelectedSavedViewId(""); }}><option value="">All types</option>{availableGroupTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label></div>
+        <div className="community-group-directory-tools"><label className="search-field"><Search size={15} /><input type="search" value={directorySearch} onChange={(event) => { setDirectorySearch(event.target.value); setSelectedSavedViewId(""); }} placeholder="Search groups by name or type" aria-label="Search groups by name or type" /></label><label className="community-group-status-filter">Group status<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as GroupStatusFilter); setSelectedSavedViewId(""); }}><option value="all">All statuses</option>{availableStatuses.map((status) => <option key={status} value={status}>{status[0].toUpperCase() + status.slice(1)}</option>)}</select></label><label className="community-group-status-filter">Group type<select value={groupTypeFilter} onChange={(event) => { setGroupTypeFilter(event.target.value); setSelectedSavedViewId(""); }}><option value="">All types</option>{availableGroupTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label className="community-group-status-filter">Sort groups<select value={sortOrder} onChange={(event) => { setSortOrder(event.target.value as GroupSortOrder); setSelectedSavedViewId(""); }}><option value="name_asc">Name A–Z</option><option value="name_desc">Name Z–A</option><option value="members_desc">Most members</option><option value="start_desc">Newest start date</option></select></label></div>
         <div className="community-saved-group-views"><select aria-label="Load a saved group view" value={selectedSavedViewId} onChange={(event) => applySavedView(event.target.value)}><option value="">Saved views</option>{savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select><input value={savedViewName} maxLength={80} onChange={(event) => setSavedViewName(event.target.value)} placeholder="View name" aria-label="Saved view name" /><button className="button button-secondary" type="button" disabled={saving || !savedViewName.trim()} onClick={() => void saveDirectoryView()}>{saving ? "Saving..." : "Save view"}</button>{selectedSavedViewId && <button className="button button-secondary" type="button" disabled={saving} onClick={() => void deleteSavedView()}>Delete</button>}</div>
         {loading ? <p className="community-empty">{translate("groups.loading")}</p> : visibleGroups.length ? <div className="community-group-options">{visibleGroups.map((group) => <button type="button" key={group.id} className={`community-group-option${selectedId === group.id ? " is-active" : ""}`} onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}><span className="community-group-icon"><ContactRound size={17} /></span><span><strong>{group.name}</strong><small>{group.groupType ? `${group.groupType} · ` : ""}{group.memberCount} {group.memberCount === 1 ? translate("groups.person") : translate("groups.people")} · {group.status}</small></span></button>)}</div> : <p className="community-empty">{((directorySearch || statusFilter !== "all" || groupTypeFilter) ? "No groups match these filters." : translate("groups.none"))}</p>}
       </section>

@@ -21,3 +21,12 @@
 .wiki-page-gallery .wiki-page-item{height:100%;min-height:120px;padding:.7rem 2rem .7rem .7rem;border:1px solid var(--border,#d9e1ea);overflow-wrap:anywhere}
 .wiki-page-gallery-icon{color:var(--accent,#1459bd);margin-bottom:.3rem}
 @media(min-width:1200px){.wiki-page-gallery-layout{grid-template-columns:minmax(175px,210px) minmax(330px,400px) minmax(0,1fr)}}
+.wiki-index-controls{display:flex;flex-wrap:wrap;align-items:baseline;gap:.5rem 1rem;margin-bottom:.65rem}
+.wiki-index-controls details label{display:block;margin-top:.3rem}
+.wiki-index-controls summary{cursor:pointer}
+.wiki-index-scroll{overflow-x:auto}
+.wiki-index table{width:100%;border-collapse:collapse;font-size:.88rem}
+.wiki-index th,.wiki-index td{padding:.45rem;text-align:left;border-bottom:1px solid var(--border,#d9e1ea)}
+.wiki-index th{white-space:nowrap}
+.wiki-index-title{font:inherit;font-weight:600;color:inherit;text-align:left;overflow-wrap:anywhere;background:transparent;border:0;border-radius:.25rem;padding:.2rem;cursor:pointer}
+.wiki-index-title.wiki-page-item-selected{background:var(--accent-soft,#e8f0ff)}

@@ -80,11 +80,28 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const canUpload = canManageSite || (department.modulePermissions?.["file-storage"] ?? []).includes("manage");
   const canSearchPeople = department.role === "site_admin" || (department.permissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
   const flatCategories = useMemo(() => categoryTree(categories), [categories]);
-  const [pageLayout, setPageLayout] = useState<"list" | "gallery">("list");
+  const [pageLayout, setPageLayout] = useState<"list" | "gallery" | "table">("list");
+  const [tableSort, setTableSort] = useState("updated-desc");
+  const [tableColumns, setTableColumns] = useState({ category: true, updated: true, editor: false, status: false });
   const categoryNames = useMemo(() => new Map(categories.map((category) => [category.id, category.name])), [categories]);
   const visiblePages = useMemo(() => pages.filter((page) => !selectedCategoryId || page.categoryId === selectedCategoryId), [pages, selectedCategoryId]);
+  const tablePages = useMemo(() => [...visiblePages].sort((a, b) => {
+    if (tableSort === "title") return a.title.localeCompare(b.title);
+    if (tableSort === "category") return (categoryNames.get(a.categoryId) ?? "").localeCompare(categoryNames.get(b.categoryId) ?? "") || a.title.localeCompare(b.title);
+    const updated = Date.parse(a.updatedAt) - Date.parse(b.updatedAt);
+    return (tableSort === "updated-asc" ? updated : -updated) || a.title.localeCompare(b.title);
+  }), [visiblePages, tableSort, categoryNames]);
   const bulkIds = visiblePages.filter((page) => page.status === "active" && bulkPageIds.includes(page.id)).map((page) => page.id);
   useEffect(() => { setBulkPageIds([]); setBulkAudience(""); setBulkGroupId(""); setBulkCategoryId(""); }, [departmentId, selectedCategoryId, search, status]);
+
+  function pageSelection(page: WikiPage) {
+    if (!canManage || status !== "active" || editing || creating || page.status !== "active") return null;
+    const selected = bulkIds.includes(page.id);
+    return <input type="checkbox" aria-label={`Select ${page.title}`} checked={selected} disabled={busy || (!selected && bulkIds.length >= 100)} onChange={(event) => {
+      const checked = event.target.checked;
+      setBulkPageIds((ids) => checked ? [...ids, page.id] : ids.filter((id) => id !== page.id));
+    }} />;
+  }
 
   function audienceLabel(value: AudienceSnapshot) {
     if (value.audience === "group") return groups.find((group) => group.id === value.groupId)?.name ?? "Restricted group";
@@ -389,7 +406,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     return <div className="wiki-category-row" key={category.id}><button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} style={{ paddingLeft: `${.6 + Math.min(depth, 6) * .8}rem` }} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
   }
 
-  return <div className={`wiki-page ${pageLayout === "gallery" ? "wiki-page-gallery-layout" : ""}`}>
+  return <div className={`wiki-page ${pageLayout !== "list" ? "wiki-page-gallery-layout" : ""}`}>
     <aside className="wiki-panel" aria-label="Wiki categories">
       <div className="wiki-panel-head"><h2>Categories</h2><div className="wiki-actions"><select className="wiki-select" aria-label="Category status" value={categoryStatus} onChange={(event) => { setCategoryStatus(event.target.value as "active" | "archived"); setSelectedCategoryId(""); }}><option value="active">Active</option><option value="archived">Archived</option></select>{canManage && categoryStatus === "active" && <button className="button button-secondary" type="button" title="Create category" onClick={() => setShowNewCategory(true)}><Plus size={15} /></button>}</div></div>
       {categoryStatus === "active" && <button type="button" className={`wiki-category-item ${!selectedCategoryId ? "wiki-category-selected" : ""}`} onClick={() => setSelectedCategoryId("")}>All pages</button>}
@@ -419,12 +436,46 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
       </form>}
       <div className="wiki-page-layout" role="group" aria-label="Wiki page layout">
         <button className="button button-secondary" type="button" aria-pressed={pageLayout === "list"} onClick={() => setPageLayout("list")}>List</button>
+        <button className="button button-secondary" type="button" aria-pressed={pageLayout === "table"} onClick={() => setPageLayout("table")}>Table</button>
         <button className="button button-secondary" type="button" aria-pressed={pageLayout === "gallery"} onClick={() => setPageLayout("gallery")}>Gallery</button>
       </div>
-      <div className={pageLayout === "gallery" ? "wiki-page-list wiki-page-gallery" : "wiki-page-list"}>{visiblePages.map((page) => <div className="wiki-bulk-page-row" key={page.id}>{canManage && status === "active" && !editing && !creating && <input type="checkbox" aria-label={`Select ${page.title}`} checked={bulkIds.includes(page.id)} disabled={busy || (!bulkIds.includes(page.id) && bulkIds.length >= 100)} onChange={(event) => {
-        const checked = event.target.checked;
-        setBulkPageIds((ids) => checked ? [...ids, page.id] : ids.filter((id) => id !== page.id));
-      }} />}<button type="button" className={`wiki-page-item ${selectedPage?.id === page.id ? "wiki-page-item-selected" : ""} ${page.status === "archived" ? "wiki-page-archived" : ""}`} aria-current={selectedPage?.id === page.id} onClick={() => { setEditing(false); void openPage(page.id); }}>{pageLayout === "gallery" && <FileText className="wiki-page-gallery-icon" size={24} aria-hidden="true" />}<strong>{page.isHomepage ? "⌂ " : ""}{page.title}</strong>{pageLayout === "gallery" && <small>{categoryNames.get(page.categoryId) ?? "Wiki page"}{page.status === "archived" ? " · Archived" : ""}{page.redirectPageId ? " · Redirect" : ""}</small>}<small>{humanDate(page.updatedAt)}{page.editorName ? ` · ${page.editorName}` : ""}</small></button></div>)}</div>
+      {pageLayout === "table" ? <div className="wiki-index">
+        <div className="wiki-index-controls">
+          <label>Sort by <select className="wiki-select" value={tableSort} onChange={(event) => setTableSort(event.target.value)}>
+            <option value="updated-desc">Most recently updated</option>
+            <option value="updated-asc">Least recently updated</option>
+            <option value="title">Title</option>
+            <option value="category">Category</option>
+          </select></label>
+          <details><summary>Columns</summary>
+            {(["category", "updated", "editor", "status"] as const).map((column) => <label key={column}>
+              <input type="checkbox" checked={tableColumns[column]} onChange={(event) => {
+                const checked = event.target.checked;
+                setTableColumns((columns) => ({ ...columns, [column]: checked }));
+              }} /> {({ category: "Category", updated: "Updated", editor: "Editor", status: "Status" })[column]}
+            </label>)}
+          </details>
+        </div>
+        {tablePages.length > 0 && <div className="wiki-index-scroll"><table aria-label="Wiki page index">
+          <thead><tr>
+            {canManage && status === "active" && !editing && !creating && <th scope="col">Select</th>}
+            <th scope="col">Title</th>
+            {tableColumns.category && <th scope="col">Category</th>}
+            {tableColumns.updated && <th scope="col">Updated</th>}
+            {tableColumns.editor && <th scope="col">Editor</th>}
+            {tableColumns.status && <th scope="col">Status</th>}
+          </tr></thead>
+          <tbody>{tablePages.map((page) => <tr key={page.id}>
+            {canManage && status === "active" && !editing && !creating && <td>{pageSelection(page)}</td>}
+            <td><button type="button" className={`wiki-index-title ${selectedPage?.id === page.id ? "wiki-page-item-selected" : ""}`} aria-current={selectedPage?.id === page.id} onClick={() => { setEditing(false); void openPage(page.id); }}>{page.isHomepage ? "⌂ " : ""}{page.title}</button></td>
+            {tableColumns.category && <td>{categoryNames.get(page.categoryId) ?? "—"}</td>}
+            {tableColumns.updated && <td>{humanDate(page.updatedAt)}</td>}
+            {tableColumns.editor && <td>{page.editorName ?? "—"}</td>}
+            {tableColumns.status && <td>{page.status === "archived" ? "Archived" : page.redirectPageId ? "Redirect" : "Active"}</td>}
+          </tr>)}</tbody>
+        </table></div>}
+      </div> :
+      <div className={pageLayout === "gallery" ? "wiki-page-list wiki-page-gallery" : "wiki-page-list"}>{visiblePages.map((page) => <div className="wiki-bulk-page-row" key={page.id}>{pageSelection(page)}<button type="button" className={`wiki-page-item ${selectedPage?.id === page.id ? "wiki-page-item-selected" : ""} ${page.status === "archived" ? "wiki-page-archived" : ""}`} aria-current={selectedPage?.id === page.id} onClick={() => { setEditing(false); void openPage(page.id); }}>{pageLayout === "gallery" && <FileText className="wiki-page-gallery-icon" size={24} aria-hidden="true" />}<strong>{page.isHomepage ? "⌂ " : ""}{page.title}</strong>{pageLayout === "gallery" && <small>{categoryNames.get(page.categoryId) ?? "Wiki page"}{page.status === "archived" ? " · Archived" : ""}{page.redirectPageId ? " · Redirect" : ""}</small>}<small>{humanDate(page.updatedAt)}{page.editorName ? ` · ${page.editorName}` : ""}</small></button></div>)}</div>}
       {!visiblePages.length && <p className="wiki-empty">{search ? "No pages match your search." : "No pages in this view."}</p>}
     </aside>
 
