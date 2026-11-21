@@ -38,7 +38,7 @@ function encrypt(value: string, purpose: "churchtools" | "elvanto") {
 }
 
 function credentialPurpose(column: string): "churchtools" | "elvanto" | null {
-  if (column === "encrypted_login_token" || column === "encrypted_snapshot") return "churchtools";
+  if (column === "encrypted_login_token" || column === "encrypted_snapshot" || column === "encrypted_custom_snapshot") return "churchtools";
   if (column === "encrypted_api_key" || column === "encrypted_payload") return "elvanto";
   return null;
 }
@@ -188,7 +188,7 @@ export function registerChurchToolsSyncReplication(context: ModuleServerContext)
       for (const name of order) {
         const table = snapshot.tables.find((item) => item.name === name)!;
         for (const row of table.rows) {
-          for (const column of ["encrypted_login_token", "encrypted_api_key", "encrypted_payload", "encrypted_snapshot"]) {
+          for (const column of table.columns.filter(credentialPurpose)) {
             const value = row[column];
             if (typeof value === "string" && value) {
               const purpose = credentialPurpose(column)!;

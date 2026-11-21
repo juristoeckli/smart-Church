@@ -1,5 +1,17 @@
 import assert from "node:assert/strict";
-import { normalizeChurchToolsGroupMembership, readChurchToolsGroupMemberships, readChurchToolsGroupRoles } from "../src/modules/churchtools-sync/group-membership.ts";
+import { registerHooks } from "node:module";
+
+const hook = registerHooks({
+  resolve(specifier, context, next) {
+    try { return next(specifier, context); }
+    catch (error) {
+      if (error.code === "ERR_MODULE_NOT_FOUND" && specifier.startsWith("./") && specifier.endsWith(".js")) return next(specifier.slice(0, -3) + ".ts", context);
+      throw error;
+    }
+  },
+});
+const { normalizeChurchToolsGroupMembership, readChurchToolsGroupMemberships, readChurchToolsGroupRoles } = await import("../src/modules/churchtools-sync/group-membership.ts");
+hook.deregister();
 
 const roles = readChurchToolsGroupRoles({ data: [{ id: 1, name: " Leader " }, { id: 2, nameTranslated: "Participant" }], meta: { count: 2 } });
 assert.deepEqual([...roles], [["1", "Leader"], ["2", "Participant"]]);

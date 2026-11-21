@@ -1,4 +1,7 @@
 import type { PoolClient } from "pg";
+import { normalizeVisibleChurchToolsMembershipFields, type readChurchToolsMembershipFieldDefinitions } from "./group-membership-custom-fields.js";
+
+type FieldDefinitions = ReturnType<typeof readChurchToolsMembershipFieldDefinitions>;
 
 type SourceObject = Record<string, unknown>;
 const object = (value: unknown): SourceObject | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as SourceObject : undefined;
@@ -34,7 +37,7 @@ export function readChurchToolsGroupRoles(payload: unknown) {
 
 const membershipStatuses = { active: "active", waiting: "waitlist", requested: "paused", to_delete: "paused" } as const;
 
-export function normalizeChurchToolsGroupMembership(value: unknown, roles: ReadonlyMap<string, string>) {
+export function normalizeChurchToolsGroupMembership(value: unknown, roles: ReadonlyMap<string, string>, definitions?: FieldDefinitions) {
   const row = object(value);
   const person = object(row?.person);
   if (person?.icon === "user-shield") return null;
@@ -55,12 +58,13 @@ export function normalizeChurchToolsGroupMembership(value: unknown, roles: Reado
     registeredBySourceId: positiveId(row.registeredBy),
     roleChangedAt: timestamp(row.roleChangedDate), statusChangedAt: timestamp(row.statusChangedDate),
     customFieldCount: Array.isArray(row.fields) ? row.fields.length : 0,
+    ...(definitions ? { customFields: normalizeVisibleChurchToolsMembershipFields(row.fields, definitions) } : {}),
   };
 }
 
 export type ChurchToolsGroupMembership = NonNullable<ReturnType<typeof normalizeChurchToolsGroupMembership>>;
 
-export async function readChurchToolsGroupMemberships(readPage: (page: number, limit: number) => Promise<unknown>, roles: ReadonlyMap<string, string>) {
+export async function readChurchToolsGroupMemberships(readPage: (page: number, limit: number) => Promise<unknown>, roles: ReadonlyMap<string, string>, definitions?: FieldDefinitions) {
   const members: ChurchToolsGroupMembership[] = [];
   const sourceIds = new Set<string>();
   const personIds = new Set<string>();
@@ -86,7 +90,7 @@ export async function readChurchToolsGroupMemberships(readPage: (page: number, l
     expectedLastPage = lastPage;
     visibleRows += payload.data.length;
     for (const raw of payload.data) {
-      const detail = normalizeChurchToolsGroupMembership(raw, roles);
+      const detail = normalizeChurchToolsGroupMembership(raw, roles, definitions);
       if (!detail) { concealed += 1; continue; }
       if (sourceIds.has(detail.sourceId) || personIds.has(detail.sourcePersonId)) throw new Error("ChurchTools repeated a group membership. Run a new migration preview.");
       sourceIds.add(detail.sourceId);
@@ -103,18 +107,19 @@ export async function readChurchToolsGroupMemberships(readPage: (page: number, l
 
 export async function importChurchToolsMemberships(
   db: Pick<PoolClient, "query">, departmentId: string, instanceUrl: string, groupId: string, groupSourceId: string,
-  members: ChurchToolsGroupMembership[], encryptArchive: (value: string) => string,
+  members: ChurchToolsGroupMembership[], encryptArchive: (value: string) => string, includeCustomFields = false,
 ) {
   const configured = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [departmentId, instanceUrl]);
   if (!configured.rowCount) throw new Error("ChurchTools connection changed after preview.");
-  if (!members.length) return;
-  const payload = members.map((member) => ({
+  if (!members.length && !includeCustomFields) return;
+  const payload = members.map(({ customFields, ...member }) => ({
     source_id: member.sourceId, source_person_id: member.sourcePersonId, role: member.role, status: member.status,
     joined_on: member.joinedOn, encrypted_snapshot: encryptArchive(JSON.stringify(member)),
+    encrypted_custom_snapshot: includeCustomFields && customFields?.length ? encryptArchive(JSON.stringify(customFields)) : null,
   }));
-  await db.query(`WITH incoming AS (
+  const persisted = await db.query<{ source_id: string }>(`WITH incoming AS (
     SELECT member.*,COALESCE(linked.id,source.id) AS contact_id
-    FROM jsonb_to_recordset($5::jsonb) AS member(source_id text,source_person_id text,role text,status text,joined_on date,encrypted_snapshot text)
+    FROM jsonb_to_recordset($5::jsonb) AS member(source_id text,source_person_id text,role text,status text,joined_on date,encrypted_snapshot text,encrypted_custom_snapshot text)
     LEFT JOIN churchtools_migration_links link ON link.department_id=$1 AND link.area='person' AND link.source_id=member.source_person_id
     LEFT JOIN contacts linked ON linked.department_id=$1 AND linked.id=link.local_record_id
     LEFT JOIN contacts source ON source.department_id=$1 AND source.source_system='churchtools' AND source.source_id=member.source_person_id
@@ -138,15 +143,22 @@ export async function importChurchToolsMemberships(
   ), managed AS (
     SELECT contact_id FROM inserted UNION ALL SELECT contact_id FROM refreshed
   )
-  INSERT INTO churchtools_migration_membership_details
-    (department_id,instance_url,source_group_id,source_id,group_id,contact_id,encrypted_snapshot,last_role,last_status,last_joined_on)
-  SELECT $1,$2,$3,c.source_id,$4,c.contact_id,c.encrypted_snapshot,
+  INSERT INTO churchtools_migration_membership_details AS archive
+    (department_id,instance_url,source_group_id,source_id,group_id,contact_id,encrypted_snapshot,encrypted_custom_snapshot,last_role,last_status,last_joined_on)
+  SELECT $1,$2,$3,c.source_id,$4,c.contact_id,c.encrypted_snapshot,c.encrypted_custom_snapshot,
     CASE WHEN m.contact_id IS NOT NULL THEN c.role END,
     CASE WHEN m.contact_id IS NOT NULL THEN c.status END,
     CASE WHEN m.contact_id IS NOT NULL THEN c.joined_on END
   FROM candidates c LEFT JOIN managed m ON m.contact_id=c.contact_id
   ON CONFLICT (department_id,instance_url,source_group_id,source_id) DO UPDATE
     SET group_id=EXCLUDED.group_id,contact_id=EXCLUDED.contact_id,encrypted_snapshot=EXCLUDED.encrypted_snapshot,
-      last_role=EXCLUDED.last_role,last_status=EXCLUDED.last_status,last_joined_on=EXCLUDED.last_joined_on,imported_at=now()`,
-  [departmentId, instanceUrl, groupSourceId, groupId, JSON.stringify(payload)]);
+      encrypted_custom_snapshot=CASE WHEN $6 THEN EXCLUDED.encrypted_custom_snapshot ELSE archive.encrypted_custom_snapshot END,
+      last_role=EXCLUDED.last_role,last_status=EXCLUDED.last_status,last_joined_on=EXCLUDED.last_joined_on,imported_at=now()
+  RETURNING source_id`,
+  [departmentId, instanceUrl, groupSourceId, groupId, JSON.stringify(payload), includeCustomFields]);
+  if (includeCustomFields) {
+    await db.query(`UPDATE churchtools_migration_membership_details SET encrypted_custom_snapshot=NULL
+      WHERE department_id=$1 AND instance_url=$2 AND source_group_id=$3 AND encrypted_custom_snapshot IS NOT NULL AND source_id<>ALL($4::text[])`,
+    [departmentId, instanceUrl, groupSourceId, persisted.rows.map((member) => member.source_id)]);
+  }
 }

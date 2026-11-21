@@ -8,6 +8,7 @@ import { bookingSourceId, normalizeChurchToolsBookingHistory, type ChurchToolsBo
 import { churchToolsSongCrosswalkId, importChurchToolsSong, readChurchToolsSongCatalog, type ChurchToolsSong } from "./song-catalog.js";
 import { churchToolsAgendaSourceId, normalizeChurchToolsAgenda, resolveChurchToolsAgendaSongs } from "./event-agenda.js";
 import { importChurchToolsMemberships, readChurchToolsGroupMemberships, readChurchToolsGroupRoles, type ChurchToolsGroupMembership } from "./group-membership.js";
+import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCustomValue } from "./group-membership-custom-fields.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -1199,11 +1200,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     }
 
     if (integration === "churchtools") {
-    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean; includeEventAgendas?: boolean; includeMembershipDetails?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" }, includeEventAgendas: { type: "boolean" }, includeMembershipDetails: { type: "boolean" } } } } }, async (request, reply) => {
+    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean; includeEventAgendas?: boolean; includeMembershipDetails?: boolean; includeMembershipCustomFields?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" }, includeEventAgendas: { type: "boolean" }, includeMembershipDetails: { type: "boolean" }, includeMembershipCustomFields: { type: "boolean" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
       const config = await settings(dept); if (!config) return reply.code(404).send({ error: "Configure ChurchTools before preparing a migration." });
       if (request.body.startDate > request.body.endDate) return reply.code(400).send({ error: "The migration start date must be on or before its end date." });
+      if (request.body.includeMembershipCustomFields && !request.body.includeMembershipDetails) return reply.code(400).send({ error: "Select detailed memberships before including custom membership values." });
       running.add(dept);
       try {
         const token = decrypt(config.encrypted_login_token);
@@ -1243,8 +1245,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const memberResults = await mapConcurrent(groupsResult.items, 8, async (group) => {
           const sourceId = idOf(group); if (!sourceId) return { sourceId, members: [] as JsonObject[], complete: true };
           if (membershipRoles) {
+            const definitions = request.body.includeMembershipCustomFields
+              ? readChurchToolsMembershipFieldDefinitions(await get(config.instance_url, token, `groups/${encodeURIComponent(sourceId)}/memberfields`), sourceId)
+              : undefined;
             const result = await readChurchToolsGroupMemberships((page, limit) => get(config.instance_url, token,
-              `groups/${encodeURIComponent(sourceId)}/members?page=${page}&limit=${limit}`), membershipRoles);
+              `groups/${encodeURIComponent(sourceId)}/members?page=${page}&limit=${limit}`), membershipRoles, definitions);
             detailedMembershipCount += result.members.length + result.concealed;
             if (detailedMembershipCount > 50_000) throw new Error("ChurchTools returned more than 50,000 memberships for the location.");
             return { sourceId, members: [] as JsonObject[], complete: true, detailed: result.members, concealed: result.concealed };
@@ -1300,7 +1305,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const memberships = membersByGroup.get(idOf(group));
             const memberDetails = (memberships?.members ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
             return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), groupType: churchToolsGroupType(group), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails,
-              ...(memberships?.detailed ? { detailedMemberships: memberships.detailed, membershipInstanceUrl: config.instance_url } : {}),
+              ...(memberships?.detailed ? {
+                detailedMemberships: memberships.detailed, membershipInstanceUrl: config.instance_url,
+                includeMembershipCustomFields: request.body.includeMembershipCustomFields === true,
+              } : {}),
             };
           }),
           ...(songCatalog ?? []).map((song) => ({ area: "song", sourceId: song.sourceId, title: song.title, song, instanceUrl: config.instance_url })),
@@ -1384,9 +1392,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             if (!member.roleKnown) summary.unknownRoles += 1;
             if (member.plannedEndOn || member.comment || member.waitingListPosition) summary.withRestrictedDetails += 1;
             summary.customFields += member.customFieldCount;
+            summary.eligibleCustomFields += member.customFields?.length ?? 0;
+            summary.excludedCustomFields += member.customFieldCount - (member.customFields?.length ?? 0);
           }
           return summary;
-        }, { members: 0, concealed: 0, unknownRoles: 0, withRestrictedDetails: 0, customFields: 0 });
+        }, { members: 0, concealed: 0, unknownRoles: 0, withRestrictedDetails: 0, customFields: 0, eligibleCustomFields: 0, excludedCustomFields: 0 });
         return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, eventAgendas, groupMemberships, songCatalog: songCatalog && { songs: songCatalog.length, arrangements: songCatalog.reduce((total, song) => total + song.arrangements.length, 0), conflicts: records.filter((record) => record.action === "review_song_conflict").length }, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
@@ -1452,7 +1462,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               const memberDetails = Array.isArray(record.memberDetails) ? record.memberDetails.filter((item: unknown): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
               if (Array.isArray(record.detailedMemberships)) {
                 await importChurchToolsMemberships(db, dept, record.membershipInstanceUrl, linked.rows[0].id, sourceId,
-                  record.detailedMemberships as ChurchToolsGroupMembership[], (value) => encrypt(value, migrationArchiveKey));
+                  record.detailedMemberships as ChurchToolsGroupMembership[], (value) => encrypt(value, migrationArchiveKey), record.includeMembershipCustomFields === true);
               } else if (memberDetails.length) {
                 await db.query(`INSERT INTO group_members (group_id,contact_id,role,status,joined_on)
                   SELECT $1,COALESCE(link.local_record_id,c.id),left(COALESCE(NULLIF(trim(member.role),''),'Member'),80),
@@ -1561,8 +1571,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const dept = await department(request, reply, true); if (!dept) return reply;
       const offset = request.query.offset ?? 0;
       const query = request.query.query?.trim() ?? "";
-      const result = await pool!.query<{ encrypted_snapshot: string; group_name: string; person_name: string; source_group_id: string }>(`
-        SELECT archive.encrypted_snapshot,archive.source_group_id,church_group.name AS group_name,
+      const result = await pool!.query<{ encrypted_snapshot: string; group_name: string; person_name: string; source_group_id: string; has_custom_fields: boolean }>(`
+        SELECT archive.encrypted_snapshot,archive.source_group_id,church_group.name AS group_name,archive.encrypted_custom_snapshot IS NOT NULL AS has_custom_fields,
           concat_ws(' ',person.first_name,person.last_name) AS person_name
         FROM churchtools_migration_membership_details archive
         JOIN churchtools_sync_settings config ON config.department_id=archive.department_id AND config.instance_url=archive.instance_url
@@ -1575,10 +1585,30 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       return reply.header("Cache-Control", "private, no-store").send({
         entries: result.rows.slice(0, 20).map((row) => ({
           group: row.group_name, person: row.person_name, groupSourceId: row.source_group_id,
+          hasCustomFields: row.has_custom_fields,
           details: JSON.parse(decrypt(row.encrypted_snapshot, archiveKey)) as ChurchToolsGroupMembership,
         })),
         nextOffset: result.rows.length > 20 ? offset + 20 : null,
       });
+    });
+    routes.get<{ Querystring: { groupSourceId: string; membershipSourceId: string } }>("/api/modules/sync/churchtools/membership-details/custom", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["groupSourceId", "membershipSourceId"], properties: {
+        groupSourceId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, membershipSourceId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const result = await pool!.query<{ encrypted_custom_snapshot: string | null }>(`
+        SELECT archive.encrypted_custom_snapshot FROM churchtools_migration_membership_details archive
+        JOIN churchtools_sync_settings config ON config.department_id=archive.department_id AND config.instance_url=archive.instance_url
+        JOIN church_groups church_group ON church_group.department_id=archive.department_id AND church_group.id=archive.group_id
+        JOIN contacts person ON person.department_id=archive.department_id AND person.id=archive.contact_id
+        WHERE archive.department_id=$1 AND archive.source_group_id=$2 AND archive.source_id=$3`,
+      [dept, request.query.groupSourceId, request.query.membershipSourceId]);
+      const saved = result.rows[0];
+      if (!saved) return reply.code(404).send({ error: "ChurchTools membership details were not found." });
+      const customFields = saved.encrypted_custom_snapshot
+        ? JSON.parse(decrypt(saved.encrypted_custom_snapshot)) as ChurchToolsMembershipCustomValue[] : [];
+      return reply.header("Cache-Control", "private, no-store").send({ customFields });
     });
     routes.get<{ Querystring: { offset?: number } }>("/api/modules/sync/churchtools/booking-history", {
       schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 2147483647 } } } },
