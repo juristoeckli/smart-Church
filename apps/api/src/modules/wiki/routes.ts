@@ -280,12 +280,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { restored: true };
   });
 
-  app.get<{ Querystring: { search?: string; categoryId?: string; status?: string } }>("/api/modules/wiki/pages", async (request, reply) => {
+  app.get<{ Querystring: { search?: string; categoryId?: string; status?: string; hideRedirects?: string } }>("/api/modules/wiki/pages", async (request, reply) => {
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
     const status = isWikiManager(request) && request.query.status === "archived" ? "archived" : "active";
     const search = (request.query.search ?? "").trim().slice(0, 120);
-    const result = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,''::text AS content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.status=$2 AND ($3::uuid IS NULL OR page.category_id=$3) AND ($4='' OR page.title ILIKE '%'||$4||'%' OR ($5::boolean AND regexp_replace(page.content_html,'<[^>]*>',' ','g') ILIKE '%'||$4||'%')) AND ${pageReadCondition("page", 5, 6)} ORDER BY page.is_homepage DESC,page.updated_at DESC,lower(page.title) LIMIT 300`, [departmentId, status, request.query.categoryId ?? null, search, isWikiManager(request), request.authenticatedUser!.id]);
+    const result = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,''::text AS content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.status=$2 AND (NOT $7::boolean OR page.redirect_page_id IS NULL) AND ($3::uuid IS NULL OR page.category_id=$3) AND ($4='' OR page.title ILIKE '%'||$4||'%' OR ($5::boolean AND regexp_replace(page.content_html,'<[^>]*>',' ','g') ILIKE '%'||$4||'%')) AND ${pageReadCondition("page", 5, 6)} ORDER BY page.is_homepage DESC,page.updated_at DESC,lower(page.title) LIMIT 300`, [departmentId, status, request.query.categoryId ?? null, search, isWikiManager(request), request.authenticatedUser!.id, request.query.hideRedirects === "true"]);
     return result.rows.map(pageDto);
   });
 

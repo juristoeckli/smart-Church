@@ -53,6 +53,8 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const [bulkCategoryId, setBulkCategoryId] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
   const [search, setSearch] = useState("");
+  const [hideRedirects, setHideRedirects] = useState(false);
+  const pageList = useRef({ version: 0, hideRedirects: false });
   const [status, setStatus] = useState<"active" | "archived">("active");
   const [categoryStatus, setCategoryStatus] = useState<"active" | "archived">("active");
   const [editing, setEditing] = useState(false);
@@ -126,7 +128,9 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const [tableSort, setTableSort] = useState("updated-desc");
   const [tableColumns, setTableColumns] = useState({ category: true, updated: true, editor: false, status: false });
   const categoryNames = useMemo(() => new Map(categories.map((category) => [category.id, category.name])), [categories]);
-  const visiblePages = useMemo(() => pages.filter((page) => !selectedCategoryId || page.categoryId === selectedCategoryId), [pages, selectedCategoryId]);
+  const visiblePages = useMemo(() => pages.filter((page) =>
+    (!hideRedirects || !page.redirectPageId) && (!selectedCategoryId || page.categoryId === selectedCategoryId)),
+  [pages, hideRedirects, selectedCategoryId]);
   const tablePages = useMemo(() => [...visiblePages].sort((a, b) => {
     if (tableSort === "title") return a.title.localeCompare(b.title);
     if (tableSort === "category") return (categoryNames.get(a.categoryId) ?? "").localeCompare(categoryNames.get(b.categoryId) ?? "") || a.title.localeCompare(b.title);
@@ -135,7 +139,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   }), [visiblePages, tableSort, categoryNames]);
   const bulkIds = visiblePages.filter((page) => page.status === "active" && bulkPageIds.includes(page.id)).map((page) => page.id);
   useEffect(() => { setShowTableForm(false); }, [departmentId, selectedPage?.id, editing]);
-  useEffect(() => { setBulkPageIds([]); setBulkAudience(""); setBulkGroupId(""); setBulkCategoryId(""); }, [departmentId, selectedCategoryId, search, status]);
+  useEffect(() => { setBulkPageIds([]); setBulkAudience(""); setBulkGroupId(""); setBulkCategoryId(""); }, [departmentId, selectedCategoryId, search, status, hideRedirects]);
 
   function pageSelection(page: WikiPage) {
     if (!canManage || status !== "active" || editing || creating || page.status !== "active") return null;
@@ -159,21 +163,29 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     return result as T;
   }
 
-  async function refresh(keepPageId = selectedPage?.id, nextStatus: "active" | "archived" = status, sharedPageId?: string) {
+  async function refresh(keepPageId = selectedPage?.id, nextStatus: "active" | "archived" = status, preserveSelection = false) {
     const generation = directorySearchGeneration.current;
+    const listVersion = ++pageList.current.version;
+    const stillCurrent = () => generation === directorySearchGeneration.current && listVersion === pageList.current.version;
+    const hide = pageList.current.hideRedirects;
     setError("");
     try {
       const [nextCategories, nextPages] = await Promise.all([
         api<Category[]>(`/api/modules/wiki/categories?status=${categoryStatus}`),
-        api<WikiPage[]>(`/api/modules/wiki/pages?status=${nextStatus}${search.trim() ? `&search=${encodeURIComponent(search.trim())}` : ""}`),
+        api<WikiPage[]>(`/api/modules/wiki/pages?${new URLSearchParams({
+          status: nextStatus, ...(search.trim() ? { search: search.trim() } : {}), ...(hide ? { hideRedirects: "true" } : {}),
+        })}`),
       ]);
       const nextGroups = canManage ? await api<GroupOption[]>("/api/modules/wiki/groups") : null;
-      if (generation !== directorySearchGeneration.current) return;
+      if (!stillCurrent()) return;
       if (nextGroups) setGroups(nextGroups);
       setCategories(nextCategories); setPages(nextPages);
-      const nextId = sharedPageId ?? (nextPages.some((page) => page.id === keepPageId) ? keepPageId : nextPages.find((page) => page.isHomepage)?.id ?? nextPages[0]?.id);
+      if (preserveSelection) return;
+      const keepHiddenRedirect = hide && selectedPage?.id === keepPageId && selectedPage?.status === nextStatus && Boolean(selectedPage.redirectPageId);
+      const nextId = keepHiddenRedirect || nextPages.some((page) => page.id === keepPageId)
+        ? keepPageId : nextPages.find((page) => page.isHomepage)?.id ?? nextPages[0]?.id;
       if (nextId) await openPage(nextId); else { setSelectedPage(null); setLinks([]); setAttachedFiles([]); }
-    } catch (reason) { if (generation === directorySearchGeneration.current) setError(reason instanceof Error ? reason.message : "Could not load Wiki pages."); }
+    } catch (reason) { if (stillCurrent()) setError(reason instanceof Error ? reason.message : "Could not load Wiki pages."); }
   }
 
   async function copyPageLink(pageId: string, headingId?: string) {
@@ -318,7 +330,8 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
         if (id && /^wiki-heading-[a-z0-9-]{1,80}-[a-f0-9]{16}-[1-9][0-9]{0,7}$/i.test(id)) {
           sharedHeading.current = { pageId, id };
         }
-        void refresh("", "active", pageId);
+        void refresh("", "active", true);
+        void openPage(pageId);
         return;
       }
       sharedPageOpened.current = true;
@@ -326,7 +339,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     }, 220);
     return () => window.clearTimeout(timer);
   }, [departmentId, status, categoryStatus, search]);
-  useEffect(() => realtime?.subscribe("module:wiki:changed", () => { void refresh(); }), [realtime, departmentId, status, categoryStatus, search]);
+  useEffect(() => realtime?.subscribe("module:wiki:changed", () => { void refresh(); }), [realtime, departmentId, status, categoryStatus, search, hideRedirects]);
   useEffect(() => {
     if (!selectedPage || !editor.current || editing) {
       setHeadings([]);
@@ -625,6 +638,12 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     <aside className="wiki-panel" aria-label="Wiki pages">
       <div className="wiki-panel-head"><h2>Pages</h2><select className="wiki-select" aria-label="Page status" value={status} onChange={(event) => setStatus(event.target.value as "active" | "archived")}><option value="active">Active</option><option value="archived">Archived</option></select></div>
       <label className="wiki-search"><Search size={14} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search pages" aria-label="Search Wiki pages" /></label>
+      <label className="wiki-redirect-filter"><input type="checkbox" checked={hideRedirects} onChange={(event) => {
+        const next = event.target.checked;
+        pageList.current.hideRedirects = next;
+        setHideRedirects(next);
+        void refresh(selectedPage?.id, status, true);
+      }} /> Hide redirects</label>
       {canManage && status === "active" && !editing && !creating && <form className="wiki-bulk-audience" onSubmit={applyBulkAudience}>
         <label>Audience for selected pages<select className="wiki-select" value={bulkAudience} onChange={(event) => setBulkAudience(event.target.value as WikiAudience | "")}>
           <option value="">Choose an audience</option><option value="location">Everyone in this location</option><option value="group">Members of one group</option><option value="managers">Wiki managers only</option>

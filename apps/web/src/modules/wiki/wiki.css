@@ -55,3 +55,5 @@
 .wiki-index-title.wiki-page-item-selected{background:var(--accent-soft,#e8f0ff)}
 
 .wiki-category-toggle{display:grid;place-items:center;flex:0 0 1.65rem;min-height:1.9rem;border:0;border-radius:6px;background:transparent;color:inherit}.wiki-category-toggle:hover{background:var(--surface-hover,#f1f5f9)}
+
+.wiki-redirect-filter{display:flex;align-items:center;gap:.4rem;margin:.45rem 0;color:var(--muted-foreground);font-size:.8rem}
