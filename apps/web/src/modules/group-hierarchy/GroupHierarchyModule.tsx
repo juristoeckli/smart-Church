@@ -33,6 +33,10 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
+  const [memberQuery, setMemberQuery] = useState("");
+  const [memberRole, setMemberRole] = useState("");
+  const [memberStatus, setMemberStatus] = useState("");
+  const [memberSort, setMemberSort] = useState<"name" | "role" | "joined">("name");
   const [rosterScope, setRosterScope] = useState("");
   const [bulkSelection, setBulkSelection] = useState<{ scope: string; ids: string[] }>({ scope: "", ids: [] });
   const [bulkRole, setBulkRole] = useState("");
@@ -57,12 +61,29 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   const [leaders, setLeaders] = useState<Leader[] | null>(null);
   const selected = groups.find((group) => group.id === selectedId) ?? null;
   const groupScope = `${departmentId}:${selectedId}`;
+  const currentRoster = rosterScope === groupScope ? members : [];
+  const memberRoles = [...new Set(currentRoster.map((member) => member.role))].filter(Boolean).sort((a, b) => a.localeCompare(b, language));
+  const memberSearch = memberQuery.trim().toLocaleLowerCase(language);
+  const compareNames = (a: Member, b: Member) =>
+    a.lastName.localeCompare(b.lastName, language) || a.firstName.localeCompare(b.firstName, language) || a.contactId.localeCompare(b.contactId);
+  const visibleMembers = currentRoster.filter((member) =>
+    (!memberRole || member.role === memberRole) &&
+    (!memberStatus || member.status === memberStatus) &&
+    (!memberSearch || `${member.firstName} ${member.lastName} ${member.email ?? ""}`.toLocaleLowerCase(language).includes(memberSearch))
+  ).sort((a, b) => {
+    if (memberSort === "role") return a.role.localeCompare(b.role, language) || compareNames(a, b);
+    if (memberSort === "joined") return (b.joinedOn ?? "").localeCompare(a.joinedOn ?? "") || compareNames(a, b);
+    return compareNames(a, b);
+  });
   const canBulkEdit = Boolean(selected && !selected.imported && rosterScope === groupScope && canManageNotes);
-  const bulkIds = bulkSelection.scope === groupScope ? bulkSelection.ids.filter((id) => members.some((member) => member.contactId === id)) : [];
+  const bulkIds = bulkSelection.scope === groupScope ? bulkSelection.ids.filter((id) => visibleMembers.some((member) => member.contactId === id)) : [];
   useEffect(() => {
     setBulkSelection({ scope: "", ids: [] });
     setBulkRole("");
     setBulkStatus("");
+    setMemberQuery("");
+    setMemberRole("");
+    setMemberStatus("");
   }, [groupScope]);
   const headers = useMemo(() => ({ "x-department-id": departmentId }), [departmentId]);
   const load = useCallback(async () => {
@@ -188,7 +209,19 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
           <label>Parent group<select value={parentId} disabled={selected.imported} onChange={(event) => setParentId(event.target.value)}><option value="">No parent</option>{groups.filter((group) => group.id !== selected.id).map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
           <button disabled={selected.imported} onClick={() => void saveParent()}>Save hierarchy</button>
         </div>
-        <div className="gh-panel"><h2>{text.members} <small>({members.length})</small></h2>
+        <div className="gh-panel"><h2>{text.members} <small>({visibleMembers.length}/{currentRoster.length})</small></h2>
+          <div className="gh-actions">
+            <label>Search members<input type="search" value={memberQuery} onChange={(event) => { setMemberQuery(event.target.value); setBulkSelection({ scope: "", ids: [] }); }} /></label>
+            <label>Filter by role<select value={memberRole} onChange={(event) => { setMemberRole(event.target.value); setBulkSelection({ scope: "", ids: [] }); }}>
+              <option value="">All roles</option>{memberRoles.map((role) => <option key={role} value={role}>{role}</option>)}
+            </select></label>
+            <label>Filter by status<select value={memberStatus} onChange={(event) => { setMemberStatus(event.target.value); setBulkSelection({ scope: "", ids: [] }); }}>
+              <option value="">All statuses</option><option value="active">Active</option><option value="paused">Paused</option><option value="waitlist">Waitlist</option>
+            </select></label>
+            <label>Sort members<select value={memberSort} onChange={(event) => setMemberSort(event.target.value as typeof memberSort)}>
+              <option value="name">Last name</option><option value="role">Role</option><option value="joined">Newest join date</option>
+            </select></label>
+          </div>
           {canBulkEdit && <section aria-label="Bulk membership editing">
             <label>Role<input value={bulkRole} maxLength={80} placeholder="Keep current role" disabled={bulkSaving} onChange={(event) => setBulkRole(event.target.value)} /></label>
             <label>Status<select value={bulkStatus} disabled={bulkSaving} onChange={(event) => setBulkStatus(event.target.value as "" | Member["status"])}>
@@ -198,7 +231,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
               {bulkSaving ? "Updating…" : `Update selected (${bulkIds.length}/100)`}
             </button>
           </section>}
-          <div className="gh-member-list">{members.map((member) => <article key={member.contactId} className="gh-member">
+          {rosterScope === groupScope && visibleMembers.length === 0 && <p>{currentRoster.length ? "No members match these filters." : "No members in this group."}</p>}
+          <div className="gh-member-list">{visibleMembers.map((member) => <article key={member.contactId} className="gh-member">
             {canBulkEdit && <input type="checkbox" aria-label={`Select ${member.firstName} ${member.lastName}`} checked={bulkIds.includes(member.contactId)}
               disabled={bulkSaving || (bulkIds.length >= 100 && !bulkIds.includes(member.contactId))}
               onChange={(event) => setBulkSelection({ scope: groupScope, ids: event.target.checked ? [...bulkIds, member.contactId] : bulkIds.filter((id) => id !== member.contactId) })} />}
