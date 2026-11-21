@@ -538,9 +538,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
-  app.post<{ Params: { id: string }; Body: { throughDate: string; templateId: string; kind: "service" | "meeting" | "community" | "other"; preview?: boolean; staffAssignments?: Array<{ positionIndex: number; positionName: string; contactId: string }> } }>("/api/modules/church-calendar/appointments/:id/service-events", { schema: {
+  app.post<{ Params: { id: string }; Body: { throughDate: string; templateId: string; kind: "service" | "meeting" | "community" | "other"; preview?: boolean; registrationEnabled?: boolean; registrationCapacity?: number; staffAssignments?: Array<{ positionIndex: number; positionName: string; contactId: string }> } }>("/api/modules/church-calendar/appointments/:id/service-events", { schema: {
     params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-    body: { type: "object", additionalProperties: false, required: ["throughDate", "templateId", "kind"], properties: { throughDate: { type: "string", format: "date" }, templateId: { type: "string", format: "uuid" }, kind: { type: "string", enum: ["service", "meeting", "community", "other"] }, preview: { type: "boolean" }, staffAssignments: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["positionIndex", "positionName", "contactId"], properties: { positionIndex: { type: "integer", minimum: 0, maximum: 39 }, positionName: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } } } },
+    body: { type: "object", additionalProperties: false, required: ["throughDate", "templateId", "kind"], properties: { throughDate: { type: "string", format: "date" }, templateId: { type: "string", format: "uuid" }, kind: { type: "string", enum: ["service", "meeting", "community", "other"] }, preview: { type: "boolean" }, registrationEnabled: { type: "boolean" }, registrationCapacity: { type: "integer", minimum: 1, maximum: 100000 }, staffAssignments: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["positionIndex", "positionName", "contactId"], properties: { positionIndex: { type: "integer", minimum: 0, maximum: 39 }, positionName: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } } } },
   } }, async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     if (!context.validateMutation(request, reply)) return reply;
@@ -645,6 +645,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return Object.prototype.hasOwnProperty.call(override, "linkedEventId") ? override.linkedEventId : row.linked_event_id;
       };
       const pending = starts.filter((start) => !byStart.get(start)?.cancelled && !effectiveLink(start));
+      const registrationEnabled = request.body.registrationEnabled === true;
+      const registrationCapacity = request.body.registrationCapacity ?? null;
+      if (!registrationEnabled && registrationCapacity !== null) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 400, "Enable public registration to set a capacity.");
+      }
+      if (registrationEnabled && (row.calendar_scope !== "community" || row.internal_only || pending.some((start) => byStart.get(start)?.overrides.internalOnly === true))) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 400, "Public registration requires a community appointment with no internal occurrences to generate.");
+      }
       if (request.body.preview) {
         await client.query("ROLLBACK");
         return { preview: true, occurrences: starts.length, planned: pending.length, alreadyLinked: starts.filter((start) => Boolean(effectiveLink(start))).length, skippedCancelled: starts.filter((start) => Boolean(byStart.get(start)?.cancelled)).length, throughDate };
@@ -666,8 +676,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const eventDescription = row.description.slice(0, 2000) || null;
         await client.query(
           `INSERT INTO service_events(id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,asset_ids,positions,time_plan,recurrence_id,registration_enabled,registration_capacity,registration_token)
-           VALUES($1,$2,$3,$4,$5::date,$6,$7::time,$8::time,$9,$10,'',ARRAY[]::uuid[],$11::jsonb,$12::jsonb,$13,false,NULL,NULL)`,
-          [eventId, departmentId, row.title, request.body.kind, start.slice(0, 10), Boolean(row.all_day), startTime, endTime, eventLocation, eventDescription, JSON.stringify(positionsWithAssignments), JSON.stringify(items), row.id],
+           VALUES($1,$2,$3,$4,$5::date,$6,$7::time,$8::time,$9,$10,'',ARRAY[]::uuid[],$11::jsonb,$12::jsonb,$13,$14,$15,$16)`,
+          [eventId, departmentId, row.title, request.body.kind, start.slice(0, 10), Boolean(row.all_day), startTime, endTime, eventLocation, eventDescription, JSON.stringify(positionsWithAssignments), JSON.stringify(items), row.id, registrationEnabled, registrationCapacity, registrationEnabled ? randomUUID() : null],
         );
         await client.query(
           `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)

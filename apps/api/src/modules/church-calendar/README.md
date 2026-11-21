@@ -23,4 +23,6 @@ Appointment wall-clock values are stored as local timestamps so recurring entrie
 
 The feed currently expands one year ahead and does not emit resource bookings, participant registration groups, or event staffing.
 
-Remaining parity work includes participant registration/capacity/waitlists on generated events, setup/lead-in and cleanup/lag buffers on resource bookings, calendar sharing controls beyond location roles, and timezone conversion across users and locations. Generation currently uses the appointment title, time, place and description, leaves event registration disabled, and rejects occurrences crossing midnight; it does not copy event assets. Images do not yet have malware scanning or version history.
+Generated service events leave public registration disabled by default. Managers can opt in for community appointments without internal occurrences and set an optional capacity per event. Each generated event gets its own link and uses the existing Services & events registration and waitlist. Existing linked events remain unchanged.
+
+Remaining parity work includes setup/lead-in and cleanup/lag buffers on resource bookings, calendar sharing controls beyond location roles, and timezone conversion across users and locations. Generation currently uses the appointment title, time, place and description, rejects occurrences crossing midnight; it does not copy event assets. Images do not yet have malware scanning or version history.
