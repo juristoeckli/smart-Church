@@ -23,11 +23,21 @@ function categoryTree(categories: Category[], parentId: string | null = null, de
 function humanDate(value: string) { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)); }
 function sizeLabel(bytes: number) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 
+function headingFingerprint(title: string) {
+  // Use a fixed-width fingerprint so links stay short even for long headings.
+  let hash = 0xcbf29ce484222325n;
+  for (const character of title.normalize("NFC")) {
+    hash = BigInt.asUintN(64, (hash ^ BigInt(character.codePointAt(0)!)) * 0x100000001b3n);
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
 export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime, state, onNavigateEntity }: ModuleContext) {
   const editor = useRef<HTMLDivElement>(null);
   const editorRange = useRef<Range | null>(null);
   const filePicker = useRef<HTMLInputElement>(null);
   const sharedPageOpened = useRef(false);
+  const sharedHeading = useRef<{ pageId: string; id: string } | null>(null);
   const initialNavigationState = useRef(state);
   const [categories, setCategories] = useState<Category[]>([]);
   const [pages, setPages] = useState<WikiPage[]>([]);
@@ -137,18 +147,19 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Wiki pages."); }
   }
 
-  async function copyPageLink(pageId: string) {
+  async function copyPageLink(pageId: string, headingId?: string) {
     const url = new URL(window.location.pathname, window.location.origin);
     url.searchParams.set("wikiPage", pageId);
     url.searchParams.set("wikiLocation", departmentId);
+    if (headingId) url.searchParams.set("wikiHeading", headingId);
     url.hash = "module-wiki";
     setError("");
     setFeedback("");
     try {
       await navigator.clipboard.writeText(url.href);
-      setFeedback("Page link copied.");
+      setFeedback(headingId ? "Heading link copied." : "Page link copied.");
     } catch {
-      setError("Could not copy the page link. Check your browser clipboard permissions.");
+      setError("Could not copy the Wiki link. Check your browser clipboard permissions.");
     }
   }
   async function openPage(id: string, visited = new Set<string>()) {
@@ -251,6 +262,10 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
           return;
         }
         sharedPageOpened.current = true;
+        const id = params.get("wikiHeading");
+        if (id && /^wiki-heading-[a-z0-9-]{1,80}-[a-f0-9]{16}-[1-9][0-9]{0,7}$/i.test(id)) {
+          sharedHeading.current = { pageId, id };
+        }
         void refresh("", "active", pageId);
         return;
       }
@@ -266,16 +281,29 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
       return;
     }
     editor.current.innerHTML = selectedPage.contentHtml;
+    const occurrences = new Map<string, number>();
     const outline = Array.from(editor.current.querySelectorAll<HTMLHeadingElement>("h1,h2,h3,h4,h5,h6"))
-      .flatMap((heading, index) => {
+      .flatMap((heading) => {
         const title = heading.textContent?.trim();
         if (!title) return [];
-        const id = `wiki-heading-${selectedPage.id}-${index + 1}`;
+        const fingerprint = headingFingerprint(title);
+        const occurrence = (occurrences.get(fingerprint) ?? 0) + 1;
+        occurrences.set(fingerprint, occurrence);
+        const id = `wiki-heading-${selectedPage.id}-${fingerprint}-${occurrence}`;
         heading.id = id;
         heading.tabIndex = -1;
         return [{ id, title, level: Number(heading.tagName.slice(1)) }];
       });
     setHeadings(outline);
+    const target = sharedHeading.current;
+    if (target?.pageId === selectedPage.id) {
+      sharedHeading.current = null;
+      const heading = document.getElementById(target.id);
+      if (heading && editor.current.contains(heading) && outline.some(({ id }) => id === target.id)) {
+        heading.focus({ preventScroll: true });
+        heading.scrollIntoView({ block: "start" });
+      }
+    }
   }, [selectedPage?.id, selectedPage?.contentHtml, editing]);
 
   async function run(action: () => Promise<void>, success: string) {
@@ -604,6 +632,11 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
                   heading?.focus({ preventScroll: true });
                   heading?.scrollIntoView({ block: "start" });
                 }}>{title}</a>
+                {selectedPage.status === "active" && (
+                  <button className="button button-quiet" type="button" aria-label={`Copy link to ${title}`} title="Copy heading link" onClick={() => void copyPageLink(selectedPage.id, id)}>
+                    <Copy size={14} />
+                  </button>
+                )}
               </li>
             ))}</ul>
           </nav>

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { flushSync } from "react-dom";
 import { Check, ChevronDown, Printer, RotateCcw, Search, UserPlus, Users } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import "./module.css";
@@ -22,6 +23,8 @@ export function CheckInModule({ csrfToken, departmentId }: ModuleContext) {
   const [hierarchyAvailable, setHierarchyAvailable] = useState(false); const [includeChildGroups, setIncludeChildGroups] = useState(false);
   const [canManage, setCanManage] = useState(false); const [canAddVisitor, setCanAddVisitor] = useState(false); const [visitorDialogOpen, setVisitorDialogOpen] = useState(false); const [visitorBusy, setVisitorBusy] = useState(false); const [pickupEditor, setPickupEditor] = useState<Attendee | null>(null); const [pickupContactIds, setPickupContactIds] = useState<string[]>([]); const [guardianConfirmed, setGuardianConfirmed] = useState(false);
   const [codeQuery, setCodeQuery] = useState("");
+  const [printMode, setPrintMode] = useState<"labels" | "pickup">("labels");
+  const printArea = useRef<HTMLDivElement>(null);
   const [loadedScope, setLoadedScope] = useState("");
   const rosterScope = JSON.stringify([departmentId, eventId, groupIds, includeChildGroups]);
   const rosterReady = Boolean(eventId && groupIds.length && loadedScope === rosterScope);
@@ -105,8 +108,36 @@ export function CheckInModule({ csrfToken, departmentId }: ModuleContext) {
     } catch (e) { setError(e instanceof Error ? e.message : "Update failed."); }
     finally { setBusy(false); }
   };
+  const presentForPickup = shown.filter((person) => person.checkedInAt && !person.isVisitor);
+  function printRoster(mode: "labels" | "pickup") {
+    if (!rosterReady || (mode === "labels" ? !shown.length : !canManage || !presentForPickup.length)) return;
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      setError("Allow pop-ups to open the Check-in print view.");
+      return;
+    }
+    printWindow.opener = null;
+    flushSync(() => setPrintMode(mode));
+    try {
+      const printDocument = printWindow.document;
+      printDocument.title = mode === "labels" ? "Check-in name labels" : "Check-in pickup slips";
+      const sheet = printDocument.createElement("style");
+      sheet.textContent = "@page{margin:12mm}body{font:12pt system-ui,sans-serif;margin:0}main{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:4mm}article{break-inside:avoid;min-height:26mm;border:1px solid #888;padding:3mm;overflow-wrap:anywhere}span,small{display:block;margin-top:2mm}";
+      printDocument.head.append(sheet);
+      const printGrid = printDocument.createElement("main");
+      for (const label of printArea.current?.children ?? []) {
+        printGrid.append(printDocument.importNode(label, true));
+      }
+      printDocument.body.replaceChildren(printGrid);
+      printWindow.focus();
+      printWindow.print();
+    } finally {
+      setPrintMode("labels");
+    }
+  }
+
   return <main className="checkin-module">
-    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a meeting and groups to build a shared attendee roster.</p></div><button className="checkin-print" onClick={() => window.print()} disabled={!shown.length}><Printer size={17}/> Print labels / pickup slips</button></header>
+    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a meeting and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions"><button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup slips</button>}</div></header>
     {error && <div className="checkin-error" role="alert">{error}</div>}
     <section className="checkin-setup"><label>Meeting<select value={eventId} onChange={(e) => setEventId(e.target.value)}><option value="">Select a meeting…</option>{events.map((event) => <option value={event.id} key={event.id}>{event.eventDate} · {event.startTime.slice(0,5)} · {event.title}{event.completedAt ? " · completed" : ""}</option>)}</select></label>
       <fieldset><legend>Groups and age subgroups</legend><div className="checkin-groups">{groups.map((group) => <label key={group.id} className={groupIds.includes(group.id) ? "selected" : ""}><input type="checkbox" checked={groupIds.includes(group.id)} onChange={() => setGroupIds((prev) => prev.includes(group.id) ? prev.filter((id) => id !== group.id) : [...prev, group.id])}/><span>{group.parentGroupId ? "↳ " : ""}{group.name}</span><small>{group.memberCount}</small></label>)}</div>{hierarchyAvailable&&<label className="checkin-descendant-option"><input type="checkbox" checked={includeChildGroups} onChange={e=>setIncludeChildGroups(e.target.checked)}/> Include members of child groups</label>}</fieldset>
@@ -115,7 +146,7 @@ export function CheckInModule({ csrfToken, departmentId }: ModuleContext) {
     <section className="checkin-toolbar"><strong><Users size={17}/> {presentCount} of {attendees.length} present</strong><label className="checkin-search"><Search size={17}/><input placeholder="Search people or groups" value={query} onChange={(e) => setQuery(e.target.value)}/></label><label className="checkin-sort">Sort <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}><option value="name">Name</option><option value="group">Group</option><option value="present">Present first</option></select><ChevronDown size={14}/></label><label className="checkin-present"><input type="checkbox" checked={presentOnly} onChange={(e) => setPresentOnly(e.target.checked)}/> Present only</label>{canManage && rosterReady && <label className="checkin-search"><span>Desk code</span><input aria-label="Find attendee by desk code" placeholder="8-character code" value={codeQuery} onChange={(e) => setCodeQuery(e.target.value)} maxLength={8} autoComplete="off" spellCheck={false}/></label>}{canAddVisitor && eventId && groupIds.length > 0 && <button className="checkin-pickup-edit" type="button" onClick={() => setVisitorDialogOpen(true)} disabled={busy || visitorBusy}><UserPlus size={15}/> Add visitor</button>}</section>
     {!eventId || !groupIds.length ? <div className="checkin-empty">Select a meeting and at least one group to see its roster.</div> : <div className="checkin-roster">{shown.map((person) => <article className={`checkin-person ${person.checkedInAt ? "is-present" : ""}`} key={person.id}><div className="checkin-avatar">{person.firstName.slice(0,1)}{person.lastName.slice(0,1)}</div><div className="checkin-person-info"><strong>{person.firstName} {person.lastName}</strong><small>{person.groups.join(" · ")}</small>{person.phone && <small>{person.phone}</small>}{person.authorizedPickups.length > 0 && <small>Authorized pickup: {person.authorizedPickups.map((item) => item.name).join(", ")}</small>}</div>{canManage && !person.isVisitor && <button className="checkin-pickup-edit" type="button" onClick={() => openPickupEditor(person)}>Pickup contacts</button>}<button className={person.checkedInAt ? "checkin-reset" : "checkin-mark"} disabled={busy || complete} onClick={() => mark(person, !person.checkedInAt)}>{person.checkedInAt ? <><RotateCcw size={15}/> Undo</> : <><Check size={16}/> Present</>}</button></article>)}{!shown.length && <div className="checkin-empty">No attendees match this view.</div>}</div>}
     <footer className="checkin-footer"><span>{complete ? `Meeting check-in completed${selected?.completedAt ? ` · ${new Date(selected.completedAt).toLocaleString()}` : ""}` : "Attendance is saved as people arrive."}</span><button onClick={() => void toggleComplete()} disabled={!eventId || busy}>{complete ? "Reopen check-in" : "Complete check-in"}</button></footer>
-    <div className="checkin-print-area" aria-hidden="true">{shown.map((person) => <article key={person.id}><strong>{person.firstName} {person.lastName}</strong><span>{person.groups.join(" · ")}</span>{canManage && <small>Desk lookup: {deskCode(departmentId, eventId, person.id)} · Verify identity for pickup</small>}<small>{selected?.title} · Pickup: {person.authorizedPickups.length ? person.authorizedPickups.map((item) => item.name).join(", ") : "__________________"}</small></article>)}</div>
+    <div ref={printArea} hidden>{rosterReady && (printMode === "pickup" ? canManage ? presentForPickup : [] : shown).map((person) => <article key={person.id}><strong>{person.firstName} {person.lastName}</strong><span>{person.groups.join(" · ")}</span><small>{selected?.title}</small>{printMode === "pickup" && <><small>Desk lookup: {deskCode(departmentId, eventId, person.id)} · Verify identity for pickup</small><small>Pickup: {person.authorizedPickups.length ? person.authorizedPickups.map((item) => item.name).join(", ") : "__________________"}</small></>}</article>)}</div>
     {pickupEditor && <div className="checkin-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setPickupEditor(null)}><section className="checkin-pickup-dialog" role="dialog" aria-modal="true" aria-labelledby="checkin-pickup-title"><header><div><h2 id="checkin-pickup-title">Authorized pickup contacts</h2><p>{pickupEditor.firstName} {pickupEditor.lastName} · {selected?.title}</p></div><button type="button" onClick={() => setPickupEditor(null)} aria-label="Close">×</button></header><p>Choose roster contacts a parent or guardian has authorized to collect this child. This records who confirmed the list and when; it does not verify the authorization independently. Only event or group managers can edit it.</p><div className="checkin-pickup-options">{attendees.filter((person) => person.id !== pickupEditor.id && !person.isVisitor).map((person) => <label key={person.id}><input type="checkbox" checked={pickupContactIds.includes(person.id)} onChange={() => setPickupContactIds((current) => current.includes(person.id) ? current.filter((id) => id !== person.id) : [...current, person.id])} /><span>{person.firstName} {person.lastName}</span></label>)}</div><label className="checkin-guardian-confirm"><input type="checkbox" checked={guardianConfirmed} onChange={(event) => setGuardianConfirmed(event.target.checked)} /><span>I confirmed this pickup list with the parent or guardian.</span></label><div className="checkin-pickup-actions"><button type="button" onClick={() => setPickupEditor(null)}>Cancel</button><button type="button" disabled={busy || !guardianConfirmed} onClick={() => void savePickups()}>Save pickup contacts</button></div></section></div>}
     {visitorDialogOpen && <div className="checkin-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setVisitorDialogOpen(false)}><form className="checkin-pickup-dialog" role="dialog" aria-modal="true" aria-labelledby="checkin-visitor-title" onSubmit={(event) => void addVisitor(event)}><header><div><h2 id="checkin-visitor-title">Add a walk-in visitor</h2><p>{selected?.title} · {selected?.eventDate}</p></div><button type="button" onClick={() => setVisitorDialogOpen(false)} aria-label="Close">×</button></header><p>Creates a visitor contact in this location and checks them in as a first-time visitor. Possible duplicate people are blocked.</p><label>First name<input name="firstName" required maxLength={80} autoFocus /></label><label>Last name<input name="lastName" required maxLength={80} /></label><label>Email <span className="optional-label">Optional</span><input name="email" type="email" maxLength={254} /></label><label>Phone <span className="optional-label">Optional</span><input name="phone" type="tel" maxLength={40} /></label><div className="checkin-pickup-actions"><button type="button" onClick={() => setVisitorDialogOpen(false)}>Cancel</button><button type="submit" disabled={visitorBusy || busy}><UserPlus size={15}/> {visitorBusy ? "Adding…" : "Add and check in"}</button></div></form></div>}
   </main>;
