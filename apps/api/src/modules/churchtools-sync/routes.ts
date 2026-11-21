@@ -31,6 +31,8 @@ import { readChurchToolsAbsencePreview } from "./absence-preview.js";
 import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
 import { isVisibleChurchToolsHistoryPerson, membershipHistoryCursor, membershipHistoryPageSize, personalChurchToolsId, readChurchToolsMembershipHistoryPage, readMembershipHistoryCursor } from "./membership-history.js";
+import { confirmsPublicStructureEdge, groupSourceGuid, groupSourceId, readStructureDefinition, readStructureGroup, singleVisibleParent } from "./group-structure.js";
+import { isSafeGroupParent, lockGroupHierarchy } from "../../group-hierarchy-parent.js";
 import { churchToolsPersonStatus, churchToolsPersonTags } from "./person-classification.js";
 
 type JsonObject = Record<string, any>;
@@ -1514,6 +1516,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const memberships = membersByGroup.get(idOf(group));
             const memberDetails = (memberships?.members ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
             return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), groupType: churchToolsGroupType(group), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails,
+              groupInstanceUrl: config.instance_url, groupSourceGuid: groupSourceId(group.id) ? groupSourceGuid(group.guid) : null,
               ...(memberships?.detailed ? {
                 detailedMemberships: memberships.detailed, membershipInstanceUrl: config.instance_url,
                 includeMembershipCustomFields: request.body.includeMembershipCustomFields === true,
@@ -1687,9 +1690,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
                 linked = await db.query<{ id: string }>("INSERT INTO church_groups (id,department_id,name,description,group_type) VALUES (gen_random_uuid(),$1,$2,$3,$4) ON CONFLICT DO NOTHING RETURNING id", [dept, record.name, record.description ?? "", record.groupType ?? ""]);
                 if (!linked.rowCount) { batchSkipped += 1; page += 1; continue; }
+                if (record.groupSourceGuid && record.groupInstanceUrl && /^[1-9][0-9]{0,15}$/.test(sourceId)) {
+                  await db.query(`INSERT INTO churchtools_migration_group_structure (department_id,instance_url,source_group_id,source_group_guid,group_id)
+                    VALUES ($1,$2,$3,$4,$5)`, [dept, record.groupInstanceUrl, sourceId, record.groupSourceGuid, linked.rows[0].id]);
+                }
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchCreated += 1;
               } else {
-                await db.query("UPDATE church_groups SET name=$3,description=$4,group_type=CASE WHEN $5<>'' THEN $5 ELSE group_type END,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.name, record.description ?? "", record.groupType ?? ""]);
+                const binding = await db.query<{ instance_url: string; source_group_guid: string }>(`SELECT instance_url,source_group_guid::text
+                  FROM churchtools_migration_group_structure WHERE department_id=$1 AND group_id=$2`, [dept, linked.rows[0].id]);
+                if (binding.rowCount && (record.groupInstanceUrl !== binding.rows[0].instance_url
+                  || record.groupSourceGuid !== binding.rows[0].source_group_guid)) { batchSkipped += 1; page += 1; continue; }
+                await db.query("UPDATE church_groups SET name=$3,description=$4,group_type=CASE WHEN group_type='' AND $5<>'' THEN $5 ELSE group_type END,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.name, record.description ?? "", record.groupType ?? ""]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchUpdated += 1;
               }
               const memberDetails = Array.isArray(record.memberDetails) ? record.memberDetails.filter((item: unknown): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
@@ -2291,6 +2302,153 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       deps.realtime.publish("people-records:changed", dept, { contactId: local.id });
       deps.realtime.publish("core:contacts:changed", dept, { contactId: local.id });
       return { updated: true, status: proposed };
+    });
+
+    type GroupStructureBody = { groupId: string; loginToken: string; review?: string; fields?: ("type" | "parent")[] };
+    routes.post<{ Body: GroupStructureBody }>("/api/modules/sync/churchtools/group-structure", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "loginToken"], properties: {
+        groupId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+        loginToken: { type: "string", pattern: "^[-A-Za-z0-9._~+/=]{8,512}$" },
+        review: { type: "string", minLength: 1, maxLength: 1800 },
+        fields: { type: "array", minItems: 1, maxItems: 2, uniqueItems: true, items: { enum: ["type", "parent"] } },
+      } } },
+    }, async (request, reply) => {
+      const { groupId, loginToken, review, fields } = request.body;
+      request.body.loginToken = "";
+      reply.header("Cache-Control", "private, no-store");
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      if (!!review !== !!fields) return reply.code(400).send({ error: "Select reviewed fields to apply." });
+      const actor = request.authenticatedUser?.id;
+      const config = await settings(dept);
+      if (!actor || !config) return reply.code(403).send({ error: "Configure ChurchTools and sign in to review group structure." });
+      try {
+        const endpoint = new URL(config.instance_url);
+        if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error();
+      } catch {
+        return reply.code(409).send({ error: "Use a configured HTTPS ChurchTools connection." });
+      }
+      const identity = await pool!.query<{ source_person_id: string }>(`SELECT proof.source_person_id
+        FROM department_memberships member JOIN contacts person ON person.id=member.contact_id
+          AND person.department_id=member.department_id AND person.archived_at IS NULL
+        JOIN churchtools_migration_person_provenance proof ON proof.department_id=person.department_id AND proof.contact_id=person.id
+        WHERE member.department_id=$1 AND member.user_id=$2 AND proof.instance_url=$3`, [dept, actor, config.instance_url]);
+      const ownerId = identity.rows[0]?.source_person_id;
+      if (!ownerId) return reply.code(403).send({ error: "Link your account to a verified ChurchTools People record at this location." });
+
+      type GroupStructureTarget = {
+        id: string; name: string; group_type: string; parent_group_id: string | null; source_group_guid: string;
+        imported_type_id: string | null; imported_parent_id: string | null;
+      };
+      const targetSql = `SELECT target.id,target.name,target.group_type,target.parent_group_id,
+        receipt.source_group_guid::text,receipt.imported_type_id,receipt.imported_parent_id
+        FROM churchtools_migration_group_structure receipt
+        JOIN church_groups target ON target.id=receipt.group_id AND target.department_id=receipt.department_id
+          AND target.source_system IS NULL AND target.status='active'
+        WHERE receipt.department_id=$1 AND receipt.instance_url=$2 AND receipt.source_group_id=$3`;
+      const args = [dept, config.instance_url, groupId];
+      const local = (await pool!.query<GroupStructureTarget>(targetSql, args)).rows[0];
+      const signal = AbortSignal.timeout(20_000);
+      let source: ReturnType<typeof readStructureGroup>;
+      let type: ReturnType<typeof readStructureDefinition> = null;
+      let category: ReturnType<typeof readStructureDefinition> = null;
+      let parent: { id: string; name: string; guid: string } | null = null;
+      try {
+        if (personalChurchToolsId(await get(config.instance_url, loginToken, "whoami", signal)) !== ownerId) {
+          return reply.code(403).send({ error: "Use the personal ChurchTools token for your own verified account." });
+        }
+        source = readStructureGroup(await get(config.instance_url, loginToken, `groups/${groupId}`, signal), groupId);
+        if (!source) return reply.code(403).send({ error: "ChurchTools did not confirm visibility for this group." });
+        const optional = async (path: string) => {
+          try { return await get(config.instance_url, loginToken, path, signal); }
+          catch (error) {
+            if (error instanceof ChurchToolsReadError && [403, 404].includes(error.status)) return null;
+            throw error;
+          }
+        };
+        const [masterdata, parents] = await Promise.all([
+          optional("person/masterdata"),
+          source.public && (!fields || fields.includes("parent")) ? optional(`groups/${groupId}/parents?limit=2`) : null,
+        ]);
+        type = readStructureDefinition(masterdata, "groupTypes", source.typeId);
+        category = readStructureDefinition(masterdata, "groupCategories", source.categoryId);
+        const parentId = singleVisibleParent(parents);
+        if (parentId && parentId !== groupId) {
+          const query = new URLSearchParams({ limit: "2" });
+          query.append("ids[]", groupId);
+          query.append("ids[]", parentId);
+          const [sourceParent, edges] = await Promise.all([
+            optional(`groups/${parentId}`),
+            optional(`groups/hierarchies?${query}`),
+          ]);
+          const current = readStructureGroup(sourceParent, parentId);
+          if (current?.public && confirmsPublicStructureEdge(edges, groupId, parentId)) {
+            parent = { id: parentId, name: current.title, guid: current.guid };
+          }
+        }
+      } catch (error) {
+        if (error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status)) {
+          return reply.code(403).send({ error: "ChurchTools did not permit this account to review this group." });
+        }
+        return reply.code(400).send({ error: "Could not verify the ChurchTools group structure. Try the review again." });
+      }
+
+      const parentArgs = parent ? [dept, config.instance_url, parent.id] : null;
+      const targetParent = parentArgs ? (await pool!.query<GroupStructureTarget>(targetSql, parentArgs)).rows[0] : null;
+      const verified = local?.source_group_guid === source.guid && source.public;
+      const typeReady = Boolean(verified && type && !local.group_type && !local.imported_type_id);
+      const parentReady = Boolean(verified && parent && targetParent?.source_group_guid === parent.guid
+        && !local.parent_group_id && !local.imported_parent_id && await isSafeGroupParent(pool!, dept, local.id, targetParent.id));
+      const fingerprint = (field: "type" | "parent") => createHash("sha256").update(JSON.stringify([
+        "group-structure", dept, config.instance_url, actor, ownerId, groupId, source.guid, local?.id, field,
+        field === "type" ? [typeReady, type] : [parentReady, parent, targetParent?.id],
+      ])).digest("hex");
+      if (!review || !fields) return {
+        sourceName: source.title, type, category, categoryKnown: source.categoryId === null || category !== null,
+        parent: parent && { id: parent.id, name: parent.name }, localName: local?.source_group_guid === source.guid ? local.name : null,
+        typeReady, parentReady,
+        review: typeReady || parentReady ? encrypt(JSON.stringify({
+          type: fingerprint("type"), parent: fingerprint("parent"), expiresAt: Date.now() + 15 * 60_000,
+        })) : null,
+      };
+      const stale = () => reply.code(409).send({ error: "The group structure changed or the review expired. Review it again." });
+      const applyType = fields.includes("type");
+      const applyParent = fields.includes("parent");
+      try {
+        const proof = JSON.parse(decrypt(review));
+        if ((applyType && !typeReady) || (applyParent && !parentReady) || fields.some((field) => proof[field] !== fingerprint(field))
+          || typeof proof.expiresAt !== "number" || proof.expiresAt <= Date.now()) return stale();
+      } catch { return stale(); }
+
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await deps.lockDepartmentForWrite(client, dept) || !await lockGroupHierarchy(client, dept)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This location is read-only." });
+        }
+        const current = (await client.query<GroupStructureTarget>(`${targetSql} FOR UPDATE OF receipt,target`, args)).rows[0];
+        const currentSettings = await client.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, config.instance_url]);
+        const currentParent = applyParent && parentArgs
+          ? (await client.query<GroupStructureTarget>(`${targetSql} FOR UPDATE OF receipt,target`, parentArgs)).rows[0] : null;
+        if (!current || current.id !== local?.id || current.source_group_guid !== source.guid || !currentSettings.rowCount
+          || (applyType && (!type || current.group_type || current.imported_type_id))
+          || (applyParent && (!parent || !currentParent || currentParent.id !== targetParent?.id || currentParent.source_group_guid !== parent.guid
+            || current.parent_group_id || current.imported_parent_id || !await isSafeGroupParent(client, dept, current.id, currentParent.id)))) {
+          await client.query("ROLLBACK");
+          return stale();
+        }
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [actor]);
+        await client.query(`UPDATE church_groups SET group_type=COALESCE($3,group_type), parent_group_id=COALESCE($4,parent_group_id),updated_at=now()
+          WHERE department_id=$1 AND id=$2`, [dept, current.id, applyType ? type!.name : null, applyParent ? currentParent!.id : null]);
+        await client.query(`UPDATE churchtools_migration_group_structure SET imported_type_id=COALESCE($4,imported_type_id),
+          imported_parent_id=COALESCE($5,imported_parent_id) WHERE department_id=$1 AND instance_url=$2 AND source_group_id=$3`,
+          [...args, applyType ? type!.id : null, applyParent ? parent!.id : null]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+      deps.realtime.publish("core:groups:changed", dept, { groupId: local?.id, action: "churchtools-structure-imported" });
+      return { updated: true };
     });
 
     type MembershipHistoryBody = { groupId: string; loginToken: string; cursor?: string };

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { isSafeGroupParent, lockGroupHierarchy } from "../../group-hierarchy-parent.js";
 
 type TreeRow = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean };
 
@@ -28,9 +29,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     || (request.activeDepartmentPermissions ?? []).includes("groups_manage")
     || (request.activeDepartmentModulePermissions?.["group-hierarchy"] ?? []).includes("manage");
 
-  async function canManageGroup(request: FastifyRequest, groupId: string, departmentId: string) {
+  async function canManageGroup(request: FastifyRequest, groupId: string, departmentId: string, db: Pick<PoolClient, "query"> = pool!) {
     if (managerGrant(request)) return true;
-    const result = await pool!.query(
+    const result = await db.query(
       `SELECT 1 FROM department_memberships account
        JOIN group_members member ON member.contact_id=account.contact_id AND member.group_id=$1
        WHERE account.user_id=$2 AND account.department_id=$3 AND member.status='active'
@@ -96,28 +97,38 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    if (!managerGrant(request) && !(await canManageGroup(request, request.params.id, departmentId))) return reply.code(403).send({ error: "Group management access is required." });
-    const group = await pool.query<{ source_system: string | null }>("SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
-    if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
-    if (group.rows[0].source_system === "churchtools" || group.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "This group is managed by an external sync." });
-    if (request.body.parentId === request.params.id) return reply.code(400).send({ error: "A group cannot be its own subgroup parent." });
-    if (request.body.parentId) {
-      const parent = await pool.query("SELECT id,source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.body.parentId, departmentId]);
-      if (!parent.rowCount) return reply.code(404).send({ error: "Parent group not found in this location." });
-      if (parent.rows[0].source_system === "churchtools" || parent.rows[0].source_system === "elvanto") return reply.code(403).send({ error: "Choose a locally managed parent group." });
-      const cycle = await pool.query(
-        `WITH RECURSIVE descendants(id) AS (
-           SELECT id FROM church_groups WHERE id=$1 AND department_id=$2
-           UNION ALL
-           SELECT child.id FROM church_groups child JOIN descendants parent ON child.parent_group_id=parent.id WHERE child.department_id=$2
-         ) SELECT 1 FROM descendants WHERE id=$3 LIMIT 1`,
-        [request.params.id, departmentId, request.body.parentId],
-      );
-      if (cycle.rowCount) return reply.code(400).send({ error: "That parent would create a circular group hierarchy." });
-    }
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId) || !await lockGroupHierarchy(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only." });
+      }
+      if (!managerGrant(request) && !(await canManageGroup(request, request.params.id, departmentId, client))) {
+        await client.query("ROLLBACK");
+        return reply.code(403).send({ error: "Group management access is required." });
+      }
+      const id = request.params.id.toLowerCase();
+      const parentId = request.body.parentId?.toLowerCase() ?? null;
+      const groups = await client.query<{ id: string; source_system: string | null }>(
+        "SELECT id,source_system FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE",
+        [departmentId, parentId ? [id, parentId] : [id]],
+      );
+      const group = groups.rows.find((candidate) => candidate.id === id);
+      const parent = parentId ? groups.rows.find((candidate) => candidate.id === parentId) : null;
+      if (!group || (parentId && !parent)) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: group ? "Parent group not found in this location." : "Group not found." });
+      }
+      if (group.source_system === "churchtools" || group.source_system === "elvanto"
+        || parent?.source_system === "churchtools" || parent?.source_system === "elvanto") {
+        await client.query("ROLLBACK");
+        return reply.code(403).send({ error: "Choose locally managed groups." });
+      }
+      if (parentId && !await isSafeGroupParent(client, departmentId, id, parentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "That parent would create a circular or invalid group hierarchy." });
+      }
       await setActor(client, departmentId, request.authenticatedUser!.id);
       await client.query("UPDATE church_groups SET parent_group_id=$1,updated_at=now() WHERE id=$2 AND department_id=$3", [request.body.parentId, request.params.id, departmentId]);
       await client.query("COMMIT");

@@ -11,6 +11,7 @@ import { VolunteerResponseImport } from "./VolunteerResponseImport";
 import { VolunteerAbsencePreview } from "./VolunteerAbsencePreview";
 import { MembershipHistoryReview } from "./MembershipHistoryReview";
 import { PersonClassificationReview } from "./PersonClassificationReview";
+import { GroupStructureReview } from "./GroupStructureReview";
 import { MembershipDetails } from "./MembershipDetails";
 import { FinancePreview } from "./FinancePreview";
 import "../sync/federation.css";
@@ -172,6 +173,7 @@ export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: {
     {settingsPanel && status?.configured && <VolunteerAbsencePreview key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} csrfToken={csrfToken} t={t} />}
     {settingsPanel && status?.configured && <MembershipHistoryReview key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} csrfToken={csrfToken} t={t} />}
     {settingsPanel && status?.configured && <PersonClassificationReview key={`classification|${departmentId}|${status.instanceUrl}`} departmentId={departmentId} csrfToken={csrfToken} t={t} />}
+    {settingsPanel && status?.configured && <GroupStructureReview key={`structure|${departmentId}|${status.instanceUrl}`} departmentId={departmentId} csrfToken={csrfToken} t={t} />}
     {settingsPanel && status?.configured && <FinancePreview key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} t={t} />}
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>{t("Module controls")}</h2><p>{t("Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.")}</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? t("Pause sync") : t("Enable sync")}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />{t("Remove sync and imported data")}</button></div></section>}
     <footer className="page-footer"><span>{t("Automatically syncs every 15 minutes while enabled.")}</span><span>{t("Only site administrators can manage this connection.")}</span></footer>
