@@ -1,0 +1,37 @@
+.group-attendance-report {
+  margin: 12px 20px;
+}
+
+.group-attendance-report > section {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.group-attendance-report .group-meeting-form {
+  padding-inline: 0;
+}
+
+.group-attendance-report .group-meeting-form select {
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: inherit;
+}
+
+.group-attendance-report-table {
+  overflow-x: auto;
+}
+
+.group-attendance-report-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.group-attendance-report-table :is(th, td) {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { BookableResource, ChurchGroup, GroupLifecycleStatus, LocationPermission, ResourceBooking } from "@smart-church/contracts";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -487,6 +488,17 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         return reply.code(inserted.rowCount ? 201 : 200).send({ id: meeting.id, date: String(meeting.meeting_date).slice(0, 10), title: meeting.title });
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
+    });
+
+    routes.get<{ Params: { id: string }; Querystring: AttendanceReportQuery }>("/api/groups/:id/attendance-report", {
+      schema: {
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: attendanceReportQuery,
+      },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      return sendGroupAttendanceReport(pool!, reply, departmentId, request.params.id, request.query);
     });
 
     const meetingParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
