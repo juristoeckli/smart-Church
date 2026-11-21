@@ -4,7 +4,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { UserLanguage } from "@smart-church/contracts";
 import type { ModuleServerContext } from "../module-sdk.js";
 import type { PoolClient } from "pg";
-import { renderNotificationEmail } from "./email-templates.js";
+import { renderNotificationEmail, type NotificationEmailTemplate } from "./email-templates.js";
 
 type NotificationRow = {
   id: string;
@@ -18,7 +18,7 @@ type NotificationRow = {
   read_at: Date | string | null;
 };
 
-type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
+type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; title: string; body: string; template_subject: string | null; template_body: string | null; attempt_count: number };
 type ResendWebhookPayload = { type?: string; data?: { email_id?: string; to?: string[]; [key: string]: unknown } };
 type StoredResendEvent = { provider_event_id: string; event_type: string; provider_email_id: string };
 type StoredWebhookEvent = { provider_event_id: string; event_type: string; provider_email_id: string; received_at: Date | string; processed_at: Date | string | null };
@@ -64,6 +64,16 @@ const announcementSchema = {
   },
 };
 
+const configurableEmailKinds = ["announcement", "event_reminder", "service_request", "follow_up_assignment", "follow_up_reminder", "community_feed"] as const;
+const emailTemplatePlaceholders = new Set(["title", "body", "open_url"]);
+
+function validateEmailTemplate(value: string, maxLength: number) {
+  const cleaned = value.replace(/\u0000/g, "").slice(0, maxLength);
+  const placeholders = cleaned.matchAll(/\{([^{}]+)\}/g);
+  for (const match of placeholders) if (!emailTemplatePlaceholders.has(match[1]!)) return null;
+  return cleaned;
+}
+
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   let reminderTimer: ReturnType<typeof setInterval> | undefined;
@@ -87,22 +97,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   context.replication.register({
-    schemaVersion: "4",
+    schemaVersion: "5",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Notifications database is unavailable."], recordCount: 0 };
       try {
-        const result = await pool.query<{ notifications: string; preferences: string; dashboardPreferences: string; deliveries: string; webhookEvents: string; emailEnabled: boolean }>(
+        const result = await pool.query<{ notifications: string; preferences: string; dashboardPreferences: string; deliveries: string; webhookEvents: string; emailTemplates: string; emailEnabled: boolean }>(
           `SELECT (SELECT count(*) FROM module_notifications WHERE department_id=$1)::text notifications,
                   (SELECT count(*) FROM module_notification_preferences WHERE department_id=$1)::text preferences,
                   (SELECT count(*) FROM overview_widget_preferences WHERE department_id=$1)::text "dashboardPreferences",
                   (SELECT count(*) FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1)::text deliveries,
                   (SELECT count(*) FROM module_notification_webhook_events event JOIN module_notification_email_deliveries d ON d.provider_email_id=event.provider_email_id JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1)::text "webhookEvents",
+                  (SELECT count(*) FROM module_notification_email_templates WHERE department_id=$1)::text "emailTemplates",
                   EXISTS(SELECT 1 FROM module_notification_preferences WHERE department_id=$1 AND email_notifications_enabled) email_enabled`, [departmentId]);
         const row = result.rows[0];
         const blockers: string[] = [];
         const ready = !row.emailEnabled || await context.email.isConfigured(departmentId);
         if (!ready) blockers.push("Email notifications are enabled for this site but the email connector is not configured on this server.");
-        return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.dashboardPreferences) + Number(row.deliveries) + Number(row.webhookEvents) };
+        return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.dashboardPreferences) + Number(row.deliveries) + Number(row.webhookEvents) + Number(row.emailTemplates) };
       } catch {
         return { ready: false, blockers: ["Notifications storage is not initialized on this server."], recordCount: 0 };
       }
@@ -114,14 +125,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const deliveries = await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId]);
       const suppressions = await client.query("SELECT email,reason,provider_event_id,created_at FROM module_notification_email_suppressions ORDER BY email");
       const webhookEvents = await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId]);
-      return { version: 4, notifications: notifications.rows, preferences: preferences.rows, homeWidgetPreferences: homeWidgetPreferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows };
+      const emailTemplates = await client.query("SELECT kind,subject_template,body_template,updated_by,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId]);
+      return { version: 5, notifications: notifications.rows, preferences: preferences.rows, homeWidgetPreferences: homeWidgetPreferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows, emailTemplates: emailTemplates.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>> };
-      if (!snapshot || ![2, 3, 4].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || (snapshot.version === 4 && (!Array.isArray(snapshot.homeWidgetPreferences) || snapshot.homeWidgetPreferences.length > 250000)) || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
+      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>> };
+      if (!snapshot || ![2, 3, 4, 5].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || (Number(snapshot.version) >= 4 && (!Array.isArray(snapshot.homeWidgetPreferences) || snapshot.homeWidgetPreferences.length > 250000)) || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000 || (Number(snapshot.version) >= 5 && (!Array.isArray(snapshot.emailTemplates) || snapshot.emailTemplates.length > 100))) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
       await client.query("DELETE FROM module_notification_webhook_events WHERE provider_email_id IN (SELECT d.provider_email_id FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 AND d.provider_email_id IS NOT NULL)", [departmentId]);
       await client.query("DELETE FROM module_notification_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM overview_widget_preferences WHERE department_id=$1", [departmentId]);
+      await client.query("DELETE FROM module_notification_email_templates WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM module_notifications WHERE department_id=$1", [departmentId]);
       for (const row of snapshot.notifications) {
         const recipientId = restoreContext.userIdMap.get(String(row.recipient_user_id));
@@ -139,6 +152,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (!userId) throw new Error("A home widget preference has no matching account on the standby server.");
         await client.query("INSERT INTO overview_widget_preferences(department_id,user_id,widget_order,visible_widgets,updated_at) VALUES($1,$2,$3::jsonb,$4::jsonb,$5)", [departmentId, userId, JSON.stringify(row.widget_order), JSON.stringify(row.visible_widgets), row.updated_at]);
       }
+      for (const row of snapshot.emailTemplates ?? []) await client.query("INSERT INTO module_notification_email_templates(department_id,kind,subject_template,body_template,updated_by,updated_at) VALUES($1,$2,$3,$4,$5,$6)", [departmentId, row.kind, row.subject_template, row.body_template, row.updated_by == null ? null : restoreContext.userIdMap.get(String(row.updated_by)) ?? null, row.updated_at]);
       for (const row of snapshot.deliveries) await client.query("INSERT INTO module_notification_email_deliveries(notification_id,recipient_email,provider_email_id,status,attempt_count,next_attempt_at,last_error,sent_at,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(notification_id) DO UPDATE SET recipient_email=EXCLUDED.recipient_email,provider_email_id=EXCLUDED.provider_email_id,status=EXCLUDED.status,attempt_count=EXCLUDED.attempt_count,next_attempt_at=EXCLUDED.next_attempt_at,last_error=EXCLUDED.last_error,sent_at=EXCLUDED.sent_at,updated_at=EXCLUDED.updated_at", [row.notification_id, row.recipient_email, row.provider_email_id, row.status, row.attempt_count, row.next_attempt_at, row.last_error, row.sent_at, row.created_at, row.updated_at]);
       // Suppressions are installation-wide by design. Merge them during a
       // per-location restore so syncing one location never removes entries
@@ -150,14 +164,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           provider_event_id=EXCLUDED.provider_event_id,
           created_at=LEAST(module_notification_email_suppressions.created_at,EXCLUDED.created_at)`, [row.email, row.reason, row.provider_event_id, row.created_at]);
       for (const row of snapshot.webhookEvents) await client.query("INSERT INTO module_notification_webhook_events(provider_event_id,event_type,provider_email_id,received_at,processed_at) VALUES($1,$2,$3,$4,$5)", [row.provider_event_id,row.event_type,row.provider_email_id,row.received_at,row.processed_at]);
-      return { recordCount: snapshot.notifications.length + snapshot.preferences.length + (snapshot.homeWidgetPreferences?.length ?? 0) + snapshot.deliveries.length + snapshot.webhookEvents.length };
+      return { recordCount: snapshot.notifications.length + snapshot.preferences.length + (snapshot.homeWidgetPreferences?.length ?? 0) + (snapshot.emailTemplates?.length ?? 0) + snapshot.deliveries.length + snapshot.webhookEvents.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>> };
-      if (!snapshot || ![2, 3, 4].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || (snapshot.version === 4 && !Array.isArray(snapshot.homeWidgetPreferences)) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents)) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
+      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>> };
+      if (!snapshot || ![2, 3, 4, 5].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || (Number(snapshot.version) >= 4 && !Array.isArray(snapshot.homeWidgetPreferences)) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents) || (Number(snapshot.version) >= 5 && !Array.isArray(snapshot.emailTemplates))) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
       const actualNotifications = (await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualPreferences = (await client.query("SELECT user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at FROM module_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualHomeWidgetPreferences = (await client.query("SELECT user_id,widget_order,visible_widgets,updated_at FROM overview_widget_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualEmailTemplates = (await client.query("SELECT kind,subject_template,body_template,updated_by,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualDeliveries = (await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualWebhookEvents = (await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const mapping = restoreContext?.userIdMap ?? new Map<string, string>();
@@ -175,6 +190,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!same(remap(snapshot.notifications, ["recipient_user_id", "sender_user_id"]), actualNotifications)
         || !same(remap(snapshot.preferences, ["user_id"]), actualPreferences)
         || !same(remap(snapshot.homeWidgetPreferences ?? [], ["user_id"]), actualHomeWidgetPreferences)
+        || (Number(snapshot.version) >= 5 && !same(remap(snapshot.emailTemplates ?? [], ["updated_by"]), actualEmailTemplates))
         || !same(snapshot.deliveries, actualDeliveries)
         || !same(snapshot.webhookEvents, actualWebhookEvents)) return { ready: false, blockers: ["Notification, email delivery, or webhook records differ from the source snapshot after restore."] };
       const actualSuppressions = (await client.query("SELECT email,reason,provider_event_id,created_at FROM module_notification_email_suppressions ORDER BY email")).rows as Array<Record<string, unknown>>;
@@ -287,12 +303,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   COALESCE(preference.email_notifications_enabled,false) AS email_enabled,
                   notification.email_enabled AS notification_email_enabled,
                   (suppressed.email IS NOT NULL) AS email_suppressed,
-                  notification.title,notification.body,delivery.attempt_count
+                   notification.title,notification.body,template.subject_template,template.body_template,delivery.attempt_count
              FROM module_notification_email_deliveries delivery
              JOIN module_notifications notification ON notification.id=delivery.notification_id
              JOIN app_users account ON account.id=notification.recipient_user_id
              LEFT JOIN module_notification_preferences preference ON preference.department_id=notification.department_id AND preference.user_id=notification.recipient_user_id
              LEFT JOIN module_notification_email_suppressions suppressed ON suppressed.email=lower(trim(account.email))
+              LEFT JOIN module_notification_email_templates template ON template.department_id=notification.department_id AND template.kind=notification.kind
             WHERE notification.department_id = ANY($1::uuid[]) AND delivery.status IN ('pending','failed') AND delivery.attempt_count < 8 AND delivery.next_attempt_at <= now()
             ORDER BY delivery.created_at
             LIMIT 1 FOR UPDATE OF delivery SKIP LOCKED`, [configuredIds],
@@ -306,7 +323,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }
         const attempts = delivery.attempt_count + 1;
         try {
-          const emailContent = renderNotificationEmail(delivery.title, delivery.body, process.env.SMART_CHURCH_WEB_ORIGIN, delivery.recipient_language);
+          const emailContent = renderNotificationEmail(delivery.title, delivery.body, process.env.SMART_CHURCH_WEB_ORIGIN, delivery.recipient_language, { subjectTemplate: delivery.template_subject, bodyTemplate: delivery.template_body });
           const sent = await context.email.send({
             recipientUserId: delivery.recipient_user_id,
             ...emailContent,
@@ -446,6 +463,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           follow_ups_enabled BOOLEAN NOT NULL DEFAULT true,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           PRIMARY KEY (department_id, user_id)
+        );
+        CREATE TABLE IF NOT EXISTS module_notification_email_templates (
+          department_id UUID NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed')),
+          subject_template TEXT,
+          body_template TEXT,
+          updated_by UUID REFERENCES app_users(id) ON DELETE SET NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (department_id,kind),
+          CHECK (subject_template IS NULL OR char_length(subject_template)<=240),
+          CHECK (body_template IS NULL OR char_length(body_template)<=4000)
         );
         ALTER TABLE module_notifications DROP CONSTRAINT IF EXISTS module_notifications_kind_check;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS related_contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE;
@@ -638,6 +666,45 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         emailSuppressed: Boolean(suppression.rowCount),
         canSend: request.activeDepartmentRole === "site_admin",
       };
+    });
+
+    routes.get("/api/modules/notifications/email-templates", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (request.activeDepartmentRole !== "site_admin") return reply.code(403).send({ error: "Only a site administrator can manage notification email templates." });
+      const result = await pool!.query<{ kind: typeof configurableEmailKinds[number]; subject_template: string | null; body_template: string | null; updated_at: Date | string | null }>(
+        "SELECT kind,subject_template,body_template,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId],
+      );
+      const byKind = new Map(result.rows.map((row) => [row.kind, row]));
+      return { placeholders: [...emailTemplatePlaceholders], templates: configurableEmailKinds.map((kind) => {
+        const row = byKind.get(kind);
+        return { kind, subjectTemplate: row?.subject_template ?? "", bodyTemplate: row?.body_template ?? "", updatedAt: row?.updated_at ? new Date(row.updated_at).toISOString() : null };
+      }) };
+    });
+
+    routes.put<{ Params: { kind: typeof configurableEmailKinds[number] }; Body: { subjectTemplate: string; bodyTemplate: string } }>("/api/modules/notifications/email-templates/:kind", {
+      schema: {
+        params: { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { type: "string", enum: [...configurableEmailKinds] } } },
+        body: { type: "object", additionalProperties: false, required: ["subjectTemplate", "bodyTemplate"], properties: { subjectTemplate: { type: "string", maxLength: 240 }, bodyTemplate: { type: "string", maxLength: 4000 } } },
+      },
+    }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (request.activeDepartmentRole !== "site_admin") return reply.code(403).send({ error: "Only a site administrator can manage notification email templates." });
+      const rawSubject = request.body.subjectTemplate.trim();
+      const rawBody = request.body.bodyTemplate.trim();
+      const subject = validateEmailTemplate(rawSubject, 240);
+      const body = validateEmailTemplate(rawBody, 4000);
+      if ((rawSubject && subject === null) || (rawBody && body === null)) return reply.code(400).send({ error: "Use only the supported placeholders: {title}, {body}, and {open_url}." });
+      const result = await pool!.query(
+        `INSERT INTO module_notification_email_templates(department_id,kind,subject_template,body_template,updated_by,updated_at)
+         VALUES($1,$2,$3,$4,$5,now())
+         ON CONFLICT(department_id,kind) DO UPDATE SET subject_template=EXCLUDED.subject_template,body_template=EXCLUDED.body_template,updated_by=EXCLUDED.updated_by,updated_at=now()
+         RETURNING kind,subject_template AS "subjectTemplate",body_template AS "bodyTemplate",updated_at AS "updatedAt"`,
+        [departmentId, request.params.kind, subject || null, body || null, request.authenticatedUser!.id],
+      );
+      return result.rows[0];
     });
 
     routes.post<{ Params: { id: string } }>("/api/modules/notifications/:id/read", {

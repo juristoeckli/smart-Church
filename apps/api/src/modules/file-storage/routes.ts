@@ -22,10 +22,10 @@ function mapFolder(row: FolderRow): StoredFolder { return { id: row.id, name: ro
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = context;
   context.replication.register({
-    schemaVersion: "2",
+    schemaVersion: "3",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The file storage database is unavailable."], recordCount: 0 };
-      const result = await pool.query<{ count: string; bytes: string }>("SELECT count(*)::text,sum(file_size)::text AS bytes FROM stored_files WHERE department_id=$1", [departmentId]);
+      const result = await pool.query<{ count: string; bytes: string }>("SELECT ((SELECT count(*) FROM stored_files WHERE department_id=$1)+(SELECT count(*) FROM stored_file_versions WHERE department_id=$1)+(SELECT count(*) FROM stored_file_folders WHERE department_id=$1))::text AS count,((SELECT COALESCE(sum(file_size),0) FROM stored_files WHERE department_id=$1)+(SELECT COALESCE(sum(file_size),0) FROM stored_file_versions WHERE department_id=$1))::text AS bytes", [departmentId]);
       const count = Number(result.rows[0].count);
       const bytes = Number(result.rows[0].bytes ?? 0);
       return { ready: bytes <= 200 * 1024 * 1024, blockers: bytes > 200 * 1024 * 1024 ? ["Stored files exceed the current 200 MiB snapshot safety limit."] : [], recordCount: count };
@@ -33,12 +33,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     exportSnapshot: async (client: PoolClient, departmentId) => {
       const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,folder_id,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
       const folders = await client.query("SELECT id,name,parent_id,created_at FROM stored_file_folders WHERE department_id=$1 ORDER BY id", [departmentId]);
-      return { version: 2, files: files.rows, folders: folders.rows };
+      const versions = await client.query("SELECT id,department_id,file_id,version_number,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,uploaded_by,created_at FROM stored_file_versions WHERE department_id=$1 ORDER BY file_id,version_number", [departmentId]);
+      return { version: 3, files: files.rows, folders: folders.rows, versions: versions.rows };
     },
-    restoreSnapshot: async (client: PoolClient, departmentId, input) => {
-      if (!input || typeof input !== "object" || ![1, 2].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) throw new Error("The File Storage snapshot is invalid.");
+    restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
+      if (!input || typeof input !== "object" || ![1, 2, 3].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) throw new Error("The File Storage snapshot is invalid.");
       const files = (input as { files: Array<Record<string, unknown>> }).files;
       const folders = (input as { folders?: Array<Record<string, unknown>> }).folders ?? [];
+      const versions = (input as { versions?: Array<Record<string, unknown>> }).versions ?? [];
       await client.query("DELETE FROM stored_files WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM stored_file_folders WHERE department_id=$1", [departmentId]);
       const pendingFolders = [...folders];
@@ -59,10 +61,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (file.folder_id != null && typeof file.folder_id !== "string") throw new Error("The File Storage snapshot contains an invalid file folder.");
         await client.query("INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data,folder_id,created_at,updated_at,deleted_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [file.id, departmentId, file.title, file.category, file.file_name, file.content_type, buffer.length, buffer, file.folder_id ?? null, file.created_at, file.updated_at, deletedAt]);
       }
-      return { recordCount: files.length + folders.length };
+      const fileIds = new Set(files.map((file) => file.id));
+      for (const version of versions) {
+        const encodedData = typeof version.file_data === "string" ? version.file_data.replace(/[\r\n]/g, "") : "";
+        if (typeof version.id !== "string" || typeof version.file_id !== "string" || !fileIds.has(version.file_id) || !Number.isInteger(version.version_number) || (version.version_number as number) < 1 || typeof version.title !== "string" || typeof version.category !== "string" || typeof version.file_name !== "string" || typeof version.content_type !== "string" || typeof version.file_size !== "number" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedData)) throw new Error("The File Storage snapshot contains an invalid file version.");
+        const buffer = Buffer.from(encodedData, "base64");
+        if (buffer.length !== version.file_size || buffer.length > resourceLimit) throw new Error("A replicated file version does not match its declared size or exceeds 25 MiB.");
+        const uploadedBy = version.uploaded_by == null ? null : restoreContext.userIdMap.get(String(version.uploaded_by)) ?? version.uploaded_by;
+        await client.query("INSERT INTO stored_file_versions(id,department_id,file_id,version_number,title,category,file_name,content_type,file_size,file_data,uploaded_by,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [version.id, departmentId, version.file_id, version.version_number, version.title, version.category, version.file_name, version.content_type, buffer.length, buffer, uploadedBy, version.created_at]);
+      }
+      return { recordCount: files.length + folders.length + versions.length };
     },
-    verifySnapshot: async (client: PoolClient, departmentId, input) => {
-      if (!input || typeof input !== "object" || ![1, 2].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
+    verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
+      if (!input || typeof input !== "object" || ![1, 2, 3].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
       const expected = (input as { files: Array<Record<string, unknown>> }).files;
       const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,folder_id,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       if (actual.length !== expected.length) return { ready: false, blockers: [`Stored file count differs: expected ${expected.length}, found ${actual.length}.`] };
@@ -70,6 +81,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const expectedRows = normalizeFiles(expected);
       const actualRows = normalizeFiles(actual);
       if (expectedRows.some((row, index) => row !== actualRows[index])) return { ready: false, blockers: ["Stored file metadata or binary content differs after restore."] };
+      const expectedVersions = (input as { versions?: Array<Record<string, unknown>> }).versions ?? [];
+      const actualVersions = (await client.query("SELECT id,department_id,file_id,version_number,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,uploaded_by,created_at FROM stored_file_versions WHERE department_id=$1 ORDER BY file_id,version_number", [departmentId])).rows as Array<Record<string, unknown>>;
+      if (actualVersions.length !== expectedVersions.length) return { ready: false, blockers: [`Stored file version count differs: expected ${expectedVersions.length}, found ${actualVersions.length}.`] };
+      const normalizeVersions = (rows: Array<Record<string, unknown>>, expected = false) => rows.map((row) => canonical({ ...row, department_id: expected ? departmentId : row.department_id, uploaded_by: row.uploaded_by == null ? null : expected ? restoreContext?.userIdMap.get(String(row.uploaded_by)) ?? row.uploaded_by : row.uploaded_by })).sort();
+      const normalizedExpectedVersions = normalizeVersions(expectedVersions, true);
+      const normalizedActualVersions = normalizeVersions(actualVersions);
+      if (normalizedExpectedVersions.some((row, index) => row !== normalizedActualVersions[index])) return { ready: false, blockers: ["Stored file version metadata or binary content differs after restore."] };
       const expectedFolders = (input as { folders?: Array<Record<string, unknown>> }).folders ?? [];
       const actualFolders = (await client.query("SELECT id,name,parent_id,created_at FROM stored_file_folders WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const normalized = (rows: Array<Record<string, unknown>>) => rows.map((row) => canonical({ ...row, parent_id: row.parent_id ?? null })).sort();
@@ -92,6 +110,30 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return null;
       }
       return departmentId;
+    }
+
+    async function canReadStoredFile(request: FastifyRequest, departmentId: string, fileId: string) {
+      const wikiSchema = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed");
+      if (!wikiSchema.rows[0]?.installed) return true;
+      const canManageWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
+      const wikiAccess = await pool!.query<{ linked: boolean; can_read: boolean }>(
+        `WITH attached_pages AS (
+           SELECT page.id,page.status,page.audience,page.audience_group_id
+             FROM wiki_page_files attachment
+             JOIN wiki_pages page ON page.id=attachment.page_id AND page.department_id=attachment.department_id
+            WHERE attachment.department_id=$1 AND attachment.file_id=$2
+         )
+         SELECT EXISTS(SELECT 1 FROM attached_pages) AS linked,
+                EXISTS(SELECT 1 FROM attached_pages page WHERE $3::boolean OR (page.status='active' AND (
+                  page.audience='location' OR (page.audience='group' AND EXISTS (
+                    SELECT 1 FROM group_members member
+                    JOIN department_memberships membership ON membership.contact_id=member.contact_id AND membership.department_id=$1
+                    WHERE member.group_id=page.audience_group_id AND member.status='active' AND membership.user_id=$4
+                  ))
+                ))) AS can_read`,
+        [departmentId, fileId, canManageWiki, request.authenticatedUser!.id],
+      );
+      return !wikiAccess.rows[0]?.linked || Boolean(wikiAccess.rows[0]?.can_read);
     }
 
     routes.get<{ Querystring: { view?: string } }>("/api/files", async (request, reply) => {
@@ -233,30 +275,97 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL", [request.params.id, departmentId]);
       const resource = result.rows[0];
       if (!resource) return reply.code(404).send({ error: "Resource not found." });
-      const wikiSchema = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed");
-      if (wikiSchema.rows[0]?.installed) {
-        const canManageWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
-        const wikiAccess = await pool!.query<{ linked: boolean; can_read: boolean }>(
-          `WITH attached_pages AS (
-             SELECT page.id,page.status,page.audience,page.audience_group_id
-               FROM wiki_page_files attachment
-               JOIN wiki_pages page ON page.id=attachment.page_id AND page.department_id=attachment.department_id
-              WHERE attachment.department_id=$1 AND attachment.file_id=$2
-           )
-           SELECT EXISTS(SELECT 1 FROM attached_pages) AS linked,
-                  EXISTS(SELECT 1 FROM attached_pages page WHERE $3::boolean OR (page.status='active' AND (
-                    page.audience='location' OR (page.audience='group' AND EXISTS (
-                      SELECT 1 FROM group_members member
-                      JOIN department_memberships membership ON membership.contact_id=member.contact_id AND membership.department_id=$1
-                      WHERE member.group_id=page.audience_group_id AND member.status='active' AND membership.user_id=$4
-                    ))
-                  ))) AS can_read`,
-          [departmentId, request.params.id, canManageWiki, request.authenticatedUser!.id],
-        );
-        if (wikiAccess.rows[0]?.linked && !wikiAccess.rows[0].can_read) return reply.code(404).send({ error: "Resource not found." });
-      }
+      if (!await canReadStoredFile(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Resource not found." });
       reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
       return resource.file_data as Buffer;
+    });
+
+    routes.get<{ Params: { id: string } }>("/api/files/:id/versions", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const file = await pool!.query("SELECT id FROM stored_files WHERE id=$1 AND department_id=$2 AND deleted_at IS NULL", [request.params.id, departmentId]);
+      if (!file.rowCount || !await canReadStoredFile(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Resource not found." });
+      const versions = await pool!.query(
+        `SELECT version.id,version.version_number AS "versionNumber",version.title,version.category,version.file_name AS "fileName",version.content_type AS "contentType",version.file_size AS "fileSize",version.uploaded_by AS "uploadedBy",u.display_name AS "uploadedByName",version.created_at AS "createdAt"
+           FROM stored_file_versions version LEFT JOIN app_users u ON u.id=version.uploaded_by
+          WHERE version.department_id=$1 AND version.file_id=$2 ORDER BY version.version_number DESC`,
+        [departmentId, request.params.id],
+      );
+      return versions.rows.map((version) => ({ ...version, createdAt: new Date(version.createdAt as Date | string).toISOString() }));
+    });
+
+    routes.post<{ Params: { id: string }; Body: Buffer; Querystring: { filename?: string } }>("/api/files/:id/versions", { bodyLimit: resourceLimit, schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      querystring: { type: "object", properties: { filename: { type: "string", maxLength: 255 } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      if (!Buffer.isBuffer(request.body) || request.body.length < 1) return reply.code(400).send({ error: "Choose a replacement file." });
+      if (request.body.length > resourceLimit) return reply.code(413).send({ error: "Files must be 25 MiB or smaller." });
+      const fileName = basename(request.query.filename || "resource").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 255) || "resource";
+      const requestedType = request.headers["x-resource-content-type"];
+      const contentType = typeof requestedType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(requestedType) ? requestedType.slice(0, 120) : "application/octet-stream";
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const current = await client.query<{ title: string; category: string; file_name: string; content_type: string; file_size: number; file_data: Buffer }>(
+          "SELECT title,category,file_name,content_type,file_size,file_data FROM stored_files WHERE id=$1 AND department_id=$2 AND deleted_at IS NULL FOR UPDATE",
+          [request.params.id, departmentId],
+        );
+        if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Resource not found." }); }
+        const before = current.rows[0]!;
+        const sequence = await client.query<{ version_number: number }>("SELECT COALESCE(max(version_number),0)+1 AS version_number FROM stored_file_versions WHERE department_id=$1 AND file_id=$2", [departmentId, request.params.id]);
+        await client.query(
+          "INSERT INTO stored_file_versions(id,department_id,file_id,version_number,title,category,file_name,content_type,file_size,file_data,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+          [randomUUID(), departmentId, request.params.id, sequence.rows[0]!.version_number, before.title, before.category, before.file_name, before.content_type, before.file_size, before.file_data, request.authenticatedUser!.id],
+        );
+        const updated = await client.query<ResourceRow>(
+          "UPDATE stored_files SET file_name=$3,content_type=$4,file_size=$5,file_data=$6,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,title,category,file_name,content_type,file_size,created_at,folder_id",
+          [request.params.id, departmentId, fileName, contentType, request.body.length, request.body],
+        );
+        await client.query(
+          "DELETE FROM stored_file_versions WHERE id IN (SELECT id FROM stored_file_versions WHERE department_id=$1 AND file_id=$2 ORDER BY version_number DESC OFFSET 5)",
+          [departmentId, request.params.id],
+        );
+        await client.query("COMMIT");
+        context.realtime.publish("module:file-storage:changed", departmentId, { fileId: request.params.id, action: "version-added" });
+        return reply.code(201).send({ ...mapResource(updated.rows[0]), versionNumber: sequence.rows[0]!.version_number });
+      } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+    });
+
+    routes.get<{ Params: { id: string; versionId: string } }>("/api/files/:id/versions/:versionId/download", { schema: { params: { type: "object", required: ["id", "versionId"], properties: { id: { type: "string", format: "uuid" }, versionId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (!await canReadStoredFile(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Resource not found." });
+      const result = await pool!.query<{ file_name: string; content_type: string; file_data: Buffer }>(
+        "SELECT version.file_name,version.content_type,version.file_data FROM stored_file_versions version JOIN stored_files stored ON stored.id=version.file_id AND stored.department_id=version.department_id WHERE version.id=$1 AND version.file_id=$2 AND version.department_id=$3 AND stored.deleted_at IS NULL",
+        [request.params.versionId, request.params.id, departmentId],
+      );
+      const version = result.rows[0];
+      if (!version) return reply.code(404).send({ error: "File version not found." });
+      reply.type(version.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(version.file_name)}`).header("X-Content-Type-Options", "nosniff");
+      return version.file_data;
+    });
+
+    routes.post<{ Params: { id: string; versionId: string } }>("/api/files/:id/versions/:versionId/restore", { schema: { params: { type: "object", required: ["id", "versionId"], properties: { id: { type: "string", format: "uuid" }, versionId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId) return reply;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const current = await client.query<{ title: string; category: string; file_name: string; content_type: string; file_size: number; file_data: Buffer }>("SELECT title,category,file_name,content_type,file_size,file_data FROM stored_files WHERE id=$1 AND department_id=$2 AND deleted_at IS NULL FOR UPDATE", [request.params.id, departmentId]);
+        const version = await client.query<{ version_number: number; title: string; category: string; file_name: string; content_type: string; file_size: number; file_data: Buffer }>("SELECT version_number,title,category,file_name,content_type,file_size,file_data FROM stored_file_versions WHERE id=$1 AND file_id=$2 AND department_id=$3", [request.params.versionId, request.params.id, departmentId]);
+        if (!current.rowCount || !version.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Resource or file version not found." }); }
+        const before = current.rows[0]!;
+        const sequence = await client.query<{ version_number: number }>("SELECT COALESCE(max(version_number),0)+1 AS version_number FROM stored_file_versions WHERE department_id=$1 AND file_id=$2", [departmentId, request.params.id]);
+        await client.query("INSERT INTO stored_file_versions(id,department_id,file_id,version_number,title,category,file_name,content_type,file_size,file_data,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)", [randomUUID(), departmentId, request.params.id, sequence.rows[0]!.version_number, before.title, before.category, before.file_name, before.content_type, before.file_size, before.file_data, request.authenticatedUser!.id]);
+        const restored = version.rows[0]!;
+        await client.query("UPDATE stored_files SET file_name=$3,content_type=$4,file_size=$5,file_data=$6,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, restored.file_name, restored.content_type, restored.file_size, restored.file_data]);
+        await client.query("DELETE FROM stored_file_versions WHERE id IN (SELECT id FROM stored_file_versions WHERE department_id=$1 AND file_id=$2 ORDER BY version_number DESC OFFSET 5)", [departmentId, request.params.id]);
+        await client.query("COMMIT");
+        context.realtime.publish("module:file-storage:changed", departmentId, { fileId: request.params.id, action: "version-restored", restoredVersion: restored.version_number });
+        return { restored: true, restoredVersion: restored.version_number };
+      } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
     });
 
     routes.delete<{ Params: { id: string } }>("/api/files/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {

@@ -34,6 +34,17 @@ type NotificationResponse = {
   canSend: boolean;
 };
 
+type EmailTemplateKind = "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed";
+type EmailTemplate = { kind: EmailTemplateKind; subjectTemplate: string; bodyTemplate: string; updatedAt: string | null };
+const emailTemplateKinds: Array<{ kind: EmailTemplateKind; label: string }> = [
+  { kind: "announcement", label: "Church announcements" },
+  { kind: "event_reminder", label: "Event reminders" },
+  { kind: "service_request", label: "Volunteer requests" },
+  { kind: "follow_up_assignment", label: "Visitor follow-up assignments" },
+  { kind: "follow_up_reminder", label: "Visitor follow-up reminders" },
+  { kind: "community_feed", label: "Community Feed" },
+];
+
 export function NotificationsModule({ departmentId, csrfToken, language }: ModuleContext) {
   const t = (key: string) => moduleTranslation(notificationTranslations, language, key);
   const format = (key: string, values: Record<string, string>) => Object.entries(values).reduce((text, [name, value]) => text.replaceAll(`{${name}}`, value), t(key));
@@ -46,6 +57,10 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   const [emailDeliveryConfigured, setEmailDeliveryConfigured] = useState(false);
   const [emailSuppressed, setEmailSuppressed] = useState(false);
   const [canSend, setCanSend] = useState(false);
+  const [emailTemplates, setEmailTemplates] = useState<EmailTemplate[]>([]);
+  const [emailTemplateKind, setEmailTemplateKind] = useState<EmailTemplateKind>("announcement");
+  const [emailTemplateSubject, setEmailTemplateSubject] = useState("");
+  const [emailTemplateBody, setEmailTemplateBody] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -78,6 +93,23 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   }, [departmentId]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    if (!canSend) return;
+    let active = true;
+    void fetch("/api/modules/notifications/email-templates", { headers: { "x-department-id": departmentId } }).then(async (response) => {
+      const result = await response.json() as { error?: string; templates?: EmailTemplate[] };
+      if (!response.ok || !Array.isArray(result.templates)) throw new Error(result.error ?? "Could not load email templates.");
+      if (active) setEmailTemplates(result.templates);
+    }).catch((reason) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load email templates."); });
+    return () => { active = false; };
+  }, [canSend, departmentId]);
+
+  useEffect(() => {
+    const selected = emailTemplates.find((item) => item.kind === emailTemplateKind);
+    setEmailTemplateSubject(selected?.subjectTemplate ?? "");
+    setEmailTemplateBody(selected?.bodyTemplate ?? "");
+  }, [emailTemplates, emailTemplateKind]);
 
   useEffect(() => {
     if (!detailsNotification) return;
@@ -146,6 +178,18 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     finally { setBusy(false); }
   }
 
+  async function saveEmailTemplate(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true); setError(""); setFeedback("");
+    try {
+      const result = await mutate(`/api/modules/notifications/email-templates/${emailTemplateKind}`, "PUT", { subjectTemplate: emailTemplateSubject, bodyTemplate: emailTemplateBody });
+      const saved = result as unknown as EmailTemplate;
+      setEmailTemplates((current) => [...current.filter((item) => item.kind !== emailTemplateKind), saved]);
+      setFeedback("Notification email template saved. Empty fields use the built-in template.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save this email template."); }
+    finally { setBusy(false); }
+  }
+
   async function sendAnnouncement(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const formElement = event.currentTarget;
@@ -186,6 +230,17 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
         <label>Title<input name="title" required maxLength={120} placeholder="A short announcement" /></label>
         <label>Message<textarea name="body" required maxLength={2000} rows={4} placeholder="Write a message for your church community…" /></label>
         <div className="form-actions"><button className="button button-primary" type="submit" disabled={busy || (announcementAudience === "groups" && selectedGroupIds.length === 0)}><Send size={14} />{busy ? "Sending…" : "Send announcement"}</button></div>
+      </form>
+    </section>}
+
+    {canSend && <section className="directory-card notification-template-card">
+      <div className="directory-heading"><div><h2>Notification email templates</h2><p>Customize the subject and plain-text message for each notification type. Emails remain escaped and use the standard Smart Church layout.</p></div></div>
+      <form className="notification-template-form" onSubmit={(event) => void saveEmailTemplate(event)}>
+        <label>Notification type<select value={emailTemplateKind} disabled={busy} onChange={(event) => setEmailTemplateKind(event.target.value as EmailTemplateKind)}>{emailTemplateKinds.map((item) => <option key={item.kind} value={item.kind}>{item.label}</option>)}</select></label>
+        <label>Email subject<input maxLength={240} value={emailTemplateSubject} disabled={busy} onChange={(event) => setEmailTemplateSubject(event.target.value)} placeholder="Default: notification title" /></label>
+        <label>Email message<textarea maxLength={4000} rows={5} value={emailTemplateBody} disabled={busy} onChange={(event) => setEmailTemplateBody(event.target.value)} placeholder="Default: notification message" /></label>
+        <p className="notification-template-help">Supported placeholders: <code>{"{title}"}</code>, <code>{"{body}"}</code>, <code>{"{open_url}"}</code>. Leave either field blank to use its built-in default. Template text is plain text; HTML is escaped automatically.</p>
+        <div className="form-actions"><button className="button button-primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Save email template"}</button></div>
       </form>
     </section>}
 

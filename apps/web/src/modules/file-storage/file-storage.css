@@ -12,3 +12,11 @@
 .file-folder-open small{color:var(--muted);font-size:11px}
 @media(max-width:520px){.community-resource-list{padding-left:13px;padding-right:13px}.community-resource-row{gap:7px}.community-category-filter{flex:1}.community-category-filter select{width:100%;min-width:0}}
 :root[data-theme="dark"] .community-category-filter select{color-scheme:dark}
+.file-version-history { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+.file-version-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.file-version-heading h3 { margin: 0; font-size: 1rem; }
+.file-version-history ol { display: grid; gap: 0.6rem; padding: 0; list-style: none; }
+.file-version-history li { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; padding: 0.7rem; border: 1px solid var(--border); border-radius: 8px; }
+.file-version-history li > span:first-child { display: grid; gap: 0.2rem; min-width: 0; }
+.file-version-history li small { color: var(--muted-foreground); }
+.file-version-history li > span:last-child { display: flex; flex-wrap: wrap; gap: 0.4rem; }
