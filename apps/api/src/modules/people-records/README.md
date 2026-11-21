@@ -45,3 +45,5 @@ Directory, saved views, and CSV support an exact group membership role filter (c
 People managers can archive or restore a person from their profile. The archive list and its CSV export honor the same filters. Archiving keeps the location contact, linked records, and audit history. Default directory and global search results exclude archived people. Imports continue checking all contacts for duplicates, including archived records.
 
 The directory statistics panel counts all matching active or archived contacts before the 500-row display limit. It reports totals, member and visitor counts, and how many people have email and phone details. It uses the same location and filters as the displayed directory.
+
+People managers can also archive or restore up to 500 visible selected contacts in one operation. The API rejects a selection that includes contacts outside the location and writes a history entry for each changed contact.

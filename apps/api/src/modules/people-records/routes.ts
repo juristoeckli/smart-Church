@@ -280,6 +280,43 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query(`${selection} FROM contacts c WHERE ${match} ORDER BY ${order} LIMIT 500`, values);
       return result.rows;
     });
+    async function updateArchiveState(departmentId: string, contactIds: string[], archived: boolean, actorId: string | null) {
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return { kind: "readonly" } as const;
+        }
+        const current = await client.query<{ id: string }>(
+          "SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR UPDATE",
+          [departmentId, contactIds],
+        );
+        if (current.rows.length !== contactIds.length) {
+          await client.query("ROLLBACK");
+          return { kind: "missing" } as const;
+        }
+        const updated = await client.query<{ id: string }>(
+          `UPDATE contacts SET archived_at=CASE WHEN $3::boolean THEN now() ELSE NULL END
+            WHERE department_id=$1 AND id=ANY($2::uuid[]) AND (archived_at IS NOT NULL) <> $3::boolean RETURNING id`,
+          [departmentId, contactIds, archived],
+        );
+        for (const { id } of updated.rows) {
+          await client.query(
+            "INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,$5,'archive',$6::jsonb,$7::jsonb)",
+            [randomUUID(), departmentId, id, actorId, archived ? "person_archived" : "person_restored", JSON.stringify(!archived), JSON.stringify(archived)],
+          );
+        }
+        await client.query("COMMIT");
+        return { kind: "updated", count: updated.rows.length } as const;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }
+
     routes.put<{ Params: { contactId: string }; Body: { archived: boolean } }>("/api/people-records/:contactId/archive", {
       schema: {
         params: { type: "object", required: ["contactId"], properties: { contactId: uuid } },
@@ -290,37 +327,38 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId || !validateMutation(request, reply)) return reply;
       const { contactId } = request.params;
       const { archived } = request.body;
-      const client = await pool!.connect();
-      try {
-        await client.query("BEGIN");
-        if (!await context.lockDepartmentForWrite(client, departmentId)) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({ error: "This location is read-only." });
-        }
-        const current = await client.query<{ archived_at: Date | null }>(
-          "SELECT archived_at FROM contacts WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, contactId],
-        );
-        if (!current.rowCount) {
-          await client.query("ROLLBACK");
-          return reply.code(404).send({ error: "Person not found at this location." });
-        }
-        if (Boolean(current.rows[0].archived_at) !== archived) {
-          await client.query("UPDATE contacts SET archived_at=CASE WHEN $3 THEN now() ELSE NULL END WHERE department_id=$1 AND id=$2", [departmentId, contactId, archived]);
-          await client.query(
-            "INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,$5,'archive',$6::jsonb,$7::jsonb)",
-            [randomUUID(), departmentId, contactId, request.authenticatedUser?.id ?? null, archived ? "person_archived" : "person_restored", JSON.stringify(!archived), JSON.stringify(archived)],
-          );
-        }
-        await client.query("COMMIT");
-      } catch (error) {
-        await client.query("ROLLBACK");
-        throw error;
-      } finally {
-        client.release();
+      const result = await updateArchiveState(departmentId, [contactId], archived, request.authenticatedUser?.id ?? null);
+      if (result.kind === "readonly") return reply.code(409).send({ error: "This location is read-only." });
+      if (result.kind === "missing") return reply.code(404).send({ error: "Person not found at this location." });
+      if (result.count) {
+        changed(departmentId, contactId);
+        realtime.publish("core:contacts:changed", departmentId, { contactId });
       }
-      changed(departmentId, contactId);
-      realtime.publish("core:contacts:changed", departmentId, { contactId });
       return { archived };
+    });
+
+    routes.post<{ Body: { contactIds: string[]; archived: boolean } }>("/api/people-records/bulk-archive", {
+      schema: {
+        body: { type: "object", additionalProperties: false, required: ["contactIds", "archived"], properties: {
+          contactIds: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: uuid },
+          archived: { type: "boolean" },
+        } },
+      },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId || !validateMutation(request, reply)) return reply;
+      const { contactIds, archived } = request.body;
+      if (new Set(contactIds.map(id => id.toLowerCase())).size !== contactIds.length) {
+        return reply.code(400).send({ error: "Select each person only once." });
+      }
+      const result = await updateArchiveState(departmentId, contactIds, archived, request.authenticatedUser?.id ?? null);
+      if (result.kind === "readonly") return reply.code(409).send({ error: "This location is read-only." });
+      if (result.kind === "missing") return reply.code(404).send({ error: "One or more selected people were not found at this location." });
+      if (result.count) {
+        changed(departmentId);
+        realtime.publish("core:contacts:changed", departmentId, {});
+      }
+      return { archived, updated: result.count };
     });
     routes.get<{ Params: { contactId: string } }>("/api/people-records/:contactId", { schema: { params: { type: "object", additionalProperties: false, required: ["contactId"], properties: { contactId: uuid } } } }, async (request, reply) => {
       const d = await department(request, reply); if (!d) return reply;

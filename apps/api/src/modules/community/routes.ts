@@ -162,6 +162,26 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       }
     });
 
+    routes.get<{ Params: { id: string } }>("/api/groups/:id/type-history", { schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const group = await pool!.query("SELECT id FROM church_groups WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
+      if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
+      const result = await pool!.query(
+        `SELECT history.id, history.previous_type AS "previousType", history.new_type AS "newType",
+                history.created_at AS "createdAt", actor.display_name AS "actorName"
+           FROM group_directory_type_history history
+           LEFT JOIN app_users actor ON actor.id=history.actor_user_id
+          WHERE history.department_id=$1 AND history.group_id=$2
+          ORDER BY history.created_at DESC, history.id DESC
+          LIMIT 100`,
+        [departmentId, request.params.id],
+      );
+      return reply.header("Cache-Control", "private, no-store").send(result.rows);
+    });
+
     routes.patch<{ Body: { groupIds: string[]; groupType: string } }>("/api/groups/bulk-type", { schema: {
       body: { type: "object", additionalProperties: false, required: ["groupIds", "groupType"], properties: {
         groupIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },

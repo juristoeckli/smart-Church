@@ -40,6 +40,53 @@ function downloadCsv(rows: (string | number)[][], fileName: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+type GroupTypeChange = {
+  id: string;
+  previousType: string | null;
+  newType: string;
+  createdAt: string;
+  actorName: string | null;
+};
+
+function GroupTypeHistory({ departmentId, groupId, groupType }: { departmentId: string; groupId: string; groupType?: string }) {
+  const [open, setOpen] = useState(false);
+  const [changes, setChanges] = useState<GroupTypeChange[] | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setChanges(null);
+    setFailed(false);
+    void (async () => {
+      try {
+        const response = await fetch(`/api/groups/${groupId}/type-history`, {
+          headers: { "x-department-id": departmentId },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("Could not load group type history.");
+        const entries: GroupTypeChange[] = await response.json();
+        if (!controller.signal.aborted) setChanges(entries);
+      } catch {
+        if (!controller.signal.aborted) setFailed(true);
+      }
+    })();
+    return () => controller.abort();
+  }, [departmentId, groupId, groupType, open]);
+
+  return <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>Bulk type change history</summary>
+    {failed ? <p role="alert">Could not load group type history.</p>
+      : changes === null ? <p role="status">Loading type changes…</p>
+      : changes.length === 0 ? <p>No bulk type changes recorded.</p>
+      : <ul>{changes.map((change) => <li key={change.id}>
+        <time dateTime={change.createdAt}>{formatUserDate(change.createdAt, true)}</time>
+        {" · "}{change.actorName || "Unknown actor"}{" · "}
+        {change.previousType || "Not set"}{" → "}{change.newType || "Not set"}
+      </li>)}</ul>}
+  </details>;
+}
+
 export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, createRequestId = 0, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; createRequestId?: number; onNavigationHandled?: (requestId: number) => void }) {
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [loadedDepartmentId, setLoadedDepartmentId] = useState("");
@@ -486,6 +533,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
           <div className="directory-heading"><div><h2>{selected.name}</h2><p>{selected.importedFrom ? translate("groups.importedReadOnly") : selected.description || translate("groups.descriptionFallback")}</p><small className="community-group-lifecycle">{selected.groupType ? `${selected.groupType} · ` : ""}{selected.status}{selected.startsOn ? ` · starts ${formatUserDate(selected.startsOn)}` : ""}{selected.endsOn ? ` · ends ${formatUserDate(selected.endsOn)}` : ""}</small></div>{canManage && !selected.importedFrom && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => setEditing((current) => !current)}><Pencil size={14} />{editing ? translate("groups.cancelEdit") : translate("groups.edit")}</button><button className="button button-danger" type="button" onClick={() => void deleteGroup(selected)}><Trash2 size={14} />{translate("groups.delete")}</button></div>}</div>
           {canManage && editing && <form className="community-group-form" onSubmit={saveGroup}><label>{translate("groups.name")}<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} /></label><label>{translate("groups.description")}<textarea rows={2} maxLength={1000} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Group type <span className="optional-label">optional</span><input maxLength={80} value={groupType} onChange={(event) => setGroupType(event.target.value)} placeholder="Youth, small group, ministry" /></label><label>Lifecycle status<select value={groupStatus} onChange={(event) => setGroupStatus(event.target.value as GroupLifecycleStatus)}><option value="active">Active</option><option value="draft">Draft</option><option value="ended">Ended</option><option value="archived">Archived</option></select></label><label>Start date <span className="optional-label">optional</span><input type="date" value={startsOn} onChange={(event) => setStartsOn(event.target.value)} /></label><label>End date <span className="optional-label">optional</span><input type="date" value={endsOn} onChange={(event) => setEndsOn(event.target.value)} min={startsOn || undefined} /></label><button className="button button-primary" type="submit" disabled={saving}><Check size={15} />{translate("groups.save")}</button></form>}
           {canManage && !selected.importedFrom && <section className="group-public-signup"><div className="community-members-heading"><div><h3>{translate("groups.publicSignup")}</h3><p>{translate("groups.publicSignupHelp")}</p></div><label className="group-public-signup-toggle"><input type="checkbox" checked={Boolean(selected.publicSignupEnabled)} disabled={signupSaving || selected.status !== "active"} onChange={(event) => void setPublicSignupEnabled(event.target.checked)} /><span>{selected.publicSignupEnabled ? translate("groups.enabled") : translate("groups.off")}</span></label></div>{selected.status !== "active" && <p className="community-empty">Public signup is available for active groups only.</p>}{selected.publicSignupEnabled && selected.publicSignupToken && <div className="group-public-signup-link"><code>{window.location.origin}/join-group/{selected.publicSignupToken}</code><button className="button button-secondary" type="button" onClick={() => void copyGroupSignupLink(selected)}><Link2 size={14} />{translate("groups.copyLink")}</button></div>}</section>}
+          {canManage && !selected.importedFrom && loadedDepartmentId === departmentId && <GroupTypeHistory key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} groupType={selected.groupType} />}
           {canManage && !selected.importedFrom && <section className="group-join-requests"><div className="community-members-heading"><div><h3>{translate("groups.joinRequests")}</h3><p>{translate("groups.waitingReview").replace("{count}", String(joinRequests.length))}</p></div></div>{joinRequests.length ? <div className="group-join-request-list">{joinRequests.map((joinRequest) => {
             const matches = contacts.filter((person) => person.email?.trim().toLocaleLowerCase() === joinRequest.email.toLocaleLowerCase());
             return <article className="group-join-request" key={joinRequest.id}><div><strong>{joinRequest.firstName} {joinRequest.lastName}</strong><small>{joinRequest.email} · {formatUserDate(joinRequest.createdAt, true)}</small></div>{matches.length > 1 && <label>{translate("groups.matchPerson")}<select value={requestContactIds[joinRequest.id] ?? ""} onChange={(event) => setRequestContactIds((current) => ({ ...current, [joinRequest.id]: event.target.value }))}><option value="">{translate("groups.choosePerson")}</option>{matches.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select></label>}{matches.length === 0 && <small>{translate("groups.approvalCreatesVisitor")}</small>}<div className="group-join-request-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => void reviewJoinRequest(joinRequest, "declined")}>{translate("groups.decline")}</button><button className="button button-primary" type="button" disabled={saving || matches.length > 1 && !requestContactIds[joinRequest.id]} onClick={() => void reviewJoinRequest(joinRequest, "approved")}><Check size={14} />{translate("groups.approve")}</button></div></article>;
