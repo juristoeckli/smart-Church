@@ -157,12 +157,14 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     return () => controller.abort();
   }, [base, contactId, reload, request]);
 
-  async function exportFields() {
+  async function exportFields(fieldIds?: string[]) {
     if (exporting) return;
     setExporting(true);
     setError("");
     try {
-      const response = await fetch(base + "/export.csv", {
+      const params = new URLSearchParams();
+      for (const id of fieldIds ?? []) params.append("fieldId", id);
+      const response = await fetch(base + "/export.csv" + (fieldIds?.length ? "?" + params : ""), {
         headers: { "x-department-id": departmentId }, cache: "no-store",
       });
       if (!response.ok) {
@@ -292,7 +294,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
       </form>}
     </>}
     {!contactId && selectedContactIds && activeFields.length > 0 && <BulkMemberFieldChange base={base} fields={activeFields} selectedContactIds={selectedContactIds} request={request} onValuesChange={onValuesChange}/>}
-    {!contactId && rosterMembers && activeFields.length > 0 && <TypedRosterColumns base={base} fields={activeFields} members={rosterMembers} revision={rosterRevision ?? 0} request={request}/>}
+    {!contactId && rosterMembers && activeFields.length > 0 && <TypedRosterColumns base={base} fields={activeFields} members={rosterMembers} revision={rosterRevision ?? 0} request={request} exporting={exporting} onExport={exportFields}/>}
     {contactId && answers && activeFields.length > 0 && <form onSubmit={saveAnswers}>
       {activeFields.map(field => {
         const value = draft[field.id] ?? (answers.values[field.id] === undefined ? "" : String(answers.values[field.id]));

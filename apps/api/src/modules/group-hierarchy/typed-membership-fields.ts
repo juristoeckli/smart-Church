@@ -252,10 +252,11 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     return { updated: changed.rowCount };
   }, 200));
 
+  const rosterFieldIds = { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: uuid } as const;
   const rosterColumnParams = {
     type: "object", additionalProperties: false, required: ["fieldId", "contactId"],
     properties: {
-      fieldId: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: uuid },
+      fieldId: rosterFieldIds,
       contactId: { type: "array", minItems: 1, maxItems: 25, uniqueItems: true, items: uuid },
     },
   } as const;
@@ -296,10 +297,15 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
   });
 
   const exportLimit = 2000;
-  app.get<{ Params: { groupId: string } }>(`${base}/export.csv`, { schema: { params: groupParams } }, async (request, reply) => {
+  app.get<{ Params: { groupId: string }; Querystring: { fieldId?: string[] } }>(`${base}/export.csv`, {
+    schema: { params: groupParams, querystring: { type: "object", additionalProperties: false, properties: { fieldId: rosterFieldIds } } },
+  }, async (request, reply) => {
     const location = await scope(request, reply);
     if (!location) return reply;
     const { departmentId, groupId } = location;
+    const names = request.query.fieldId?.map(id => id.toLowerCase());
+    const chosenIds = names && new Set(names);
+    if (chosenIds && chosenIds.size !== names?.length) return reply.code(400).send({ error: "Select each membership field only once." });
     const client = await pool!.connect();
     let activeFields: Field[];
     let members: {
@@ -309,7 +315,11 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       if (!await checkGroup(request, reply, location, client)) { await client.query("ROLLBACK"); return reply; }
-      activeFields = (await definitions(client, location)).filter(field => !field.archivedAt);
+      activeFields = (await definitions(client, location)).filter(field => !field.archivedAt && (!chosenIds || chosenIds.has(field.id)));
+      if (chosenIds && activeFields.length !== chosenIds.size) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "A selected field is no longer active in this group. Reload the fields and try again." });
+      }
       const roster = await client.query<typeof members[number]>(
         `SELECT person.first_name AS "firstName",person.last_name AS "lastName",member.role,member.status,
                 COALESCE((SELECT jsonb_object_agg(field.key,field.value) FROM jsonb_each(answer.field_values) field

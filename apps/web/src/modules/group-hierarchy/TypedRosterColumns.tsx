@@ -8,8 +8,9 @@ type Request = <T>(url: string, init?: RequestInit) => Promise<T>;
 const pageSize = 25;
 const maxFields = 8;
 
-export function TypedRosterColumns({ base, fields, members, revision, request }: {
+export function TypedRosterColumns({ base, fields, members, revision, request, exporting, onExport }: {
   base: string; fields: Field[]; members: RosterMember[]; revision: number; request: Request;
+  exporting: boolean; onExport: (fieldIds: string[]) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -52,6 +53,9 @@ export function TypedRosterColumns({ base, fields, members, revision, request }:
         {field.label}
       </label>)}
     </fieldset>
+    {selected.length > 0 && <button type="button" disabled={exporting} onClick={() => void onExport(selected.map(field => field.id))}>
+      Export whole group with these columns (CSV)
+    </button>}
     {error && <p role="alert">{error} <button type="button" onClick={() => setRetry(value => value + 1)}>Retry</button></p>}
     {query && !rows && !error && <p role="status">Loading roster values…</p>}
     {selected.length > 0 && !visible.length && <p>No members match the roster filters.</p>}
