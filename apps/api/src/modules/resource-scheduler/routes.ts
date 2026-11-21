@@ -369,7 +369,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search]),
       canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
       canManage ? context.pool!.query<{ id: string; name: string }>(
-        "SELECT id,name FROM church_groups WHERE department_id=$1 AND status='active' ORDER BY lower(name),id", [departmentId],
+        "SELECT id,name FROM church_groups groups WHERE department_id=$1 AND (to_jsonb(groups)->>'status')='active' ORDER BY lower(name),id", [departmentId],
       ).then((result) => result.rows) : Promise.resolve([]),
     ]);
     return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, visibilityGroups, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
@@ -471,7 +471,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const visibilityGroupId = request.body.visibilityGroupId === undefined
         ? resource.visibility_group_id : request.body.visibilityGroupId?.toLowerCase() ?? null;
       if (visibilityGroupId && visibilityGroupId !== resource.visibility_group_id) {
-        const group = await client.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status='active' FOR SHARE",
+        const group = await client.query("SELECT id FROM church_groups groups WHERE id=$1 AND department_id=$2 AND (to_jsonb(groups)->>'status')='active' FOR SHARE",
           [visibilityGroupId, departmentId]);
         if (!group.rowCount) {
           await client.query("ROLLBACK");
