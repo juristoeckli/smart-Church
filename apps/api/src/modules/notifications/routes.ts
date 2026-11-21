@@ -101,50 +101,57 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   context.replication.register({
-    schemaVersion: "5",
+    schemaVersion: "6",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Notifications database is unavailable."], recordCount: 0 };
       try {
-        const result = await pool.query<{ notifications: string; preferences: string; dashboardPreferences: string; deliveries: string; webhookEvents: string; emailTemplates: string; emailEnabled: boolean }>(
+        const result = await pool.query<{ notifications: string; preferences: string; dashboardPreferences: string; deliveries: string; webhookEvents: string; emailTemplates: string; announcementBatches: string; emailEnabled: boolean }>(
           `SELECT (SELECT count(*) FROM module_notifications WHERE department_id=$1)::text notifications,
                   (SELECT count(*) FROM module_notification_preferences WHERE department_id=$1)::text preferences,
                   (SELECT count(*) FROM overview_widget_preferences WHERE department_id=$1)::text "dashboardPreferences",
                   (SELECT count(*) FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1)::text deliveries,
                   (SELECT count(*) FROM module_notification_webhook_events event JOIN module_notification_email_deliveries d ON d.provider_email_id=event.provider_email_id JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1)::text "webhookEvents",
                   (SELECT count(*) FROM module_notification_email_templates WHERE department_id=$1)::text "emailTemplates",
-                  EXISTS(SELECT 1 FROM module_notification_preferences WHERE department_id=$1 AND email_notifications_enabled) email_enabled`, [departmentId]);
+                  (SELECT count(*) FROM module_notification_announcement_batches WHERE department_id=$1)::text "announcementBatches",
+                  EXISTS(SELECT 1 FROM module_notification_preferences WHERE department_id=$1 AND email_notifications_enabled) "emailEnabled"`, [departmentId]);
         const row = result.rows[0];
         const blockers: string[] = [];
         const ready = !row.emailEnabled || await context.email.isConfigured(departmentId);
         if (!ready) blockers.push("Email notifications are enabled for this site but the email connector is not configured on this server.");
-        return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.dashboardPreferences) + Number(row.deliveries) + Number(row.webhookEvents) + Number(row.emailTemplates) };
+        return { ready: !blockers.length, blockers, recordCount: Number(row.notifications) + Number(row.preferences) + Number(row.dashboardPreferences) + Number(row.deliveries) + Number(row.webhookEvents) + Number(row.emailTemplates) + Number(row.announcementBatches) };
       } catch {
         return { ready: false, blockers: ["Notifications storage is not initialized on this server."], recordCount: 0 };
       }
     },
     exportSnapshot: async (client: PoolClient, departmentId) => {
-      const notifications = await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
+      const notifications = await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at,announcement_batch_id FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
       const preferences = await client.query("SELECT user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at FROM module_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId]);
       const homeWidgetPreferences = await client.query("SELECT user_id,widget_order,visible_widgets,updated_at FROM overview_widget_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId]);
       const deliveries = await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId]);
       const suppressions = await client.query("SELECT email,reason,provider_event_id,created_at FROM module_notification_email_suppressions ORDER BY email");
       const webhookEvents = await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId]);
       const emailTemplates = await client.query("SELECT kind,subject_template,body_template,updated_by,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId]);
-      return { version: 5, notifications: notifications.rows, preferences: preferences.rows, homeWidgetPreferences: homeWidgetPreferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows, emailTemplates: emailTemplates.rows };
+      const announcementBatches = await client.query("SELECT id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count FROM module_notification_announcement_batches WHERE department_id=$1 ORDER BY sent_at,id", [departmentId]);
+      return { version: 6, announcementBatches: announcementBatches.rows, notifications: notifications.rows, preferences: preferences.rows, homeWidgetPreferences: homeWidgetPreferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows, emailTemplates: emailTemplates.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>> };
-      if (!snapshot || ![2, 3, 4, 5].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || (Number(snapshot.version) >= 4 && (!Array.isArray(snapshot.homeWidgetPreferences) || snapshot.homeWidgetPreferences.length > 250000)) || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000 || (Number(snapshot.version) >= 5 && (!Array.isArray(snapshot.emailTemplates) || snapshot.emailTemplates.length > 100))) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
+      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>>; announcementBatches?: Array<Record<string, unknown>> };
+      if (!snapshot || ![2, 3, 4, 5, 6].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || (Number(snapshot.version) >= 4 && (!Array.isArray(snapshot.homeWidgetPreferences) || snapshot.homeWidgetPreferences.length > 250000)) || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000 || (Number(snapshot.version) >= 5 && (!Array.isArray(snapshot.emailTemplates) || snapshot.emailTemplates.length > 100)) || (Number(snapshot.version) >= 6 && (!Array.isArray(snapshot.announcementBatches) || snapshot.announcementBatches.length > 250000))) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
       await client.query("DELETE FROM module_notification_webhook_events WHERE provider_email_id IN (SELECT d.provider_email_id FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 AND d.provider_email_id IS NOT NULL)", [departmentId]);
       await client.query("DELETE FROM module_notification_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM overview_widget_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM module_notification_email_templates WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM module_notifications WHERE department_id=$1", [departmentId]);
+      await client.query("DELETE FROM module_notification_announcement_batches WHERE department_id=$1", [departmentId]);
+      for (const batch of snapshot.announcementBatches ?? []) {
+        await client.query(`INSERT INTO module_notification_announcement_batches (department_id,id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [departmentId,batch.id,batch.sent_at,batch.sender_name,batch.title,batch.audience,batch.group_names,batch.recipient_count,batch.email_queued_count]);
+      }
       for (const row of snapshot.notifications) {
         const recipientId = restoreContext.userIdMap.get(String(row.recipient_user_id));
         const senderId = row.sender_user_id == null ? null : restoreContext.userIdMap.get(String(row.sender_user_id)) ?? null;
         if (!recipientId) throw new Error("A notification recipient has no matching account on the standby server.");
-        await client.query("INSERT INTO module_notifications(id,department_id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)", [row.id, departmentId, recipientId, senderId, row.kind, row.title, row.body, row.event_id, row.related_event_id, row.related_contact_id, row.in_app_enabled ?? true, row.email_enabled ?? true, row.created_at, row.read_at]);
+        await client.query("INSERT INTO module_notifications(id,department_id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at,announcement_batch_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)", [row.id, departmentId, recipientId, senderId, row.kind, row.title, row.body, row.event_id, row.related_event_id, row.related_contact_id, row.in_app_enabled ?? true, row.email_enabled ?? true, row.created_at, row.read_at, row.announcement_batch_id ?? null]);
       }
       for (const row of snapshot.preferences) {
         const userId = restoreContext.userIdMap.get(String(row.user_id));
@@ -168,17 +175,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           provider_event_id=EXCLUDED.provider_event_id,
           created_at=LEAST(module_notification_email_suppressions.created_at,EXCLUDED.created_at)`, [row.email, row.reason, row.provider_event_id, row.created_at]);
       for (const row of snapshot.webhookEvents) await client.query("INSERT INTO module_notification_webhook_events(provider_event_id,event_type,provider_email_id,received_at,processed_at) VALUES($1,$2,$3,$4,$5)", [row.provider_event_id,row.event_type,row.provider_email_id,row.received_at,row.processed_at]);
-      return { recordCount: snapshot.notifications.length + snapshot.preferences.length + (snapshot.homeWidgetPreferences?.length ?? 0) + (snapshot.emailTemplates?.length ?? 0) + snapshot.deliveries.length + snapshot.webhookEvents.length };
+      return { recordCount: snapshot.notifications.length + snapshot.preferences.length + (snapshot.homeWidgetPreferences?.length ?? 0) + (snapshot.emailTemplates?.length ?? 0) + snapshot.deliveries.length + snapshot.webhookEvents.length + (snapshot.announcementBatches?.length ?? 0) };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>> };
-      if (!snapshot || ![2, 3, 4, 5].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || (Number(snapshot.version) >= 4 && !Array.isArray(snapshot.homeWidgetPreferences)) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents) || (Number(snapshot.version) >= 5 && !Array.isArray(snapshot.emailTemplates))) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
-      const actualNotifications = (await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>>; announcementBatches?: Array<Record<string, unknown>> };
+      if (!snapshot || ![2, 3, 4, 5, 6].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || (Number(snapshot.version) >= 4 && !Array.isArray(snapshot.homeWidgetPreferences)) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents) || (Number(snapshot.version) >= 5 && !Array.isArray(snapshot.emailTemplates)) || (Number(snapshot.version) >= 6 && !Array.isArray(snapshot.announcementBatches))) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
+      const actualNotifications = (await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at,announcement_batch_id FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualPreferences = (await client.query("SELECT user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at FROM module_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualHomeWidgetPreferences = (await client.query("SELECT user_id,widget_order,visible_widgets,updated_at FROM overview_widget_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualEmailTemplates = (await client.query("SELECT kind,subject_template,body_template,updated_by,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualDeliveries = (await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualWebhookEvents = (await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualAnnouncementBatches = (await client.query("SELECT id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count FROM module_notification_announcement_batches WHERE department_id=$1 ORDER BY sent_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const mapping = restoreContext?.userIdMap ?? new Map<string, string>();
       const remap = (rows: Array<Record<string, unknown>>, fields: string[]) => rows.map((source) => {
         const row = { ...source };
@@ -191,7 +199,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return left.every((row, index) => row === right[index]);
       };
       if (Number(snapshot.version) < 3) for (const row of snapshot.notifications) { row.in_app_enabled ??= true; row.email_enabled ??= true; }
-      if (!same(remap(snapshot.notifications, ["recipient_user_id", "sender_user_id"]), actualNotifications)
+      const expectedNotifications = remap(snapshot.notifications, ["recipient_user_id", "sender_user_id"])
+        .map((row) => ({ ...row, announcement_batch_id: row.announcement_batch_id ?? null }));
+      if (!same(expectedNotifications, actualNotifications)
+        || !same(snapshot.announcementBatches ?? [], actualAnnouncementBatches)
         || !same(remap(snapshot.preferences, ["user_id"]), actualPreferences)
         || !same(remap(snapshot.homeWidgetPreferences ?? [], ["user_id"]), actualHomeWidgetPreferences)
         || (Number(snapshot.version) >= 5 && !same(remap(snapshot.emailTemplates ?? [], ["updated_by"]), actualEmailTemplates))
@@ -493,6 +504,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS related_event_id UUID REFERENCES service_events(id) ON DELETE CASCADE;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS in_app_enabled BOOLEAN NOT NULL DEFAULT true;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NOT NULL DEFAULT true;
+        ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS announcement_batch_id UUID;
+        DO $$
+        BEGIN
+          ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_announcement_batch_fk
+            FOREIGN KEY (department_id, announcement_batch_id) REFERENCES module_notification_announcement_batches(department_id,id);
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+        CREATE INDEX IF NOT EXISTS idx_module_notifications_announcement_batch
+          ON module_notifications (department_id, announcement_batch_id) WHERE announcement_batch_id IS NOT NULL;
         ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed','report_ready'));
         DROP INDEX IF EXISTS module_notifications_follow_up_unique_idx;
         CREATE UNIQUE INDEX IF NOT EXISTS module_notifications_follow_up_unique_idx
@@ -821,29 +841,82 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       });
     });
 
+    routes.get<{ Querystring: { audience?: AnnouncementAudience; page?: number } }>("/api/modules/notifications/announcements/history", {
+      schema: { querystring: { type: "object", additionalProperties: false, properties: {
+        audience: { type: "string", enum: ["location", "groups"] }, page: { type: "integer", minimum: 1, maximum: 2000 },
+      } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (request.activeDepartmentRole !== "site_admin" || request.headers.authorization) {
+        return reply.code(403).send({ error: "A site administrator browser session is required to view announcement history." });
+      }
+      const page = request.query.page ?? 1;
+      const pageSize = 25;
+      const { rows } = await pool!.query(
+        `WITH history AS (
+           SELECT id, department_id, sent_at, sender_name, title, audience, group_names, recipient_count, email_queued_count
+             FROM module_notification_announcement_batches batch
+            WHERE batch.department_id=$1 AND ($2::text IS NULL OR batch.audience=$2)
+              AND EXISTS (
+                SELECT 1 FROM department_memberships member JOIN app_users account ON account.id=member.user_id
+                 WHERE member.department_id=batch.department_id AND member.user_id=$3 AND member.role='site_admin'
+                   AND account.is_enabled AND NOT account.is_service_user
+                   AND NOT (account.must_change_password AND account.can_change_password)
+              )
+            ORDER BY batch.sent_at DESC, batch.id DESC LIMIT $4 OFFSET $5
+         )
+         SELECT history.id, history.sent_at AS "sentAt", history.sender_name AS "senderName", history.title,
+                history.audience, history.group_names AS "groupNames", history.recipient_count AS "recipientCount",
+                history.email_queued_count AS "emailQueuedCount", COALESCE((
+                  SELECT jsonb_object_agg(status, amount) FROM (
+                    SELECT d.status, count(*)::integer AS amount
+                      FROM module_notifications n JOIN module_notification_email_deliveries d ON d.notification_id=n.id
+                     WHERE n.department_id=history.department_id AND n.announcement_batch_id=history.id
+                     GROUP BY d.status
+                  ) totals
+                ), '{}'::jsonb) AS "emailStatuses"
+           FROM history ORDER BY history.sent_at DESC, history.id DESC`,
+        [departmentId, request.query.audience ?? null, request.authenticatedUser!.id, pageSize + 1, (page - 1) * pageSize],
+      );
+      return reply.header("Cache-Control", "private, no-store").send({ page, hasNext: rows.length > pageSize && page < 2000, batches: rows.slice(0, pageSize) });
+    });
+
     routes.post<{ Body: Announcement }>("/api/modules/notifications/announcements", { schema: announcementSchema }, async (request, reply) => {
       const announcement = await resolveAnnouncement(request, reply);
       if (!announcement) return reply;
       const { title, body, departmentId, audience, groupIds } = announcement;
       const recipients = await getAnnouncementRecipientIds(pool!, departmentId, audience, groupIds);
       const client = await pool!.connect();
-      let recipientCount = 0;
+      const batchId = randomUUID();
+      const recipientCount = recipients.length;
       try {
         await client.query("BEGIN");
-        for (const recipient of recipients) {
-          await client.query(
-            `INSERT INTO module_notifications (id, department_id, recipient_user_id, sender_user_id, kind, title, body)
-             VALUES ($1, $2, $3, $4, 'announcement', $5, $6)`,
-            [randomUUID(), departmentId, recipient.user_id, request.authenticatedUser!.id, title, body],
-          );
-          recipientCount += 1;
-        }
+        await client.query(
+          `INSERT INTO module_notification_announcement_batches (id, department_id, sender_name, title, audience, group_names, recipient_count)
+           VALUES ($1, $2, $3, $4, $5, ARRAY(SELECT name FROM church_groups WHERE department_id=$2 AND id=ANY($6::uuid[]) ORDER BY lower(name), id), $7)`,
+          [batchId, departmentId, request.authenticatedUser!.displayName, title, audience, groupIds, recipientCount],
+        );
+        await client.query(
+          `INSERT INTO module_notifications (id, department_id, recipient_user_id, sender_user_id, kind, title, body, announcement_batch_id)
+           SELECT gen_random_uuid(), $1, recipient, $2, 'announcement', $3, $4, $5
+             FROM unnest($6::uuid[]) AS recipient`,
+          [departmentId, request.authenticatedUser!.id, title, body, batchId, recipients.map((recipient) => recipient.user_id)],
+        );
+        await client.query(
+          `UPDATE module_notification_announcement_batches batch SET email_queued_count = (
+             SELECT count(*)::integer FROM module_notifications n
+             JOIN module_notification_email_deliveries d ON d.notification_id=n.id
+             WHERE n.department_id=batch.department_id AND n.announcement_batch_id=batch.id
+           ) WHERE batch.id=$1 AND batch.department_id=$2`,
+          [batchId, departmentId],
+        );
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
       } finally { client.release(); }
-      return reply.code(201).send({ sent: true, recipientCount, audience });
+      return reply.code(201).send({ sent: true, recipientCount, audience, batchId });
     });
   });
 }

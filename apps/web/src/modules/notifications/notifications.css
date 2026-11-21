@@ -9,6 +9,8 @@
 .announcement-preview dl{display:flex;flex-wrap:wrap;gap:16px}
 .announcement-preview dd{font-weight:700}
 .announcement-preview pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.5}
+.announcement-history{display:grid;gap:12px;padding:0 21px 18px}
+.announcement-history-items{display:grid;gap:8px;list-style:none;padding:0;margin:0}
 .announcement-group-picker label { justify-content: space-between; padding: 0.35rem 0; }
 .announcement-group-picker label > span { display: flex; flex: 1; justify-content: space-between; gap: 1rem; }
 .announcement-group-picker small, .announcement-group-picker p { color: var(--muted-foreground); }

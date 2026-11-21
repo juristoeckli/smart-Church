@@ -3,6 +3,7 @@ import { Bell, CalendarClock, Check, CheckCheck, CircleAlert, ClipboardCheck, Me
 import { moduleTranslation, type ModuleContext } from "../../module-registry";
 import type { ChurchGroup } from "@smart-church/contracts";
 import { formatUserDate } from "../../date-format";
+import { AnnouncementHistory } from "./AnnouncementHistory";
 import { translationsForModule } from "../translations";
 import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 import "./notifications.css";
@@ -73,6 +74,8 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
+  const [announcementHistoryOpen, setAnnouncementHistoryOpen] = useState(false);
+  const [announcementHistoryRefresh, setAnnouncementHistoryRefresh] = useState(0);
   const [detailsNotification, setDetailsNotification] = useState<Notification | null>(null);
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [announcementAudience, setAnnouncementAudience] = useState<"location" | "groups">("location");
@@ -218,6 +221,7 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
       }
       const result = await mutate("/api/modules/notifications/announcements", "POST", payload);
       const recipientCount = result.recipientCount ?? 0;
+      setAnnouncementHistoryRefresh((value) => value + 1);
       setFeedback(format(recipientCount === 1 ? "Announcement sent to {count} person." : "Announcement sent to {count} people.", { count: String(recipientCount) }));
       setComposeOpen(false);
       setAnnouncementAudience("location");
@@ -235,10 +239,12 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
       <div><div className="eyebrow">STAY CONNECTED</div><h1>Notifications</h1><p className="page-subtitle">Announcements, event reminders, volunteer requests, and visitor follow-ups.</p></div>
       <div className="notification-heading-actions">
         {canSend && <button className="button button-primary" type="button" disabled={busy} onClick={() => { setAnnouncementPreview(undefined); setComposeOpen((open) => !open); }}><Megaphone size={15} />{composeOpen ? "Close announcement" : "New announcement"}</button>}
+        {canSend && <button className="button button-secondary" type="button" aria-expanded={announcementHistoryOpen} onClick={() => setAnnouncementHistoryOpen((open) => !open)}>Announcement history</button>}
         <button className="button button-secondary" type="button" onClick={() => void markAllRead()} disabled={busy || unreadCount === 0}><CheckCheck size={15} />Mark all read</button>
       </div>
     </section>
 
+    {announcementHistoryOpen && canSend && <AnnouncementHistory key={departmentId} departmentId={departmentId} refresh={announcementHistoryRefresh} />}
     {composeOpen && canSend && <section className="directory-card notification-compose-card">
       <div className="directory-heading"><div><h2>Church announcement</h2><p>Send this message to everyone in the location or to active members of selected groups.</p></div></div>
       <form className="notification-compose-form" onSubmit={submitAnnouncement} onInput={() => setAnnouncementPreview(undefined)} aria-busy={busy}>
