@@ -856,22 +856,30 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply.header("Cache-Control", "private, no-store"), "finance-period-turnover-" + year + "-" + interval, header, rows, [6, 7, 8]);
   });
 
-  app.get<{ Querystring: { year?: string; report?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
+  app.get<{ Querystring: { year?: string; report?: string; exclude?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
     if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
     const report = request.query.report ?? "trial-balance";
     if (!["trial-balance", "balance-sheet", "profit-loss"].includes(report)) return reply.code(400).send({ error: "Choose a valid turnover report." });
+    const rawExcluded = request.query.exclude;
+    if (rawExcluded !== undefined && (typeof rawExcluded !== "string" || rawExcluded.length > 3699)) {
+      return reply.code(400).send({ error: "Choose up to 100 valid excluded accounts." });
+    }
+    const excluded = rawExcluded ? [...new Set(rawExcluded.split(","))] : [];
+    if (excluded.length > 100 || excluded.some((id) => !transactionFilterIdPattern.test(id))) {
+      return reply.code(400).send({ error: "Choose up to 100 valid excluded accounts." });
+    }
     const result = await pool!.query(`SELECT a.code,a.name,a.account_type,
               COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents ELSE 0 END),0) AS debit_cents,
               COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.credit_cents ELSE 0 END),0) AS credit_cents,
               COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents-l.credit_cents ELSE 0 END),0) AS net_cents
          FROM finance_accounts a LEFT JOIN finance_transaction_lines l ON l.department_id=a.department_id AND l.account_id=a.id
          LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2
-        WHERE a.department_id=$1 GROUP BY a.id ORDER BY a.code`, [departmentId, year]);
+        WHERE a.department_id=$1 AND NOT (a.id=ANY($3::uuid[])) GROUP BY a.id ORDER BY a.code`, [departmentId, year, excluded]);
     const rows = report === "balance-sheet" ? result.rows.filter((row) => ["asset", "liability", "equity"].includes(row.account_type)) : report === "profit-loss" ? result.rows.filter((row) => ["income", "expense"].includes(row.account_type)) : result.rows;
     const header = ["accounting_year", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
-    return sendFinanceExport(request, reply, `finance-turnover-${report}-${year}`, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
+    return sendFinanceExport(request, reply, `finance-turnover-${report}-${year}${excluded.length ? "-filtered" : ""}`, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
   });
 
   app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; donorId?: string; accountId?: string; costCenterId?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {

@@ -16,3 +16,7 @@
 
 .finance-transaction-filters{flex-wrap:wrap;justify-content:flex-start}
 .finance-transaction-filters .finance-posted-filter{display:flex;min-height:35px}
+
+.finance-report-account-filter{margin-block:12px}
+.finance-report-account-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(14rem,100%),1fr));gap:6px 16px;max-block-size:16rem;overflow:auto}
+.finance-report-account-options label{display:flex;align-items:flex-start;gap:6px;overflow-wrap:anywhere}
