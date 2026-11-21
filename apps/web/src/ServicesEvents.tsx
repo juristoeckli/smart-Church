@@ -17,18 +17,7 @@ import { openServicePlanPrint, servicePlanSectionHeading } from "./service-plan-
 import { servicePlanLinkUrl } from "./service-plan-link";
 import { buildOwnDutyRows, OwnDutyExports } from "./OwnDutyExports";
 
-function templateFromServiceAgenda(event: ServiceEvent): Omit<ServicePlanTemplate, "id"> {
-  return {
-    name: Array.from(event.title).slice(0, 160).join(""),
-    positions: (event.positions ?? []).map(({ name, category, qualificationIds }) => ({
-      name, category, qualificationIds: qualificationIds ? [...qualificationIds] : undefined,
-    })),
-    items: (event.timePlan ?? []).map(({ section, title, startTime, durationMinutes, notes, songId, arrangementId, position }) => ({
-      section, title, startTime, durationMinutes, notes, songId, arrangementId, position,
-    })),
-    active: true,
-  };
-}
+import { templateFromServiceAgenda } from "./service-plan-template";
 
 type EventFilter = "upcoming" | "all" | "past";
 type ScheduleView = "list" | "month" | "attendance" | "workload" | "roster";
