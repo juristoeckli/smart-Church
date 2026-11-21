@@ -349,10 +349,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const appointmentId = request.body.linkedAppointmentId ?? null;
     if (appointmentId) {
       if (!isManager(request)) return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
-      const exists = await context.pool!.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AS available");
+      const exists = await context.pool!.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
       if (!exists.rows[0]?.available) return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
-      const appointment = await context.pool!.query("SELECT id FROM church_calendar_appointments WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [appointmentId, departmentId]);
-      if (!appointment.rowCount) return reply.code(404).send({ error: "Calendar appointment not found in this location." });
     }
     const quantity = request.body.quantity ?? 1;
     if (quantity > resource.total_units) return reply.code(400).send({ error: "Quantity exceeds this resource's available units." });
@@ -364,9 +362,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const instances = seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
     const status = resource.requires_approval && !isManager(request) ? "requested" : "approved";
-    const seriesId = randomUUID(); const client = await context.pool!.connect();
+    const seriesId = randomUUID(); const client = await context.pool!.connect(); const bookingIds: string[] = [];
     try {
       await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
+      if (appointmentId) {
+        const appointment = await client.query(
+          `SELECT appointment.id FROM church_calendar_appointments appointment
+            JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+            WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL
+              AND calendar.archived_at IS NULL AND calendar.scope IN ('community','group')
+            FOR SHARE OF appointment,calendar`, [appointmentId, departmentId]);
+        if (!appointment.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
+        }
+      }
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.body.resourceId]);
       await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, appointmentId]);
@@ -374,10 +388,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const day of new Set(excludedDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
       for (const occurrence of instances) {
         const bookingId = randomUUID();
+        bookingIds.push(bookingId);
         await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [bookingId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes]);
         await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.localDate)]);
-        if (appointmentId && await client.query("SELECT to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available").then((result) => result.rows[0]?.available)) {
+        if (appointmentId) {
           await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [appointmentId, bookingId, request.authenticatedUser!.id]);
         }
       }
@@ -389,7 +404,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       throw error;
     } finally { client.release(); }
     context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId, action: "series-created" });
-    return reply.code(201).send({ seriesId, occurrenceCount: instances.length, status });
+    return reply.code(201).send({ seriesId, occurrenceCount: instances.length, status, bookingIds });
   });
 
   const futureEditSchema = { type: "object", additionalProperties: false, required: ["fromDate", "purpose", "startsAt", "endsAt", "quantity", "leadInMinutes", "cleanupMinutes", "recurrence"], properties: {
