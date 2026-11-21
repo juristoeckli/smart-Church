@@ -10,3 +10,11 @@ export async function lockResourceBookingPolicy(client: PoolClient, departmentId
   );
   return result.rows[0] ?? null;
 }
+
+export async function hasResourceSchedulerCapacityGuard(client: Pick<PoolClient, "query">) {
+  const result = await client.query<{ installed: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid='public.resource_bookings'::regclass
+       AND tgname='resource_scheduler_capacity_check' AND tgenabled IN ('O','A') AND NOT tgisinternal) AS installed`,
+  );
+  return Boolean(result.rows[0]?.installed);
+}

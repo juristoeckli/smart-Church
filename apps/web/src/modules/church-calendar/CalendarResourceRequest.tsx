@@ -1,3 +1,4 @@
+import { ResourceAvailabilityCheck } from "../resource-scheduler/ResourceAvailabilityCheck";
 import { useEffect, useState } from "react";
 
 type Resource = {
@@ -112,6 +113,16 @@ export function CalendarResourceRequest({ appointmentId, occurrenceStartAt, defa
             <button type="button" className="button button-secondary" onClick={() => setSelections((current) => current.filter((item) => item.resourceId !== selection.resourceId))} disabled={busy} aria-label={`Remove ${resource?.name ?? "unavailable resource"}`}>Remove</button>
           </fieldset>;
         })}
+        {selections.length > 0 && <ResourceAvailabilityCheck
+          key={JSON.stringify([appointmentId, startsAt, endsAt, selections])}
+          getWindow={() => ({ startsAt, endsAt })}
+          headers={headers}
+          selections={selections.map((selection) => ({
+            resourceId: selection.resourceId, name: resources.find((resource) => resource.id === selection.resourceId)?.name ?? "Resource",
+            quantity: Number(selection.quantity), leadInMinutes: Number(selection.leadInMinutes), cleanupMinutes: Number(selection.cleanupMinutes),
+          }))}
+          disabled={busy}
+        />}
         <button type="button" className="button button-secondary" onClick={() => void book()} disabled={!selections.length || !purpose.trim() || busy}>{busy ? "Booking…" : "Reserve and link"}</button>
       </div>}
       {!data && !error && <small>Loading resources…</small>}

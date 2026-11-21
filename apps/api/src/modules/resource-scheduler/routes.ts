@@ -471,6 +471,69 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } finally { client.release(); }
   });
 
+  app.post<{ Body: { startsAt: string; endsAt: string; resources: ResourceSelection[] } }>("/api/modules/resource-scheduler/availability", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["startsAt", "endsAt", "resources"], properties: {
+      startsAt: { type: "string", format: "date-time" },
+      endsAt: { type: "string", format: "date-time" },
+      resources: { type: "array", minItems: 1, maxItems: 20, items: {
+        type: "object", additionalProperties: false, required: ["resourceId", "quantity", "leadInMinutes", "cleanupMinutes"], properties: {
+          resourceId: { type: "string", format: "uuid" },
+          quantity: { type: "integer", minimum: 1, maximum: 10000 },
+          leadInMinutes: { type: "integer", minimum: 0, maximum: 10080 },
+          cleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 },
+        },
+      } },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    if (!context.validateMutation(request, reply)) return reply;
+    const { startsAt, endsAt, resources } = request.body;
+    const start = Date.parse(startsAt);
+    const end = Date.parse(endsAt);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return reply.code(400).send({ error: "Choose a valid start and end time." });
+    const ids = new Set(resources.map((resource) => resource.resourceId.toLowerCase()));
+    if (ids.size !== resources.length) return reply.code(400).send({ error: "Select each resource once." });
+
+    // Match the capacity trigger's buffered, half-open time windows. Only aggregate availability is exposed.
+    const result = await context.pool!.query<{ resourceId: string; availableUnits: number; requestedUnits: number }>(
+      `WITH proposed AS (
+         SELECT draft."resourceId" AS resource_id,draft.quantity,
+                $2::timestamptz-make_interval(mins=>draft."leadInMinutes") AS begins_at,
+                $3::timestamptz+make_interval(mins=>draft."cleanupMinutes") AS finishes_at
+           FROM jsonb_to_recordset($4::jsonb) AS draft("resourceId" uuid,quantity int,"leadInMinutes" int,"cleanupMinutes" int)
+       )
+       SELECT proposed.resource_id AS "resourceId",proposed.quantity AS "requestedUnits",
+              greatest(COALESCE(settings.total_units,1)-usage.peak,0)::int AS "availableUnits"
+         FROM proposed
+         JOIN bookable_resources resource ON resource.id=proposed.resource_id AND resource.department_id=$1 AND resource.active
+         LEFT JOIN resource_scheduler_settings settings ON settings.resource_id=resource.id AND settings.department_id=resource.department_id
+         CROSS JOIN LATERAL (
+           WITH occupied AS (
+             SELECT starts_at-make_interval(mins=>lead_in_minutes) AS begins_at,
+                    ends_at+make_interval(mins=>cleanup_minutes) AS finishes_at,quantity
+               FROM resource_bookings booking
+              WHERE booking.department_id=$1 AND booking.resource_id=proposed.resource_id
+                AND booking.status IN ('requested','approved')
+                AND starts_at<proposed.finishes_at+make_interval(mins=>10080)
+                AND ends_at>proposed.begins_at-make_interval(mins=>10080)
+                AND starts_at-make_interval(mins=>lead_in_minutes)<proposed.finishes_at
+                AND ends_at+make_interval(mins=>cleanup_minutes)>proposed.begins_at
+           ), points AS (
+             SELECT proposed.begins_at AS point_at
+             UNION SELECT begins_at FROM occupied WHERE begins_at>=proposed.begins_at
+           )
+           SELECT COALESCE(max((SELECT COALESCE(sum(quantity),0) FROM occupied
+                                WHERE begins_at<=points.point_at AND finishes_at>points.point_at)),0) AS peak
+             FROM points
+         ) AS usage`, [departmentId, startsAt, endsAt, JSON.stringify(resources)],
+    );
+    if (result.rows.length !== ids.size) return reply.code(404).send({ error: "One of the selected resources is no longer available in this location." });
+    return { resources: result.rows };
+  });
+
+
+
   app.post<{ Body: OccurrenceResourceRequest }>("/api/modules/resource-scheduler/occurrence-bookings", {
     schema: { body: { type: "object", additionalProperties: false, required: ["linkedAppointmentId", "linkedOccurrenceStartAt", "purpose", "startsAt", "endsAt", "resources"], properties: {
       linkedAppointmentId: { type: "string", format: "uuid" },

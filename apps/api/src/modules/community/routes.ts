@@ -1,5 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
-import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
+import { hasResourceSchedulerCapacityGuard, lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -1135,15 +1135,23 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const resource = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
         if (!resource?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This resource is not available for booking." }); }
         if (resource.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
-        const conflicts = await client.query(
-          `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND status IN ('requested','approved')
-             AND starts_at < $4 AND ends_at > $3 LIMIT 1`,
-          [departmentId, request.body.resourceId, startsAt.toISOString(), endsAt.toISOString()],
-        );
-        if (conflicts.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This resource is already requested or booked during that time." }); }
+        const schedulerCapacity = await hasResourceSchedulerCapacityGuard(client);
+        if (!schedulerCapacity) {
+          const conflicts = await client.query(
+            `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND status IN ('requested','approved')
+               AND starts_at < $4 AND ends_at > $3 LIMIT 1`,
+            [departmentId, request.body.resourceId, startsAt.toISOString(), endsAt.toISOString()],
+          );
+          if (conflicts.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This resource is already requested or booked during that time." }); }
+        }
+        const schedulerColumns = schedulerCapacity ? ", lead_in_minutes, cleanup_minutes" : "";
+        const schedulerValues = schedulerCapacity
+          ? `, COALESCE((SELECT default_lead_in_minutes FROM resource_scheduler_settings WHERE department_id=$2 AND resource_id=$3),0)
+             , COALESCE((SELECT default_cleanup_minutes FROM resource_scheduler_settings WHERE department_id=$2 AND resource_id=$3),0)`
+          : "";
         const result = await client.query<BookingRow>(
-          `INSERT INTO resource_bookings (id, department_id, resource_id, requested_by, purpose, starts_at, ends_at, status)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+          `INSERT INTO resource_bookings (id, department_id, resource_id, requested_by, purpose, starts_at, ends_at, status${schedulerColumns})
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8${schedulerValues})
            RETURNING id, resource_id, $9::text AS resource_name, requested_by, $10::text AS requester_name, purpose, starts_at, ends_at, status, created_at`,
           [randomUUID(), departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt.toISOString(), endsAt.toISOString(), resource.requires_approval ? "requested" : "approved", resource.name, request.authenticatedUser!.displayName],
         );
@@ -1154,6 +1162,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         return reply.code(201).send(mapBooking(result.rows[0]));
       } catch (error) {
         await client.query("ROLLBACK");
+        if (error && typeof error === "object" && "code" in error && error.code === "23P01") {
+          return reply.code(409).send({ error: "This resource booking conflicts with other reservations or exceeds available units." });
+        }
         throw error;
       } finally { client.release(); }
     });
@@ -1178,7 +1189,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           await client.query("ROLLBACK");
           return reply.code(403).send({ error: "Resource management permission is required to approve or decline a pending request." });
         }
-        if (request.body.status === "approved") {
+        if (request.body.status === "approved" && !await hasResourceSchedulerCapacityGuard(client)) {
           await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [departmentId, booking.resource_id]);
           const conflict = await client.query(
             `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND id<>$3 AND status='approved'
@@ -1193,6 +1204,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         return { updated: true, status: request.body.status };
       } catch (error) {
         await client.query("ROLLBACK");
+        if (error && typeof error === "object" && "code" in error && error.code === "23P01") {
+          return reply.code(409).send({ error: "This resource booking conflicts with other reservations or exceeds available units." });
+        }
         throw error;
       } finally { client.release(); }
     });
