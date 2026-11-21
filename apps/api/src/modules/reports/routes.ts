@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import type { Pool, PoolClient } from "pg";
 import { registerReportDesigner } from "./designer.js";
 
 type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
 type ReportRow = Record<string, string | number | boolean | null>;
-type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean };
+type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null };
 
 const catalog = [
   { key: "people-directory" as const, title: "People directory", description: "Contact list with status and contact details.", permission: "people" as const },
@@ -38,11 +39,13 @@ const catalog = [
 ];
 const uuid = { type: "string", format: "uuid" };
 
-function canModule(request: FastifyRequest, grant: "view" | "manage") {
+type ReportAccess = Pick<FastifyRequest, "activeDepartmentRole" | "activeDepartmentPermissions" | "activeDepartmentModulePermissions">;
+
+function canModule(request: ReportAccess, grant: "view" | "manage") {
   const grants = request.activeDepartmentModulePermissions?.reports ?? [];
   return request.activeDepartmentRole === "site_admin" || grants.includes("manage") || (grant === "view" && grants.includes("view"));
 }
-function hasPermission(request: FastifyRequest, permission: "people" | "groups" | "events" | "finance" | "resources") {
+function hasPermission(request: ReportAccess, permission: "people" | "groups" | "events" | "finance" | "resources") {
   if (request.activeDepartmentRole === "site_admin") return true;
   const location = request.activeDepartmentPermissions ?? [];
   if (permission === "people") return location.includes("people_view_private") || location.includes("people_manage");
@@ -81,7 +84,7 @@ function normalizeFilters(input: unknown): ReportFilters | string {
 }
 function filterError(value: ReportFilters | string): value is string { return typeof value === "string"; }
 function denied(reply: { code: (status: number) => { send: (body: object) => unknown } }) { return reply.code(403).send({ error: "You do not have access to this report." }); }
-function available(request: FastifyRequest, key: ReportKey) {
+function available(request: ReportAccess, key: ReportKey) {
   const definition = catalog.find((item) => item.key === key);
   const absenceManager = request.activeDepartmentRole === "site_admin"
     || (request.activeDepartmentPermissions ?? []).includes("events_manage")
@@ -101,8 +104,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!canModule(request, "view")) { reply.code(403).send({ error: "Reports view access is required." }); return null; }
     return id;
   }
-  async function installedReports(request: FastifyRequest) {
-    const present = await pool!.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
+  async function installedReports(request: ReportAccess, db: Pool | PoolClient = pool!) {
+    const present = await db.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
       `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
               to_regclass('public.finance_budgets') IS NOT NULL AS "financeBudgets",
               to_regclass('public.finance_donors') IS NOT NULL AS "financeDonors",
@@ -138,16 +141,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "resource-bookings" || state.resources)
       && (item.key !== "resource-utilization" || state.resources));
   }
-  async function runReport(departmentId: string, reportKey: ReportKey, filters: ReportFilters) {
+  async function runReport(departmentId: string, reportKey: ReportKey, filters: ReportFilters, db: Pool | PoolClient = pool!) {
     let columns: Array<{ key: string; label: string }>;
     let rows: ReportRow[];
     if (reportKey === "people-directory") {
       columns = [{ key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "email", label: "Email" }, { key: "phone", label: "Phone" }, { key: "status", label: "Status" }, { key: "createdAt", label: "Created" }];
-      const result = await pool!.query("SELECT first_name AS \"firstName\",last_name AS \"lastName\",COALESCE(email,'') AS email,COALESCE(phone,'') AS phone,status,created_at::date::text AS \"createdAt\" FROM contacts WHERE department_id=$1 AND ($2::text IS NULL OR status=$2) AND ($3::date IS NULL OR created_at::date >= $3::date) AND ($4::date IS NULL OR created_at::date <= $4::date) ORDER BY last_name,first_name LIMIT 5000", [departmentId, filters.status ?? null, filters.from ?? null, filters.to ?? null]);
+      const result = await db.query("SELECT first_name AS \"firstName\",last_name AS \"lastName\",COALESCE(email,'') AS email,COALESCE(phone,'') AS phone,status,created_at::date::text AS \"createdAt\" FROM contacts WHERE department_id=$1 AND ($2::text IS NULL OR status=$2) AND ($3::date IS NULL OR created_at::date >= $3::date) AND ($4::date IS NULL OR created_at::date <= $4::date) ORDER BY last_name,first_name LIMIT 5000", [departmentId, filters.status ?? null, filters.from ?? null, filters.to ?? null]);
       rows = result.rows;
     } else if (reportKey === "people-consent-history") {
       columns = [{ key: "person", label: "Person" }, { key: "purpose", label: "Purpose" }, { key: "status", label: "Consent status" }, { key: "capturedAt", label: "Captured" }, { key: "expiresAt", label: "Expires" }, { key: "actor", label: "Recorded by" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT concat_ws(' ',contact.first_name,contact.last_name) AS person,consent.purpose,consent.status,
                 consent.captured_at::text AS "capturedAt",consent.expires_at::text AS "expiresAt",
                 COALESCE(actor.display_name,'System or imported update') AS actor
@@ -161,7 +164,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows.map((row) => ({ ...row, capturedAt: row.capturedAt instanceof Date ? row.capturedAt.toISOString() : String(row.capturedAt ?? "") }));
     } else if (reportKey === "people-status-changes") {
       columns = [{ key: "changedAt", label: "Changed" }, { key: "person", label: "Person" }, { key: "previousStatus", label: "Previous status" }, { key: "newStatus", label: "New status" }, { key: "actor", label: "Changed by" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT history.created_at::text AS "changedAt",concat_ws(' ',contact.first_name,contact.last_name) AS person,
                 history.before_value->>'status' AS "previousStatus",history.after_value->>'status' AS "newStatus",
                 COALESCE(actor.display_name,'System or imported update') AS actor
@@ -178,7 +181,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } else if (reportKey === "upcoming-birthdays" || reportKey === "upcoming-anniversaries") {
       const kind = reportKey === "upcoming-birthdays" ? "birth_date" : "wedding_anniversary";
       columns = [{ key: "person", label: "Person" }, { key: "nextDate", label: "Next date" }, ...(kind === "wedding_anniversary" ? [{ key: "years", label: "Years married" }] : [])];
-      const result = await pool!.query(
+      const result = await db.query(
         `WITH base AS (
            SELECT contact.first_name,contact.last_name,dates.date_value,
                   extract(year FROM CURRENT_DATE)::int AS y,
@@ -199,16 +202,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "group-summary") {
       columns = [{ key: "groupName", label: "Group" }, { key: "memberCount", label: "Members" }, { key: "activeCount", label: "Active" }, { key: "pausedCount", label: "Paused" }, { key: "waitlistCount", label: "Waitlist" }];
-      const result = await pool!.query("SELECT church_group.name AS \"groupName\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL)::int AS \"memberCount\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL AND group_member.status='active')::int AS \"activeCount\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL AND group_member.status='paused')::int AS \"pausedCount\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL AND group_member.status='waitlist')::int AS \"waitlistCount\" FROM church_groups church_group LEFT JOIN group_members group_member ON group_member.group_id=church_group.id LEFT JOIN contacts contact ON contact.id=group_member.contact_id AND contact.department_id=church_group.department_id WHERE church_group.department_id=$1 GROUP BY church_group.id,church_group.name ORDER BY church_group.name LIMIT 2000", [departmentId]);
+      const result = await db.query("SELECT church_group.name AS \"groupName\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL)::int AS \"memberCount\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL AND group_member.status='active')::int AS \"activeCount\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL AND group_member.status='paused')::int AS \"pausedCount\",count(group_member.contact_id) FILTER (WHERE contact.id IS NOT NULL AND group_member.status='waitlist')::int AS \"waitlistCount\" FROM church_groups church_group LEFT JOIN group_members group_member ON group_member.group_id=church_group.id LEFT JOIN contacts contact ON contact.id=group_member.contact_id AND contact.department_id=church_group.department_id WHERE church_group.department_id=$1 GROUP BY church_group.id,church_group.name ORDER BY church_group.name LIMIT 2000", [departmentId]);
       rows = result.rows;
     } else if (reportKey === "group-roster") {
       if (!filters.groupId) throw new Error("Choose a group to run this report.");
       columns = [{ key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "role", label: "Role" }, { key: "status", label: "Membership status" }, { key: "joinedOn", label: "Joined on" }, { key: "email", label: "Email" }, { key: "phone", label: "Phone" }];
-      const result = await pool!.query("SELECT contact.first_name AS \"firstName\",contact.last_name AS \"lastName\",group_member.role,group_member.status,group_member.joined_on::text AS \"joinedOn\",COALESCE(contact.email,'') AS email,COALESCE(contact.phone,'') AS phone FROM group_members group_member JOIN contacts contact ON contact.id=group_member.contact_id JOIN church_groups church_group ON church_group.id=group_member.group_id WHERE church_group.department_id=$1 AND church_group.id=$2 AND contact.department_id=$1 ORDER BY contact.last_name,contact.first_name LIMIT 5000", [departmentId, filters.groupId]);
+      const result = await db.query("SELECT contact.first_name AS \"firstName\",contact.last_name AS \"lastName\",group_member.role,group_member.status,group_member.joined_on::text AS \"joinedOn\",COALESCE(contact.email,'') AS email,COALESCE(contact.phone,'') AS phone FROM group_members group_member JOIN contacts contact ON contact.id=group_member.contact_id JOIN church_groups church_group ON church_group.id=group_member.group_id WHERE church_group.department_id=$1 AND church_group.id=$2 AND contact.department_id=$1 ORDER BY contact.last_name,contact.first_name LIMIT 5000", [departmentId, filters.groupId]);
       rows = result.rows;
     } else if (reportKey === "group-leaders") {
       columns = [{ key: "groupName", label: "Group" }, { key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "role", label: "Role" }, { key: "joinedOn", label: "Membership start" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT church_group.name AS "groupName",contact.first_name AS "firstName",contact.last_name AS "lastName",group_member.role,group_member.joined_on::text AS "joinedOn"
            FROM church_groups church_group
            JOIN group_members group_member ON group_member.group_id=church_group.id AND group_member.status='active'
@@ -223,7 +226,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "group-hierarchy") {
       columns = [{ key: "groupName", label: "Group" }, { key: "parentGroupName", label: "Parent group" }, { key: "childGroupNames", label: "Active child groups" }, { key: "status", label: "Status" }, { key: "startsOn", label: "Starts on" }, { key: "endsOn", label: "Ends on" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT church_group.name AS "groupName",parent.name AS "parentGroupName",
                 COALESCE(string_agg(child.name,', ' ORDER BY child.name),'') AS "childGroupNames",
                 church_group.status,church_group.starts_on::text AS "startsOn",church_group.ends_on::text AS "endsOn"
@@ -239,7 +242,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "group-meeting-attendance") {
       columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "present", label: "Present" }, { key: "absent", label: "Absent" }, { key: "excused", label: "Excused" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT meeting.meeting_date::text AS "meetingDate",church_group.name AS "groupName",meeting.title AS "meetingTitle",
                 count(attendance.contact_id) FILTER (WHERE attendance.status='present')::int AS present,
                 count(attendance.contact_id) FILTER (WHERE attendance.status='absent')::int AS absent,
@@ -255,12 +258,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "group-meeting-feedback") {
       columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "formTitle", label: "Feedback form" }, { key: "responseType", label: "Response type" }, { key: "question", label: "Question" }, { key: "answer", label: "Answer" }, { key: "submittedAt", label: "Submitted" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `WITH feedback_rows AS (
            SELECT feedback.department_id,feedback.group_id,feedback.meeting_id,feedback.answers,'Leader'::text AS response_type,feedback.updated_at AS submitted_at
              FROM group_meeting_feedback_responses feedback WHERE feedback.department_id=$1
            UNION ALL
-           SELECT submission.department_id,submission.group_id,submission.meeting_id,submission.answers,'Attendee'::text AS response_type,submission.updated_at AS submitted_at
+           SELECT submission.department_id,submission.group_id,submission.meeting_id,submission.answers,'Attendee'::text AS response_type,
+                  CASE WHEN submission.contact_id IS NULL THEN NULL ELSE submission.updated_at END AS submitted_at
              FROM group_meeting_feedback_attendee_submissions submission WHERE submission.department_id=$1
          )
          SELECT meeting.meeting_date::text AS "meetingDate",church_group.name AS "groupName",meeting.title AS "meetingTitle",template.title AS "formTitle",
@@ -284,7 +288,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "group-lifecycle") {
       columns = [{ key: "changedAt", label: "Changed" }, { key: "action", label: "Action" }, { key: "group", label: "Group" }, { key: "beforeName", label: "Previous name" }, { key: "afterName", label: "Updated name" }, { key: "beforeDescription", label: "Previous description" }, { key: "afterDescription", label: "Updated description" }, { key: "beforeParentId", label: "Previous parent group ID" }, { key: "afterParentId", label: "Updated parent group ID" }, { key: "actor", label: "Changed by" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT history.created_at::text AS "changedAt",history.action,
                 COALESCE(history.after_data->>'name',history.before_data->>'name') AS "group",
                 history.before_data->>'name' AS "beforeName",history.after_data->>'name' AS "afterName",
@@ -300,11 +304,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "event-attendance") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "title", label: "Event" }, { key: "kind", label: "Type" }, { key: "location", label: "Location" }, { key: "adults", label: "Adults" }, { key: "children", label: "Children" }, { key: "checkedIn", label: "Individual check-ins" }, { key: "firstTimeVisitors", label: "First-time visitors" }];
-      const result = await pool!.query("SELECT event.event_date::text AS \"eventDate\",event.title,event.kind,event.location,event.attendance_adults AS adults,event.attendance_children AS children,count(contact.id)::int AS \"checkedIn\",count(contact.id) FILTER (WHERE checkin.first_time_visitor)::int AS \"firstTimeVisitors\" FROM service_events event LEFT JOIN event_attendance_checkins checkin ON checkin.event_id=event.id LEFT JOIN contacts contact ON contact.id=checkin.contact_id AND contact.department_id=event.department_id WHERE event.department_id=$1 AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date) GROUP BY event.id ORDER BY event.event_date DESC,event.start_time DESC LIMIT 2000", [departmentId, filters.from ?? null, filters.to ?? null]);
+      const result = await db.query("SELECT event.event_date::text AS \"eventDate\",event.title,event.kind,event.location,event.attendance_adults AS adults,event.attendance_children AS children,count(contact.id)::int AS \"checkedIn\",count(contact.id) FILTER (WHERE checkin.first_time_visitor)::int AS \"firstTimeVisitors\" FROM service_events event LEFT JOIN event_attendance_checkins checkin ON checkin.event_id=event.id LEFT JOIN contacts contact ON contact.id=checkin.contact_id AND contact.department_id=event.department_id WHERE event.department_id=$1 AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date) GROUP BY event.id ORDER BY event.event_date DESC,event.start_time DESC LIMIT 2000", [departmentId, filters.from ?? null, filters.to ?? null]);
       rows = result.rows;
     } else if (reportKey === "check-in-trend") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventCount", label: "Events" }, { key: "checkIns", label: "Check-ins" }, { key: "firstTimeVisitors", label: "First-time visitors" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT event.event_date::text AS "eventDate",count(DISTINCT event.id)::int AS "eventCount",count(checkin.contact_id)::int AS "checkIns",
                 count(checkin.contact_id) FILTER (WHERE checkin.first_time_visitor)::int AS "firstTimeVisitors"
            FROM service_events event LEFT JOIN event_attendance_checkins checkin ON checkin.event_id=event.id
@@ -317,7 +321,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "event-staffing") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventTitle", label: "Event" }, { key: "role", label: "Role" }, { key: "person", label: "Assigned person" }, { key: "response", label: "Response" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT event.event_date::text AS "eventDate",event.title AS "eventTitle",position.value->>'name' AS role,
                 concat_ws(' ',contact.first_name,contact.last_name) AS person,
                 CASE COALESCE(response.status,'pending') WHEN 'accepted' THEN 'confirmed' WHEN 'declined' THEN 'declined' ELSE 'requested' END AS response
@@ -332,7 +336,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "event-service-plan") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventTitle", label: "Event" }, { key: "location", label: "Location" }, { key: "itemNumber", label: "Order" }, { key: "startTime", label: "Start time" }, { key: "durationMinutes", label: "Duration (minutes)" }, { key: "itemTitle", label: "Plan item" }, { key: "songTitle", label: "Song" }, { key: "position", label: "Role category" }, { key: "notes", label: "Notes" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT event.event_date::text AS "eventDate",event.title AS "eventTitle",event.location,
                 plan.position_number::int AS "itemNumber",COALESCE(plan.value->>'startTime','') AS "startTime",
                 CASE WHEN plan.value->>'durationMinutes' ~ '^[0-9]{1,4}$' THEN (plan.value->>'durationMinutes')::int END AS "durationMinutes",plan.value->>'title' AS "itemTitle",
@@ -348,7 +352,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "event-registration-summary") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventTitle", label: "Event" }, { key: "capacity", label: "Capacity" }, { key: "registered", label: "Registered" }, { key: "waitlisted", label: "Waitlisted" }, { key: "cancelled", label: "Cancelled" }, { key: "checkedIn", label: "Checked in" }, { key: "remaining", label: "Remaining places" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT event.event_date::text AS "eventDate",event.title AS "eventTitle",event.registration_capacity AS capacity,
                 count(registration.id) FILTER (WHERE registration.status='registered')::int AS registered,
                 count(registration.id) FILTER (WHERE registration.status='waitlisted')::int AS waitlisted,
@@ -363,7 +367,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "event-registration-details") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventTitle", label: "Event" }, { key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "email", label: "Email" }, { key: "status", label: "Registration status" }, { key: "registeredAt", label: "Registered" }, { key: "checkedInAt", label: "Checked in" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT event.event_date::text AS "eventDate",event.title AS "eventTitle",registration.first_name AS "firstName",registration.last_name AS "lastName",registration.email,registration.status,
                 registration.registered_at::text AS "registeredAt",registration.checked_in_at::text AS "checkedInAt"
            FROM event_registrations registration JOIN service_events event ON event.id=registration.event_id
@@ -377,7 +381,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const rangeDays = (Date.parse(`${filters.to}T00:00:00Z`) - Date.parse(`${filters.from}T00:00:00Z`)) / 86_400_000;
       if (rangeDays > 366) throw new Error("Choose a date range of 367 days or less.");
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventTitle", label: "Event" }, { key: "role", label: "Role" }, { key: "person", label: "Assigned person" }, { key: "response", label: "Response" }, { key: "absenceStartsOn", label: "Absence starts" }, { key: "absenceEndsOn", label: "Absence ends" }, { key: "reason", label: "Absence reason" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT event.event_date::text AS "eventDate",event.title AS "eventTitle",position.value->>'name' AS role,
                 concat_ws(' ',person.first_name,person.last_name) AS person,
                 CASE COALESCE(response.status,'pending') WHEN 'accepted' THEN 'confirmed' WHEN 'declined' THEN 'declined' ELSE 'requested' END AS response,
@@ -396,13 +400,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "visitor-follow-up") {
       columns = [{ key: "eventDate", label: "Event date" }, { key: "eventTitle", label: "Event" }, { key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "followUpStatus", label: "Follow-up" }, { key: "checkedInAt", label: "Checked in" }];
-      const result = await pool!.query("SELECT event.event_date::text AS \"eventDate\",event.title AS \"eventTitle\",contact.first_name AS \"firstName\",contact.last_name AS \"lastName\",checkin.follow_up_status AS \"followUpStatus\",checkin.checked_in_at AS \"checkedInAt\" FROM event_attendance_checkins checkin JOIN service_events event ON event.id=checkin.event_id JOIN contacts contact ON contact.id=checkin.contact_id WHERE event.department_id=$1 AND contact.department_id=$1 AND checkin.first_time_visitor=TRUE AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date) AND ($4::text IS NULL OR checkin.follow_up_status=$4) ORDER BY event.event_date DESC,contact.last_name,contact.first_name LIMIT 3000", [departmentId, filters.from ?? null, filters.to ?? null, filters.followUpStatus ?? null]);
+      const result = await db.query("SELECT event.event_date::text AS \"eventDate\",event.title AS \"eventTitle\",contact.first_name AS \"firstName\",contact.last_name AS \"lastName\",checkin.follow_up_status AS \"followUpStatus\",checkin.checked_in_at AS \"checkedInAt\" FROM event_attendance_checkins checkin JOIN service_events event ON event.id=checkin.event_id JOIN contacts contact ON contact.id=checkin.contact_id WHERE event.department_id=$1 AND contact.department_id=$1 AND checkin.first_time_visitor=TRUE AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date) AND ($4::text IS NULL OR checkin.follow_up_status=$4) ORDER BY event.event_date DESC,contact.last_name,contact.first_name LIMIT 3000", [departmentId, filters.from ?? null, filters.to ?? null, filters.followUpStatus ?? null]);
       rows = result.rows.map((row) => ({ ...row, checkedInAt: row.checkedInAt instanceof Date ? row.checkedInAt.toISOString() : String(row.checkedInAt ?? "") }));
     } else if (reportKey === "worship-song-usage") {
       columns = [{ key: "songTitle", label: "Song" }, { key: "uses", label: "Uses" }, { key: "latestUse", label: "Latest use" }];
-      const present = await pool!.query<{ present: boolean }>("SELECT to_regclass('public.worship_songs') IS NOT NULL AND to_regclass('public.worship_song_arrangements') IS NOT NULL AS present");
+      const present = await db.query<{ present: boolean }>("SELECT to_regclass('public.worship_songs') IS NOT NULL AND to_regclass('public.worship_song_arrangements') IS NOT NULL AS present");
       if (!present.rows[0]?.present) throw new Error("Worship Planning is not installed for this site.");
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT song.title AS "songTitle",count(*)::int AS uses,max(event.event_date)::text AS "latestUse"
            FROM service_events event CROSS JOIN LATERAL jsonb_array_elements(event.time_plan) item(value)
            JOIN worship_songs song ON song.id=NULLIF(item.value->>'songId','')::uuid AND song.department_id=event.department_id
@@ -413,7 +417,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "resource-bookings") {
       columns = [{ key: "resourceName", label: "Resource" }, { key: "category", label: "Category" }, { key: "bookings", label: "Bookings" }, { key: "requested", label: "Requested" }, { key: "approved", label: "Approved" }, { key: "declined", label: "Declined" }, { key: "cancelled", label: "Cancelled" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT resource.name AS "resourceName",resource.category,count(booking.id)::int AS bookings,
                 count(booking.id) FILTER (WHERE booking.status='requested')::int AS requested,
                 count(booking.id) FILTER (WHERE booking.status='approved')::int AS approved,
@@ -427,7 +431,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "resource-utilization") {
       columns = [{ key: "month", label: "Month" }, { key: "resourceName", label: "Resource" }, { key: "category", label: "Category" }, { key: "bookingCount", label: "Bookings" }, { key: "requestedCount", label: "Requested" }, { key: "approvedCount", label: "Approved" }, { key: "declinedCount", label: "Declined" }, { key: "cancelledCount", label: "Cancelled" }, { key: "requestedHours", label: "Requested hours" }, { key: "approvedHours", label: "Approved hours" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT date_trunc('month',booking.starts_at)::date::text AS month,resource.name AS "resourceName",resource.category,
                 count(booking.id)::int AS "bookingCount",
                 count(booking.id) FILTER (WHERE booking.status='requested')::int AS "requestedCount",
@@ -445,9 +449,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "finance-budget-vs-actual") {
       columns = [{ key: "year", label: "Accounting year" }, { key: "account", label: "Account scope" }, { key: "costCenter", label: "Cost-center scope" }, { key: "budgetCents", label: "Budget (minor units)" }, { key: "actualDebitsCents", label: "Posted debits (minor units)" }, { key: "actualCreditsCents", label: "Posted credits (minor units)" }, { key: "note", label: "Budget note" }];
-      const present = await pool!.query<{ present: boolean }>("SELECT to_regclass('public.finance_budgets') IS NOT NULL AND to_regclass('public.finance_transactions') IS NOT NULL AS present");
+      const present = await db.query<{ present: boolean }>("SELECT to_regclass('public.finance_budgets') IS NOT NULL AND to_regclass('public.finance_transactions') IS NOT NULL AS present");
       if (!present.rows[0]?.present) throw new Error("Finance budgets are not installed for this site.");
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT budget.accounting_year AS year,
                 CASE WHEN budget.account_id IS NULL THEN 'All accounts' ELSE concat_ws(' · ',account.code,account.name) END AS account,
                 CASE WHEN budget.cost_center_id IS NULL THEN 'All cost centers' ELSE concat_ws(' · ',center.code,center.name) END AS "costCenter",
@@ -471,7 +475,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else if (reportKey === "finance-donor-giving") {
       columns = [{ key: "donor", label: "Donor" }, { key: "donorType", label: "Type" }, { key: "giftTransactions", label: "Posted transactions" }, { key: "grossCreditsCents", label: "Credits (minor units)" }, { key: "reversalsCents", label: "Debits/reversals (minor units)" }, { key: "netGivingCents", label: "Net giving (minor units)" }, { key: "lastGiftDate", label: "Latest transaction" }];
-      const result = await pool!.query(
+      const result = await db.query(
         `SELECT donor.display_name AS donor,donor.donor_type AS "donorType",
                 count(DISTINCT txn.id)::int AS "giftTransactions",
                 COALESCE(sum(line.credit_cents) FILTER (WHERE txn.id IS NOT NULL),0)::text AS "grossCreditsCents",
@@ -490,9 +494,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       rows = result.rows;
     } else {
       columns = [{ key: "year", label: "Accounting year" }, { key: "accountCode", label: "Account code" }, { key: "accountName", label: "Account" }, { key: "accountType", label: "Class" }, { key: "debitsCents", label: "Debits (minor units)" }, { key: "creditsCents", label: "Credits (minor units)" }];
-      const available = await pool!.query<{ present: boolean }>("SELECT to_regclass('public.finance_transactions') IS NOT NULL AS present");
+      const available = await db.query<{ present: boolean }>("SELECT to_regclass('public.finance_transactions') IS NOT NULL AS present");
       if (!available.rows[0]?.present) throw new Error("The Finance module is not installed for this site.");
-      const result = await pool!.query("SELECT txn.accounting_year AS year,account.code AS \"accountCode\",account.name AS \"accountName\",account.account_type AS \"accountType\",COALESCE(sum(line.debit_cents),0)::text AS \"debitsCents\",COALESCE(sum(line.credit_cents),0)::text AS \"creditsCents\" FROM finance_transaction_lines line JOIN finance_transactions txn ON txn.id=line.transaction_id AND txn.department_id=line.department_id JOIN finance_accounts account ON account.id=line.account_id AND account.department_id=line.department_id WHERE line.department_id=$1 AND txn.status='posted' AND ($2::date IS NULL OR txn.booking_date >= $2::date) AND ($3::date IS NULL OR txn.booking_date <= $3::date) GROUP BY txn.accounting_year,account.code,account.name,account.account_type ORDER BY txn.accounting_year DESC,account.code LIMIT 5000", [departmentId, filters.from ?? null, filters.to ?? null]);
+      const result = await db.query("SELECT txn.accounting_year AS year,account.code AS \"accountCode\",account.name AS \"accountName\",account.account_type AS \"accountType\",COALESCE(sum(line.debit_cents),0)::text AS \"debitsCents\",COALESCE(sum(line.credit_cents),0)::text AS \"creditsCents\" FROM finance_transaction_lines line JOIN finance_transactions txn ON txn.id=line.transaction_id AND txn.department_id=line.department_id JOIN finance_accounts account ON account.id=line.account_id AND account.department_id=line.department_id WHERE line.department_id=$1 AND txn.status='posted' AND ($2::date IS NULL OR txn.booking_date >= $2::date) AND ($3::date IS NULL OR txn.booking_date <= $3::date) GROUP BY txn.accounting_year,account.code,account.name,account.account_type ORDER BY txn.accounting_year DESC,account.code LIMIT 5000", [departmentId, filters.from ?? null, filters.to ?? null]);
       rows = result.rows;
     }
     return { reportKey, title: catalog.find((item) => item.key === reportKey)!.title, generatedAt: new Date().toISOString(), columns, rows };
@@ -526,9 +530,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/reports/saved", async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
+    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,schedule_days,next_run_at,last_run_at,last_run_status,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
     const availableKeys = new Set((await installedReports(request)).map((item) => item.key));
-    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit }));
+    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit, ...(saved.owner_user_id === request.authenticatedUser!.id ? { scheduleDays: saved.schedule_days, nextRunAt: saved.next_run_at, lastRunAt: saved.last_run_at, lastRunStatus: saved.last_run_status } : {}) }));
   });
   app.post<{ Body: { reportKey: ReportKey; name: string; filters: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/saved", {
     schema: { body: { type: "object", additionalProperties: false, required: ["reportKey", "name", "filters"], properties: { reportKey: { type: "string", enum: catalog.map((item) => item.key) }, name: { type: "string", minLength: 1, maxLength: 120 }, filters: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } },
@@ -568,5 +572,143 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Saved report not found or you cannot delete it." });
     return { deleted: true };
   });
+  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null } }>("/api/modules/reports/saved/:id/schedule", {
+    schema: {
+      params: { type: "object", required: ["id"], properties: { id: uuid } },
+      body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { anyOf: [{ type: "integer", enum: [1, 7] }, { type: "null" }] } } },
+    },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply);
+    if (!departmentId) return reply;
+    if (!canModule(request, "manage")) return denied(reply);
+    if (!validateMutation(request, reply)) return reply;
+    const keys = (await installedReports(request)).map((item) => item.key);
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const result = await client.query(
+        `UPDATE saved_report_definitions SET schedule_days=$4, next_run_at=CASE WHEN $4::int IS NULL THEN NULL ELSE now() END,
+           scheduled_result=NULL, last_run_at=NULL, last_run_status=NULL
+         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND ($4::int IS NULL OR report_key=ANY($5::text[])) RETURNING id`,
+        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys],
+      );
+      await client.query("COMMIT");
+      if (!result.rowCount) return reply.code(404).send({ error: "No accessible saved report owned by your account." });
+      return { scheduled: request.body.days !== null };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/modules/reports/saved/:id/scheduled-result", {
+    schema: { params: { type: "object", required: ["id"], properties: { id: uuid } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply);
+    if (!departmentId) return reply;
+    const keys = (await installedReports(request)).map((item) => item.key);
+    const result = await pool!.query<{ scheduled_result: Awaited<ReturnType<typeof runReport>> | null }>(
+      `SELECT scheduled_result FROM saved_report_definitions
+        WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND report_key=ANY($4::text[])`,
+      [request.params.id, departmentId, request.authenticatedUser!.id, keys],
+    );
+    const report = result.rows[0]?.scheduled_result;
+    if (!report) return reply.code(404).send({ error: "No scheduled result is available." });
+    if (report.reportKey === "group-meeting-feedback") {
+      // Stored attendee result rows omit identity, so older results cannot distinguish anonymous submissions.
+      report.rows = report.rows.map((row) => row.responseType === "Attendee" ? { ...row, submittedAt: null } : row);
+    }
+    return reply.header("cache-control", "private, no-store").send(report);
+  });
+
+  let scheduleRunning = false;
+  async function runDueReports() {
+    if (!pool || !isDatabaseReady() || !context.activation.isEnabled() || scheduleRunning) return;
+    scheduleRunning = true;
+    try {
+      const redundancy = await pool.query<{ ready: boolean }>("SELECT to_regclass('public.sync_site_redundancy') IS NOT NULL AS ready");
+      const primaryOnly = redundancy.rows[0]?.ready
+        ? "AND EXISTS (SELECT 1 FROM sync_site_redundancy state WHERE state.department_id=saved.department_id AND state.role='primary')"
+        : "";
+      const candidates = await pool.query<{ id: string; department_id: string }>(
+        `SELECT saved.id, saved.department_id FROM saved_report_definitions saved
+         JOIN departments location ON location.id=saved.department_id
+         WHERE saved.next_run_at <= now() AND 'reports'=ANY(location.enabled_modules) ${primaryOnly}
+         ORDER BY saved.next_run_at LIMIT 50`,
+      );
+      for (const candidate of candidates.rows) {
+        if (!await context.isDepartmentWritable(candidate.department_id)) continue;
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          if (!await context.lockDepartmentForWrite(client, candidate.department_id)) {
+            await client.query("ROLLBACK");
+            continue;
+          }
+          const due = await client.query<SavedReport>(
+            `SELECT saved.* FROM saved_report_definitions saved JOIN departments location ON location.id=saved.department_id
+             WHERE saved.id=$1 AND saved.department_id=$2 AND saved.next_run_at<=now() AND 'reports'=ANY(location.enabled_modules)
+             FOR UPDATE OF saved SKIP LOCKED`,
+            [candidate.id, candidate.department_id],
+          );
+          const saved = due.rows[0];
+          if (!saved) {
+            await client.query("ROLLBACK");
+            continue;
+          }
+          const membership = await client.query<{ role: ReportAccess["activeDepartmentRole"]; permissions: ReportAccess["activeDepartmentPermissions"]; module_permissions: ReportAccess["activeDepartmentModulePermissions"] }>(
+            "SELECT role, permissions, module_permissions FROM department_memberships WHERE department_id=$1 AND user_id=$2 FOR SHARE",
+            [candidate.department_id, saved.owner_user_id],
+          );
+          const grants = membership.rows[0];
+          const access = grants && {
+            activeDepartmentRole: grants.role,
+            activeDepartmentPermissions: grants.permissions,
+            activeDepartmentModulePermissions: grants.module_permissions,
+          };
+          let status = "unavailable";
+          let output: string | null = null;
+          if (access && canModule(access, "manage") && (await installedReports(access, client)).some((entry) => entry.key === saved.report_key)) {
+            await client.query("SAVEPOINT generate_report");
+            try {
+              const document = JSON.stringify(await runReport(candidate.department_id, saved.report_key, saved.filters, client));
+              if (Buffer.byteLength(document) <= 2_000_000) {
+                output = document;
+                status = "ready";
+              } else status = "too_large";
+            } catch {
+              await client.query("ROLLBACK TO SAVEPOINT generate_report");
+              status = "failed";
+            }
+          }
+          await client.query(
+            `UPDATE saved_report_definitions SET last_run_at=now(), last_run_status=$2, scheduled_result=$3::jsonb,
+              next_run_at=now()+schedule_days*interval '24 hours' WHERE id=$1`,
+            [saved.id, status, output],
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          app.log.error({ err: error, savedReportId: candidate.id }, "Could not process scheduled report.");
+        } finally {
+          client.release();
+        }
+      }
+    } catch (error) {
+      app.log.error({ err: error }, "Could not scan scheduled reports.");
+    } finally {
+      scheduleRunning = false;
+    }
+  }
+  const scheduleTimer = setInterval(() => void runDueReports(), 60_000);
+  scheduleTimer.unref();
+  app.addHook("onClose", async () => clearInterval(scheduleTimer));
+
   registerReportDesigner(app, context);
 }

@@ -50,3 +50,5 @@ This is an initial reporting slice, not feature parity with ChurchTools reportin
 - Saved-report editing, version history, explicit sharing/ownership controls, and organization-wide report templates.
 
 The current result limits are fixed per report. CSV export includes the rows returned by the current bounded query.
+
+Managers can schedule their own saved catalog reports to run immediately on the next worker scan and repeat every 24 hours or 7 days. Runs use the saved filters, each run rechecks the owner's current permissions, and the latest result up to 2 MB can be opened and downloaded by the owner in Reports. Result access also checks current report permissions. Scheduled results are local to the installation.
