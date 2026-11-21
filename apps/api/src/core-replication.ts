@@ -14,10 +14,10 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 24 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 25 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
   tables.event_registrations = (tables.event_registrations ?? []).map((row) => ({ ...row, cancellation_token_hash: row.cancellation_token_hash ?? null, additional_attendee: row.additional_attendee ?? false, party_id: row.party_id ?? null }));
-  tables.bookable_resources = (tables.bookable_resources ?? []).map((row) => ({ ...row, calendar_required: row.calendar_required ?? false }));
+  tables.bookable_resources = (tables.bookable_resources ?? []).map((row) => ({ ...row, calendar_required: row.calendar_required ?? false, responsible_user_id: row.responsible_user_id ?? null }));
   tables.event_volunteer_absences = (tables.event_volunteer_absences ?? []).map((row) => ({ ...row, starts_at: row.starts_at ?? null, ends_at: row.ends_at ?? null }));
   tables.contacts = (tables.contacts ?? []).map((row) => ({ ...row, postal_address: row.postal_address ?? {}, archived_at: row.archived_at ?? null }));
   tables.service_events = (tables.service_events ?? []).map((row) => ({ ...row, responsible_contact_id: row.responsible_contact_id ?? null }));
@@ -144,7 +144,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 24, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 25, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -161,7 +161,7 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "15",
+    schemaVersion: "16",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
@@ -268,6 +268,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
             row.user_id = userIdMap.get(String(row.user_id)) ?? row.user_id;
             row.related_user_id = userIdMap.get(String(row.related_user_id)) ?? row.related_user_id;
           }
+          if (table === "bookable_resources" && row.responsible_user_id != null) row.responsible_user_id = userIdMap.get(String(row.responsible_user_id)) ?? null;
           if (table === "resource_bookings") row.requested_by = userIdMap.get(String(row.requested_by)) ?? row.requested_by;
           if (table === "church_team_leaders") row.user_id = userIdMap.get(String(row.user_id)) ?? row.user_id;
           if (table === "check_in_pickup_authorizations") {
@@ -336,6 +337,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
         }
         const expected = expectedRows.map((source) => {
           const row = mapUserFields({ ...source }, userIdMap);
+          if (table === "bookable_resources" && source.responsible_user_id != null) row.responsible_user_id = userIdMap.get(String(source.responsible_user_id)) ?? null;
           if (table === "check_in_sessions" && source.completed_by != null) row.completed_by = userIdMap.get(String(source.completed_by)) ?? null;
           if ("department_id" in row) row.department_id = departmentId;
           return canonical(row);

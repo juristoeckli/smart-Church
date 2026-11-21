@@ -1,4 +1,4 @@
-import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
+import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
 import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -331,9 +331,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const from = request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : new Date().toISOString().slice(0, 10);
     const to = request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
     const search = typeof request.query.search === "string" ? request.query.search.trim().slice(0, 100) : "";
-    const [department, resources, bookings] = await Promise.all([
+    const canManage = isManager(request);
+    const [department, resources, bookings, responsiblePeople] = await Promise.all([
       context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,resource.calendar_required AS "calendarRequired",
+          CASE WHEN $2 THEN resource.responsible_user_id END AS "responsibleUserId",
           ($4::text='' OR (strpos(lower(resource.name),lower($4))>0 OR strpos(lower(resource.category),lower($4))>0 OR strpos(lower(resource.location),lower($4))>0)) AS "matchesSearch",
           EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=resource.department_id AND mark.resource_id=resource.id AND mark.user_id=$3) AS marked,
           COALESCE(settings.total_units,1) AS "totalUnits",COALESCE(settings.default_lead_in_minutes,0) AS "defaultLeadInMinutes",COALESCE(settings.default_cleanup_minutes,0) AS "defaultCleanupMinutes"
@@ -358,8 +360,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($7::boolean OR resource.active=true)
           AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
         ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search]),
+      canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
     ]);
-    return { resources: resources.rows, bookings: bookings.rows, canManage: isManager(request), timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
+    return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
   });
 
   app.get("/api/modules/resource-scheduler/home-bookings", async (request, reply) => {
@@ -420,8 +423,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   });
 
-  app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number; calendarRequired?: boolean } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
-    schema: { params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["totalUnits", "defaultLeadInMinutes", "defaultCleanupMinutes"], properties: { totalUnits: { type: "integer", minimum: 1, maximum: 10000 }, defaultLeadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, defaultCleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 }, calendarRequired: { type: "boolean" } } } },
+  app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number; calendarRequired?: boolean; responsibleUserId?: string | null } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
+    schema: { params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["totalUnits", "defaultLeadInMinutes", "defaultCleanupMinutes"], properties: { totalUnits: { type: "integer", minimum: 1, maximum: 10000 }, defaultLeadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, defaultCleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 }, calendarRequired: { type: "boolean" }, responsibleUserId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply, true);
     if (!departmentId) return reply;
@@ -448,12 +451,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(409).send({ error: "Enable General Calendar before requiring an appointment for this resource." });
         }
       }
-      if (calendarRequired !== resource.calendar_required) {
-        await client.query("UPDATE bookable_resources SET calendar_required=$3,updated_at=now() WHERE department_id=$1 AND id=$2", [departmentId, resource.id, calendarRequired]);
+      const responsibleUserId = request.body.responsibleUserId === undefined
+        ? resource.responsible_user_id : request.body.responsibleUserId?.toLowerCase() ?? null;
+      if (responsibleUserId !== resource.responsible_user_id && responsibleUserId
+          && !(await resourceBookingReviewers(client, departmentId, responsibleUserId)).length) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose someone who can manage resource bookings in this location." });
+      }
+      if (calendarRequired !== resource.calendar_required || responsibleUserId !== resource.responsible_user_id) {
+        await client.query("UPDATE bookable_resources SET calendar_required=$3,responsible_user_id=$4,updated_at=now() WHERE department_id=$1 AND id=$2",
+          [departmentId, resource.id, calendarRequired, responsibleUserId]);
       }
       await client.query("COMMIT");
       context.realtime.publish("module:resource-scheduler:changed", departmentId, { resourceId: resource.id, action: "settings-updated" });
-      return { ...result.rows[0], calendarRequired };
+      return { ...result.rows[0], calendarRequired, responsibleUserId };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
