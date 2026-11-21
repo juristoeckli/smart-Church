@@ -2,12 +2,12 @@ import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type GroupJoinRequest = Record<string, unknown>;
-type FormRow = { department_id: string; group_id: string; revision: string; questions: unknown[]; opens_at?: string | Date | null; closes_at?: string | Date | null; default_role?: string; heading?: string; active_seat_limit?: number | null; waitlist_limit?: number | null; counted_roles?: string[] };
-type Snapshot = { version: 2 | 3 | 4 | 5 | 6; groupJoinRequests: GroupJoinRequest[]; signupForms?: FormRow[] };
+type FormRow = { department_id: string; group_id: string; revision: string; questions: unknown[]; opens_at?: string | Date | null; closes_at?: string | Date | null; default_role?: string; heading?: string; active_seat_limit?: number | null; waitlist_limit?: number | null; counted_roles?: string[]; connected_admission?: boolean };
+type Snapshot = { version: 2 | 3 | 4 | 5 | 6 | 7; groupJoinRequests: GroupJoinRequest[]; signupForms?: FormRow[] };
 const requestColumns = "id,department_id,group_id,first_name,last_name,email,status,contact_id,created_at,reviewed_at,reviewed_by,answer_snapshot";
 async function loadForms(client: PoolClient, departmentId: string) {
   return (await client.query<FormRow>(
-    "SELECT department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles FROM group_signup_forms WHERE department_id=$1 ORDER BY group_id", [departmentId],
+    "SELECT department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles,connected_admission FROM group_signup_forms WHERE department_id=$1 ORDER BY group_id", [departmentId],
   )).rows;
 }
 const maxSnapshotBytes = 50 * 1024 * 1024;
@@ -29,7 +29,7 @@ function remapReviewer(row: GroupJoinRequest, userIdMap: Map<string, string>, de
 export function registerCommunityReplication(context: ModuleServerContext) {
   const { pool, isDatabaseReady } = context;
   context.replication.register({
-    schemaVersion: "6",
+    schemaVersion: "7",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Community database is unavailable."], recordCount: 0 };
       try {
@@ -49,19 +49,19 @@ export function registerCommunityReplication(context: ModuleServerContext) {
     exportSnapshot: async (client: PoolClient, departmentId) => {
       const result = await client.query(`SELECT ${requestColumns}
         FROM group_join_requests WHERE department_id=$1 ORDER BY created_at,id`, [departmentId]);
-      return { version: 6, groupJoinRequests: result.rows, signupForms: await loadForms(client, departmentId) };
+      return { version: 7, groupJoinRequests: result.rows, signupForms: await loadForms(client, departmentId) };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as Snapshot;
-      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6) || !Array.isArray(snapshot.groupJoinRequests) || snapshot.groupJoinRequests.length > 100_000 || Buffer.byteLength(JSON.stringify(snapshot)) > maxSnapshotBytes) throw new Error("The Community group-join request snapshot is invalid or exceeds the supported limits.");
+      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6 && snapshot.version !== 7) || !Array.isArray(snapshot.groupJoinRequests) || snapshot.groupJoinRequests.length > 100_000 || Buffer.byteLength(JSON.stringify(snapshot)) > maxSnapshotBytes) throw new Error("The Community group-join request snapshot is invalid or exceeds the supported limits.");
       if (snapshot.version >= 4 && (!Array.isArray(snapshot.signupForms) || snapshot.signupForms.length > 100_000)) throw new Error("The Community signup-form snapshot is invalid.");
       await client.query("DELETE FROM group_signup_forms WHERE department_id=$1", [departmentId]);
       for (const form of snapshot.signupForms ?? []) {
         if (!Array.isArray(form.questions) || typeof form.group_id !== "string" || typeof form.revision !== "string") throw new Error("The Community snapshot contains an invalid signup form.");
         const inserted = await client.query(
-          `INSERT INTO group_signup_forms(department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles)
-           SELECT $1,id,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11 FROM church_groups WHERE department_id=$1 AND id=$2`,
-          [departmentId, form.group_id, form.revision, JSON.stringify(form.questions), form.opens_at ?? null, form.closes_at ?? null, form.default_role ?? "Member", form.heading ?? "", form.active_seat_limit ?? null, form.waitlist_limit ?? null, form.counted_roles ?? []],
+          `INSERT INTO group_signup_forms(department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles,connected_admission)
+           SELECT $1,id,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12 FROM church_groups WHERE department_id=$1 AND id=$2`,
+          [departmentId, form.group_id, form.revision, JSON.stringify(form.questions), form.opens_at ?? null, form.closes_at ?? null, form.default_role ?? "Member", form.heading ?? "", form.active_seat_limit ?? null, form.waitlist_limit ?? null, form.counted_roles ?? [], form.connected_admission ?? false],
         );
         if (!inserted.rowCount) throw new Error("A signup form references a group outside the restored location.");
       }
@@ -76,12 +76,12 @@ export function registerCommunityReplication(context: ModuleServerContext) {
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as Snapshot;
-      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6) || !Array.isArray(snapshot.groupJoinRequests)) return { ready: false, blockers: ["No supported Community group-join request snapshot is available."] };
+      if (!snapshot || (snapshot.version !== 2 && snapshot.version !== 3 && snapshot.version !== 4 && snapshot.version !== 5 && snapshot.version !== 6 && snapshot.version !== 7) || !Array.isArray(snapshot.groupJoinRequests)) return { ready: false, blockers: ["No supported Community group-join request snapshot is available."] };
       const actual = (await client.query(`SELECT ${requestColumns}
         FROM group_join_requests WHERE department_id=$1 ORDER BY created_at,id`, [departmentId])).rows as GroupJoinRequest[];
       const expectedRows = snapshot.groupJoinRequests.map((row) => canonical(remapReviewer(row, restoreContext?.userIdMap ?? new Map(), departmentId))).sort();
       const actualRows = actual.map(canonical).sort();
-      const expectedForms = (snapshot.signupForms ?? []).map((form) => canonical({ ...form, department_id: departmentId, opens_at: form.opens_at ?? null, closes_at: form.closes_at ?? null, default_role: form.default_role ?? "Member", heading: form.heading ?? "", active_seat_limit: form.active_seat_limit ?? null, waitlist_limit: form.waitlist_limit ?? null, counted_roles: form.counted_roles ?? [] })).sort();
+      const expectedForms = (snapshot.signupForms ?? []).map((form) => canonical({ ...form, department_id: departmentId, opens_at: form.opens_at ?? null, closes_at: form.closes_at ?? null, default_role: form.default_role ?? "Member", heading: form.heading ?? "", active_seat_limit: form.active_seat_limit ?? null, waitlist_limit: form.waitlist_limit ?? null, counted_roles: form.counted_roles ?? [], connected_admission: form.connected_admission ?? false })).sort();
       const actualForms = (await loadForms(client, departmentId)).map(canonical).sort();
       if (canonical(expectedForms) !== canonical(actualForms)) return { ready: false, blockers: ["Community signup forms differ from the source snapshot after restore."] };
       const matches = expectedRows.length === actualRows.length && expectedRows.every((row, index) => row === actualRows[index]);

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 export type SignupQuestion = { id: string; label: string; type: "text" | "choice"; required: boolean; options?: string[] };
-type SignupPolicy = { opensAt: string | null; closesAt: string | null; defaultRole: string; heading: string; timeZone: string; activeSeatLimit?: number | null; waitlistLimit?: number | null; countedRoles?: string[] };
+type SignupPolicy = { opensAt: string | null; closesAt: string | null; defaultRole: string; heading: string; timeZone: string; activeSeatLimit?: number | null; waitlistLimit?: number | null; countedRoles?: string[]; connectedAdmission?: boolean };
 type SignupForm = { revision: string | null; questions: SignupQuestion[]; policy: SignupPolicy };
 const emptyPolicy: SignupPolicy = { opensAt: null, closesAt: null, defaultRole: "Member", heading: "", timeZone: "UTC" };
 type QuestionDraft = Omit<SignupQuestion, "options"> & { optionText: string };
@@ -87,7 +87,10 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
         <label>Public signup heading<input maxLength={120} value={policy.heading} onChange={(event) => setPolicy({ ...policy, heading: event.target.value })} /></label>
         <label>Open signup ({policy.timeZone})<input type="datetime-local" step={1} value={policy.opensAt ?? ""} onChange={(event) => setPolicy({ ...policy, opensAt: event.target.value || null })} /></label>
         <label>Close signup ({policy.timeZone})<input type="datetime-local" step={1} value={policy.closesAt ?? ""} onChange={(event) => setPolicy({ ...policy, closesAt: event.target.value || null })} /></label>
-        <label>Default role for new admissions<input required maxLength={80} value={policy.defaultRole} onChange={(event) => setPolicy({ ...policy, defaultRole: event.target.value })} /></label>
+        <label>Default role for new admissions<input required maxLength={80} value={policy.defaultRole} onChange={(event) => {
+          const defaultRole = event.target.value;
+          setPolicy({ ...policy, defaultRole, connectedAdmission: defaultRole.trim().toLowerCase() === "member" && policy.connectedAdmission });
+        }} /></label>
         <label>Admission seats<input type="number" min={1} max={100000} step={1} value={policy.activeSeatLimit ?? ""} onChange={(event) => setPolicy({
           ...policy, activeSeatLimit: event.target.value ? Number(event.target.value) : null,
         })} /></label>
@@ -96,7 +99,12 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
           ...policy, waitlistLimit: event.target.value ? Number(event.target.value) : null,
         })} /></label>
         <p>Leave a limit blank for unlimited places. With no roles listed, all active members count. These limits apply to application decisions and waitlist promotions. Existing memberships stay in place if a limit is lowered.</p>
-        <p>Signup must be enabled to use the schedule. Each application still needs review.</p>
+        <label><input type="checkbox" checked={policy.connectedAdmission ?? false}
+          disabled={policy.defaultRole.trim().toLowerCase() !== "member"}
+          onChange={(event) => setPolicy({ ...policy, connectedAdmission: event.target.checked })} />
+          Allow immediate admission with a linked account
+        </label>
+        <p>This option is available for the Member role. It admits eligible signed-in people when a place is open. Other applicants submit a request for review.</p>
         <h4>Signup questions</h4>
         <p>Applicants see these questions. Group managers can read the answers when reviewing the application.</p>
         {draft.map((question, index) => <fieldset key={question.id} disabled={busy}>

@@ -486,20 +486,21 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           activeSeatLimit: policyDraft.activeSeatLimit === undefined ? previous.policy.activeSeatLimit : policyDraft.activeSeatLimit,
           waitlistLimit: policyDraft.waitlistLimit === undefined ? previous.policy.waitlistLimit : policyDraft.waitlistLimit,
           countedRoles: policyDraft.countedRoles ?? previous.policy.countedRoles,
+          connectedAdmission: policyDraft.connectedAdmission ?? previous.policy.connectedAdmission,
         }, group.time_zone) : previous.policy;
         if (typeof policy === "string") { await client.query("ROLLBACK"); return reply.code(400).send({ error: policy }); }
         const hasPolicy = policy.opensAt || policy.closesAt || policy.heading || policy.defaultRole !== defaultSignupPolicy.defaultRole || policy.activeSeatLimit != null
-          || policy.waitlistLimit != null || Boolean(policy.countedRoles?.length);
+          || policy.waitlistLimit != null || Boolean(policy.countedRoles?.length) || policy.connectedAdmission;
         const revision = questions.length || hasPolicy ? randomUUID() : null;
         if (revision) {
           await client.query(
-            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles)
-             VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11)
+            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles,connected_admission)
+             VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11,$12)
              ON CONFLICT(group_id) DO UPDATE SET revision=EXCLUDED.revision,questions=EXCLUDED.questions,opens_at=EXCLUDED.opens_at,
                closes_at=EXCLUDED.closes_at,default_role=EXCLUDED.default_role,heading=EXCLUDED.heading,
-               active_seat_limit=EXCLUDED.active_seat_limit,waitlist_limit=EXCLUDED.waitlist_limit,counted_roles=EXCLUDED.counted_roles
+               active_seat_limit=EXCLUDED.active_seat_limit,waitlist_limit=EXCLUDED.waitlist_limit,counted_roles=EXCLUDED.counted_roles,connected_admission=EXCLUDED.connected_admission
              WHERE group_signup_forms.department_id=EXCLUDED.department_id`,
-            [departmentId, groupId, revision, JSON.stringify(questions), policy.opensAt, policy.closesAt, policy.defaultRole, policy.heading, policy.activeSeatLimit, policy.waitlistLimit, policy.countedRoles],
+            [departmentId, groupId, revision, JSON.stringify(questions), policy.opensAt, policy.closesAt, policy.defaultRole, policy.heading, policy.activeSeatLimit, policy.waitlistLimit, policy.countedRoles, policy.connectedAdmission],
           );
         } else await client.query("DELETE FROM group_signup_forms WHERE department_id=$1 AND group_id=$2", [departmentId, groupId]);
         await client.query("COMMIT");
@@ -608,11 +609,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
-      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[]; heading: string; opensAt: Date | null; closesAt: Date | null; timeZone: string }>(
+      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[]; heading: string; opensAt: Date | null; closesAt: Date | null; timeZone: string; connectedAdmission: boolean }>(
         `SELECT church_group.name,church_group.description,
                 CASE WHEN jsonb_array_length(form.questions)>0 THEN form.revision ELSE NULL END AS revision,
                 COALESCE(form.questions,'[]'::jsonb) AS questions, COALESCE(form.heading,'') AS heading,
-                form.opens_at AS "opensAt",form.closes_at AS "closesAt",site.time_zone AS "timeZone"
+                form.opens_at AS "opensAt",form.closes_at AS "closesAt",site.time_zone AS "timeZone",COALESCE(form.connected_admission,false) AS "connectedAdmission"
            FROM church_groups church_group JOIN departments site ON site.id=church_group.department_id
            LEFT JOIN group_signup_forms form ON form.group_id=church_group.id AND form.department_id=church_group.department_id
           WHERE church_group.public_signup_token=$1 AND church_group.public_signup_enabled=true
@@ -676,6 +677,106 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       realtime.publish("core:groups:changed", groupDepartmentId, { groupId, action: "join-requested" });
       return reply.code(201).send({ status: "pending" as const });
     });
+
+    routes.post<{ Params: { token: string }; Body: { formRevision?: string; answers?: Record<string, string> } }>("/api/public/group-signups/:token/connected", { schema: {
+      params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, properties: signupAnswerFields },
+    } }, async (request, reply) => {
+      if (!isDatabaseReady() || !pool || !dependencies.authenticate) return reply.code(503).send({ error: "Group registration is temporarily unavailable." });
+      if (request.headers.authorization) return reply.code(403).send({ error: "Use a personal browser session to join this group." });
+      if (!await dependencies.authenticate(request, reply) || !validateMutation(request, reply)) return reply;
+      const actor = request.authenticatedUser;
+      if (!actor || actor.isServiceUser || !actor.email) return reply.code(403).send({ error: "Use your personal, linked account to join this group." });
+      reply.header("cache-control", "private, no-store");
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const group = (await client.query<{ id: string; department_id: string }>(
+          `SELECT id,department_id FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true
+            AND status='active' AND source_system IS NULL FOR UPDATE`, [request.params.token],
+        )).rows[0];
+        if (!group) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this group." }); }
+        if (!await dependencies.lockDepartmentForWrite(client, group.department_id)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({ error: "This group's location is read-only while it is a redundancy standby or fenced site." });
+        }
+        const form = await readSignupForm(client, group.department_id, group.id);
+        if (!form.policy.connectedAdmission || form.policy.defaultRole.trim().toLowerCase() !== "member") {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This group uses reviewed applications. Submit a regular request to join." });
+        }
+        if (signupState(form.policy.opensAt, form.policy.closesAt) !== "open") {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ code: "group_signup_window_closed", error: "This group is not accepting applications right now." });
+        }
+        const captured = captureSignupAnswers(form, request.body.formRevision, request.body.answers);
+        if ("error" in captured) {
+          await client.query("ROLLBACK");
+          return reply.code(captured.status).send({ error: captured.error });
+        }
+        const person = (await client.query<{ id: string; first_name: string; last_name: string; email: string }>(
+          `SELECT person.id,person.first_name,person.last_name,lower(trim(person.email)) AS email
+             FROM department_memberships membership
+             JOIN contacts person ON person.id=membership.contact_id AND person.department_id=membership.department_id
+            WHERE membership.department_id=$1 AND membership.user_id=$2 AND person.archived_at IS NULL
+              AND lower(trim(person.email))=lower(trim($3::text))
+            FOR SHARE OF membership,person`,
+          [group.department_id, actor.id, actor.email],
+        )).rows[0];
+        if (!person) {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "Your account is not linked to an eligible person in this location. Submit a regular request instead." });
+        }
+        const member = (await client.query<{ status: string }>(
+          "SELECT status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [group.id, person.id],
+        )).rows[0];
+        if (member?.status === "active") {
+          await client.query("COMMIT");
+          return { status: "approved" };
+        }
+        if (member) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "You already have a membership or waitlist place. Ask a group manager before changing it." });
+        }
+        const waiting = await client.query(
+          `SELECT 1 FROM group_members member JOIN contacts person ON person.id=member.contact_id AND person.department_id=$2
+            WHERE member.group_id=$1 AND member.status='waitlist' LIMIT 1`, [group.id, group.department_id],
+        );
+        const capacityError = await checkGroupAdmissionCapacity(client, group.department_id, group.id, "active", "Member", form.policy);
+        if (waiting.rowCount || capacityError) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Immediate admission is unavailable. Submit a regular request for review." });
+        }
+        const pending = await client.query(
+          "SELECT 1 FROM group_join_requests WHERE group_id=$1 AND department_id=$2 AND lower(email)=$3 AND status='pending'",
+          [group.id, group.department_id, person.email],
+        );
+        if (pending.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "An application from this email is already awaiting review." });
+        }
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [actor.id]);
+        const inserted = await client.query(
+          `INSERT INTO group_members(group_id,contact_id,role,status,joined_on)
+           VALUES($1,$2,'Member','active',CURRENT_DATE) ON CONFLICT(group_id,contact_id) DO NOTHING RETURNING contact_id`,
+          [group.id, person.id],
+        );
+        if (!inserted.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Your membership changed. Reload the signup form." });
+        }
+        await client.query(
+          `INSERT INTO group_join_requests(id,department_id,group_id,first_name,last_name,email,status,contact_id,answer_snapshot,reviewed_at)
+           VALUES($1,$2,$3,$4,$5,$6,'approved',$7,$8::jsonb,now())`,
+          [randomUUID(), group.department_id, group.id, person.first_name, person.last_name, person.email, person.id, JSON.stringify(captured.saved)],
+        );
+        await client.query("COMMIT");
+        realtime.publish("core:groups:changed", group.department_id, { groupId: group.id, action: "connected-member-admitted" });
+        return reply.code(201).send({ status: "approved" });
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+
 
     routes.get<{ Params: { id: string } }>("/api/groups/:id/meetings", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply);
