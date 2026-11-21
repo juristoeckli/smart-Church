@@ -1,4 +1,4 @@
-import { recordResourceBookingDecision } from "../../resource-booking-notices.js";
+import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
 import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
@@ -1147,6 +1147,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
            RETURNING id, resource_id, $9::text AS resource_name, requested_by, $10::text AS requester_name, purpose, starts_at, ends_at, status, created_at`,
           [randomUUID(), departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt.toISOString(), endsAt.toISOString(), resource.requires_approval ? "requested" : "approved", resource.name, request.authenticatedUser!.displayName],
         );
+        if (result.rows[0].status === "requested") {
+          await recordPendingResourceBookingRequest(client, departmentId, request.authenticatedUser!.id, [result.rows[0].id]);
+        }
         await client.query("COMMIT");
         return reply.code(201).send(mapBooking(result.rows[0]));
       } catch (error) {

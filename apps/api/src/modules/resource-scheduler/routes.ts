@@ -1,4 +1,4 @@
-import { recordResourceBookingDecision } from "../../resource-booking-notices.js";
+import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
 import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -637,6 +637,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         purpose: request.body.purpose.trim(), startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
         instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart,
       });
+      if (status === "requested") await recordPendingResourceBookingRequest(client, departmentId, request.authenticatedUser!.id, created.bookingIds);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
