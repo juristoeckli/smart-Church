@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Bell, Link2, MessageCircle, Newspaper, Send, Trash2 } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { translateModuleText } from "../../module-registry";
@@ -77,6 +77,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
   const [detailsPost, setDetailsPost] = useState<FeedPost | null>(null);
+  const openedSharedPost = useRef("");
   const [editingDetails, setEditingDetails] = useState(false);
   const [editTitle, setEditTitle] = useState("");
   const [editBody, setEditBody] = useState("");
@@ -112,14 +113,22 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     try {
       const parameters = new URLSearchParams({ scope: feedScope });
       if (groupFilter) parameters.set("groupId", groupFilter);
-      const sharedPostId = new URLSearchParams(window.location.search).get("communityPost");
-      if (sharedPostId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sharedPostId)) parameters.set("postId", sharedPostId);
+      const sharedPostId = new URLSearchParams(window.location.search).get("communityPost")?.toLowerCase();
+      const sharedPostKey = sharedPostId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(sharedPostId)
+        ? departmentId + ":" + sharedPostId : "";
+      if (sharedPostId && sharedPostKey && openedSharedPost.current !== sharedPostKey) parameters.set("postId", sharedPostId);
       const response = await fetch(`/api/modules/community-feed/posts?${parameters}`, { headers: { "x-department-id": departmentId }, signal });
       const result = await response.json() as FeedPost[] | { error?: string };
       if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? t("Could not load community posts.") : t("Could not load community posts."));
+      if (signal?.aborted) return;
       setPosts(result);
-      const sharedPost = sharedPostId ? result.find((post) => post.id === sharedPostId) : null;
-      if (sharedPost) setDetailsPost(sharedPost);
+      if (!sharedPostKey || openedSharedPost.current === sharedPostKey
+        || new URLSearchParams(window.location.search).get("communityPost")?.toLowerCase() !== sharedPostId) return;
+      const sharedPost = result.find((post) => post.id === sharedPostId);
+      if (sharedPost) {
+        openedSharedPost.current = sharedPostKey;
+        setDetailsPost(sharedPost);
+      }
     } catch (reason) {
       if (!signal?.aborted) setError(reason instanceof Error ? t(reason.message) : t("Could not load the community feed."));
     } finally { if (!signal?.aborted) setLoading(false); }
