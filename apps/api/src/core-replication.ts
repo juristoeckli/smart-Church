@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import { registerPlatformReplicationAdapter, type ReplicationRestoreContext } from "./modules/module-sdk.js";
 
 const snapshotTableNames = [
-  "contacts", "service_events", "service_event_lifecycle_audit", "church_groups", "group_members", "church_teams", "team_members",
+  "contacts", "service_events", "service_event_fact_definitions", "service_event_lifecycle_audit", "church_groups", "group_members", "church_teams", "team_members",
   "church_team_leaders", "bookable_resources", "resource_bookings", "group_meetings",
   "group_meeting_attendance", "event_volunteer_absences", "event_position_responses", "event_position_swap_requests", "event_attendance_checkins", "check_in_sessions", "check_in_pickup_authorizations", "worship_songs",
   "worship_song_arrangements", "service_plan_templates", "service_volunteer_qualifications", "contact_service_qualifications",
@@ -14,7 +14,7 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 28 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 29 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
   tables.event_registrations = (tables.event_registrations ?? []).map((row) => ({ ...row, cancellation_token_hash: row.cancellation_token_hash ?? null, additional_attendee: row.additional_attendee ?? false, party_id: row.party_id ?? null }));
   tables.bookable_resources = (tables.bookable_resources ?? []).map((row) => ({ ...row, calendar_required: row.calendar_required ?? false, manager_booking_only: row.manager_booking_only ?? false, visibility_group_id: row.visibility_group_id ?? null, responsible_user_id: row.responsible_user_id ?? null }));
@@ -49,6 +49,7 @@ function replicationValue(value: unknown, dataType: string | undefined) {
 const exportQueries: Record<SnapshotTable, string> = {
   contacts: "SELECT * FROM contacts WHERE department_id=$1 ORDER BY id",
   service_events: "SELECT * FROM service_events WHERE department_id=$1 ORDER BY id",
+  service_event_fact_definitions: "SELECT * FROM service_event_fact_definitions WHERE department_id=$1 ORDER BY id",
   service_event_lifecycle_audit: "SELECT * FROM service_event_lifecycle_audit WHERE department_id=$1 ORDER BY event_id,created_at,id",
   church_groups: "SELECT * FROM church_groups WHERE department_id=$1 ORDER BY id",
   group_members: "SELECT member.* FROM group_members member JOIN church_groups parent ON parent.id=member.group_id WHERE parent.department_id=$1 ORDER BY member.group_id,member.contact_id",
@@ -106,6 +107,7 @@ const deleteQueries = [
   "DELETE FROM church_teams WHERE department_id=$1",
   "DELETE FROM bookable_resources WHERE department_id=$1",
   "DELETE FROM service_events WHERE department_id=$1",
+  "DELETE FROM service_event_fact_definitions WHERE department_id=$1",
   "DELETE FROM contacts WHERE department_id=$1",
 ];
 
@@ -144,7 +146,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 28, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 29, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -161,7 +163,7 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "19",
+    schemaVersion: "20",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
@@ -243,7 +245,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
            OR user_id=ANY($2::uuid[]) OR related_user_id=ANY($2::uuid[])`, [[...replicatedUserIds], orphanedSiteUsers]);
       await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersWithReplicatedPhones]);
 
-      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_volunteer_qualifications", "contact_service_qualifications", "service_events", "service_event_lifecycle_audit", "church_groups", "church_teams", "bookable_resources", "worship_songs", "worship_song_arrangements", "service_plan_templates", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_volunteer_absences", "event_position_responses", "event_position_swap_requests", "event_attendance_checkins", "check_in_sessions", "check_in_pickup_authorizations", "check_in_event_pickups", "event_registrations", "event_registration_waitlist_notices"];
+      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_volunteer_qualifications", "contact_service_qualifications", "service_event_fact_definitions", "service_events", "service_event_lifecycle_audit", "church_groups", "church_teams", "bookable_resources", "worship_songs", "worship_song_arrangements", "service_plan_templates", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_volunteer_absences", "event_position_responses", "event_position_swap_requests", "event_attendance_checkins", "check_in_sessions", "check_in_pickup_authorizations", "check_in_event_pickups", "event_registrations", "event_registration_waitlist_notices"];
       const upsertQueries: Partial<Record<SnapshotTable, string>> = {
         // Worship library rows are soft-deleted and referenced by the
         // ChurchTools/Elvanto integration module. Updating them in place keeps

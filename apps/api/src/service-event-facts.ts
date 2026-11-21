@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
-import type { ServiceEventFacts, ServiceEventFactsPeriod } from "@smart-church/contracts";
+import type { ServiceEventFactDefinition, ServiceEventFacts, ServiceEventFactsPeriod } from "@smart-church/contracts";
 
 type Dependencies = {
   pool: Pool | null;
@@ -10,10 +11,24 @@ type Dependencies = {
   lockDepartmentForWrite: (client: PoolClient, departmentId: string) => Promise<boolean>;
 };
 const path = "/api/events/:id/recorded-facts";
+const definitionsPath = "/api/events/recorded-fact-definitions";
+const numericValue = /^-?(?:0|[1-9][0-9]{0,8})(?:\.[0-9]{1,3})?$/;
+const definitionFields = 'id,label,kind,unit,options,archived_at AS "archivedAt"';
+type DefinitionInput = Pick<ServiceEventFactDefinition, "label" | "kind"> & { unit?: string; options?: string[] };
+type FactsInput = Omit<ServiceEventFacts, "custom"> & { custom?: Record<string, string | null> };
+const definitionBody = { type: "object", additionalProperties: false, required: ["label", "kind"], properties: {
+  label: { type: "string", minLength: 1, maxLength: 80 },
+  kind: { type: "string", enum: ["number", "select"] },
+  unit: { type: "string", maxLength: 24 },
+  options: { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 80 } },
+} } as const;
 const params = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
 const count = { type: "integer", minimum: 0, maximum: 1_000_000 } as const;
 const body = { type: "object", additionalProperties: false, properties: {
   visitors: count, firstTimeVisitors: count,
+  custom: { type: "object", maxProperties: 100, propertyNames: {
+    pattern: "^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+  }, additionalProperties: { anyOf: [{ type: "null" }, { type: "string", minLength: 1, maxLength: 80 }] } },
   collection: { type: "object", additionalProperties: false, required: ["amount", "currency"], properties: {
     amount: { type: "string", pattern: "^(?:0|[1-9][0-9]{0,8})(?:\\.[0-9]{1,3})?$" },
     currency: { type: "string", pattern: "^[A-Z]{3}$" },
@@ -33,6 +48,66 @@ export function registerServiceEventFactsRoutes(app: FastifyInstance, { pool, av
     return resolveScope(request, reply);
   }
 
+  app.get(definitionsPath, async (request, reply) => {
+    const departmentId = await scope(request, reply);
+    if (!departmentId) return reply;
+    const { rows } = await pool!.query<ServiceEventFactDefinition>(
+      "SELECT " + definitionFields + " FROM service_event_fact_definitions WHERE department_id=$1 ORDER BY archived_at NULLS FIRST,lower(label),id",
+      [departmentId]);
+    return { definitions: rows };
+  });
+
+  app.post<{ Body: DefinitionInput }>(definitionsPath, { schema: { body: definitionBody } }, async (request, reply) => {
+    const departmentId = await scope(request, reply);
+    if (!departmentId || !validateMutation(request, reply)) return reply;
+    const label = request.body.label.trim();
+    const unit = request.body.unit?.trim() || null;
+    const options = (request.body.options ?? []).map((option) => option.trim());
+    const kind = request.body.kind;
+    if (!label || (kind === "number" && options.length) || (kind === "select" && (unit || options.length < 2
+      || options.some((option) => !option) || new Set(options.map((option) => option.toLowerCase())).size !== options.length))) {
+      return reply.code(400).send({ error: "Enter a label and valid, distinct options for select facts, or a unit for a numeric fact." });
+    }
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const { rows: [created] } = await client.query<ServiceEventFactDefinition>(
+        "INSERT INTO service_event_fact_definitions(id,department_id,label,kind,unit,options) VALUES($1,$2,$3,$4,$5,$6) RETURNING " + definitionFields,
+        [randomUUID(), departmentId, label, kind, unit, options]);
+      await client.query("COMMIT");
+      return reply.code(201).send(created);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "An active fact already uses that label." });
+      throw error;
+    } finally { client.release(); }
+  });
+
+  app.post<{ Params: { id: string } }>(definitionsPath + "/:id/archive", { schema: { params } }, async (request, reply) => {
+    const departmentId = await scope(request, reply);
+    if (!departmentId || !validateMutation(request, reply)) return reply;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const { rows: [definition] } = await client.query<ServiceEventFactDefinition>(
+        "UPDATE service_event_fact_definitions SET archived_at=COALESCE(archived_at,now()) WHERE department_id=$1 AND id=$2 RETURNING " + definitionFields,
+        [departmentId, request.params.id]);
+      await client.query("COMMIT");
+      return definition ?? reply.code(404).send({ error: "Event fact definition could not be found." });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  });
+
   app.get<{ Params: { id: string } }>(path, { schema: { params } }, async (request, reply) => {
     const departmentId = await scope(request, reply);
     if (!departmentId) return reply;
@@ -41,11 +116,11 @@ export function registerServiceEventFactsRoutes(app: FastifyInstance, { pool, av
     return { facts: event.facts ?? {}, editable: !event.source_system && !event.cancelled_at };
   });
 
-  app.put<{ Params: { id: string }; Body: ServiceEventFacts }>(path, { schema: { params, body } }, async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: FactsInput }>(path, { schema: { params, body } }, async (request, reply) => {
     const departmentId = await scope(request, reply);
     if (!departmentId || !validateMutation(request, reply)) return reply;
-    const facts = request.body;
-    if (facts.visitors !== undefined && facts.firstTimeVisitors !== undefined && facts.firstTimeVisitors > facts.visitors) {
+    const { custom: changes = {}, ...fixed } = request.body;
+    if (fixed.visitors !== undefined && fixed.firstTimeVisitors !== undefined && fixed.firstTimeVisitors > fixed.visitors) {
       return reply.code(400).send({ error: "First-time visitors cannot exceed total visitors." });
     }
 
@@ -62,6 +137,23 @@ export function registerServiceEventFactsRoutes(app: FastifyInstance, { pool, av
         return !event ? reply.code(404).send({ error: "Event could not be found." })
           : reply.code(409).send({ error: "Facts cannot be changed on imported or cancelled events." });
       }
+      const custom = { ...event.facts?.custom };
+      if (Object.keys(changes).length) {
+        const { rows } = await client.query<ServiceEventFactDefinition>(
+          "SELECT " + definitionFields + " FROM service_event_fact_definitions WHERE department_id=$1 AND archived_at IS NULL AND id=ANY($2::uuid[]) FOR SHARE",
+          [departmentId, Object.keys(changes)]);
+        const activeDefinitions = new Map(rows.map((definition) => [definition.id, definition]));
+        for (const [id, value] of Object.entries(changes)) {
+          const definition = activeDefinitions.get(id);
+          if (!definition || (value !== null && !(definition.kind === "number" ? numericValue.test(value) : definition.options.includes(value)))) {
+            await client.query("ROLLBACK");
+            return reply.code(400).send({ error: "A custom fact or its value is no longer valid for this location." });
+          }
+          if (value === null) delete custom[id];
+          else custom[id] = value;
+        }
+      }
+      const facts: ServiceEventFacts = Object.keys(custom).length ? { ...fixed, custom } : fixed;
       await client.query("UPDATE service_events SET recorded_facts=$3::jsonb WHERE department_id=$1 AND id=$2",
         [departmentId, request.params.id, Object.keys(facts).length ? JSON.stringify(facts) : null]);
       await client.query("COMMIT");
@@ -89,11 +181,25 @@ export function registerServiceEventFactsRoutes(app: FastifyInstance, { pool, av
       SELECT start_date, f->'collection'->>'currency' currency,
         SUM((f->'collection'->>'amount')::numeric)::text amount
       FROM facts WHERE f ? 'collection' GROUP BY start_date, currency
+    ), custom_values AS (
+      SELECT f.start_date,d.id,d.kind,value
+      FROM facts f CROSS JOIN LATERAL jsonb_each_text(f.f->'custom') AS entry(key,value)
+      JOIN service_event_fact_definitions d ON d.department_id=$1 AND d.id::text=entry.key
+    ), custom_select_counts AS (
+      SELECT start_date,id,value,count(*)::text amount FROM custom_values WHERE kind='select'
+      GROUP BY start_date,id,value
+    ), custom_summaries AS (
+      SELECT start_date,id,json_build_object('id',id,'total',SUM(value::numeric)::text) result
+      FROM custom_values WHERE kind='number' GROUP BY start_date,id
+      UNION ALL
+      SELECT start_date,id,json_build_object('id',id,'counts',json_agg(json_build_object('value',value,'count',amount) ORDER BY value))
+      FROM custom_select_counts GROUP BY start_date,id
     )
     SELECT to_char(start_date,'YYYY-MM') period, SUM((f->>'visitors')::bigint)::text visitors,
       SUM((f->>'firstTimeVisitors')::bigint)::text AS "firstTimeVisitors",
       COALESCE((SELECT json_agg(json_build_object('amount',amount,'currency',currency) ORDER BY currency)
-        FROM collections c WHERE c.start_date=facts.start_date), '[]'::json) collections
+        FROM collections c WHERE c.start_date=facts.start_date), '[]'::json) collections,
+      COALESCE((SELECT json_agg(result ORDER BY id) FROM custom_summaries c WHERE c.start_date=facts.start_date), '[]'::json) custom
     FROM facts GROUP BY start_date ORDER BY start_date DESC`, [departmentId, request.query.period + "-01"]);
     return { periods: rows };
   });

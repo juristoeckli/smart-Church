@@ -36,10 +36,24 @@ export interface ServicePosition {
   canRespond?: boolean;
 }
 
+export interface ServiceEventFactDefinition {
+  id: string;
+  label: string;
+  kind: "number" | "select";
+  unit: string | null;
+  options: string[];
+  archivedAt: string | null;
+}
+
+export type ServiceEventCustomFactTotal =
+  | { id: string; total: string }
+  | { id: string; counts: Array<{ value: string; count: string }> };
+
 export interface ServiceEventFacts {
   visitors?: number;
   firstTimeVisitors?: number;
   collection?: { amount: string; currency: string };
+  custom?: Record<string, string>;
 }
 
 export interface ServiceEventFactsPeriod {
@@ -47,6 +61,7 @@ export interface ServiceEventFactsPeriod {
   visitors: string | null;
   firstTimeVisitors: string | null;
   collections: Array<{ amount: string; currency: string }>;
+  custom?: ServiceEventCustomFactTotal[];
 }
 
 export interface ServicePlanItem {
