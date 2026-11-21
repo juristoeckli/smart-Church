@@ -8,7 +8,7 @@ import { registerReportDesigner } from "./designer.js";
 type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
 type ReportRow = Record<string, string | number | boolean | null>;
-type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null };
+type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
 
 const catalog = [
   { key: "people-directory" as const, title: "People directory", description: "Contact list with status and contact details.", permission: "people" as const },
@@ -535,9 +535,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/reports/saved", async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,schedule_days,notify_when_ready,next_run_at,last_run_at,last_run_status,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
+    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,schedule_days,notify_when_ready,next_run_at,last_run_at,last_run_status,CASE WHEN owner_user_id=$2 THEN run_history END AS run_history,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
     const availableKeys = new Set((await installedReports(request)).map((item) => item.key));
-    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit, ...(saved.owner_user_id === request.authenticatedUser!.id ? { scheduleDays: saved.schedule_days, notifyWhenReady: saved.notify_when_ready, nextRunAt: saved.next_run_at, lastRunAt: saved.last_run_at, lastRunStatus: saved.last_run_status } : {}) }));
+    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit, ...(saved.owner_user_id === request.authenticatedUser!.id ? { scheduleDays: saved.schedule_days, notifyWhenReady: saved.notify_when_ready, nextRunAt: saved.next_run_at, lastRunAt: saved.last_run_at, lastRunStatus: saved.last_run_status, runHistory: saved.run_history } : {}) }));
   });
   app.post<{ Body: { reportKey: ReportKey; name: string; filters: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/saved", {
     schema: { body: { type: "object", additionalProperties: false, required: ["reportKey", "name", "filters"], properties: { reportKey: { type: "string", enum: catalog.map((item) => item.key) }, name: { type: "string", minLength: 1, maxLength: 120 }, filters: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } },
@@ -709,7 +709,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           }
           await client.query(
             `UPDATE ${table} SET last_run_at=now(), last_run_status=$2, scheduled_result=$3::jsonb,
-              next_run_at=now()+schedule_days*interval '24 hours' WHERE id=$1`,
+              next_run_at=now()+schedule_days*interval '24 hours',
+              run_history=(jsonb_build_array(jsonb_build_object('ranAt',now(),'status',$2::text)) || run_history) - 20 WHERE id=$1`,
             [saved.id, status, output],
           );
           if (status === "ready" && saved.notify_when_ready && isServerModuleEnabled("notifications")) {
