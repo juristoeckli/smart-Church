@@ -52,6 +52,7 @@ const english = {
   groupRequestHelp: "A group leader will review your request and follow up with you.",
   groupRequestIntro: "Send a request to join. Your membership starts after a group leader approves it.",
   groupPrivacy: "Your name and email will be shared with this group’s leaders to review your request.",
+  groupPrivacyWithAnswers: "Group managers can read your name, email, and answers when reviewing your application.",
   sending: "Sending…",
   requestToJoin: "Request to join",
   smartChurch: "Smart Church",
@@ -92,7 +93,7 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
     registered: "Du bist angemeldet", waitlisted: "Du stehst auf der Warteliste", registeredHelp: "Dein Platz ist bestätigt. Wir freuen uns auf dich.", waitlistedHelp: "Die Veranstaltung ist ausgebucht. Du stehst auf der Warteliste. Die Veranstaltenden melden sich, falls ein Platz frei wird.",
     registrationClosed: "Die Anmeldung für diese Veranstaltung ist geschlossen.", placesRemaining: "Noch {count} Plätze frei", registrationOpen: "Die Anmeldung ist geöffnet", waitlistCount: " · {count} auf der Warteliste",
     firstName: "Vorname", lastName: "Nachname", email: "E-Mail-Adresse", eventPrivacy: "Deine Angaben werden mit den Veranstaltenden geteilt, damit sie Anmeldung und Check-in verwalten können.", submitting: "Wird gesendet …", register: "Anmelden",
-    groupRequestSent: "Anfrage gesendet", groupRequestHelp: "Die Gruppenleitung prüft deine Anfrage und meldet sich bei dir.", groupRequestIntro: "Sende eine Beitrittsanfrage. Deine Mitgliedschaft beginnt, sobald die Gruppenleitung zustimmt.", groupPrivacy: "Dein Name und deine E-Mail-Adresse werden mit der Gruppenleitung geteilt, damit sie deine Anfrage prüfen kann.", sending: "Wird gesendet …", requestToJoin: "Beitritt anfragen", smartChurch: "Smart Church",
+    groupRequestSent: "Anfrage gesendet", groupRequestHelp: "Die Gruppenleitung prüft deine Anfrage und meldet sich bei dir.", groupRequestIntro: "Sende eine Beitrittsanfrage. Deine Mitgliedschaft beginnt, sobald die Gruppenleitung zustimmt.", groupPrivacy: "Dein Name und deine E-Mail-Adresse werden mit der Gruppenleitung geteilt, damit sie deine Anfrage prüfen kann.", groupPrivacyWithAnswers: "Die Gruppenleitung kann deinen Namen, deine E-Mail-Adresse und deine Antworten bei der Prüfung deiner Anfrage einsehen.", sending: "Wird gesendet …", requestToJoin: "Beitritt anfragen", smartChurch: "Smart Church",
   },
   fr: {
     registrationReceipt: "Reçu d’inscription",
@@ -125,7 +126,7 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
     registered: "Votre inscription est confirmée", waitlisted: "Vous êtes sur la liste d’attente", registeredHelp: "Votre place est confirmée. Nous nous réjouissons de vous accueillir.", waitlistedHelp: "L’événement est complet, mais vous êtes sur la liste d’attente. Les organisateurs vous contacteront si une place se libère.",
     registrationClosed: "Les inscriptions à cet événement sont closes.", placesRemaining: "{count} places restantes", registrationOpen: "Les inscriptions sont ouvertes", waitlistCount: " · {count} sur la liste d’attente",
     firstName: "Prénom", lastName: "Nom", email: "Adresse e-mail", eventPrivacy: "Vos coordonnées sont partagées avec les organisateurs pour gérer l’inscription et l’accueil.", submitting: "Envoi en cours…", register: "S’inscrire",
-    groupRequestSent: "Demande envoyée", groupRequestHelp: "Un responsable du groupe examinera votre demande et vous recontactera.", groupRequestIntro: "Envoyez une demande pour rejoindre le groupe. Votre adhésion commencera après l’approbation d’un responsable.", groupPrivacy: "Votre nom et votre adresse e-mail seront transmis aux responsables du groupe afin qu’ils examinent votre demande.", sending: "Envoi en cours…", requestToJoin: "Demander à rejoindre", smartChurch: "Smart Church",
+    groupRequestSent: "Demande envoyée", groupRequestHelp: "Un responsable du groupe examinera votre demande et vous recontactera.", groupRequestIntro: "Envoyez une demande pour rejoindre le groupe. Votre adhésion commencera après l’approbation d’un responsable.", groupPrivacy: "Votre nom et votre adresse e-mail seront transmis aux responsables du groupe afin qu’ils examinent votre demande.", groupPrivacyWithAnswers: "Les responsables du groupe peuvent consulter votre nom, votre adresse e-mail et vos réponses pour examiner votre demande.", sending: "Envoi en cours…", requestToJoin: "Demander à rejoindre", smartChurch: "Smart Church",
   },
   it: {
     registrationReceipt: "Ricevuta di iscrizione",
@@ -158,7 +159,7 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
     registered: "Iscrizione confermata", waitlisted: "Sei in lista d’attesa", registeredHelp: "Il tuo posto è confermato. Non vediamo l’ora di incontrarti.", waitlistedHelp: "L’evento è al completo, ma sei in lista d’attesa. Gli organizzatori ti contatteranno se si libera un posto.",
     registrationClosed: "Le iscrizioni a questo evento sono chiuse.", placesRemaining: "Ancora {count} posti disponibili", registrationOpen: "Le iscrizioni sono aperte", waitlistCount: " · {count} in lista d’attesa",
     firstName: "Nome", lastName: "Cognome", email: "Indirizzo e-mail", eventPrivacy: "I tuoi dati saranno condivisi con gli organizzatori per gestire l’iscrizione e l’accoglienza.", submitting: "Invio in corso…", register: "Iscriviti",
-    groupRequestSent: "Richiesta inviata", groupRequestHelp: "Un responsabile del gruppo esaminerà la richiesta e ti ricontatterà.", groupRequestIntro: "Invia una richiesta per entrare nel gruppo. L’adesione inizierà dopo l’approvazione di un responsabile.", groupPrivacy: "Il tuo nome e indirizzo e-mail saranno condivisi con i responsabili del gruppo per valutare la richiesta.", sending: "Invio in corso…", requestToJoin: "Richiedi di entrare", smartChurch: "Smart Church",
+    groupRequestSent: "Richiesta inviata", groupRequestHelp: "Un responsabile del gruppo esaminerà la richiesta e ti ricontatterà.", groupRequestIntro: "Invia una richiesta per entrare nel gruppo. L’adesione inizierà dopo l’approvazione di un responsabile.", groupPrivacy: "Il tuo nome e indirizzo e-mail saranno condivisi con i responsabili del gruppo per valutare la richiesta.", groupPrivacyWithAnswers: "I responsabili del gruppo possono consultare il tuo nome, il tuo indirizzo e-mail e le tue risposte per valutare la richiesta.", sending: "Invio in corso…", requestToJoin: "Richiedi di entrare", smartChurch: "Smart Church",
   },
 };
 

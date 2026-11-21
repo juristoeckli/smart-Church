@@ -6,6 +6,7 @@ import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.j
 import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback, saveGroupLeaderFeedback, type CompletionFeedback } from "../../group-leader-feedback.js";
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { groupMemberDraftSchema, groupMembershipState, groupWaitlist, type GroupMembershipDraft } from "./group-waitlist.js";
+import { captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAnswerFields, signupSettingsSchema, type SignupSettings } from "./signup-form.js";
 import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -430,17 +431,75 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return { enabled: result.rows[0].public_signup_enabled, ...(result.rows[0].public_signup_token ? { token: result.rows[0].public_signup_token } : {}) };
     });
 
+    const signupFormParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
+    function getSignupGroup(db: typeof pool | PoolClient, departmentId: string, groupId: string, lock = false) {
+      return db!.query<{ source_system: string | null }>(
+        "SELECT source_system FROM church_groups WHERE department_id=$1 AND id=$2" + (lock ? " FOR UPDATE" : ""), [departmentId, groupId],
+      );
+    }
+
+    routes.get<{ Params: { id: string } }>("/api/groups/:id/signup-form", { schema: { params: signupFormParams } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const group = (await getSignupGroup(pool, departmentId, request.params.id)).rows[0];
+      if (!group) return reply.code(404).send({ error: "Group not found." });
+      if (group.source_system === "churchtools" || group.source_system === "elvanto") return reply.code(403).send({ error: "This signup form is managed in the source system." });
+      reply.header("cache-control", "private, no-store");
+      return readSignupForm(pool!, departmentId, request.params.id);
+    });
+
+    routes.put<{ Params: { id: string }; Body: SignupSettings }>("/api/groups/:id/signup-form", {
+      schema: { params: signupFormParams, body: signupSettingsSchema },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const questions = prepareSignupQuestions(request.body.questions);
+      if (typeof questions === "string") return reply.code(400).send({ error: questions });
+      const groupId = request.params.id;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const group = (await getSignupGroup(client, departmentId, groupId, true)).rows[0];
+        if (!group) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+        if (group.source_system === "churchtools" || group.source_system === "elvanto") {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "This signup form is managed in the source system." });
+        }
+        const previous = await readSignupForm(client, departmentId, groupId);
+        if (previous.revision !== request.body.expectedRevision) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The signup form changed. Reload it before saving." });
+        }
+        const revision = questions.length ? randomUUID() : null;
+        if (revision) {
+          await client.query(
+            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions) VALUES($1,$2,$3,$4::jsonb)
+             ON CONFLICT(group_id) DO UPDATE SET revision=EXCLUDED.revision,questions=EXCLUDED.questions
+             WHERE group_signup_forms.department_id=EXCLUDED.department_id`,
+            [departmentId, groupId, revision, JSON.stringify(questions)],
+          );
+        } else await client.query("DELETE FROM group_signup_forms WHERE department_id=$1 AND group_id=$2", [departmentId, groupId]);
+        await client.query("COMMIT");
+        realtime.publish("core:groups:changed", departmentId, { groupId, action: "group-signup-form-updated" });
+        return { revision, questions };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+
+
     routes.get<{ Params: { id: string } }>("/api/groups/:id/join-requests", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT id,group_id AS "groupId",first_name AS "firstName",last_name AS "lastName",email,status,created_at AS "createdAt"
+        `SELECT id,group_id AS "groupId",first_name AS "firstName",last_name AS "lastName",email,status,answer_snapshot AS "answers",created_at AS "createdAt"
            FROM group_join_requests WHERE group_id=$1 AND department_id=$2 AND status='pending'
           ORDER BY created_at,id`,
         [request.params.id, departmentId],
       );
+      reply.header("cache-control", "private, no-store");
       return result.rows;
     });
 
@@ -514,17 +573,22 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
-      const result = await pool!.query<{ name: string; description: string }>(
-        "SELECT name,description FROM church_groups WHERE public_signup_token=$1 AND public_signup_enabled=true AND status='active' AND source_system IS NULL",
+      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[] }>(
+        `SELECT church_group.name,church_group.description,form.revision,COALESCE(form.questions,'[]'::jsonb) AS questions
+           FROM church_groups church_group
+           LEFT JOIN group_signup_forms form ON form.group_id=church_group.id AND form.department_id=church_group.department_id
+          WHERE church_group.public_signup_token=$1 AND church_group.public_signup_enabled=true
+            AND church_group.status='active' AND church_group.source_system IS NULL`,
         [request.params.token],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "This group registration link is unavailable." });
-      return { name: result.rows[0].name, description: result.rows[0].description };
+      reply.header("cache-control", "private, no-store");
+      return result.rows[0];
     });
 
-    routes.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string } }>("/api/public/group-signups/:token", { schema: {
+    routes.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string; formRevision?: string; answers?: Record<string, string> } }>("/api/public/group-signups/:token", { schema: {
       params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email"], properties: { firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" } } },
+      body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email"], properties: { firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" }, ...signupAnswerFields } },
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
       const firstName = request.body.firstName.trim();
@@ -541,6 +605,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         groupId = group.rows[0].id;
         groupDepartmentId = group.rows[0].department_id;
         if (!await dependencies.lockDepartmentForWrite(client, groupDepartmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This group's location is read-only while it is a redundancy standby or fenced site." }); }
+        const form = await readSignupForm(client, groupDepartmentId, groupId);
+        const captured = captureSignupAnswers(form, request.body.formRevision, request.body.answers);
+        if ("error" in captured) {
+          await client.query("ROLLBACK");
+          return reply.code(captured.status).send({ error: captured.error });
+        }
         const existing = await client.query("SELECT 1 FROM group_join_requests WHERE group_id=$1 AND lower(email)=lower($2) AND status='pending'", [groupId, email]);
         if (existing.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A request from this email is already waiting for review." }); }
         const member = await client.query(
@@ -550,8 +620,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         );
         if (member.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A registration for this email is already on file." }); }
         await client.query(
-          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email) VALUES ($1,$2,$3,$4,$5,$6)",
-          [randomUUID(), groupDepartmentId, groupId, firstName, lastName, email],
+          "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email,answer_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)",
+          [randomUUID(), groupDepartmentId, groupId, firstName, lastName, email, JSON.stringify(captured.saved)],
         );
         await client.query("COMMIT");
       } catch (error) {
