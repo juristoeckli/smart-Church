@@ -1,4 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
+import { resourceBookedDayReport } from "./booked-day-report.js";
 import { canViewResource, isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -373,6 +374,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ).then((result) => result.rows) : Promise.resolve([]),
     ]);
     return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, visibilityGroups, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
+  });
+
+  type BookedDayQuery = { from: string; through: string; resourceId?: string; markedOnly?: boolean };
+  app.get<{ Querystring: BookedDayQuery }>("/api/modules/resource-scheduler/booked-days", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["from", "through"], properties: {
+      from: { type: "string", format: "date" }, through: { type: "string", format: "date" },
+      resourceId: { type: "string", format: "uuid" }, markedOnly: { type: "boolean" },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    const { from, through, resourceId, markedOnly } = request.query;
+    if (!isoDate(from) || !isoDate(through) || from < "0001-01-01" || through >= "9999-12-31" || from > through) {
+      return reply.code(400).send({ error: "Choose a valid start and end date." });
+    }
+    const calendarDays = (Date.parse(through) - Date.parse(from)) / 86_400_000 + 1;
+    if (calendarDays > 548) return reply.code(400).send({ error: "Choose a range of up to 548 calendar days." });
+    const department = await context.pool!.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+    const timeZone = canonicalTimeZone(department.rows[0]?.time_zone) ?? "UTC";
+    const report = await context.pool!.query(resourceBookedDayReport,
+      [departmentId, isManager(request), request.authenticatedUser!.id, from, through, timeZone, resourceId ?? null, markedOnly ?? false]);
+    return reply.header("Cache-Control", "private, no-store").send({ from, through, timeZone, calendarDays, resources: report.rows });
   });
 
   app.get("/api/modules/resource-scheduler/home-bookings", async (request, reply) => {

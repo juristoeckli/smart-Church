@@ -48,3 +48,9 @@
 .resource-scheduler-field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; }
 @media (max-width: 640px) { .resource-scheduler-heading { align-items: flex-start; flex-direction: column; } .resource-scheduler-week { width: 100%; justify-content: space-between; } .resource-scheduler-week strong { min-width: 0; font-size: .85rem; } .resource-scheduler-filters { width: 100%; align-items: stretch; } .resource-scheduler-filters label { flex: 1; } .resource-scheduler-field-grid { grid-template-columns: 1fr; } }
 .resource-scheduler-filters .resource-scheduler-marked-filter { display: flex; align-items: center; gap: .35rem; white-space: nowrap; }
+
+.resource-scheduler-booked-days { display: grid; gap: .75rem; padding: 1rem; border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; background: var(--surface, #fff); }
+.resource-scheduler-booked-days h2, .resource-scheduler-booked-days p { margin: 0; }
+.resource-scheduler-booked-days-table { width: 100%; min-width: 28rem; border-collapse: collapse; }
+.resource-scheduler-booked-days-table th, .resource-scheduler-booked-days-table td { text-align: start; padding: .55rem .75rem; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+.resource-scheduler-booked-days-table small { display: block; font-weight: normal; }
