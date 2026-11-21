@@ -288,7 +288,10 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     }
     if (sourcePage.name === "PWR_ASK" && channel === 2) {
       if (!action || !(await send(action, sourcePage, true))) return;
-      navigate("PWR_COUNT");
+      const progressPage = findPage("PWR_COUNT");
+      if (progressPage) {
+        setOverlayPages((current) => current.length ? [...current.slice(0, -1), progressPage.name] : [progressPage.name]);
+      }
       return;
     }
     if (sourcePage.name === "Modus" && object.pageFlip === "DetailPopup") {
