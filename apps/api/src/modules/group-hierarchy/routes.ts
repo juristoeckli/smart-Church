@@ -5,6 +5,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { isSafeGroupParent, lockGroupHierarchy } from "../../group-hierarchy-parent.js";
 
 import { registerTypedMembershipFields } from "./typed-membership-fields.js";
+import { registerGroupNotesReplication } from "./note-replication.js";
 
 type TreeRow = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean; status: string };
 
@@ -43,6 +44,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return Boolean(result.rowCount);
   }
 
+  registerGroupNotesReplication(context);
   registerTypedMembershipFields(app, context, canManageGroup);
 
   app.get("/api/modules/group-hierarchy/leaders", async (request, reply) => {
