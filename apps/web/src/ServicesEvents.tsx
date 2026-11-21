@@ -253,7 +253,7 @@ function EventBulkRoleAssignment({ event, contacts, qualifications, canManage, d
   </form>;
 }
 
-export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, contacts, canManage, onNotice, linkedSongNavigation, onLinkedSongHandled }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; contacts: Contact[]; canManage: boolean; onNotice: (message: string) => void; linkedSongNavigation?: { id: string; requestId: number } | null; onLinkedSongHandled?: (requestId: number) => void }) {
+export function ServicesEvents({ departmentId, departmentLocation, departmentTimeZone, contacts, canManage, onNotice, linkedSongNavigation, onLinkedSongHandled, linkedEventNavigation, onLinkedEventHandled }: { departmentId: string; departmentLocation: string; departmentTimeZone: string; contacts: Contact[]; canManage: boolean; onNotice: (message: string) => void; linkedSongNavigation?: { id: string; requestId: number } | null; onLinkedSongHandled?: (requestId: number) => void; linkedEventNavigation?: { id: string; requestId: number } | null; onLinkedEventHandled?: (requestId: number) => void }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [positionSwaps, setPositionSwaps] = useState<EventPositionSwap[]>([]);
   const [volunteerQualifications, setVolunteerQualifications] = useState<VolunteerQualification[]>([]);
@@ -288,6 +288,13 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isWorshipLibraryOpen, setIsWorshipLibraryOpen] = useState(false);
   useEffect(() => { if (linkedSongNavigation) setIsWorshipLibraryOpen(true); }, [linkedSongNavigation]);
+  useEffect(() => {
+    if (!linkedEventNavigation || isLoading || loadError) return;
+    const target = events.find((event) => event.id === linkedEventNavigation.id);
+    if (target) setDetailsEvent(target);
+    else onNotice("This event is no longer available.");
+    onLinkedEventHandled?.(linkedEventNavigation.requestId);
+  }, [linkedEventNavigation?.requestId, events, isLoading, loadError, onLinkedEventHandled, onNotice]);
   const [selectedPlanTemplateId, setSelectedPlanTemplateId] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isAllDay, setIsAllDay] = useState(false);

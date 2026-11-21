@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import { Search, X } from "lucide-react";
 import "./global-search.css";
 
-type EntityType = "person" | "group" | "wiki" | "song";
+type EntityType = "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking";
 type SearchResult = { id: string; type: EntityType; title: string; detail?: string };
-type Categories = { people: SearchResult[]; groups: SearchResult[]; wiki: SearchResult[]; songs: SearchResult[] };
+type Categories = { people: SearchResult[]; groups: SearchResult[]; wiki: SearchResult[]; songs: SearchResult[]; events: SearchResult[]; resources: SearchResult[]; bookings: SearchResult[] };
 type SearchResponse = { isIdQuery: boolean; canSearchPeople: boolean; categories: Categories };
 type QuickCreateType = "person" | "group" | "wiki";
 type QuickCreateAction = { type: QuickCreateType; label: string; description: string };
@@ -38,6 +38,9 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
       ...result.categories.groups,
       ...result.categories.wiki,
       ...result.categories.songs,
+      ...result.categories.events,
+      ...result.categories.resources,
+      ...result.categories.bookings,
     ];
   }, [result]);
 
@@ -104,10 +107,10 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   }
 
   return <>
-    <button className="icon-button global-search-trigger" type="button" aria-label="Search People, Groups, Wiki and Songs" title="Search · Ctrl+K" onClick={show}><Search size={17} /><span>Search</span></button>
+    <button className="icon-button global-search-trigger" type="button" aria-label="Search People, Groups, Wiki, Songs, Events and Resources" title="Search · Ctrl+K" onClick={show}><Search size={17} /><span>Search</span></button>
     {open && <div className="global-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) hide(); }}>
       <section className="global-search-dialog" role="dialog" aria-modal="true" aria-label="Global search">
-        <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search People, Groups, Wiki, Songs or # ID" aria-label="Search People, Groups, Wiki, Songs or ID" autoComplete="off" /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
+        <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search People, Groups, Wiki, Songs, Events, Resources or # ID" aria-label="Search People, Groups, Wiki, Songs, Events, Resources or ID" autoComplete="off" /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
         <div className="global-search-body">
           {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly.</p>{quickCreateActions.length > 0 && onQuickCreate && <section className="global-search-quick-create"><strong>Quick create</strong>{quickCreateActions.map((action) => <button type="button" key={action.type} onClick={() => { hide(); onQuickCreate(action.type); }}><span><b>{action.label}</b><small>{action.description}</small></span></button>)}</section>}{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
           {query.trim() && !query.trim().startsWith("#") && query.trim().length < 2 && <p className="global-search-hint">Type at least two characters, or enter # followed by a record ID.</p>}
@@ -118,6 +121,9 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
             <SearchCategory title="Groups" items={result.categories.groups} activeIndex={activeIndex} onOpen={navigate} offset={result.canSearchPeople ? result.categories.people.length : 0} />
             <SearchCategory title="Wiki" items={result.categories.wiki} activeIndex={activeIndex} onOpen={navigate} offset={(result.canSearchPeople ? result.categories.people.length : 0) + result.categories.groups.length} />
             <SearchCategory title="Songs" items={result.categories.songs} activeIndex={activeIndex} onOpen={navigate} offset={(result.canSearchPeople ? result.categories.people.length : 0) + result.categories.groups.length + result.categories.wiki.length} />
+            <SearchCategory title="Events and services" items={result.categories.events} activeIndex={activeIndex} onOpen={navigate} offset={(result.canSearchPeople ? result.categories.people.length : 0) + result.categories.groups.length + result.categories.wiki.length + result.categories.songs.length} />
+            <SearchCategory title="Resources" items={result.categories.resources} activeIndex={activeIndex} onOpen={navigate} offset={(result.canSearchPeople ? result.categories.people.length : 0) + result.categories.groups.length + result.categories.wiki.length + result.categories.songs.length + result.categories.events.length} />
+            <SearchCategory title="Bookings" items={result.categories.bookings} activeIndex={activeIndex} onOpen={navigate} offset={(result.canSearchPeople ? result.categories.people.length : 0) + result.categories.groups.length + result.categories.wiki.length + result.categories.songs.length + result.categories.events.length + result.categories.resources.length} />
             {!resultRows.length && <p className="global-search-status">No visible records match this search.</p>}
           </>}
         </div>

@@ -17,7 +17,67 @@ function isManager(request: FastifyRequest) {
     || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
 }
 
-function seriesDates(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[]) {
+type ZonedParts = { year: number; month: number; day: number; hour: number; minute: number; second: number };
+const DAY_MS = 86_400_000;
+function partsInTimeZone(value: Date, timeZone: string): ZonedParts {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }).formatToParts(value);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return { year: Number(values.year), month: Number(values.month), day: Number(values.day), hour: Number(values.hour) % 24, minute: Number(values.minute), second: Number(values.second) };
+}
+function localDate(parts: Pick<ZonedParts, "year" | "month" | "day">) {
+  return `${String(parts.year).padStart(4,"0")}-${String(parts.month).padStart(2,"0")}-${String(parts.day).padStart(2,"0")}`;
+}
+function occurrenceDateKey(value: Date, timeZone: string | null | undefined) {
+  return timeZone ? localDate(partsInTimeZone(value, timeZone)) : value.toISOString().slice(0,10);
+}
+function occurrenceAtDate(startsAt: Date, endsAt: Date, date: string, timeZone: string | null | undefined) {
+  const target = new Date(`${date}T00:00:00Z`);
+  if (!timeZone) {
+    const start = new Date(startsAt); start.setUTCFullYear(target.getUTCFullYear(), target.getUTCMonth(), target.getUTCDate());
+    return { startsAt: start, endsAt: new Date(start.getTime() + endsAt.getTime() - startsAt.getTime()) };
+  }
+  const startParts = partsInTimeZone(startsAt, timeZone), endParts = partsInTimeZone(endsAt, timeZone);
+  const startDay = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
+  const endDay = Date.UTC(endParts.year, endParts.month - 1, endParts.day);
+  const targetDay = target.getTime();
+  const dayOffset = Math.round((endDay - startDay) / DAY_MS);
+  const start = localDateTimeToUtc({ year: target.getUTCFullYear(), month: target.getUTCMonth() + 1, day: target.getUTCDate(), hour: startParts.hour, minute: startParts.minute, second: startParts.second }, timeZone);
+  const targetEnd = new Date(targetDay + dayOffset * DAY_MS);
+  const end = localDateTimeToUtc({ year: targetEnd.getUTCFullYear(), month: targetEnd.getUTCMonth() + 1, day: targetEnd.getUTCDate(), hour: endParts.hour, minute: endParts.minute, second: endParts.second }, timeZone);
+  return { startsAt: start, endsAt: end };
+}
+function isValidTimeZone(value: string) {
+  try { new Intl.DateTimeFormat("en-US", { timeZone: value }).format(new Date(0)); return true; }
+  catch { return false; }
+}
+function localDateTimeToUtc(parts: ZonedParts, timeZone: string) {
+  const target = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const representedAt = (instant: number) => {
+    const fields = Object.fromEntries(formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]));
+    return Date.UTC(Number(fields.year), Number(fields.month) - 1, Number(fields.day), Number(fields.hour) % 24, Number(fields.minute), Number(fields.second));
+  };
+  const offsets = new Set<number>();
+  for (const delta of [-36,-24,-12,0,12,24,36]) {
+    const instant = target + delta * 3_600_000;
+    offsets.add(representedAt(instant) - instant);
+  }
+  const exact: number[] = [];
+  const shifted: Array<{ instant: number; distance: number }> = [];
+  for (const offset of offsets) {
+    const instant = target - offset;
+    const represented = representedAt(instant);
+    if (represented === target) exact.push(instant);
+    else if (represented > target && new Date(represented).toISOString().slice(0,10) === localDate(parts)) shifted.push({ instant, distance: represented - target });
+  }
+  // Fall-back ambiguity uses the first occurrence. Spring-forward gaps shift
+  // forward by the size of the gap, preserving minutes (02:30 becomes 03:30).
+  const chosen = exact.length ? Math.min(...exact) : shifted.sort((a,b)=>a.distance-b.distance)[0]?.instant;
+  if (chosen === undefined) throw new Error(`Could not resolve local time in ${timeZone}.`);
+  return new Date(chosen);
+}
+function seriesDates(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[], timeZone: string | null = null) {
+  if (timeZone) return seriesDatesInTimeZone(startsAt, endsAt, rule, extras, excluded, timeZone);
   const interval = Math.max(1, Math.min(366, Math.floor(Number(rule.interval) || 1)));
   const until = rule.endsOn ? new Date(`${rule.endsOn}T23:59:59.999Z`) : new Date(startsAt.getTime() + 366 * 86_400_000);
   const last = new Date(Math.min(until.getTime(), startsAt.getTime() + 366 * 86_400_000));
@@ -57,7 +117,63 @@ function seriesDates(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: str
     const key = start.toISOString();
     if (!excludedSet.has(key.slice(0, 10))) unique.set(key, start);
   }
-  return [...unique.values()].sort((a, b) => a.getTime() - b.getTime()).slice(0, 500).map((start) => ({ startsAt: start, endsAt: new Date(start.getTime() + duration) }));
+  return [...unique.values()].sort((a, b) => a.getTime() - b.getTime()).slice(0, 500).map((start) => ({ startsAt: start, endsAt: new Date(start.getTime() + duration), localDate: start.toISOString().slice(0,10) }));
+}
+
+function seriesDatesInTimeZone(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[], timeZone: string) {
+  const startParts = partsInTimeZone(startsAt, timeZone);
+  const endParts = partsInTimeZone(endsAt, timeZone);
+  const startDay = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
+  const endDayOffset = Math.round((Date.UTC(endParts.year, endParts.month - 1, endParts.day) - startDay) / DAY_MS);
+  const until = rule.endsOn ? new Date(`${rule.endsOn}T00:00:00Z`) : new Date(startDay + 366 * DAY_MS);
+  const lastDay = Math.min(until.getTime(), startDay + 366 * DAY_MS);
+  const occurrences = new Map<string,{ startsAt: Date; endsAt: Date; localDate: string }>();
+  const excludedSet = new Set(excluded);
+  const interval = Math.max(1, Math.min(366, Math.floor(Number(rule.interval) || 1)));
+  const weekdays = rule.weekdays?.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6) ?? [];
+  if (rule.frequency === "once") {
+    const day = localDate(startParts);
+    occurrences.set(day, { startsAt: new Date(startsAt), endsAt: new Date(endsAt), localDate: day });
+  } else {
+    let count = 0;
+    for (let cursor = startDay, deltaDays = 0; cursor <= lastDay && occurrences.size < 500; cursor += DAY_MS, deltaDays++) {
+      const date = new Date(cursor);
+      const year = date.getUTCFullYear(), month = date.getUTCMonth() + 1, dayOfMonth = date.getUTCDate();
+      const localDay = localDate({ year, month, day: dayOfMonth });
+      const deltaWeeks = Math.floor(deltaDays / 7);
+      const deltaMonths = (year - startParts.year) * 12 + month - startParts.month;
+      const match = rule.frequency === "daily" ? deltaDays % interval === 0
+        : rule.frequency === "weekly" ? deltaWeeks % interval === 0 && (weekdays.length ? weekdays.includes(date.getUTCDay()) : date.getUTCDay() === new Date(startDay).getUTCDay())
+        : rule.frequency === "monthly" ? deltaMonths >= 0 && deltaMonths % interval === 0 && dayOfMonth === startParts.day
+        : rule.frequency === "yearly" ? month === startParts.month && dayOfMonth === startParts.day && (year - startParts.year) % interval === 0
+        : false;
+      if (!match) continue;
+      count++;
+      if (rule.count && count > rule.count) break;
+      if (excludedSet.has(localDay)) continue;
+      const occurrenceStart = localDay === localDate(startParts)
+        ? new Date(startsAt)
+        : localDateTimeToUtc({ year, month, day: dayOfMonth, hour: startParts.hour, minute: startParts.minute, second: startParts.second }, timeZone);
+      if (occurrenceStart < startsAt) continue;
+      const endDate = new Date(cursor + endDayOffset * DAY_MS);
+      const occurrenceEnd = localDay === localDate(startParts)
+        ? new Date(endsAt)
+        : localDateTimeToUtc({ year: endDate.getUTCFullYear(), month: endDate.getUTCMonth() + 1, day: endDate.getUTCDate(), hour: endParts.hour, minute: endParts.minute, second: endParts.second }, timeZone);
+      if (occurrenceStart.getTime() < lastDay + DAY_MS && occurrenceEnd > occurrenceStart) occurrences.set(localDay, { startsAt: occurrenceStart, endsAt: occurrenceEnd, localDate: localDay });
+    }
+  }
+  for (const day of extras) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || excludedSet.has(day)) continue;
+    const cursor = new Date(`${day}T00:00:00Z`).getTime();
+    if (!Number.isFinite(cursor) || cursor < startDay || cursor > lastDay) continue;
+    const date = new Date(cursor);
+    const dateParts = { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, day: date.getUTCDate() };
+    const start = day === localDate(startParts) ? new Date(startsAt) : localDateTimeToUtc({ ...dateParts, hour: startParts.hour, minute: startParts.minute, second: startParts.second }, timeZone);
+    const endDate = new Date(cursor + endDayOffset * DAY_MS);
+    const end = day === localDate(startParts) ? new Date(endsAt) : localDateTimeToUtc({ year: endDate.getUTCFullYear(), month: endDate.getUTCMonth() + 1, day: endDate.getUTCDate(), hour: endParts.hour, minute: endParts.minute, second: endParts.second }, timeZone);
+    if (end > start) occurrences.set(day, { startsAt: start, endsAt: end, localDate: day });
+  }
+  return [...occurrences.values()].sort((a,b)=>a.startsAt.getTime()-b.startsAt.getTime()).slice(0,500);
 }
 
 function isoDate(value: string) {
@@ -84,7 +200,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!series) return { error: "Booking series not found in this location." } as const;
     const startsAt = new Date(input.startsAt); const endsAt = new Date(input.endsAt);
     if (!isoDate(input.fromDate) || !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) return { error: "Choose a valid date range and start/end time." } as const;
-    if (startsAt.toISOString().slice(0, 10) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
+    if (occurrenceDateKey(startsAt, series.time_zone ?? null) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
     if (startsAt.getTime() < Date.now() - 60_000 || startsAt.getTime() > Date.now() + 366 * 86_400_000) return { error: "Choose an edit date and time in the next twelve months." } as const;
     if (input.recurrence.endsOn && (!isoDate(input.recurrence.endsOn) || input.recurrence.endsOn < input.fromDate)) return { error: "Choose a valid repeat end date on or after the edit date." } as const;
     const resourceResult = await queryable.query("SELECT COALESCE(settings.total_units,1)::int AS total_units FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true", [series.resource_id, departmentId]);
@@ -93,16 +209,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const dates = await queryable.query("SELECT occurrence_date::text AS date,date_type FROM resource_booking_series_dates WHERE series_id=$1", [seriesId]);
     const extras = dates.rows.filter((row: { date_type: string }) => row.date_type === "extra").map((row: { date: string }) => row.date);
     const excluded = dates.rows.filter((row: { date_type: string }) => row.date_type === "excluded").map((row: { date: string }) => row.date);
-    const proposed = seriesDates(startsAt, endsAt, input.recurrence, extras, excluded).filter((item) => item.startsAt.toISOString().slice(0, 10) >= input.fromDate);
+    const proposed = seriesDates(startsAt, endsAt, input.recurrence, extras, excluded, series.time_zone ?? null).filter((item) => item.localDate >= input.fromDate);
     if (!proposed.length) return { error: "This repeat rule has no future occurrences from the selected date." } as const;
     const current = await queryable.query(`SELECT occurrence.resource_booking_id AS id,occurrence.occurrence_starts_at AS "occurrenceStartsAt",occurrence.is_extra_date AS "isExtraDate",booking.status,
-        EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=occurrence.series_id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE 'UTC')::date) AS "hasOccurrenceOverride"
-      FROM resource_booking_series_occurrences occurrence JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
-      WHERE occurrence.department_id=$1 AND occurrence.series_id=$2 AND occurrence.occurrence_starts_at >= GREATEST($3::date::timestamptz,now()) ORDER BY occurrence.occurrence_starts_at`, [departmentId, seriesId, input.fromDate]);
+        to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
+        EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=occurrence.series_id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride"
+      FROM resource_booking_series_occurrences occurrence JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=occurrence.department_id
+      JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
+      WHERE occurrence.department_id=$1 AND occurrence.series_id=$2 AND booking.starts_at>=now()
+        AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date >= $3::date ORDER BY occurrence.occurrence_starts_at`, [departmentId, seriesId, input.fromDate]);
     const approved = current.rows.filter((row: { status: string }) => row.status === "approved");
     const requested = current.rows.filter((row: { status: string }) => row.status === "requested");
-    const requestedDates = new Set(requested.map((row: { occurrenceStartsAt: Date }) => new Date(row.occurrenceStartsAt).toISOString().slice(0, 10)));
-    const retained = proposed.filter((item) => requestedDates.has(item.startsAt.toISOString().slice(0, 10))).length;
+    const requestedDates = new Set(requested.map((row: { occurrenceDate: string }) => row.occurrenceDate));
+    const retained = proposed.filter((item) => requestedDates.has(item.localDate)).length;
     return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units) };
   }
 
@@ -111,7 +230,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const from = request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : new Date().toISOString().slice(0, 10);
     const to = request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
-    const [resources, bookings] = await Promise.all([
+    const [department, resources, bookings] = await Promise.all([
+      context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,
           COALESCE(settings.total_units,1) AS "totalUnits",COALESCE(settings.default_lead_in_minutes,0) AS "defaultLeadInMinutes",COALESCE(settings.default_cleanup_minutes,0) AS "defaultCleanupMinutes"
         FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.resource_id=resource.id AND settings.department_id=resource.department_id
@@ -121,7 +241,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,series.linked_appointment_id AS "linkedAppointmentId",occurrence.is_extra_date AS "isExtraDate",
-          EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE 'UTC')::date) AS "hasOccurrenceOverride",
+          series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
+          EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
           booking.created_at AS "createdAt",booking.updated_at AS "updatedAt"
         FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
@@ -132,7 +253,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($4::text IS NULL OR booking.status=$4) AND ($5::uuid IS NULL OR booking.resource_id=$5)
         ORDER BY booking.starts_at,resource.name LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request)]),
     ]);
-    return { resources: resources.rows, bookings: bookings.rows, canManage: isManager(request), from, to };
+    return { resources: resources.rows, bookings: bookings.rows, canManage: isManager(request), timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
   });
 
   app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
@@ -194,22 +315,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (quantity > resource.total_units) return reply.code(400).send({ error: "Quantity exceeds this resource's available units." });
     const leadInMinutes = request.body.leadInMinutes ?? resource.default_lead_in_minutes;
     const cleanupMinutes = request.body.cleanupMinutes ?? resource.default_cleanup_minutes;
-    const instances = seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates);
+    const zoneResult = await context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+    const timeZone = zoneResult.rows[0]?.time_zone ?? "UTC";
+    if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
+    const instances = seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
     const status = resource.requires_approval && !isManager(request) ? "requested" : "approved";
     const seriesId = randomUUID(); const client = await context.pool!.connect();
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.body.resourceId]);
-      await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, appointmentId]);
+      await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, appointmentId]);
       for (const day of new Set(extraDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
       for (const day of new Set(excludedDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
       for (const occurrence of instances) {
         const bookingId = randomUUID();
         await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [bookingId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes]);
-        await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.startsAt.toISOString().slice(0, 10))]);
+        await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.localDate)]);
         if (appointmentId && await client.query("SELECT to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available").then((result) => result.rows[0]?.available)) {
           await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [appointmentId, bookingId, request.authenticatedUser!.id]);
         }
@@ -261,9 +385,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if ("error" in plan) { await client.query("ROLLBACK"); return reply.code(400).send({ error: plan.error }); }
       if (plan.approvedCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `${plan.approvedCount} future occurrence(s) are already approved. No changes were made; handle those bookings individually before editing the series.` }); }
       const input = request.body;
-      const currentByDate = new Map<string, { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }>(plan.requested.map((row: { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }) => [new Date(row.occurrenceStartsAt).toISOString().slice(0, 10), row] as const));
-      const proposedDates = new Set(plan.proposed.map((item) => item.startsAt.toISOString().slice(0, 10)));
-      const canceledIds = plan.requested.filter((row: { occurrenceStartsAt: Date }) => !proposedDates.has(new Date(row.occurrenceStartsAt).toISOString().slice(0, 10))).map((row: { id: string }) => row.id);
+      const currentByDate = new Map<string, { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }>(plan.requested.map((row: { id: string; occurrenceStartsAt: Date; occurrenceDate: string; hasOccurrenceOverride: boolean }) => [row.occurrenceDate, row] as const));
+      const proposedDates = new Set(plan.proposed.map((item) => item.localDate));
+      const canceledIds = plan.requested.filter((row: { occurrenceDate: string }) => !proposedDates.has(row.occurrenceDate)).map((row: { id: string }) => row.id);
       if (canceledIds.length) {
         await client.query("UPDATE resource_bookings SET status='cancelled',updated_at=now() WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='requested'", [departmentId, canceledIds]);
         await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND resource_booking_id=ANY($2::uuid[])", [request.params.seriesId, canceledIds]);
@@ -273,7 +397,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const extrasResult = await client.query("SELECT occurrence_date::text AS date FROM resource_booking_series_dates WHERE series_id=$1 AND date_type='extra'", [request.params.seriesId]);
       const extras = new Set(extrasResult.rows.map((row: { date: string }) => row.date));
       for (const occurrence of plan.proposed) {
-        const date = occurrence.startsAt.toISOString().slice(0, 10);
+        const date = occurrence.localDate;
         const existing = currentByDate.get(date);
         if (existing) {
           if (existing.hasOccurrenceOverride) {
@@ -319,17 +443,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!context.validateMutation(request, reply)) return reply;
     if (!isoDate(request.params.date)) return reply.code(400).send({ error: "Choose a valid occurrence date." });
-    if (request.params.date < new Date().toISOString().slice(0, 10)) return reply.code(400).send({ error: "Only future occurrences can be edited." });
     const startsAt = new Date(request.body.startsAt); const endsAt = new Date(request.body.endsAt);
-    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt
-      || startsAt.toISOString().slice(0, 10) !== request.params.date || endsAt.toISOString().slice(0, 10) !== request.params.date) {
-      return reply.code(400).send({ error: "Choose a valid start and end time on the selected UTC date." });
-    }
+    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) return reply.code(400).send({ error: "Choose a valid start and end time." });
     const client = await context.pool!.connect();
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.params.seriesId]);
-      const found = await client.query(`SELECT series.id,series.requested_by,series.resource_id,booking.id AS booking_id,booking.status,
+      const found = await client.query(`SELECT series.id,series.requested_by,series.resource_id,series.time_zone,booking.id AS booking_id,booking.status,
           booking.starts_at,booking.ends_at,booking.quantity,COALESCE(settings.total_units,1)::int AS total_units
         FROM resource_booking_series series
         JOIN resource_booking_series_occurrences occurrence ON occurrence.series_id=series.id AND occurrence.department_id=series.department_id
@@ -337,10 +457,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         JOIN bookable_resources resource ON resource.id=series.resource_id AND resource.department_id=series.department_id AND resource.active=true
         LEFT JOIN resource_scheduler_settings settings ON settings.department_id=series.department_id AND settings.resource_id=series.resource_id
         WHERE series.id=$1 AND series.department_id=$2 AND series.archived_at IS NULL
-          AND (occurrence.occurrence_starts_at AT TIME ZONE 'UTC')::date=$3::date
+          AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date=$3::date
         FOR UPDATE OF series,booking`, [request.params.seriesId, departmentId, request.params.date]);
       const row = found.rows[0];
       if (!row) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "No booking occurrence exists on this date." }); }
+      const today = occurrenceDateKey(new Date(), row.time_zone ?? null);
+      if (request.params.date < today) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Only future occurrences can be edited." }); }
+      if (occurrenceDateKey(startsAt, row.time_zone ?? null) !== request.params.date || occurrenceDateKey(endsAt, row.time_zone ?? null) !== request.params.date) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a valid start and end time on the selected location date." }); }
       if (row.requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can edit this occurrence." }); }
       if (row.status !== "requested") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only pending occurrences can be edited. Cancel or resolve a confirmed occurrence individually first." }); }
       if (request.body.quantity > Number(row.total_units)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Quantity exceeds this resource's available units." }); }
@@ -365,12 +488,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!context.validateMutation(request, reply)) return reply;
     if (!isoDate(request.params.date)) return reply.code(400).send({ error: "Choose a valid occurrence date." });
-    if (request.params.date < new Date().toISOString().slice(0, 10)) return reply.code(400).send({ error: "Only future occurrences can be reset." });
     const client = await context.pool!.connect();
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.params.seriesId]);
-      const found = await client.query(`SELECT series.id,series.requested_by,series.starts_at AS series_starts_at,series.ends_at AS series_ends_at,series.quantity AS series_quantity,
+      const found = await client.query(`SELECT series.id,series.requested_by,series.time_zone,series.starts_at AS series_starts_at,series.ends_at AS series_ends_at,series.quantity AS series_quantity,
           series.lead_in_minutes,series.cleanup_minutes,booking.id AS booking_id,booking.status,booking.starts_at,booking.ends_at,booking.quantity
         FROM resource_booking_series series
         JOIN resource_booking_series_occurrence_overrides override ON override.series_id=series.id AND override.occurrence_date=$3::date
@@ -379,13 +501,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE series.id=$1 AND series.department_id=$2 AND series.archived_at IS NULL FOR UPDATE OF series,booking`, [request.params.seriesId, departmentId, request.params.date]);
       const row = found.rows[0];
       if (!row) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "No occurrence override exists on this date." }); }
+      if (request.params.date < occurrenceDateKey(new Date(), row.time_zone ?? null)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Only future occurrences can be reset." }); }
       if (row.requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can reset this occurrence." }); }
       if (row.status !== "requested") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only pending occurrences can be reset. Cancel or resolve a confirmed occurrence individually first." }); }
-      const templateStart = new Date(row.series_starts_at);
-      const startsAt = new Date(`${request.params.date}T00:00:00.000Z`);
-      startsAt.setUTCHours(templateStart.getUTCHours(), templateStart.getUTCMinutes(), templateStart.getUTCSeconds(), templateStart.getUTCMilliseconds());
-      const duration = new Date(row.series_ends_at).getTime() - templateStart.getTime();
-      const endsAt = new Date(startsAt.getTime() + duration);
+      const { startsAt, endsAt } = occurrenceAtDate(new Date(row.series_starts_at), new Date(row.series_ends_at), request.params.date, row.time_zone ?? null);
       await client.query("UPDATE resource_bookings SET starts_at=$3,ends_at=$4,quantity=$5,lead_in_minutes=$6,cleanup_minutes=$7,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [row.booking_id, departmentId, startsAt, endsAt, row.series_quantity, row.lead_in_minutes, row.cleanup_minutes]);
       await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND occurrence_date=$2::date", [request.params.seriesId, request.params.date]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_override_reset',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, restored: { startsAt, endsAt, quantity: row.series_quantity } })]);
@@ -413,9 +532,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const series = found.rows[0];
       if (!series) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking series not found." }); }
       if (!isManager(request) && series.requested_by !== request.authenticatedUser!.id) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You can only edit your own booking series." }); }
-      if (request.body.date < new Date().toISOString().slice(0, 10)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a future date." }); }
-      const startsAt = new Date(series.starts_at); startsAt.setUTCFullYear(Number(request.body.date.slice(0, 4)), Number(request.body.date.slice(5, 7)) - 1, Number(request.body.date.slice(8, 10)));
-      const endsAt = new Date(startsAt.getTime() + (new Date(series.ends_at).getTime() - new Date(series.starts_at).getTime()));
+      if (request.body.date < occurrenceDateKey(new Date(), series.time_zone ?? null)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a future date." }); }
+      const { startsAt, endsAt } = occurrenceAtDate(new Date(series.starts_at), new Date(series.ends_at), request.body.date, series.time_zone ?? null);
       await client.query("DELETE FROM resource_booking_series_dates WHERE series_id=$1 AND occurrence_date=$2 AND date_type='excluded'", [series.id, request.body.date]);
       await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [series.id, request.body.date, request.authenticatedUser!.id]);
       const bookingId = randomUUID();
@@ -440,14 +558,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }, async (request, reply) => {
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
-    const series = await context.pool!.query("SELECT requested_by FROM resource_booking_series WHERE id=$1 AND department_id=$2", [request.params.seriesId, departmentId]);
+    const series = await context.pool!.query("SELECT requested_by,time_zone FROM resource_booking_series WHERE id=$1 AND department_id=$2", [request.params.seriesId, departmentId]);
     if (!series.rowCount) return reply.code(404).send({ error: "Booking series not found." });
     if (!isManager(request) && series.rows[0].requested_by !== request.authenticatedUser!.id) return reply.code(403).send({ error: "You can only manage extra dates in your own booking series." });
     return (await context.pool!.query(
       `SELECT dates.occurrence_date::text AS date,booking.id AS "bookingId",booking.status,booking.starts_at AS "startsAt",booking.ends_at AS "endsAt"
          FROM resource_booking_series_dates dates
+         JOIN resource_booking_series series ON series.id=dates.series_id AND series.department_id=$2
          LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.series_id=dates.series_id AND occurrence.department_id=$2
-           AND occurrence.is_extra_date AND occurrence.occurrence_starts_at::date=dates.occurrence_date
+           AND occurrence.is_extra_date AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date=dates.occurrence_date
          LEFT JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=$2
         WHERE dates.series_id=$1 AND dates.date_type='extra' ORDER BY dates.occurrence_date`,
       [request.params.seriesId, departmentId],
@@ -471,16 +590,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const date = await client.query(
         `SELECT dates.occurrence_date,booking.id AS booking_id,booking.status
            FROM resource_booking_series_dates dates
+           JOIN resource_booking_series series_row ON series_row.id=dates.series_id AND series_row.department_id=$2
            LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.series_id=dates.series_id AND occurrence.department_id=$2
-             AND occurrence.is_extra_date AND occurrence.occurrence_starts_at::date=dates.occurrence_date
+             AND occurrence.is_extra_date AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series_row.time_zone,'UTC'))::date=dates.occurrence_date
            LEFT JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=$2
           WHERE dates.series_id=$1 AND dates.occurrence_date=$3 AND dates.date_type='extra' FOR UPDATE OF dates`,
         [series.id, departmentId, request.params.date],
       );
       if (!date.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Extra booking date not found." }); }
       const exclusions = await client.query("SELECT occurrence_date::text AS date FROM resource_booking_series_dates WHERE series_id=$1 AND date_type='excluded'", [series.id]);
-      const regularDate = seriesDates(new Date(series.starts_at), new Date(series.ends_at), series.recurrence, [], exclusions.rows.map((row: { date: string }) => row.date))
-        .some((occurrence) => occurrence.startsAt.toISOString().slice(0, 10) === request.params.date);
+      const regularDate = seriesDates(new Date(series.starts_at), new Date(series.ends_at), series.recurrence, [], exclusions.rows.map((row: { date: string }) => row.date), series.time_zone ?? null)
+        .some((occurrence) => occurrence.localDate === request.params.date);
       if (date.rows[0].status === "approved" && !regularDate) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Cancel the approved booking individually before removing its extra date." }); }
       if (date.rows[0].booking_id && date.rows[0].status === "requested" && !regularDate) await client.query("UPDATE resource_bookings SET status='cancelled',updated_at=now() WHERE id=$1 AND department_id=$2", [date.rows[0].booking_id, departmentId]);
       await client.query("DELETE FROM resource_booking_series_dates WHERE series_id=$1 AND occurrence_date=$2 AND date_type='extra'", [series.id, date.rows[0].occurrence_date]);
@@ -503,14 +623,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await context.pool!.connect();
     try {
       await client.query("BEGIN");
-      const series = await client.query("SELECT id,requested_by,resource_id FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE", [request.params.seriesId, departmentId]);
+      const series = await client.query("SELECT id,requested_by,resource_id,time_zone FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE", [request.params.seriesId, departmentId]);
       if (!series.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking series not found." }); }
       if (!isManager(request) && series.rows[0].requested_by !== request.authenticatedUser!.id) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You can only edit your own booking series." }); }
       await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [series.rows[0].id, request.body.date, request.authenticatedUser!.id]);
       const cancelled = await client.query(`UPDATE resource_bookings booking SET status='cancelled',updated_at=now()
-        FROM resource_booking_series_occurrences occurrence
+        FROM resource_booking_series_occurrences occurrence JOIN resource_booking_series parent ON parent.id=occurrence.series_id AND parent.department_id=occurrence.department_id
         WHERE occurrence.series_id=$1 AND occurrence.resource_booking_id=booking.id AND occurrence.department_id=$2
-          AND occurrence.occurrence_starts_at::date=$3::date AND booking.status IN ('requested','approved') RETURNING booking.id`, [series.rows[0].id, departmentId, request.body.date]);
+          AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(parent.time_zone,'UTC'))::date=$3::date AND booking.status IN ('requested','approved') RETURNING booking.id`, [series.rows[0].id, departmentId, request.body.date]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'date_excluded',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.rows[0].id, JSON.stringify({ date: request.body.date, cancelledBookings: cancelled.rowCount })]);
       await client.query("COMMIT");
       context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: series.rows[0].id, action: "date-excluded" });

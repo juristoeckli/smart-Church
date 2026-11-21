@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 
-type SearchResult = { id: string; type: "person" | "group" | "wiki" | "song"; title: string; detail?: string };
+type SearchResult = { id: string; type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking"; title: string; detail?: string };
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function canSearchPeople(request: FastifyRequest) {
@@ -29,7 +29,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const validIdQuery = isIdQuery && id.length > 0 && id.length <= 100 && !/[\u0000-\u001f\u007f]/.test(id);
     const localUuidQuery = validIdQuery && uuidPattern.test(id);
     if ((!isIdQuery && searchText.length < 2) || (isIdQuery && !validIdQuery)) {
-      return { isIdQuery, canSearchPeople: canSearchPeople(request), categories: { people: [], groups: [], wiki: [], songs: [] } };
+      return { isIdQuery, canSearchPeople: canSearchPeople(request), categories: { people: [], groups: [], wiki: [], songs: [], events: [], resources: [], bookings: [] } };
     }
     const pattern = `%${searchText}%`;
     const values = localUuidQuery ? [departmentId, id] : [departmentId, pattern];
@@ -40,6 +40,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       wikiEnabled: boolean;
       wikiReady: boolean;
       songsReady: boolean;
+      communityEnabled: boolean;
       contactSourceReady: boolean;
       groupSourceReady: boolean;
       migrationLinksReady: boolean;
@@ -47,6 +48,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT COALESCE($2::text = ANY(location.enabled_modules),false) AS "wikiEnabled",
               to_regclass('public.wiki_pages') IS NOT NULL AND to_regclass('public.wiki_categories') IS NOT NULL AS "wikiReady",
               to_regclass('public.worship_songs') IS NOT NULL AS "songsReady",
+              $3::text = ANY(location.enabled_modules) AS "communityEnabled",
               EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contacts' AND column_name='source_system')
                 AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='contacts' AND column_name='source_id') AS "contactSourceReady",
               EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='church_groups' AND column_name='source_system')
@@ -57,16 +59,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                 AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='churchtools_migration_links' AND column_name='source_id')
                 AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='churchtools_migration_links' AND column_name='local_record_id') AS "migrationLinksReady"
          FROM departments location WHERE location.id=$1`,
-      [departmentId, "wiki"],
+      [departmentId, "wiki", "community"],
     );
-    const state = optional.rows[0] ?? { wikiEnabled: false, wikiReady: false, songsReady: false, contactSourceReady: false, groupSourceReady: false, migrationLinksReady: false };
+    const state = optional.rows[0] ?? { wikiEnabled: false, wikiReady: false, songsReady: false, communityEnabled: false, contactSourceReady: false, groupSourceReady: false, migrationLinksReady: false };
     const wikiAudienceCondition = `($3::boolean OR page.audience='location' OR (page.audience='group' AND EXISTS (
       SELECT 1 FROM group_members audience_member
       JOIN department_memberships audience_user ON audience_user.contact_id=audience_member.contact_id AND audience_user.department_id=page.department_id
       WHERE audience_member.group_id=page.audience_group_id AND audience_member.status='active' AND audience_user.user_id=$4
     )))`;
 
-    const [peopleRows, groupRows, wikiRows, songRows] = await Promise.all([
+    const [peopleRows, groupRows, wikiRows, songRows, eventRows, resourceRows, bookingRows] = await Promise.all([
       canViewPrivatePeople ? pool.query<{ id: string; title: string }>(
         localUuidQuery
           ? `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts WHERE department_id=$1 AND id=$2`
@@ -95,6 +97,34 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           : `SELECT id,title,authors AS detail FROM worship_songs WHERE department_id=$1 AND title ILIKE $2 AND active=true ORDER BY lower(title),id LIMIT 6`,
         values,
       ).then((result) => result.rows) : Promise.resolve([]),
+      localUuidQuery || !validIdQuery || state.migrationLinksReady ? pool.query<{ id: string; title: string; detail: string }>(
+        localUuidQuery
+          ? `SELECT id,title,concat(to_char(event_date,'YYYY-MM-DD'),' · ',kind,' · ',location) AS detail FROM service_events WHERE department_id=$1 AND id=$2`
+          : validIdQuery
+            ? `SELECT event.id,event.title,concat(to_char(event.event_date,'YYYY-MM-DD'),' · ',event.kind,' · ',event.location) AS detail
+                 FROM churchtools_migration_links link JOIN service_events event ON event.id=link.local_record_id AND event.department_id=link.department_id
+                WHERE link.department_id=$1 AND link.area='event' AND link.source_id=$2 LIMIT 6`
+            : `SELECT id,title,concat(to_char(event_date,'YYYY-MM-DD'),' · ',kind,' · ',location) AS detail FROM service_events WHERE department_id=$1 AND (title ILIKE $2 OR location ILIKE $2) ORDER BY event_date DESC,title,id LIMIT 6`,
+        localUuidQuery || !validIdQuery ? values : [departmentId, id],
+      ).then((result) => result.rows) : Promise.resolve([]),
+      state.communityEnabled && (localUuidQuery || !validIdQuery || state.migrationLinksReady) ? pool.query<{ id: string; title: string; detail: string }>(
+        localUuidQuery
+          ? `SELECT id,name AS title,concat(category,' · ',nullif(location,'')) AS detail FROM bookable_resources WHERE department_id=$1 AND id=$2 AND (active=true OR $3::boolean)`
+          : validIdQuery
+            ? `SELECT resource.id,resource.name AS title,concat(resource.category,' · ',nullif(resource.location,'')) AS detail
+                 FROM churchtools_migration_links link JOIN bookable_resources resource ON resource.id=link.local_record_id AND resource.department_id=link.department_id
+                WHERE link.department_id=$1 AND link.area='resource' AND link.source_id=$2 AND (resource.active=true OR $3::boolean) LIMIT 6`
+            : `SELECT id,name AS title,concat(category,' · ',nullif(location,'')) AS detail FROM bookable_resources WHERE department_id=$1 AND name ILIKE $2 AND (active=true OR $3::boolean) ORDER BY lower(name),id LIMIT 6`,
+        localUuidQuery || !validIdQuery ? [...values, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")] : [departmentId, id, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")],
+      ).then((result) => result.rows) : Promise.resolve([]),
+      state.communityEnabled ? pool.query<{ id: string; title: string; detail: string }>(
+        localUuidQuery
+          ? `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND booking.id=$2 AND booking.ends_at>now()-interval '30 days' AND booking.starts_at<now()+interval '6 months' AND (resource.active=true OR $3::boolean)`
+          : validIdQuery
+            ? `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND false`
+            : `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND (booking.purpose ILIKE $2 OR resource.name ILIKE $2) AND booking.ends_at>now()-interval '30 days' AND booking.starts_at<now()+interval '6 months' AND (resource.active=true OR $3::boolean) ORDER BY booking.starts_at,resource.name LIMIT 6`,
+        validIdQuery && !localUuidQuery ? [departmentId] : localUuidQuery ? [...values, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")] : [...values, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")],
+      ).then((result) => result.rows) : Promise.resolve([]),
     ]);
 
     const categories = {
@@ -102,6 +132,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       groups: groupRows.map((row): SearchResult => ({ id: row.id, type: "group", title: row.title, ...(row.detail ? { detail: row.detail } : {}) })),
       wiki: wikiRows.map((row): SearchResult => ({ id: row.id, type: "wiki", title: row.title, ...(row.detail ? { detail: row.detail } : {}) })),
       songs: songRows.map((row): SearchResult => ({ id: row.id, type: "song", title: row.title, ...(row.detail ? { detail: row.detail } : {}) })),
+      events: eventRows.map((row): SearchResult => ({ id: row.id, type: "event", title: row.title, detail: row.detail })),
+      resources: resourceRows.map((row): SearchResult => ({ id: row.id, type: "resource", title: row.title, detail: row.detail })),
+      bookings: bookingRows.map((row): SearchResult => ({ id: row.id, type: "booking", title: row.title, detail: row.detail })),
     };
     return { isIdQuery, canSearchPeople: canViewPrivatePeople, categories };
   });

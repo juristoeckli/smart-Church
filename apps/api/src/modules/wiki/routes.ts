@@ -6,9 +6,9 @@ import { createWikiPdf } from "./pdf.js";
 type WikiAudience = "location" | "group" | "managers";
 type WikiPageRow = { id: string; category_id: string; title: string; content_html: string; status: "active" | "archived"; redirect_page_id?: string | null; is_homepage: boolean; audience?: WikiAudience; audience_group_id?: string | null; created_at: Date | string; updated_at: Date | string; updated_by: string | null; editor_name?: string | null };
 type WikiCategoryRow = { id: string; name: string; parent_id: string | null; position: number; archived_at: Date | string | null; created_at: Date | string; updated_at: Date | string };
-const allowedTags = new Set(["a", "b", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li", "ol", "p", "pre", "s", "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"]);
+const allowedTags = new Set(["a", "b", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "s", "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"]);
 
-function safeHtml(value: string): string {
+function safeHtml(value: string, pageId?: string): string {
   let html = value.slice(0, 500_000)
     .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|textarea|select|option|meta|link)[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
     .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|textarea|select|option|meta|link)\b[^>]*\/?\s*>/gi, "");
@@ -16,6 +16,16 @@ function safeHtml(value: string): string {
     const tag = rawTag.toLowerCase();
     if (!allowedTags.has(tag)) return "";
     if (whole.startsWith("</")) return `</${tag}>`;
+    if (tag === "img") {
+      if (!pageId) return "";
+      const src = attributes.match(/\bsrc\s*=\s*(["'])([^"']+)\1/i)?.[2] ?? "";
+      const prefix = `/api/modules/wiki/pages/${pageId}/files/`;
+      if (!src.startsWith(prefix) || !src.endsWith("/inline")) return "";
+      const fileId = src.slice(prefix.length, -"/inline".length);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(fileId)) return "";
+      const alt = (attributes.match(/\balt\s*=\s*(["'])([^"']*)\1/i)?.[2] ?? "").slice(0, 180).replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
+      return `<img src="${src}" alt="${alt}">`;
+    }
     if (tag === "br" || tag === "hr") return `<${tag}>`;
     if (tag !== "a" && tag !== "span") return `<${tag}>`;
     const hrefMatch = tag === "a" ? attributes.match(/\bhref\s*=\s*(["'])(.*?)\1/i) : null;
@@ -27,6 +37,24 @@ function safeHtml(value: string): string {
     return tag === "a" ? `<a${safeHref ? ` href="${safeHref.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}" rel="noopener noreferrer" target="_blank"` : ""}${safeEntity}>` : `<span${safeEntity}>`;
   });
   return html;
+}
+
+function inlineWikiImageRefs(html: string, pageId: string): Array<{ fileId: string; alt: string }> {
+  const refs: Array<{ fileId: string; alt: string }> = [];
+  const seen = new Set<string>();
+  const prefix = `/api/modules/wiki/pages/${pageId}/files/`;
+  for (const match of html.matchAll(/<img\b[^>]*>/gi)) {
+    const tag = match[0];
+    const src = tag.match(/\bsrc\s*=\s*(["'])([^"']+)\1/i)?.[2] ?? "";
+    if (!src.startsWith(prefix) || !src.endsWith("/inline")) continue;
+    const fileId = src.slice(prefix.length, -"/inline".length);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(fileId) || seen.has(fileId)) continue;
+    seen.add(fileId);
+    const alt = tag.match(/\balt\s*=\s*(["'])([^"']*)\1/i)?.[2]?.slice(0, 180) ?? "Inline image";
+    refs.push({ fileId, alt });
+    if (refs.length >= 5) break;
+  }
+  return refs;
 }
 
 function pageDto(row: WikiPageRow) {
@@ -274,7 +302,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         (status='active' OR EXISTS (SELECT 1 FROM wiki_pages page WHERE page.id=$3 AND page.department_id=$2 AND page.audience='group' AND page.audience_group_id=church_groups.id))`, [audienceGroupId, departmentId, request.params.id]);
       if (!group.rowCount) return reply.code(400).send({ error: "Choose a group in this location." });
     }
-    const content = safeHtml(request.body.contentHtml);
+    const content = safeHtml(request.body.contentHtml, request.params.id);
+    const inlineImages = inlineWikiImageRefs(content, request.params.id);
+    if (inlineImages.length) {
+      const linked = await pool!.query<{ file_id: string }>(
+        `SELECT attachment.file_id FROM wiki_page_files attachment
+         JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
+         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=ANY($3::uuid[])
+           AND stored.deleted_at IS NULL AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000`,
+        [departmentId, request.params.id, inlineImages.map((image) => image.fileId)],
+      );
+      if (linked.rowCount !== inlineImages.length) return reply.code(400).send({ error: "Inline images must be JPEG attachments on this page and no larger than 2 MB." });
+    }
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
@@ -337,7 +376,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const byId = new Map(revisions.rows.map((revision) => [revision.id, revision]));
     const safeRevision = async (id: string) => {
       const revision = byId.get(id)!;
-      const sanitized = safeHtml(revision.contentHtml);
+      const sanitized = safeHtml(revision.contentHtml, request.params.id);
       return { ...revision, contentHtml: await hideUnreadableWikiEntityLinks(sanitized, request, departmentId) };
     };
     return { left: await safeRevision(leftVersionId), right: await safeRevision(rightVersionId) };
@@ -450,6 +489,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await site(request, reply, true);
     if (!departmentId) return reply;
+    const page = await pool!.query<{ content_html: string }>("SELECT content_html FROM wiki_pages WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
+    if (page.rowCount && inlineWikiImageRefs(page.rows[0].content_html, request.params.id).some((image) => image.fileId === request.params.fileId)) {
+      return reply.code(409).send({ error: "Remove this image from the page content before detaching its file." });
+    }
     const result = await pool!.query("DELETE FROM wiki_page_files WHERE department_id=$1 AND page_id=$2 AND file_id=$3 RETURNING file_id", [departmentId, request.params.id, request.params.fileId]);
     if (!result.rowCount) return reply.code(404).send({ error: "Page attachment not found." });
     changed(departmentId, { action: "file-detached", pageId: request.params.id });
@@ -473,6 +516,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return file.file_data;
   });
 
+  app.get<{ Params: { id: string; fileId: string } }>("/api/modules/wiki/pages/:id/files/:fileId/inline", async (request, reply) => {
+    const departmentId = await site(request, reply);
+    if (!departmentId) return reply;
+    if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki image not found." });
+    const result = await pool!.query<{ file_data: Buffer }>(
+      `SELECT stored.file_data
+         FROM wiki_page_files attachment
+         JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
+        WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=$3
+          AND stored.deleted_at IS NULL AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000`,
+      [departmentId, request.params.id, request.params.fileId],
+    );
+    const file = result.rows[0];
+    if (!file) return reply.code(404).send({ error: "Wiki image not found." });
+    return reply.type("image/jpeg").header("Content-Disposition", "inline").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "private, no-store").send(file.file_data);
+  });
+
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/export/html", async (request, reply) => {
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
@@ -481,7 +541,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
     result.rows[0].content_html = await hideUnreadableWikiEntityLinks(result.rows[0].content_html, request, departmentId);
     const title = result.rows[0].title.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
-    return reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src data: https:; base-uri 'none'; form-action 'none'").header("X-Content-Type-Options", "nosniff").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:3rem auto;padding:0 1rem;color:#17212b}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:.4rem}</style><main><h1>${title}</h1>${safeHtml(result.rows[0].content_html)}</main></html>`);
+    return reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'").header("X-Content-Type-Options", "nosniff").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:3rem auto;padding:0 1rem;color:#17212b}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:.4rem}</style><main><h1>${title}</h1>${safeHtml(result.rows[0].content_html, request.params.id)}</main></html>`);
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/export/pdf", async (request, reply) => {
@@ -491,8 +551,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
     if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
     const content = await hideUnreadableWikiEntityLinks(safeHtml(result.rows[0].content_html), request, departmentId);
-    const attachedImages = await pool!.query<{ title: string; fileName: string; fileData: Buffer }>(
-      `SELECT stored.title,stored.file_name AS "fileName",stored.file_data AS "fileData"
+    const inlineRefs = inlineWikiImageRefs(result.rows[0].content_html, request.params.id);
+    const inlineImages = inlineRefs.length ? await pool!.query<{ id: string; title: string; fileName: string; fileData: Buffer }>(
+      `SELECT stored.id,stored.title,stored.file_name AS "fileName",stored.file_data AS "fileData"
+         FROM wiki_page_files attachment
+         JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
+        WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.id=ANY($3::uuid[])
+          AND stored.deleted_at IS NULL AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000
+        ORDER BY attachment.created_at,attachment.file_id LIMIT 5`,
+      [departmentId, request.params.id, inlineRefs.map((image) => image.fileId)],
+    ) : { rows: [] as Array<{ id: string; title: string; fileName: string; fileData: Buffer }> };
+    const inlineAltById = new Map(inlineRefs.map((image) => [image.fileId, image.alt]));
+    const attachedImages = await pool!.query<{ id: string; title: string; fileName: string; fileData: Buffer }>(
+      `SELECT stored.id,stored.title,stored.file_name AS "fileName",stored.file_data AS "fileData"
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.deleted_at IS NULL
@@ -501,7 +572,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       [departmentId, request.params.id],
     );
     const filename = result.rows[0].title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "wiki-page";
-    const images = attachedImages.rows.map((image) => ({ title: image.title, fileName: image.fileName, data: image.fileData }));
+    const images = [...inlineImages.rows.map((image) => ({ ...image, title: inlineAltById.get(image.id) ?? image.title })), ...attachedImages.rows.filter((image) => !inlineAltById.has(image.id))]
+      .slice(0, 5)
+      .map((image) => ({ title: image.title, fileName: image.fileName, data: image.fileData }));
     return reply.type("application/pdf").header("Content-Disposition", `attachment; filename="${filename}.pdf"`).header("X-Content-Type-Options", "nosniff").send(createWikiPdf(result.rows[0].title, content, images));
   });
 }

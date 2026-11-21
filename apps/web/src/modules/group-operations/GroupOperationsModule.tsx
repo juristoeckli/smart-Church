@@ -13,10 +13,17 @@ type Rule = { id: string; groupId: string; groupName: string; name: string; cont
 type Preview = { rule: Rule; matches: Array<{ id: string; firstName: string; lastName: string; email: string | null }>; capped: boolean; applyEnabled: boolean };
 type FollowUp = { id: string; groupId: string; groupName: string; contactId: string; personName: string; assignedContactId: string | null; assignedName: string | null; subject: string; note: string; dueDate: string; status: "open" | "completed"; completedAt: string | null };
 type FeedbackMeeting = { id: string; date: string; title: string };
-type FeedbackQuestion = { id: string; prompt: string };
-type FeedbackTemplate = { id: string; title: string; questions: FeedbackQuestion[]; updatedAt: string };
-type AttendeeFeedback = { meetingDate: string; feedbackOpen: boolean; template: FeedbackTemplate; myResponse: { answers: Record<string, string>; updatedAt: string } | null; responses: Array<{ contactId: string; firstName: string; lastName: string; answers: Record<string, string>; updatedAt: string }>; canViewResponses: boolean; canSubmit: boolean };
+type FeedbackQuestion = { id: string; prompt: string; required?: boolean };
+type FeedbackTemplate = { id: string; title: string; questions: FeedbackQuestion[]; anonymousAttendeeResponses: boolean; updatedAt: string };
+type AttendeeFeedback = { meetingDate: string; feedbackOpen: boolean; template: FeedbackTemplate; myResponse: { answers: Record<string, string>; updatedAt: string } | null; responses: Array<{ respondentLabel: string; answers: Record<string, string>; updatedAt: string | null }>; canViewResponses: boolean; canSubmit: boolean };
 type Section = "routines" | "followups" | "certificates" | "membership" | "feedback";
+
+function getAnonymousResponseToken(groupId: string, meetingId: string) {
+  const key = `smart-church:anonymous-feedback:${groupId}:${meetingId}`;
+  let token = sessionStorage.getItem(key);
+  if (!token) { token = crypto.randomUUID(); sessionStorage.setItem(key, token); }
+  return token;
+}
 
 export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -32,6 +39,8 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
   const [feedbackTemplate, setFeedbackTemplate] = useState<FeedbackTemplate | null>(null);
   const [feedbackTitle, setFeedbackTitle] = useState("Meeting feedback");
   const [feedbackQuestionDraft, setFeedbackQuestionDraft] = useState("");
+  const [feedbackRequiredDraft, setFeedbackRequiredDraft] = useState<boolean[]>([]);
+  const [anonymousAttendeeResponses, setAnonymousAttendeeResponses] = useState(false);
   const [feedbackAnswers, setFeedbackAnswers] = useState<Record<string, string>>({});
   const [feedbackUpdatedBy, setFeedbackUpdatedBy] = useState("");
   const [canSubmitFeedback, setCanSubmitFeedback] = useState(false);
@@ -100,6 +109,8 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
         setCanSubmitFeedback(result.canSubmitFeedback);
         setFeedbackTitle(result.template?.title ?? "Meeting feedback");
         setFeedbackQuestionDraft(result.template?.questions.map((question) => question.prompt).join("\n") ?? "");
+        setFeedbackRequiredDraft(result.template?.questions.map((question) => Boolean(question.required)) ?? []);
+        setAnonymousAttendeeResponses(result.template?.anonymousAttendeeResponses ?? false);
         if (!feedbackMeetingId && result.meetings.length) setFeedbackMeetingId(result.meetings[0].id);
         setFeedbackAnswers(result.response?.answers ?? {});
         setFeedbackUpdatedBy(result.response?.updatedBy ?? "");
@@ -108,14 +119,15 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
   useEffect(() => {
     if (section !== "feedback" || !groupId || !feedbackMeetingId || (!canSubmitFeedback && !isGroupLeader)) { setAttendeeAnswers({}); setAttendeeResponses([]); setCanViewAttendeeResponses(false); setAttendeeMeetingDate(""); setAttendeeFeedbackOpen(false); return; }
     setAttendeeAnswers({}); setCanViewAttendeeResponses(false);
-    void request<AttendeeFeedback>(`/api/modules/group-operations/meeting-feedback/attendees?groupId=${encodeURIComponent(groupId)}&meetingId=${encodeURIComponent(feedbackMeetingId)}`)
+    const responseHeaders = feedbackTemplate?.anonymousAttendeeResponses ? { "x-feedback-response-token": getAnonymousResponseToken(groupId, feedbackMeetingId) } : undefined;
+    void request<AttendeeFeedback>(`/api/modules/group-operations/meeting-feedback/attendees?groupId=${encodeURIComponent(groupId)}&meetingId=${encodeURIComponent(feedbackMeetingId)}`, { headers: responseHeaders })
       .then((result) => {
         const questionIds = new Set(result.template.questions.map((question) => question.id));
         const currentAnswers = Object.fromEntries(Object.entries(result.myResponse?.answers ?? {}).filter(([questionId]) => questionIds.has(questionId)));
         setAttendeeAnswers(currentAnswers); setAttendeeResponses(result.responses); setCanViewAttendeeResponses(result.canViewResponses); setAttendeeMeetingDate(result.meetingDate); setAttendeeFeedbackOpen(result.feedbackOpen);
       })
       .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load attendee feedback."));
-  }, [request, groupId, section, feedbackMeetingId, canSubmitFeedback, isGroupLeader]);
+  }, [request, groupId, section, feedbackMeetingId, canSubmitFeedback, isGroupLeader, feedbackTemplate?.anonymousAttendeeResponses]);
 
   async function mutate(path: string, method: string, body: object, done: string) {
     setBusy(true); setError(""); setMessage("");
@@ -136,15 +148,15 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
   async function updateFollowUp(task: FollowUp) { await mutate(`/api/modules/group-operations/follow-ups/${task.id}`, "PATCH", { status: task.status === "open" ? "completed" : "open", note: task.note }, task.status === "open" ? "Follow-up completed." : "Follow-up reopened."); }
   async function saveFeedbackTemplate(event: FormEvent) {
     event.preventDefault();
-    const questions = feedbackQuestionDraft.split("\n").map((item) => item.trim()).filter(Boolean);
+    const questions = feedbackQuestionDraft.split("\n").map((prompt, index) => ({ prompt: prompt.trim(), required: feedbackRequiredDraft[index] ?? false })).filter((question) => question.prompt);
     if (!groupId || questions.length < 1 || questions.length > 10) { setError("Enter between one and ten feedback prompts."); return; }
     setBusy(true); setError("");
     try {
-      const result = await request<FeedbackTemplate>("/api/modules/group-operations/meeting-feedback/template", { method: "PUT", body: JSON.stringify({ groupId, title: feedbackTitle, questions }) });
+      const result = await request<FeedbackTemplate>("/api/modules/group-operations/meeting-feedback/template", { method: "PUT", body: JSON.stringify({ groupId, title: feedbackTitle, questions, anonymousAttendeeResponses }) });
       const questionIds = new Set(result.questions.map((question) => question.id));
       setFeedbackAnswers((current) => Object.fromEntries(Object.entries(current).filter(([questionId]) => questionIds.has(questionId))));
       setAttendeeAnswers((current) => Object.fromEntries(Object.entries(current).filter(([questionId]) => questionIds.has(questionId))));
-      setFeedbackTemplate(result); setFeedbackQuestionDraft(result.questions.map((question) => question.prompt).join("\n")); setMessage("Meeting feedback template saved.");
+      setFeedbackTemplate(result); setFeedbackQuestionDraft(result.questions.map((question) => question.prompt).join("\n")); setFeedbackRequiredDraft(result.questions.map((question) => Boolean(question.required))); setMessage("Meeting feedback template saved.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the feedback template."); }
     finally { setBusy(false); }
   }
@@ -180,8 +192,10 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
     if (!groupId || !feedbackMeetingId) return;
     setBusy(true); setError(""); setMessage("");
     try {
-      await request("/api/modules/group-operations/meeting-feedback/attendees", { method: "PUT", body: JSON.stringify({ groupId, meetingId: feedbackMeetingId, answers: attendeeAnswers }) });
-      const result = await request<AttendeeFeedback>(`/api/modules/group-operations/meeting-feedback/attendees?groupId=${encodeURIComponent(groupId)}&meetingId=${encodeURIComponent(feedbackMeetingId)}`);
+      const responseToken = feedbackTemplate?.anonymousAttendeeResponses ? getAnonymousResponseToken(groupId, feedbackMeetingId) : undefined;
+      await request("/api/modules/group-operations/meeting-feedback/attendees", { method: "PUT", body: JSON.stringify({ groupId, meetingId: feedbackMeetingId, answers: attendeeAnswers, ...(responseToken ? { responseToken } : {}) }) });
+      const responseHeaders = feedbackTemplate?.anonymousAttendeeResponses && responseToken ? { "x-feedback-response-token": responseToken } : undefined;
+      const result = await request<AttendeeFeedback>(`/api/modules/group-operations/meeting-feedback/attendees?groupId=${encodeURIComponent(groupId)}&meetingId=${encodeURIComponent(feedbackMeetingId)}`, { headers: responseHeaders });
       const questionIds = new Set(result.template.questions.map((question) => question.id));
       setAttendeeAnswers(Object.fromEntries(Object.entries(result.myResponse?.answers ?? {}).filter(([questionId]) => questionIds.has(questionId))));
       setAttendeeResponses(result.responses); setCanViewAttendeeResponses(result.canViewResponses); setAttendeeMeetingDate(result.meetingDate); setAttendeeFeedbackOpen(result.feedbackOpen);
@@ -211,10 +225,13 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
       {isGroupLeader && <div className="go-layout">
         <section className="go-panel">
           <h2>Meeting feedback template</h2>
-          <p className="go-note">Create prompts that leaders and attendees can answer after each meeting. Each attendee response is private to the respondent and group leaders.</p>
+          <p className="go-note">Create prompts that leaders and attendees can answer after each meeting. Attendee feedback is identified by default; anonymous answers omit member and account IDs from stored responses and exports.</p>
           <form className="go-form" onSubmit={(event) => void saveFeedbackTemplate(event)}>
             <label>Template title<input required maxLength={120} value={feedbackTitle} onChange={(event) => setFeedbackTitle(event.target.value)} /></label>
             <label>Questions (one per line)<textarea required rows={7} maxLength={3000} value={feedbackQuestionDraft} onChange={(event) => setFeedbackQuestionDraft(event.target.value)} placeholder="What went well?&#10;What should we follow up on?" /></label>
+            {feedbackQuestionDraft.split("\n").map((prompt, index) => prompt.trim() ? <label className="go-checkbox-label" key={`required-${index}`}><input type="checkbox" checked={feedbackRequiredDraft[index] ?? false} onChange={(event) => setFeedbackRequiredDraft((current) => { const next = [...current]; next[index] = event.target.checked; return next; })} /> Require answer to question {index + 1}</label> : null)}
+            <label className="go-checkbox-label"><input type="checkbox" checked={anonymousAttendeeResponses} onChange={(event) => setAnonymousAttendeeResponses(event.target.checked)} /> Make attendee responses anonymous</label>
+            {anonymousAttendeeResponses && <small>Anonymous mode stores answers without a member or account ID. A random key kept in this browser lets a respondent edit their answer; clear browser session data and the response can no longer be edited. Privacy mode locks after the first attendee response.</small>}
             <small>Use one to ten prompts. Each prompt may contain up to 300 characters.</small>
             <button className="button button-primary" disabled={busy || !groupId}><Check size={15} /> Save template</button>
           </form>
@@ -238,15 +255,15 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
         {!feedbackTemplate && <p className="go-empty">Group leaders have not created a feedback template for this group yet.</p>}
         {feedbackMeetingId && attendeeMeetingDate && !attendeeFeedbackOpen && <p className="go-empty">Attendee feedback opens on the meeting date ({attendeeMeetingDate}).</p>}
         {canSubmitFeedback && attendeeFeedbackOpen && feedbackTemplate && feedbackMeetingId && <form className="go-form" onSubmit={(event) => void saveAttendeeFeedback(event)}>
-          <p className="go-note">Your response is linked to your group membership. Group leaders can read it.</p>
+          <p className="go-note">{feedbackTemplate?.anonymousAttendeeResponses ? "Your answers are stored without your member or account ID. This browser keeps a random edit key so you can return to your response during this session." : "Your response is linked to your group membership. Group leaders can read it."}</p>
           <h3>{feedbackTemplate.title}</h3>
-          {feedbackTemplate.questions.map((question) => <label key={question.id}>{question.prompt}<textarea rows={3} maxLength={2000} value={attendeeAnswers[question.id] ?? ""} onChange={(event) => setAttendeeAnswers((current) => ({ ...current, [question.id]: event.target.value }))} /></label>)}
+          {feedbackTemplate.questions.map((question) => <label key={question.id}>{question.prompt}{question.required && <span className="optional-label">Required</span>}<textarea required={Boolean(question.required)} rows={3} maxLength={2000} value={attendeeAnswers[question.id] ?? ""} onChange={(event) => setAttendeeAnswers((current) => ({ ...current, [question.id]: event.target.value }))} /></label>)}
           <button className="button button-primary" disabled={busy}><Check size={15} /> Save my feedback</button>
         </form>}
         {isGroupLeader && canViewAttendeeResponses && <div className="go-list">
           <h3>Attendee responses ({attendeeResponses.length})</h3>
-          {attendeeResponses.length ? attendeeResponses.map((response) => <article key={response.contactId}>
-            <div><strong>{response.firstName} {response.lastName}</strong><small>Updated {new Date(response.updatedAt).toLocaleString()}</small>
+          {attendeeResponses.length ? attendeeResponses.map((response, index) => <article key={`${response.respondentLabel}-${index}`}>
+            <div><strong>{response.respondentLabel}</strong>{response.updatedAt && <small>Updated {new Date(response.updatedAt).toLocaleString()}</small>}
               {feedbackTemplate?.questions.map((question) => <p key={question.id}><b>{question.prompt}</b><br />{response.answers[question.id] || "No response"}</p>)}
             </div>
           </article>) : <p className="go-empty">No attendee responses have been submitted for this meeting.</p>}

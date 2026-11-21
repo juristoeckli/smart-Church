@@ -102,6 +102,7 @@
 .community-booking-form .button{height:35px}
 .community-booking-list{padding:0 20px 8px}
 .community-booking-row{min-height:64px;display:flex;align-items:center;gap:11px;border-top:1px solid var(--line)}
+.community-booking-row[data-focused="true"]{border-radius:8px;background:var(--green-soft);box-shadow:inset 0 0 0 2px var(--green)}
 .community-booking-status{width:max-content;padding:3px 7px;border-radius:999px;background:var(--green-soft);color:var(--green);font-size:8px;text-transform:capitalize}
 .community-booking-status.status-requested{background:#fff4dd;color:#936411}
 .community-booking-status.status-declined,.community-booking-status.status-cancelled{background:#f5e8e9;color:#9b4a50}

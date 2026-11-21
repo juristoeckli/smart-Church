@@ -29,7 +29,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ? pool!.query(`SELECT g.id,g.name,g.description,g.parent_group_id AS "parentGroupId",COUNT(m.contact_id)::int AS "memberCount" FROM church_groups g LEFT JOIN group_members m ON m.group_id=g.id AND m.status='active' WHERE g.department_id=$1 AND g.status='active' GROUP BY g.id ORDER BY g.name`, [departmentId])
         : pool!.query(`SELECT g.id,g.name,g.description,NULL::uuid AS "parentGroupId",COUNT(m.contact_id)::int AS "memberCount" FROM church_groups g LEFT JOIN group_members m ON m.group_id=g.id AND m.status='active' WHERE g.department_id=$1 AND g.status='active' GROUP BY g.id ORDER BY g.name`, [departmentId]),
     ]);
-    return { events: events.rows, groups: groups.rows, hierarchyAvailable, canManage: canManage(request) };
+    const permissions = request.activeDepartmentPermissions ?? [];
+    const canAddVisitor = (request.activeDepartmentRole === "site_admin" || permissions.includes("events_manage") || (request.activeDepartmentModulePermissions?.["check-in"] ?? []).includes("manage"))
+      && (request.activeDepartmentRole === "site_admin" || permissions.includes("people_manage"));
+    return { events: events.rows, groups: groups.rows, hierarchyAvailable, canManage: canManage(request), canAddVisitor };
   });
   app.put<{ Params: { eventId: string }; Body: { complete: boolean } }>("/api/modules/check-in/events/:eventId/session", {
     schema: { params: { type: "object", additionalProperties: false, required: ["eventId"], properties: { eventId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["complete"], properties: { complete: { type: "boolean" } } } },
@@ -75,7 +78,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       LEFT JOIN event_attendance_checkins ch ON ch.event_id=$2 AND ch.contact_id=c.id
       WHERE gm.group_id=ANY($3::uuid[]) AND gm.status='active'
       GROUP BY c.id,ch.first_time_visitor,ch.checked_in_at ORDER BY c.last_name,c.first_name`, [departmentId, request.params.eventId, groupIds]);
-    const attendees = roster.rows as Array<Record<string, unknown> & { id: string }>;
+    const canViewPrivatePeople = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
+    const visitors = await pool!.query(`SELECT contact.id,contact.first_name AS "firstName",contact.last_name AS "lastName",
+        CASE WHEN $3::boolean THEN contact.email ELSE NULL END AS email,CASE WHEN $3::boolean THEN contact.phone ELSE NULL END AS phone,
+        checkin.first_time_visitor AS "firstTimeVisitor",checkin.checked_in_at AS "checkedInAt",ARRAY['Visitor']::text[] AS groups,true AS "isVisitor"
+      FROM event_attendance_checkins checkin JOIN contacts contact ON contact.id=checkin.contact_id AND contact.department_id=$1
+      WHERE checkin.event_id=$2 AND contact.status='visitor'
+      ORDER BY contact.last_name,contact.first_name`, [departmentId, request.params.eventId, canViewPrivatePeople]);
+    const attendees = [...roster.rows, ...visitors.rows] as Array<Record<string, unknown> & { id: string }>;
     if (canManage(request) && attendees.length) {
       const pickupRows = await pool!.query<{ child_contact_id: string; id: string; name: string }>(
         `SELECT authorization.child_contact_id,authorized.id,concat_ws(' ',authorized.first_name,authorized.last_name) AS name
@@ -146,18 +156,27 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await scope(request, reply, true); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     const hierarchyAvailable = Boolean(request.body.includeChildGroups && (await pool!.query<{ present: boolean }>("SELECT to_regclass('public.group_hierarchy_history') IS NOT NULL AS present")).rows[0]?.present);
-    const valid = await pool!.query(hierarchyAvailable ? `WITH RECURSIVE selected_groups(id) AS (
+    const selectedGroups = await pool!.query("SELECT id FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='active'", [departmentId, request.body.groupIds]);
+    if (selectedGroups.rowCount !== request.body.groupIds.length) return reply.code(403).send({ error: "One or more selected groups are outside this location." });
+    const valid = await pool!.query<{ status: "member" | "visitor" }>(hierarchyAvailable ? `WITH RECURSIVE selected_groups(id) AS (
       SELECT g.id FROM church_groups g WHERE g.department_id=$2 AND g.id=ANY($4::uuid[]) AND g.status='active'
       UNION
       SELECT child.id FROM church_groups child JOIN selected_groups parent ON child.parent_group_id=parent.id WHERE child.department_id=$2 AND child.status='active'
-    ) SELECT 1 FROM service_events e JOIN contacts c ON c.department_id=e.department_id
-      JOIN group_members gm ON gm.contact_id=c.id AND gm.status='active' AND gm.group_id IN (SELECT id FROM selected_groups)
-      WHERE e.id=$1 AND e.department_id=$2 AND c.id=$3` : `SELECT 1 FROM service_events e JOIN contacts c ON c.department_id=e.department_id
-      JOIN group_members gm ON gm.contact_id=c.id AND gm.status='active' AND gm.group_id=ANY($4::uuid[])
-      JOIN church_groups g ON g.id=gm.group_id AND g.department_id=e.department_id AND g.status='active'
-      WHERE e.id=$1 AND e.department_id=$2 AND c.id=$3`, [request.params.eventId, departmentId, request.params.contactId, request.body.groupIds]);
+    ) SELECT c.status FROM service_events e JOIN contacts c ON c.department_id=e.department_id
+      WHERE e.id=$1 AND e.department_id=$2 AND c.id=$3 AND (c.status='visitor' OR EXISTS (
+        SELECT 1 FROM group_members gm WHERE gm.contact_id=c.id AND gm.status='active' AND gm.group_id IN (SELECT id FROM selected_groups)))` : `SELECT c.status FROM service_events e JOIN contacts c ON c.department_id=e.department_id
+      WHERE e.id=$1 AND e.department_id=$2 AND c.id=$3 AND (c.status='visitor' OR EXISTS (
+        SELECT 1 FROM group_members gm JOIN church_groups g ON g.id=gm.group_id AND g.department_id=e.department_id AND g.status='active'
+        WHERE gm.contact_id=c.id AND gm.status='active' AND gm.group_id=ANY($4::uuid[])))`, [request.params.eventId, departmentId, request.params.contactId, request.body.groupIds]);
     if (!valid.rowCount) return reply.code(404).send({ error: "Meeting or attendee not found in this location." });
-    if (request.body.present) await pool!.query(`INSERT INTO event_attendance_checkins(event_id,contact_id,first_time_visitor) VALUES($1,$2,$3) ON CONFLICT(event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,updated_at=now()`, [request.params.eventId, request.params.contactId, request.body.firstTimeVisitor ?? false]);
+    if (request.body.present) {
+      let firstTimeVisitor = Boolean(request.body.firstTimeVisitor);
+      if (valid.rows[0].status === "visitor") {
+        const previousAttendance = await pool!.query("SELECT 1 FROM event_attendance_checkins WHERE contact_id=$1 AND event_id<>$2 LIMIT 1", [request.params.contactId, request.params.eventId]);
+        firstTimeVisitor = previousAttendance.rowCount === 0;
+      }
+      await pool!.query(`INSERT INTO event_attendance_checkins(event_id,contact_id,first_time_visitor) VALUES($1,$2,$3) ON CONFLICT(event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,updated_at=now()`, [request.params.eventId, request.params.contactId, firstTimeVisitor]);
+    }
     else await pool!.query("DELETE FROM event_attendance_checkins WHERE event_id=$1 AND contact_id=$2", [request.params.eventId, request.params.contactId]);
     realtime.publish("module:check-in:changed", departmentId, { eventId: request.params.eventId, contactId: request.params.contactId, present: request.body.present });
     return { present: request.body.present };
