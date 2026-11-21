@@ -29,7 +29,7 @@ const db = { query:async(sql) => {
   writes++; return {rowCount:1};
 } };
 const review = await reviewChurchToolsAbsenceImport(db,scope,"local",source);
-assert.deepEqual(review.dates.map(row => row.status),["outside_consent","ready","timed_source","local_overlap","local_removed","ready","ready"]);
+assert.deepEqual(review.dates.map(row => row.status),["outside_consent","ready","timed_consent_required","local_overlap","local_removed","ready","ready"]);
 await assert.rejects(applyChurchToolsAbsenceImport(db,scope,"local",review,review.reviewHash,["2","3"]), /no longer eligible/);
 assert.equal(writes,0);
 assert.deepEqual(await applyChurchToolsAbsenceImport(db,scope,"local",review,review.reviewHash,["2"]),{imported:1,replayed:false});
@@ -40,3 +40,31 @@ assert.equal(revoked.dates[1].status,"consent_required");
 await assert.rejects(applyChurchToolsAbsenceImport(db,scope,"local",revoked,review.reviewHash,["2"]), /no longer eligible/);
 assert.equal(writes,2);
 console.log("ChurchTools all-day absence import preserves local data and requires an active date-scoped grant.");
+
+const timedScope = { ...scope, from: "2026-10-25", through: "2026-10-25" };
+const sourceTimed = { unsupported: 0, dates: [{
+  sourceId: "8", sourceStartDate: "2026-10-25", sourceEndDate: "2026-10-25", timed: true,
+  startUtc: "2026-10-25T00:30:00.000Z", endUtc: "2026-10-25T01:30:00.000Z",
+}] };
+const zone = "Europe/Zurich";
+const legacyConsent = { startsOn:"2026-10-25", endsOn:"2026-10-25", allowTimed:false, confirmedAt:"2026-10-23 09:00:00+00" };
+let activeTimed = legacyConsent;
+const timedDb = { query: async(sql) => {
+  if (/SELECT grant_row/.test(sql)) return {rows:[activeTimed]};
+  if (/SELECT time_zone/.test(sql)) return {rows:[{time_zone:zone}]};
+  if (/SELECT first_day|SELECT receipt/.test(sql)) return {rows:[]};
+  throw new Error("Unexpected query");
+} };
+const legacyReview = await reviewChurchToolsAbsenceImport(timedDb,timedScope,"local",sourceTimed,false,"Europe/Berlin");
+assert.equal(legacyReview.dates[0].status,"timed_consent_required");
+assert.doesNotMatch(JSON.stringify(legacyReview.dates),/00:30/);
+const differentPrivateClocks = { ...sourceTimed, dates: [{ ...sourceTimed.dates[0], startUtc: "2026-10-25T00:35:00.000Z" }] };
+assert.equal((await reviewChurchToolsAbsenceImport(timedDb,timedScope,"local",differentPrivateClocks,false,"Europe/Berlin")).reviewHash, legacyReview.reviewHash);
+activeTimed={...legacyConsent,allowTimed:true,timedZone:zone};
+const timedReview = await reviewChurchToolsAbsenceImport(timedDb,timedScope,"local",sourceTimed,false,"Europe/Berlin");
+assert.equal(timedReview.dates[0].status,"ready");
+assert.equal(timedReview.dates[0].startUtc,"2026-10-25T00:30:00.000Z");
+assert.equal(timedReview.dates[0].localStart,timedReview.dates[0].localEnd);
+assert.equal((await reviewChurchToolsAbsenceImport(timedDb,timedScope,"local",sourceTimed)).dates[0].status,"unverified_source_time");
+assert.equal((await reviewChurchToolsAbsenceImport(timedDb,timedScope,"local",sourceTimed,false,"Pacific/Honolulu")).dates[0].status,"unverified_source_time");
+console.log("Timed import requires explicit consent and preserves both instants in a repeated local clock hour.");

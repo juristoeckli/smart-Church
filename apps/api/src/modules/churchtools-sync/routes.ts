@@ -26,6 +26,7 @@ import { applyChurchToolsServiceTemplates, readChurchToolsServiceTemplates, revi
 import { applyChurchToolsVolunteerResponses, readChurchToolsVolunteerResponses, reviewChurchToolsVolunteerResponses, VolunteerResponseReviewError } from "./volunteer-responses.js";
 
 import { validVolunteerAbsenceRange } from "../../event-volunteer-absences.js";
+import { canonicalTimeZone } from "../../calendar-time.js";
 import { readChurchToolsAbsencePreview } from "./absence-preview.js";
 import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
@@ -2097,7 +2098,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const nextDay = new Date(Date.parse(through) + 86_400_000).toISOString().slice(0, 10);
       const query = new URLSearchParams({ from, to: nextDay, order_direction: "ASC" });
       const source = await get(config.instance_url, decrypt(config.encrypted_login_token), `persons/${personId}/absences?${query}`);
-      return readChurchToolsAbsencePreview(source, personId, from, through);
+      const preview = readChurchToolsAbsencePreview(source, personId, from, through);
+      if (!preview.dates.some(({ startUtc }) => startUtc)) return { preview, sourceZone: null };
+      // Configuration exposes the source application's IANA time zone. An
+      // unavailable value keeps timed rows ineligible while dates stay usable.
+      const configPayload = await get(config.instance_url, decrypt(config.encrypted_login_token), "config").catch(() => null);
+      return { preview, sourceZone: canonicalTimeZone(configPayload?.timezone) };
     }
     function absenceSourceError(error: unknown, reply: FastifyReply) {
       const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
@@ -2119,7 +2125,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       let source: Awaited<ReturnType<typeof churchToolsAbsenceSource>>;
       try { source = await churchToolsAbsenceSource(config, scope); }
       catch (error) { return absenceSourceError(error, reply); }
-      const preview = await reviewChurchToolsAbsenceImport(pool!, scope, contact, source);
+      const { records: _records, ...preview } = await reviewChurchToolsAbsenceImport(pool!, scope, contact, source.preview, false, source.sourceZone);
       return reply.header("Cache-Control", "private, no-store").send(preview);
     });
     routes.post<{ Body: AbsenceImportBody }>("/api/modules/sync/churchtools/absence-import", {
@@ -2155,7 +2161,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (!current.rowCount || await verifiedAbsenceContact(db, scope, true) !== contact) {
           throw new AbsenceImportReviewError("The verified person or ChurchTools connection changed.");
         }
-        const review = await reviewChurchToolsAbsenceImport(db, scope, contact, source, true);
+        const review = await reviewChurchToolsAbsenceImport(db, scope, contact, source.preview, true, source.sourceZone);
         const result = await applyChurchToolsAbsenceImport(db, scope, contact, review, reviewHash, sourceIds);
         await db.query("COMMIT");
         return reply.header("Cache-Control", "private, no-store").send(result);

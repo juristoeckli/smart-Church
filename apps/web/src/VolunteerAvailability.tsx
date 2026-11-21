@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 type Range = { startsOn: string; endsOn: string };
-type Row = Range & { id: string; startsAt?: string; endsAt?: string };
+type Row = Range & { id: string; startsAt?: string; endsAt?: string; startsAtUtc?: string; endsAtUtc?: string };
 type Translate = (message: string) => string;
 const endpoint = "/api/events/volunteer-absences";
 const empty = { startsOn: "", endsOn: "" };
@@ -11,17 +11,21 @@ function ChurchToolsAbsenceConsent({ departmentId, csrfToken, t }: { departmentI
   const [available, setAvailable] = useState(false);
   const [current, setCurrent] = useState<Range | null>(null);
   const [draft, setDraft] = useState<Range>(empty);
+  const [allowTimed, setAllowTimed] = useState(false);
+  const [grantedTimed, setGrantedTimed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     void fetch(consentEndpoint, { signal: controller.signal, headers: { "x-department-id": departmentId } }).then(async (response) => {
-      const result = await response.json() as { available: boolean; range: Range | null; error?: string };
+      const result = await response.json() as { available: boolean; range: Range | null; allowTimed: boolean; error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not load ChurchTools import permission.");
       if (controller.signal.aborted) return;
       setAvailable(result.available);
       setCurrent(result.range);
       setDraft(result.range ?? empty);
+      setAllowTimed(result.allowTimed);
+      setGrantedTimed(result.allowTimed);
     }).catch((failure: unknown) => {
       if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Could not load ChurchTools import permission.");
     });
@@ -35,20 +39,22 @@ function ChurchToolsAbsenceConsent({ departmentId, csrfToken, t }: { departmentI
       const response = await fetch(consentEndpoint, {
         method: grant ? "PUT" : "DELETE", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken,
           ...(grant ? { "Content-Type": "application/json" } : {}) },
-        ...(grant ? { body: JSON.stringify(draft) } : {}),
+        ...(grant ? { body: JSON.stringify({ ...draft, allowTimed }) } : {}),
       });
-      const result = await response.json() as { range: Range | null; error?: string };
+      const result = await response.json() as { range: Range | null; allowTimed: boolean; error?: string };
       if (!response.ok) throw new Error(result.error ?? "Could not save ChurchTools import permission.");
       setCurrent(result.range);
       setDraft(result.range ?? empty);
+      setAllowTimed(result.allowTimed);
+      setGrantedTimed(result.allowTimed);
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not save ChurchTools import permission."); }
     finally { setBusy(false); }
   }
   if (!available) return error ? <p role="alert">{t(error)}</p> : null;
   return <section>
     <h3>{t("ChurchTools absence import permission")}</h3>
-    <p>{t("Allow a site administrator to copy your all-day ChurchTools absence dates for this range. You can edit or remove imported dates in Events.")}</p>
-    {current && <p role="status">{t("Permission active")} · {current.startsOn} – {current.endsOn}</p>}
+    <p>{t("Allow a site administrator to copy your all-day ChurchTools absences for these dates. You can also choose to share timed absences in this range.")}</p>
+    {current && <p role="status">{t("Permission active")} · {current.startsOn} – {current.endsOn}{grantedTimed && ` · ${t("Includes timed absences")}`}</p>}
     <form onSubmit={(event) => { event.preventDefault(); void update(true); }}>
       <fieldset disabled={busy}>
         <div className="form-row">
@@ -57,6 +63,8 @@ function ChurchToolsAbsenceConsent({ departmentId, csrfToken, t }: { departmentI
           <label>{t("Last allowed day")}<input type="date" required value={draft.endsOn} min={draft.startsOn || undefined}
             onChange={(event) => setDraft({ ...draft, endsOn: event.target.value })} /></label>
         </div>
+        <label><input type="checkbox" checked={allowTimed} onChange={(event) => setAllowTimed(event.target.checked)} />
+          {t("Include timed absences in this location’s time zone. The administrator can review the exact start and end times.")}</label>
         <button type="submit" className="button button-secondary">{t("Allow date import")}</button>
         {current && <button type="button" className="button button-secondary" onClick={() => void update(false)}>{t("Revoke permission")}</button>}
       </fieldset>
@@ -123,7 +131,7 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
       {linked === false && <p>{t("Link your account to a People record at this location to use volunteer availability.")}</p>}
       {linked && <>
         {rows.length ? <ul>{rows.map((row) => <li key={row.id}>
-          <span>{row.startsAt && row.endsAt ? `${row.startsAt.replace("T", " ")} – ${row.endsAt.replace("T", " ")}`
+          <span title={row.startsAtUtc && row.endsAtUtc ? `${row.startsAtUtc} – ${row.endsAtUtc}` : undefined}>{row.startsAt && row.endsAt ? `${row.startsAt.replace("T", " ")} – ${row.endsAt.replace("T", " ")}`
             : row.startsOn + (row.endsOn !== row.startsOn ? ` – ${row.endsOn}` : "")}</span>{" "}
           <button type="button" className="button button-secondary" disabled={busy}
             onClick={() => {
@@ -140,7 +148,7 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
               <option value="days">{t("All day")}</option><option value="time" disabled={!timeZone}>{t("Timed")}</option>
             </select></label>
             {timed ? <>
-              <p>{timeZone} · {t("When the clock repeats, the later time is used.")}</p>
+              <p>{timeZone} · {t("New times in a repeated clock hour use the later occurrence.")}</p>
               <div className="form-row">
                 <label>{t("Starts at")}<input type="datetime-local" step="1" required value={clock.startsAt}
                   onChange={(event) => setClock({ ...clock, startsAt: event.target.value })} /></label>

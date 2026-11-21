@@ -14,10 +14,18 @@ export function describeTimedVolunteerAbsence(startsAtUtc: string, endsAtUtc: st
   };
 }
 
-export function parseTimedVolunteerAbsence(startsAt: string, endsAt: string, timeZone: string) {
+export function parseTimedVolunteerAbsence(startsAt: string, endsAt: string, timeZone: string,
+  previous?: { startsAtUtc: string | null; endsAtUtc: string | null },
+) {
   if (!wall.test(startsAt) || !wall.test(endsAt)) return null;
-  const start = resolveAppointmentWallTime(seconds(startsAt), timeZone);
-  const end = resolveAppointmentWallTime(seconds(endsAt), timeZone);
+  function resolve(value: string, prior: string | null | undefined) {
+    const local = seconds(value);
+    const existing = prior ? Date.parse(prior) : NaN;
+    if (Number.isFinite(existing) && appointmentWallTime(existing, timeZone) === local) return { instant: existing, shifted: false };
+    return resolveAppointmentWallTime(local, timeZone);
+  }
+  const start = resolve(startsAt, previous?.startsAtUtc);
+  const end = resolve(endsAt, previous?.endsAtUtc);
   // Keep the site's calendar policy for repeated clocks and reject missing clocks.
   if (!start || !end || start.shifted || end.shifted || start.instant >= end.instant) return null;
   const startsAtUtc = instant(start.instant);

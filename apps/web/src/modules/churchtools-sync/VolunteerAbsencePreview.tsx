@@ -1,8 +1,10 @@
 import { useState, type FormEvent } from "react";
 
-type Preview = { dates: Array<{ sourceId: string; sourceStartDate: string; sourceEndDate: string; timed: boolean; status: string }>; unsupported: number; reviewHash: string; consentGranted: boolean };
+type Preview = { dates: Array<{ sourceId: string; sourceStartDate: string; sourceEndDate: string; timed: boolean; status: string; localStart?: string; localEnd?: string; localZone?: string; startUtc?: string; endUtc?: string }>; unsupported: number; reviewHash: string; consentGranted: boolean };
 const statusLabels: Record<string, string> = {
-  ready: "Ready to import", timed_source: "Timed source absence", consent_required: "Volunteer permission required",
+  ready: "Ready to import", timed_consent_required: "Separate volunteer permission required for timed absences",
+  timed_consent_timezone_changed: "Volunteer permission needs to be renewed for this location time zone",
+  unverified_source_time: "Source time or time zone could not be verified", consent_required: "Volunteer permission required",
   outside_consent: "Outside the volunteer’s allowed dates", outside_review: "Outside the review dates",
   unsupported_range: "Unsupported date range", local_copy_present: "These dates are already recorded locally",
   local_overlap: "Overlaps local availability", already_imported: "Already imported",
@@ -49,14 +51,14 @@ export function VolunteerAbsencePreview({ departmentId, csrfToken, t }: { depart
         body: JSON.stringify({ ...scope, reviewHash: preview.reviewHash, sourceIds: selection }),
       });
       const result = await response.json() as { imported?: number; error?: string };
-      if (!response.ok) throw new Error(result.error ?? "Could not import the selected all-day dates.");
+      if (!response.ok) throw new Error(result.error ?? "Could not import the selected absences.");
       setFeedback(result.imported ? "Selected dates imported into Events availability." : "The selected dates were already imported.");
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not import the selected all-day dates."); }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not import the selected absences."); }
     finally { setBusy(false); setPreview(null); setSelection([]); }
   }
   return <section className="directory-card sync-controls-card">
     <div><h2>{t("ChurchTools absence preview")}</h2>
-      <p>{t("Review source absence dates for a verified People record. A volunteer can allow their all-day dates to be imported from My volunteer availability.")}</p></div>
+      <p>{t("Review source absence dates for a verified People record. Volunteers can allow all-day and timed imports in My volunteer availability.")}</p></div>
     <form onSubmit={(event) => void load(event)}>
       <fieldset disabled={busy}>
         <div className="form-row">
@@ -77,16 +79,21 @@ export function VolunteerAbsencePreview({ departmentId, csrfToken, t }: { depart
       {!preview.consentGranted && <p>{t("The volunteer needs to allow date import before any dates can be selected.")}</p>}
       {preview.dates.length ? <div className="table-wrap"><table>
         <thead><tr><th scope="col">{t("Source absence")}</th><th scope="col">{t("Source start date")}</th>
-          <th scope="col">{t("Source end date")}</th><th scope="col">{t("Status")}</th></tr></thead>
+          <th scope="col">{t("Source end date")}</th><th scope="col">{t("Reviewed interval")}</th><th scope="col">{t("Status")}</th></tr></thead>
         <tbody>{preview.dates.map((row) => <tr key={row.sourceId}>
           <td>{row.status === "ready" ? <label>
             <input type="checkbox" checked={selection.includes(row.sourceId)} disabled={busy || (!selection.includes(row.sourceId) && selection.length >= 25)}
               onChange={(event) => setSelection((current) => event.target.checked ? [...current, row.sourceId] : current.filter((id) => id !== row.sourceId))} /> #{row.sourceId}
-          </label> : `#${row.sourceId}`}</td><td>{row.sourceStartDate}</td><td>{row.sourceEndDate}</td><td>{t(statusLabels[row.status] ?? row.status)}</td>
+          </label> : `#${row.sourceId}`}</td><td>{row.sourceStartDate}</td><td>{row.sourceEndDate}</td>
+          <td>{row.localStart && row.localEnd ? <>
+            {row.localStart.replace("T", " ")} – {row.localEnd.replace("T", " ")} · {row.localZone}
+            <small>{row.startUtc} – {row.endUtc}</small>
+          </> : row.timed ? t("Timed") : t("All day")}</td>
+          <td>{t(statusLabels[row.status] ?? row.status)}</td>
         </tr>)}</tbody>
       </table></div> : <p>{t("No visible absences in the selected dates.")}</p>}
       {!!selection.length && <button type="button" className="button button-primary" disabled={busy} onClick={() => void apply()}>
-        {t("Import selected all-day dates")} ({selection.length})
+        {t("Import selected absences")} ({selection.length})
       </button>}
       {!!preview.unsupported && <p>{preview.unsupported} {t("source records had unsupported dates.")}</p>}
     </>}

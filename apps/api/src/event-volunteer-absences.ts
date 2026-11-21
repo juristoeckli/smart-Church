@@ -9,6 +9,7 @@ type Dependencies = { pool: Pool | null; available: () => boolean; resolveScope:
   validateMutation: (request: FastifyRequest, reply: FastifyReply) => boolean;
   lockDepartmentForWrite: (db: PoolClient, departmentId: string) => Promise<boolean> };
 type Range = { startsOn: string; endsOn: string };
+type ConsentInput = Range & { allowTimed?: boolean };
 type TimedInput = { startsAt: string; endsAt: string };
 type AbsenceInput = Range | TimedInput;
 type Row = Range & { id: string; startsAtUtc: string | null; endsAtUtc: string | null };
@@ -36,7 +37,7 @@ async function absenceZone(db: Queryable, departmentId: string, lock = false) {
 }
 function storedAbsence(row: Row, timeZone: string) {
   const { id, startsOn, endsOn, startsAtUtc, endsAtUtc } = row;
-  return startsAtUtc && endsAtUtc ? { id, ...describeTimedVolunteerAbsence(startsAtUtc, endsAtUtc, timeZone) }
+  return startsAtUtc && endsAtUtc ? { id, ...describeTimedVolunteerAbsence(startsAtUtc, endsAtUtc, timeZone), startsAtUtc, endsAtUtc }
     : { id, startsOn, endsOn };
 }
 
@@ -87,7 +88,10 @@ export function registerEventVolunteerAbsenceRoutes(app: FastifyInstance, deps: 
       }
       const timeZone = input ? await absenceZone(db, departmentId, true) : null;
       const timed = input && "startsAt" in input;
-      const range = timed && timeZone ? parseTimedVolunteerAbsence(input.startsAt, input.endsAt, timeZone)
+      const previous = timed && id ? (await db.query<Row>(`SELECT id,${storedDates}
+        FROM event_volunteer_absences WHERE department_id=$1 AND contact_id=$2 AND id=$3 FOR UPDATE`,
+      [departmentId, person.id, id])).rows[0] : undefined;
+      const range = timed && timeZone ? parseTimedVolunteerAbsence(input.startsAt, input.endsAt, timeZone, previous)
         : input && "startsOn" in input ? { ...input, startsAtUtc: null, endsAtUtc: null } : null;
       if (input && (!range || !validVolunteerAbsenceRange(range))) {
         await db.query("ROLLBACK");
@@ -131,18 +135,18 @@ export function registerEventVolunteerAbsenceRoutes(app: FastifyInstance, deps: 
     const departmentId = await scope(request, reply);
     if (!departmentId) return reply;
     const actor = request.authenticatedUser!.id;
-    const { rows: [result] } = await pool!.query<{ startsOn: string | null; endsOn: string | null }>(`SELECT
-      consent.starts_on::text AS "startsOn",consent.ends_on::text AS "endsOn"
+    const { rows: [result] } = await pool!.query<{ startsOn: string | null; endsOn: string | null; allowTimed: boolean | null; timedZone: string | null }>(`SELECT
+      consent.starts_on::text AS "startsOn",consent.ends_on::text AS "endsOn",consent.allow_timed AS "allowTimed",consent.timed_zone AS "timedZone"
       FROM (${localPerson}) person
       JOIN churchtools_migration_person_provenance proof ON proof.department_id=$1 AND proof.contact_id=person.id
       JOIN churchtools_sync_settings config ON config.department_id=proof.department_id AND config.instance_url=proof.instance_url
       LEFT JOIN event_volunteer_absence_import_consents consent ON consent.department_id=$1 AND consent.contact_id=person.id
         AND consent.actor_user_id=$2 AND consent.instance_url=proof.instance_url AND consent.source_person_id=proof.source_person_id`, [departmentId, actor]);
     return reply.header("Cache-Control", "private, no-store").send({
-      available: !!result, range: result?.startsOn && result.endsOn ? { startsOn: result.startsOn, endsOn: result.endsOn } : null,
+      available: !!result, allowTimed: result?.allowTimed === true && result.timedZone === await absenceZone(pool!, departmentId), range: result?.startsOn && result.endsOn ? { startsOn: result.startsOn, endsOn: result.endsOn } : null,
     });
   });
-  async function mutateConsent(request: FastifyRequest, reply: FastifyReply, range?: Range) {
+  async function mutateConsent(request: FastifyRequest, reply: FastifyReply, range?: ConsentInput) {
     const departmentId = await scope(request, reply);
     if (!departmentId || !deps.validateMutation(request, reply)) return reply;
     if (range && !validVolunteerAbsenceRange(range)) return reply.code(400).send({ error: "Choose a date range of up to 366 calendar days." });
@@ -166,22 +170,29 @@ export function registerEventVolunteerAbsenceRoutes(app: FastifyInstance, deps: 
           await db.query("ROLLBACK");
           return reply.code(409).send({ error: "This People record needs a verified ChurchTools connection." });
         }
+        const timedZone = range.allowTimed ? await absenceZone(db, departmentId, true) : null;
+        if (range.allowTimed && !timedZone) {
+          await db.query("ROLLBACK");
+          return reply.code(400).send({ error: "A valid location time zone is required to allow timed imports." });
+        }
         await db.query(`INSERT INTO event_volunteer_absence_import_consents
-          (department_id,contact_id,actor_user_id,instance_url,source_person_id,starts_on,ends_on)
-          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(department_id,contact_id) DO UPDATE SET
+          (department_id,contact_id,actor_user_id,instance_url,source_person_id,starts_on,ends_on,allow_timed,timed_zone)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(department_id,contact_id) DO UPDATE SET
           actor_user_id=EXCLUDED.actor_user_id,instance_url=EXCLUDED.instance_url,source_person_id=EXCLUDED.source_person_id,
-          starts_on=EXCLUDED.starts_on,ends_on=EXCLUDED.ends_on,consented_at=now()`,
-        [departmentId, person.id, actor, verified.instanceUrl, verified.sourcePersonId, range.startsOn, range.endsOn]);
+          starts_on=EXCLUDED.starts_on,ends_on=EXCLUDED.ends_on,allow_timed=EXCLUDED.allow_timed,timed_zone=EXCLUDED.timed_zone,consented_at=now()`,
+        [departmentId, person.id, actor, verified.instanceUrl, verified.sourcePersonId, range.startsOn, range.endsOn, range.allowTimed === true, timedZone]);
       } else {
         await db.query("DELETE FROM event_volunteer_absence_import_consents WHERE department_id=$1 AND contact_id=$2 AND actor_user_id=$3",
           [departmentId, person.id, actor]);
       }
       await db.query("COMMIT");
-      return reply.header("Cache-Control", "private, no-store").send({ range: range ?? null });
+      return reply.header("Cache-Control", "private, no-store").send({ range: range ? { startsOn: range.startsOn, endsOn: range.endsOn } : null, allowTimed: range?.allowTimed === true });
     } catch (error) { await db.query("ROLLBACK"); throw error; }
     finally { db.release(); }
   }
-  app.put<{ Body: Range }>(consentPath, { schema: { body } }, (request, reply) => mutateConsent(request, reply, request.body));
+  app.put<{ Body: ConsentInput }>(consentPath, { schema: { body: {
+    ...body, properties: { ...body.properties, allowTimed: { type: "boolean" } },
+  } } }, (request, reply) => mutateConsent(request, reply, request.body));
   app.delete(consentPath, (request, reply) => mutateConsent(request, reply));
 
   app.get<{ Params: { id: string } }>("/api/events/:id/volunteer-conflicts", { schema: { params } }, async (request, reply) => {
