@@ -16,6 +16,7 @@ import { csvCell, printHtml } from "./service-exports";
 import { openServicePlanPrint, servicePlanSectionHeading } from "./service-plan-print";
 import { LiveRunSheet } from "./LiveRunSheet";
 import { OwnCalendarDuty } from "./OwnCalendarDuty";
+import { downloadOpenSongSet } from "./open-song-set";
 import { ownCalendarAbsenceForDate, useOwnCalendarAbsences } from "./own-calendar-absences";
 import { servicePlanLinkUrl } from "./service-plan-link";
 import { buildOwnDutyRows, OwnDutyExports } from "./OwnDutyExports";
@@ -471,6 +472,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const [resources, setResources] = useState<BookableResource[]>([]);
   const [servicePlanTemplates, setServicePlanTemplates] = useState<ServicePlanTemplate[]>([]);
   const [worshipSongs, setWorshipSongs] = useState<WorshipSong[]>([]);
+  const [worshipSongsDepartment, setWorshipSongsDepartment] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [eventsDepartmentId, setEventsDepartmentId] = useState("");
   const [loadError, setLoadError] = useState("");
@@ -570,7 +572,10 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       fetch("/api/worship/songs", { headers, signal: controller.signal }).then(async (response) => ({ response, data: await response.json() as WorshipSong[] | { error?: string } })),
     ]).then(([templates, songs]) => {
       if (templates.response.ok && Array.isArray(templates.data)) setServicePlanTemplates(templates.data);
-      if (songs.response.ok && Array.isArray(songs.data)) setWorshipSongs(songs.data);
+      if (!controller.signal.aborted && songs.response.ok && Array.isArray(songs.data)) {
+        setWorshipSongs(songs.data);
+        setWorshipSongsDepartment(departmentId);
+      }
     }).catch(() => {});
     return () => controller.abort();
   }, [departmentId]);
@@ -706,7 +711,10 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
       ]);
       const [templates, songs] = await Promise.all([templateResponse.json(), songResponse.json()]) as [ServicePlanTemplate[] | { error?: string }, WorshipSong[] | { error?: string }];
       if (templateResponse.ok && Array.isArray(templates)) setServicePlanTemplates(templates);
-      if (songResponse.ok && Array.isArray(songs)) setWorshipSongs(songs);
+      if (songResponse.ok && Array.isArray(songs)) {
+        setWorshipSongs(songs);
+        setWorshipSongsDepartment(departmentId);
+      }
     } catch { /* Keep the last successfully loaded library data. */ }
   }
 
@@ -1182,7 +1190,11 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           setDetailsEvent((current) => current?.id === updated.id ? updated : current);
           onNotice("Volunteer assigned.");
           void loadEvents();
-        }} /><EventPositionStaffNotes event={detailsEvent} departmentId={departmentId} canManage={canManage} />{Boolean(detailsEvent.timePlan?.length) && <section className="event-details-section"><div className="service-planning-heading"><h3>{translate("events.timePlan")}</h3><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => void copyServicePlanLink(detailsEvent.id)}><Link2 size={15} />Copy plan link</button><button className="button button-secondary" type="button" onClick={() => printRunSheet(detailsEvent)}><Printer size={15} />Print run sheet</button>{canManage && <button className="button button-secondary" type="button" onClick={() => {
+        }} /><EventPositionStaffNotes event={detailsEvent} departmentId={departmentId} canManage={canManage} />{Boolean(detailsEvent.timePlan?.length) && <section className="event-details-section"><div className="service-planning-heading"><h3>{translate("events.timePlan")}</h3><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => void copyServicePlanLink(detailsEvent.id)}><Link2 size={15} />Copy plan link</button><button className="button button-secondary" type="button" onClick={() => printRunSheet(detailsEvent)}><Printer size={15} />Print run sheet</button>
+      {eventsDepartmentId === departmentId && !detailsEvent.cancelledAt && <button className="button button-secondary" type="button"
+        title={translate("events.openSongHelp")} onClick={() => downloadOpenSongSet(
+          detailsEvent, worshipSongsDepartment === departmentId ? worshipSongs : [],
+        )}><Download size={15} />{translate("events.downloadOpenSong")}</button>}{canManage && <button className="button button-secondary" type="button" onClick={() => {
         setNewWorshipTemplate(templateFromServiceAgenda(detailsEvent));
         setDetailsEvent(null);
         setIsWorshipLibraryOpen(true);
