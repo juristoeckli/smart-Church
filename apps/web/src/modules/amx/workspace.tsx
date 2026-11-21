@@ -260,9 +260,11 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       await readResponse(await fetch("/api/modules/amx/send", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ actionId: action.id }) }));
       if (!quietSuccess) setFeedback(`${action.name}: sent.`);
       if (sourcePage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number")) {
-        void refreshPageLevels(sourcePage).catch((error: unknown) => {
-          if (error instanceof Error) { setFeedback(`Live level feedback: ${error.message}`); setFailed(true); }
-        });
+        void refreshPageLevels(sourcePage)
+          .then(() => setLevelFeedbackError(""))
+          .catch((error: unknown) => setLevelFeedbackError(error instanceof Error
+            ? `Live level feedback: ${error.message}`
+            : "Live level feedback could not be read."));
       }
       return true;
     } catch (error) {
