@@ -33,6 +33,7 @@ Common errors are JSON objects with an `error` message. Typical status codes are
 | `POST` | `/api/auth/login` | Create a session using username/email and password. |
 | `POST` | `/api/auth/logout` | Revoke the current session. |
 | `POST` | `/api/auth/change-password` | Change the current user's password; also used to satisfy a forced password change. |
+| `POST` | `/api/auth/accept-setup-invitation` | Public single-use account setup with `setupCode` and `password`. The account holder signs in separately after setting a password. |
 | `PUT` | `/api/auth/preferences` | Save the user's date/time format and language preferences. |
 | `GET` | `/api/auth/sessions` | List the current user's signed-in devices. |
 | `DELETE` | `/api/auth/sessions/:id` | Revoke one of the current user's sessions. |
@@ -51,6 +52,7 @@ These routes include server-wide administration. Most writes require a Server Ad
 | `GET`, `POST` | `/api/users` | List users or create an account. |
 | `PUT`, `DELETE` | `/api/users/:id` | Edit or delete an account. |
 | `POST` | `/api/users/:id/reset-password` | Set a temporary password and optionally require a change at next login. |
+| `GET`, `POST`, `DELETE` | `/api/users/:id/setup-invitation` | Server Administrator browser sessions can read setup status, issue or replace a 14-day link, and revoke it. Only enabled person accounts with an initial password and no previous activity or installation grants qualify. The setup code is returned once on issue and is shared directly by the administrator. Changing the account's sign-in details or location grants invalidates the link. |
 | `GET`, `POST` | `/api/departments` | List locations or create one. |
 | `GET`, `PUT` | `/api/department` | Read/update the selected location profile. |
 | `GET`, `PUT`, `DELETE` | `/api/location-access`, `/api/location-access/:userId` | List, grant, edit, or revoke a user's membership in the selected location. |

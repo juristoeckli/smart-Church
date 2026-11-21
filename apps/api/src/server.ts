@@ -15,6 +15,7 @@ import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-superv
 import { getRegisteredServerModuleCatalog, getRegisteredServerModuleIds, getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
+import { registerAccountSetupInvitations } from "./account-setup-invitations.js";
 import { followRuntimeLogFile, recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 import { createEmailConnector } from "./modules/email-worker/service.js";
 import { allServerPermissions, hasServerPermission as userHasServerPermission, serverPermissionsForUser } from "./server-permissions.js";
@@ -303,19 +304,25 @@ function requireServerPermission(request: FastifyRequest, reply: FastifyReply, p
   return false;
 }
 
-async function createSession(userId: string, request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, secure: boolean) {
+async function createSession(userId: string, request: FastifyRequest, reply: { header: (name: string, value: string) => unknown }, secure: boolean, verifiedPasswordHash?: string) {
   const token = randomBytes(32).toString("base64url");
   const sessionId = randomUUID();
   const userAgent = typeof request.headers["user-agent"] === "string" ? request.headers["user-agent"].slice(0, 512) : "Unknown browser";
   const clientIp = typeof request.ip === "string" && request.ip.length <= 64 ? request.ip : null;
-  await pool!.query(
-    `INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, user_agent, last_seen_at, client_ip)
-     VALUES ($1, $2, $3, now() + ($4 * interval '1 second'), $5, now(), $6)`,
-    [sessionId, userId, hashToken(token), sessionLifetimeSeconds, userAgent, clientIp],
+  const created = await pool!.query(
+    `WITH eligible_user AS (
+       UPDATE app_users SET last_active_at = now()
+       WHERE id = $2 AND is_enabled AND NOT is_service_user AND ($7::text IS NULL OR password_hash = $7)
+       RETURNING id
+     )
+     INSERT INTO auth_sessions (id, user_id, token_hash, expires_at, user_agent, last_seen_at, client_ip)
+     SELECT $1, id, $3, now() + ($4 * interval '1 second'), $5, now(), $6 FROM eligible_user`,
+    [sessionId, userId, hashToken(token), sessionLifetimeSeconds, userAgent, clientIp, verifiedPasswordHash ?? null],
   );
-  await pool!.query("UPDATE app_users SET last_active_at = now() WHERE id = $1", [userId]);
+  if (!created.rowCount) return false;
   if (clientIp) refreshSessionDnsName(sessionId, clientIp);
   setSessionCookie(reply, token, secure, sessionCookieNameFor(request));
+  return true;
 }
 
 const pendingSessionDnsLookups = new Set<string>();
@@ -1327,7 +1334,9 @@ app.post<{ Body: LoginCredentials }>("/api/auth/login", {
   }
   for (const key of buckets) failedLogins.delete(key);
   const user: AuthenticatedUser = { id: row.id, ...(row.email ? { email: row.email } : {}), username: row.username, displayName: row.display_name, role: row.role, mustChangePassword: row.must_change_password && row.can_change_password, canChangePassword: row.can_change_password, dateTimeFormat: row.date_time_format, language: row.language, languageIsCustom: row.language_is_custom, menuPreferences: row.menu_preferences, serverPermissions: serverPermissionsForUser(row.role, row.server_permissions) };
-  await createSession(user.id, request, reply, request.protocol === "https");
+  if (!await createSession(user.id, request, reply, request.protocol === "https", row.password_hash)) {
+    return reply.code(401).send({ error: "Username, email, or password is incorrect." });
+  }
   return { user };
 });
 
@@ -2113,6 +2122,21 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   } finally {
     client.release();
   }
+});
+
+registerAccountSetupInvitations(app, {
+  pool: () => databaseReady ? pool ?? null : null,
+  authorize(request, reply, mutate) {
+    const actor = request.authenticatedUser;
+    if (actor?.role !== "server_admin" || request.headers.authorization) {
+      reply.code(403).send({ error: "A Server Administrator session is required." });
+      return null;
+    }
+    return !mutate || validModuleMutation(request, reply) ? actor.id : null;
+  },
+  hashPassword,
+  lockDepartment: lockDepartmentForWrite,
+  writeLock: locationAccessWriteLock,
 });
 
 app.post<{ Params: { id: string }; Body: { password: string; mustChangePassword?: boolean } }>("/api/users/:id/reset-password", {
