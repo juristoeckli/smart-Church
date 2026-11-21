@@ -6,13 +6,13 @@ import layoutJson from "../../../../api/src/modules/amx/tp4-layout.json";
 import "./amx.css";
 
 type PanelState = { number: number; style?: string; backgroundColor?: string; fontColor?: string; textColor?: string; fontId?: number; text?: string; bitmap?: string; bitmapX?: number; bitmapY?: number; textX?: number; textY?: number; iconId?: number; iconX?: number; iconY?: number; justification?: number; textEffect?: number };
-type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[] };
+type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; hitStyle?: string | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[] };
 type PanelPage = { id: number; name: string; kind: string; group?: string | null; canvas: { x?: number | null; y?: number | null; width: number; height: number }; objects: PanelObject[] };
 type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }>; fonts?: Array<{ id: number; name: string; subfamily: string; size: number }> };
 type Action = { id: string; name: string; channel: number; port?: number };
 type Status = { configured: boolean };
 type LevelFeedback = { page: string; values: Record<string, number>; updatedAt: string };
-type ControllerState = { currentRoom: string | null; activeRooms: string[]; channels: number[]; updatedAt: string };
+type ControllerState = { currentRoom: string | null; activeRooms: string[]; channels: number[]; channelsByPort?: Record<string, number[]>; updatedAt: string };
 const panel = layoutJson as unknown as PanelLayout;
 const assets = import.meta.glob<string>("../../../../api/src/modules/amx/assets/*", { eager: true, query: "?url", import: "default" });
 const imageUrl = (name?: string) => name ? assets[`../../../../api/src/modules/amx/assets/${name}`] : undefined;
@@ -97,6 +97,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [basePageName, setBasePageName] = useState("Home");
   const [overlayPages, setOverlayPages] = useState<string[]>([]);
   const [selectedRoom, setSelectedRoom] = useState("");
+  const [activePanelChannels, setActivePanelChannels] = useState<Record<string, number[]>>({});
   const [busy, setBusy] = useState("");
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
@@ -138,6 +139,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
         const state = await readResponse<ControllerState>(response);
         if (active) {
           setSelectedRoom(state.currentRoom ?? "");
+          setActivePanelChannels(state.channelsByPort ?? { "1": state.channels });
           setControllerStatusError("");
         }
       } catch (error) {
@@ -335,7 +337,10 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       && object.height === panel.project.screen.height && !object.channel && !object.pageFlip) return null;
     const activeRoomState = page.name === "Home" && typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
     const activeModeState = page.name === "Modus" && selectedModeChannel === object.channel;
-    const state = stateFor(object, activeRoomState || activeModeState);
+    const feedbackPort = object.channelPort && object.channelPort > 0 ? object.channelPort : 1;
+    const activePanelState = object.hitStyle === "passThru" && typeof object.channel === "number"
+      && (activePanelChannels[String(feedbackPort)] ?? []).includes(object.channel);
+    const state = stateFor(object, activeRoomState || activeModeState || activePanelState);
     const baseText = labelFor(object, state);
     const levelValue = object.type === "bargraph" && typeof object.level === "number" ? levelValues[String(object.level)] : undefined;
     const low = object.rangeLow ?? 0;
@@ -354,7 +359,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     if (page.name === "Modus" && /^Betriebsmodus/.test(baseText)) text = selectedRoom ? `Betriebsmodus "${selectedRoom}"` : "Betriebsmodus";
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
-    const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
+    const button = object.type === "general" && object.hitStyle !== "passThru" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
     const port = portForObject(page, object);
     const isAudioSourceHeader = /^(Kanzel|Ambient|Chor Summe|Stativ Mik \d+|Drahtlos \d+)$/i.test(object.name.trim());
     const background = isAudioSourceHeader ? "#000" : toCssColor(state?.fontColor) ?? toCssColor(state?.backgroundColor);
