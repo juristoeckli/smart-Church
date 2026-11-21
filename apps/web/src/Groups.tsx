@@ -5,6 +5,7 @@ import { formatUserDate } from "./date-format";
 import { getGroupAttendance, groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type GroupAttendanceEntry as AttendanceEntry, type GroupAttendanceSnapshot, type CompletionFeedbackDraft } from "./group-attendance";
 import { GroupMeetingCompletion } from "./GroupMeetingCompletion";
 import { GroupAttendanceReport } from "./GroupAttendanceReport";
+import type { DirectorySearchNavigation } from "./module-registry";
 import { getActiveLanguage, translate } from "./i18n";
 import { translateModuleMessage } from "./modules/translations";
 
@@ -91,7 +92,7 @@ function GroupTypeHistory({ departmentId, groupId, groupType }: { departmentId: 
   </details>;
 }
 
-export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, createRequestId = 0, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; createRequestId?: number; onNavigationHandled?: (requestId: number) => void }) {
+export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, directorySearch: directorySearchNavigation, createRequestId = 0, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; directorySearch?: DirectorySearchNavigation; createRequestId?: number; onNavigationHandled?: (requestId: number) => void }) {
   const [groups, setGroups] = useState<(ChurchGroup & { isMyGroup?: boolean })[]>([]);
   const [loadedDepartmentId, setLoadedDepartmentId] = useState("");
   const [directorySearch, setDirectorySearch] = useState("");
@@ -262,6 +263,21 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     }
     onNavigationHandled?.(navigationTarget.requestId);
   }, [navigationTarget, groups, loading, onNavigationHandled]);
+
+  useEffect(() => {
+    if (!directorySearchNavigation) return;
+    setDirectorySearch(directorySearchNavigation.query);
+    setStatusFilter("active");
+    setGroupTypeFilter("");
+    setSourceFilter("all");
+    setMyGroupsOnly(false);
+    setSelectedSavedViewId("");
+    setSavedViewName("");
+    setSelectedId("");
+    setDetailsGroup(null);
+    setEditing(false);
+    directorySearchNavigation.onHandled(directorySearchNavigation.requestId);
+  }, [directorySearchNavigation]);
 
   useEffect(() => {
     if (!createRequestId || !canManage) return;

@@ -11,6 +11,10 @@ type Categories = { people: SearchResult[]; groups: SearchResult[]; wiki: Search
 type SearchResponse = { isIdQuery: boolean; canSearchPeople: boolean; categories: Categories };
 type QuickCreateType = "person" | "group" | "wiki";
 type QuickCreateAction = { type: QuickCreateType; label: string; description: string };
+export type FullSearchDestination = "people" | "groups" | "wiki" | "songs";
+const fullSearchLabels: Record<FullSearchDestination, string> = {
+  people: "Search all People", groups: "Search all Groups", wiki: "Search all Wiki pages", songs: "Search the song library",
+};
 function loadRecent(recentStorageKey: string): string[] {
   try {
     const value = JSON.parse(localStorage.getItem(recentStorageKey) ?? "[]");
@@ -18,23 +22,26 @@ function loadRecent(recentStorageKey: string): string[] {
   } catch { return []; }
 }
 
-export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCreateActions = [], onQuickCreate, navigationActions = [] }: {
+export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCreateActions = [], onQuickCreate, navigationActions = [], fullSearchDestinations = [], onFullSearch }: {
   departmentId: string;
   userId: string;
   onNavigateEntity?: (type: EntityType, id: string) => void;
   navigationActions?: NavigationAction[];
   quickCreateActions?: QuickCreateAction[];
   onQuickCreate?: (type: QuickCreateType) => void;
+  fullSearchDestinations?: readonly FullSearchDestination[];
+  onFullSearch?: (destination: FullSearchDestination, query: string) => void;
 }) {
   const recentStorageKey = `smart-church-global-search-recent:${departmentId}:${userId}`;
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [result, setResult] = useState<SearchResponse | null>(null);
+  const [response, setResponse] = useState<{ query: string; result: SearchResponse } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const [recent, setRecent] = useState<string[]>(() => loadRecent(recentStorageKey));
   const inputRef = useRef<HTMLInputElement>(null);
+  const result = response?.query === query.trim() ? response.result : null;
   const categories = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
     const actions: ActionResult[] = [];
@@ -63,13 +70,21 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
         { title: "Resources", items: result.categories.resources },
         { title: "Bookings", items: result.categories.bookings },
       );
+      if (!result.isIdQuery && query.trim().length >= 2 && onFullSearch) {
+        groups.push({ title: "More results", items: fullSearchDestinations
+          .filter((destination) => destination !== "people" || result.canSearchPeople)
+          .map((destination) => ({
+            id: `search:${destination}`, type: "action", title: fullSearchLabels[destination],
+            detail: query.trim(), run: () => onFullSearch(destination, query.trim()),
+          })) });
+      }
     }
     return groups;
-  }, [query, result, navigationActions, quickCreateActions, onQuickCreate]);
+  }, [query, result, navigationActions, quickCreateActions, onQuickCreate, fullSearchDestinations, onFullSearch]);
   const resultRows = categories.flatMap((category) => category.items);
 
-  function show() { setOpen(true); setQuery(""); setResult(null); setError(""); setActiveIndex(0); }
-  function hide() { setOpen(false); setQuery(""); setResult(null); setError(""); }
+  function show() { setOpen(true); setQuery(""); setResponse(null); setError(""); setActiveIndex(0); }
+  function hide() { setOpen(false); setQuery(""); setResponse(null); setError(""); }
 
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -93,7 +108,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
 
   useEffect(() => {
     const value = query.trim();
-    setResult(null); setError(""); setActiveIndex(0);
+    setResponse(null); setError(""); setActiveIndex(0);
     if (!open || (!value.startsWith("#") && value.length < 2)) { setLoading(false); return; }
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
@@ -103,7 +118,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
           if (!response.ok) throw new Error(response.status === 403 ? "You do not have access to these search results." : "Search is temporarily unavailable.");
           return await response.json() as SearchResponse;
         })
-        .then((data) => { if (!controller.signal.aborted) setResult(data); })
+        .then((data) => { if (!controller.signal.aborted) setResponse({ query: value, result: data }); })
         .catch((reason: unknown) => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Search is temporarily unavailable."); })
         .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     }, 180);
@@ -135,14 +150,15 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
     <button className="icon-button global-search-trigger" type="button" aria-label="Search records and actions" title="Search · Ctrl+K" onClick={show}><Search size={17} /><span>Search</span></button>
     {open && <div className="global-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) hide(); }}>
       <section className="global-search-dialog" role="dialog" aria-modal="true" aria-label="Global search">
-        <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search records, actions or # ID" aria-label="Search records, actions or ID" autoComplete="off" /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
+        <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search records, actions or # ID" aria-label="Search records, actions or ID" autoComplete="off" maxLength={100} /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
         <div className="global-search-body">
           {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly.</p>{quickCreateActions.length > 0 && onQuickCreate && <section className="global-search-quick-create"><strong>Quick create</strong>{quickCreateActions.map((action) => <button type="button" key={action.type} onClick={() => { hide(); onQuickCreate(action.type); }}><span><b>{action.label}</b><small>{action.description}</small></span></button>)}</section>}{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
           {query.trim() && !query.trim().startsWith("#") && query.trim().length < 2 && <p className="global-search-hint">Type at least two characters, or enter # followed by a record ID.</p>}
           {loading && <p className="global-search-status" role="status">Searching…</p>}
           {error && <p className="global-search-status global-search-error" role="alert">{error}</p>}
           {categories.map((category, index) => <SearchCategory key={category.title} {...category} activeIndex={activeIndex} onOpen={navigate} offset={categories.slice(0, index).reduce((total, previous) => total + previous.items.length, 0)} />)}
-          {result && !resultRows.length && <p className="global-search-status">No visible records or actions match this search.</p>}
+          {result && !categories.some((category) => category.title !== "More results" && category.items.length > 0)
+            && <p className="global-search-status">No suggested records or actions match this search.</p>}
         </div>
         <footer className="global-search-footer"><span>↑↓ Navigate</span><span>Enter Open</span><span>Esc Close</span></footer>
       </section>

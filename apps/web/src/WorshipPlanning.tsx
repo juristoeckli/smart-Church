@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ArrowDown, ArrowUp, Music2, Plus, Search, Trash2, X } from "lucide-react";
 import type { ServicePlanItem, ServicePlanTemplate, WorshipSong, WorshipSongArrangement } from "@smart-church/contracts";
 import { getActiveLanguage, translate } from "./i18n";
+import type { DirectorySearchNavigation } from "./module-registry";
 import { translateModuleMessage } from "./modules/translations";
 
 type Tab = "songs" | "plans";
@@ -13,7 +14,7 @@ const emptySong = (): SongDraft => ({ title: "", authors: "", defaultKey: "", no
 const emptyPlan = (): PlanDraft => ({ name: "", description: "", positions: [], items: [], active: true });
 const localizedError = (message: string) => translateModuleMessage("core-events", getActiveLanguage(), message);
 
-export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, onNotice, selectedSongId, selectedSongRequestId, onSelectedSongHandled }: { departmentId: string; canManage: boolean; onClose: () => void; onChanged: () => void; onNotice: (message: string) => void; selectedSongId?: string; selectedSongRequestId?: number; onSelectedSongHandled?: (requestId: number) => void }) {
+export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, onNotice, selectedSongId, directorySearch, selectedSongRequestId, onSelectedSongHandled }: { departmentId: string; canManage: boolean; onClose: () => void; onChanged: () => void; onNotice: (message: string) => void; selectedSongId?: string; directorySearch?: DirectorySearchNavigation; selectedSongRequestId?: number; onSelectedSongHandled?: (requestId: number) => void }) {
   const [tab, setTab] = useState<Tab>("songs");
   const [songs, setSongs] = useState<WorshipSong[]>([]);
   const [plans, setPlans] = useState<ServicePlanTemplate[]>([]);
@@ -62,6 +63,16 @@ export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, o
     handledSongRequestId.current = selectedSongRequestId;
     onSelectedSongHandled?.(selectedSongRequestId);
   }, [selectedSongId, selectedSongRequestId, loading, songs, onSelectedSongHandled]);
+
+  useEffect(() => {
+    if (!directorySearch) return;
+    setTab("songs");
+    setSearch(directorySearch.query);
+    setLinkedSongId("");
+    setSongDraft(null);
+    setPlanDraft(null);
+    directorySearch.onHandled(directorySearch.requestId);
+  }, [directorySearch]);
 
   const filteredSongs = useMemo(() => {
     const value = search.trim().toLocaleLowerCase();

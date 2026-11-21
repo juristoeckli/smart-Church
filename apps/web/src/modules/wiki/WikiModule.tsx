@@ -32,13 +32,14 @@ function headingFingerprint(title: string) {
   return hash.toString(16).padStart(16, "0");
 }
 
-export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime, state, onNavigateEntity }: ModuleContext) {
+export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime, state, directorySearch, onNavigateEntity }: ModuleContext) {
   const editor = useRef<HTMLDivElement>(null);
   const editorRange = useRef<Range | null>(null);
   const filePicker = useRef<HTMLInputElement>(null);
   const sharedPageOpened = useRef(false);
   const sharedHeading = useRef<{ pageId: string; id: string } | null>(null);
   const initialNavigationState = useRef(state);
+  const directorySearchGeneration = useRef(0);
   const [categories, setCategories] = useState<Category[]>([]);
   const [pages, setPages] = useState<WikiPage[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
@@ -157,17 +158,20 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   }
 
   async function refresh(keepPageId = selectedPage?.id, nextStatus: "active" | "archived" = status, sharedPageId?: string) {
+    const generation = directorySearchGeneration.current;
     setError("");
     try {
       const [nextCategories, nextPages] = await Promise.all([
         api<Category[]>(`/api/modules/wiki/categories?status=${categoryStatus}`),
         api<WikiPage[]>(`/api/modules/wiki/pages?status=${nextStatus}${search.trim() ? `&search=${encodeURIComponent(search.trim())}` : ""}`),
       ]);
-      if (canManage) setGroups(await api<GroupOption[]>("/api/modules/wiki/groups"));
+      const nextGroups = canManage ? await api<GroupOption[]>("/api/modules/wiki/groups") : null;
+      if (generation !== directorySearchGeneration.current) return;
+      if (nextGroups) setGroups(nextGroups);
       setCategories(nextCategories); setPages(nextPages);
       const nextId = sharedPageId ?? (nextPages.some((page) => page.id === keepPageId) ? keepPageId : nextPages.find((page) => page.isHomepage)?.id ?? nextPages[0]?.id);
       if (nextId) await openPage(nextId); else { setSelectedPage(null); setLinks([]); setAttachedFiles([]); }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not load Wiki pages."); }
+    } catch (reason) { if (generation === directorySearchGeneration.current) setError(reason instanceof Error ? reason.message : "Could not load Wiki pages."); }
   }
 
   async function copyPageLink(pageId: string, headingId?: string) {
@@ -186,18 +190,21 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     }
   }
   async function openPage(id: string, visited = new Set<string>()) {
+    const generation = directorySearchGeneration.current;
     if (visited.has(id)) { setError("This Wiki redirect leads to a loop."); return; }
     visited.add(id);
     try {
       const detail = await api<WikiPage>(`/api/modules/wiki/pages/${id}`);
+      if (generation !== directorySearchGeneration.current) return;
       if (!canManage && detail.redirectPageId) { await openPage(detail.redirectPageId, visited); return; }
       setComparison(null);
       setSelectedPage(detail); setTitleDraft(detail.title); setCategoryDraft(detail.categoryId); setRedirectDraft(detail.redirectPageId ?? ""); setAudienceDraft(detail.audience ?? "location"); setAudienceGroupIdDraft(detail.audienceGroupId ?? ""); setLinks(detail.links ?? []); setAttachedFiles(detail.files ?? []);
       if (editor.current) editor.current.innerHTML = detail.contentHtml;
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not open Wiki page."); }
+    } catch (reason) { if (generation === directorySearchGeneration.current) setError(reason instanceof Error ? reason.message : "Could not open Wiki page."); }
   }
 
   useEffect(() => {
+    if (directorySearch) return;
     if (state === initialNavigationState.current && new URLSearchParams(window.location.search).has("wikiPage")) return;
     const match = /^wiki-page:([a-z0-9-]{1,80}):\d+$/i.exec(state);
     if (!match) return;
@@ -211,6 +218,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   }, [state]);
 
   useEffect(() => {
+    if (directorySearch) return;
     if (state === initialNavigationState.current && new URLSearchParams(window.location.search).has("wikiPage")) return;
     if (!/^wiki-create:\d+$/.test(state) || !canManage) return;
     setStatus("active"); setSearch(""); setSelectedCategoryId(""); setSelectedPage(null); setEditing(false);
@@ -219,6 +227,25 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     if (categoryId) { setDraftCategory(categoryId); setCreating(true); }
     else { setDraftCategory(""); setCreating(false); setError("Create a Wiki category before creating a page."); }
   }, [state, canManage, categories]);
+
+  useEffect(() => {
+    if (!directorySearch) return;
+    directorySearchGeneration.current += 1;
+    sharedPageOpened.current = true;
+    sharedHeading.current = null;
+    setStatus("active");
+    setCategoryStatus("active");
+    setSearch(directorySearch.query);
+    setSelectedCategoryId("");
+    setBulkPageIds([]);
+    setSelectedPage(null);
+    setLinks([]);
+    setAttachedFiles([]);
+    setEditing(false);
+    setCreating(false);
+    setError("");
+    directorySearch.onHandled(directorySearch.requestId);
+  }, [directorySearch]);
 
   function followWikiEntityLink(event: MouseEvent<HTMLElement>) {
     if (editing) return;

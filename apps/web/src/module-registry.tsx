@@ -10,6 +10,8 @@ export interface ModuleRealtime {
   send: (topic: string, payload?: unknown) => boolean;
 }
 
+export type DirectorySearchNavigation = { query: string; requestId: number; onHandled: (requestId: number) => void };
+
 export interface ModuleContext {
   language: UserLanguage;
   department: DepartmentProfile;
@@ -24,6 +26,7 @@ export interface ModuleContext {
   onChatConversationOpened?: (conversationId: string) => void;
   onActiveChatChange?: (conversationId: string | null) => void;
   refreshCsrfToken?: () => Promise<string>;
+  directorySearch?: DirectorySearchNavigation;
   onNavigateEntity?: (type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking", id: string) => void;
 }
 
