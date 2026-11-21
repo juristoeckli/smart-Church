@@ -8,6 +8,8 @@ import { checkInPrintFormats, checkInPrintItems, readCheckInPrintOptions, writeC
 type EventRow = { id: string; title: string; kind: string; eventDate: string; startTime: string; location: string; completedAt: string | null };
 type GroupRow = { id: string; name: string; memberCount: number; parentGroupId: string | null };
 type Attendee = { id: string; firstName: string; lastName: string; email: string | null; phone: string | null; firstTimeVisitor: boolean; checkedInAt: string | null; groups: string[]; isVisitor?: boolean; authorizedPickups: Array<{ id: string; name: string }>; previousPickupIds?: string[]; pickupRelease?: { name: string; at: string } | null };
+type RosterLayout = "full" | "groups" | "people";
+type AttendanceFilter = "all" | "awaiting" | "present" | "released";
 type IdentityCheck = "" | "photo_id" | "personally_known";
 
 // An event-specific reference for finding a roster entry. It grants no access.
@@ -40,7 +42,9 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
   const rosterReady = Boolean(eventId && groupIds.length && loadedScope === rosterScope);
   const currentPrintScope = useRef({ key: rosterScope, canManage, stationScope });
   currentPrintScope.current = { key: rosterScope, canManage, stationScope };
-  const [query, setQuery] = useState(""); const [presentOnly, setPresentOnly] = useState(false); const [sort, setSort] = useState<"name" | "group" | "present">("name"); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  const [layout, setLayout] = useState<RosterLayout>("full");
+  const [attendanceFilter, setAttendanceFilter] = useState<AttendanceFilter>("all");
+  const [query, setQuery] = useState(""); const [sort, setSort] = useState<"name" | "group" | "present">("name"); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   const reloadBase = useCallback(async () => {
     const response = await fetch("/api/modules/check-in/bootstrap", { credentials: "include", headers: { "x-department-id": departmentId } }); const data = await response.json();
     if (!response.ok) throw new Error(data.error ?? "Could not load meetings."); setEvents(data.events); setGroups(data.groups); setHierarchyAvailable(Boolean(data.hierarchyAvailable)); setCanManage(Boolean(data.canManage)); setCanAddVisitor(Boolean(data.canAddVisitor)); if (!data.hierarchyAvailable) setIncludeChildGroups(false);
@@ -68,8 +72,30 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
     return () => { unsubscribe(); unsubscribeReconnect(); };
   }, [realtime, reloadBase, reloadRoster]);
   useEffect(() => { setCodeQuery(""); setStationScope(null); setPickupEditor(null); setReleaseAttendee(null); }, [rosterScope]);
-  const normalizedCode = codeQuery.trim().toUpperCase();
-  const shown = useMemo(() => attendees.filter((person) => rosterReady && (!normalizedCode || deskCode(departmentId, eventId, person.id) === normalizedCode) && (!presentOnly || Boolean(person.checkedInAt && !person.pickupRelease)) && `${person.firstName} ${person.lastName} ${person.groups.join(" ")}`.toLowerCase().includes(query.toLowerCase())).sort((a,b) => sort === "group" ? a.groups.join().localeCompare(b.groups.join()) || a.lastName.localeCompare(b.lastName) : sort === "present" ? Number(Boolean(b.checkedInAt))-Number(Boolean(a.checkedInAt)) || a.lastName.localeCompare(b.lastName) : a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName)), [attendees, presentOnly, query, sort, rosterReady, normalizedCode, departmentId, eventId]);
+  const normalizedCode = canManage ? codeQuery.trim().toUpperCase() : "";
+  const shown = useMemo(() => {
+    if (!rosterReady) return [];
+    const needle = query.trim().toLocaleLowerCase();
+    const matching = attendees.filter((person) => {
+      // A desk reference is used for pickup. Arrival filters and name search must not hide its match.
+      if (normalizedCode) return deskCode(departmentId, eventId, person.id) === normalizedCode;
+      const present = Boolean(person.checkedInAt && !person.pickupRelease);
+      if (attendanceFilter === "awaiting" && (person.checkedInAt || person.pickupRelease)) return false;
+      if (attendanceFilter === "present" && !present) return false;
+      if (attendanceFilter === "released" && !person.pickupRelease) return false;
+      return `${person.firstName} ${person.lastName} ${person.groups.join(" ")}`.toLocaleLowerCase().includes(needle);
+    });
+    return matching.sort((a, b) => {
+      if (sort === "group") {
+        const groupOrder = a.groups.join().localeCompare(b.groups.join());
+        if (groupOrder) return groupOrder;
+      } else if (sort === "present") {
+        const presentOrder = Number(Boolean(b.checkedInAt && !b.pickupRelease)) - Number(Boolean(a.checkedInAt && !a.pickupRelease));
+        if (presentOrder) return presentOrder;
+      }
+      return a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName);
+    });
+  }, [attendees, attendanceFilter, query, sort, rosterReady, normalizedCode, departmentId, eventId]);
   const mark = async (person: Attendee, present: boolean) => {
     if (!rosterReady || !canManage) return null;
     setBusy(true); setError("");
@@ -167,7 +193,9 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       setBusy(false);
     }
   }
-  const selected = events.find((e) => e.id === eventId); const presentCount = attendees.filter((p) => p.checkedInAt && !p.pickupRelease).length;
+  const selected = events.find((e) => e.id === eventId);
+  const selectedGroupNames = groups.filter((group) => groupIds.includes(group.id)).map((group) => group.name);
+  const activeLayout = !selected ? "full" : layout === "people" && !groupIds.length ? "groups" : layout; const presentCount = attendees.filter((p) => p.checkedInAt && !p.pickupRelease).length;
   const complete = Boolean(selected?.completedAt);
   const toggleComplete = async () => {
     if (!eventId) return;
@@ -284,7 +312,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
     return <main className="checkin-module">
       <header className="checkin-heading">
         <div><h1>Check-in station</h1><p>{selected?.title} · {presentCount} of {attendees.length} present</p></div>
-        <button type="button" className="checkin-print" onClick={() => { setStationScope(null); setQuery(""); }}>Exit station</button>
+        <button type="button" className="checkin-print" onClick={() => { setStationScope(null); setQuery(""); setCodeQuery(""); }}>Exit station</button>
       </header>
       {error && <div className="checkin-error" role="alert">{error}</div>}
       {complete && <p>Meeting check-in completed.</p>}
@@ -314,15 +342,50 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
   }
 
   return <main className="checkin-module">
-    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a service event and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions">{canManageGroupAttendance && <button type="button" className="checkin-print" onClick={() => setGroupAttendanceOpen(true)}>Group meeting attendance</button>}{canManage && <button type="button" className="checkin-print" disabled={!rosterReady || busy || visitorBusy} onClick={() => { setQuery(""); setCodeQuery(""); setPresentOnly(false); setStationScope(rosterScope); }}>Open check-in station</button>}<button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup pairs</button>}</div></header>
+    <header className="checkin-heading"><div><p className="checkin-eyebrow">WELCOME DESK</p><h1>Check-in</h1><p>Choose a service event and groups to build a shared attendee roster.</p></div><div className="checkin-print-actions">{canManageGroupAttendance && <button type="button" className="checkin-print" onClick={() => setGroupAttendanceOpen(true)}>Group meeting attendance</button>}{canManage && <button type="button" className="checkin-print" disabled={!rosterReady || busy || visitorBusy} onClick={() => { setQuery(""); setCodeQuery(""); setAttendanceFilter("all"); setStationScope(rosterScope); }}>Open check-in station</button>}<button type="button" className="checkin-print" onClick={() => printRoster("labels")} disabled={!rosterReady || !shown.length}><Printer size={17}/> Print name labels</button>{canManage && <button type="button" className="checkin-print" onClick={() => printRoster("pickup")} disabled={!rosterReady || !presentForPickup.length}><Printer size={17}/> Print pickup pairs</button>}</div></header>
     {error && <div className="checkin-error" role="alert">{error}</div>}
     {printOptionsPanel}
-    <section className="checkin-setup"><label>Meeting<select value={eventId} onChange={(e) => setEventId(e.target.value)}><option value="">Select a meeting…</option>{events.map((event) => <option value={event.id} key={event.id}>{event.eventDate} · {event.startTime.slice(0,5)} · {event.title}{event.completedAt ? " · completed" : ""}</option>)}</select></label>
-      <fieldset><legend>Groups and age subgroups</legend><div className="checkin-groups">{groups.map((group) => <label key={group.id} className={groupIds.includes(group.id) ? "selected" : ""}><input type="checkbox" checked={groupIds.includes(group.id)} onChange={() => setGroupIds((prev) => prev.includes(group.id) ? prev.filter((id) => id !== group.id) : [...prev, group.id])}/><span>{group.parentGroupId ? "↳ " : ""}{group.name}</span><small>{group.memberCount}</small></label>)}</div>{hierarchyAvailable&&<label className="checkin-descendant-option"><input type="checkbox" checked={includeChildGroups} onChange={e=>setIncludeChildGroups(e.target.checked)}/> Include members of child groups</label>}</fieldset>
-      {selected && <p className="checkin-event-meta">{selected.location} <span>·</span> {selected.kind}</p>}
+    <div className="checkin-view-controls">
+      <label>Roster layout<select value={activeLayout} onChange={(event) => setLayout(event.target.value as RosterLayout)}>
+        <option value="full">Meetings, groups and people</option>
+        <option value="groups" disabled={!eventId}>Groups and people</option>
+        <option value="people" disabled={!eventId || !groupIds.length}>People only</option>
+      </select></label>
+      {activeLayout !== "full" && selected && <div className="checkin-scope-summary">
+        <strong>{selected.title}</strong>
+        <span>{selected.eventDate} · {selected.startTime.slice(0, 5)}{selected.location ? " · " + selected.location : ""}</span>
+        {activeLayout === "people" && <span>{selectedGroupNames.join(" · ")}{includeChildGroups ? " · includes child groups" : ""}</span>}
+      </div>}
+    </div>
+    {activeLayout !== "people" && <section className="checkin-setup">
+      {activeLayout === "full" && <label>Meeting<select value={eventId} onChange={(e) => setEventId(e.target.value)}>
+        <option value="">Select a meeting…</option>{events.map((event) => <option value={event.id} key={event.id}>
+          {event.eventDate} · {event.startTime.slice(0, 5)} · {event.title}{event.completedAt ? " · completed" : ""}
+        </option>)}
+      </select></label>}
+      <fieldset><legend>Groups and age subgroups</legend><div className="checkin-groups">{groups.map((group) =>
+        <label key={group.id} className={groupIds.includes(group.id) ? "selected" : ""}>
+          <input type="checkbox" checked={groupIds.includes(group.id)} onChange={() => setGroupIds((previous) => previous.includes(group.id) ? previous.filter((id) => id !== group.id) : [...previous, group.id])} />
+          <span>{group.parentGroupId ? "↳ " : ""}{group.name}</span><small>{group.memberCount}</small>
+        </label>)}</div>
+        {hierarchyAvailable && <label className="checkin-descendant-option"><input type="checkbox" checked={includeChildGroups} onChange={(event) => setIncludeChildGroups(event.target.checked)} /> Include members of child groups</label>}
+      </fieldset>
+      {activeLayout === "full" && selected && <p className="checkin-event-meta">{selected.location} <span>·</span> {selected.kind}</p>}
+    </section>}
+    <section className="checkin-toolbar">
+      <strong><Users size={17}/> {rosterReady ? `${presentCount} of ${attendees.length} present` : "Attendees"}</strong>
+      <label className="checkin-search"><Search size={17}/><input aria-label="Search people or groups" placeholder="Search people or groups" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+      <label className="checkin-sort">Sort <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
+        <option value="name">Name</option><option value="group">Group</option><option value="present">Present first</option>
+      </select><ChevronDown size={14}/></label>
+      <label className="checkin-sort">Attendance <select value={attendanceFilter} onChange={(event) => setAttendanceFilter(event.target.value as AttendanceFilter)}>
+        <option value="all">All attendees</option><option value="awaiting">Not arrived</option><option value="present">Present now</option><option value="released">Released</option>
+      </select><ChevronDown size={14}/></label>
+      {canManage && rosterReady && <label className="checkin-search"><span>Desk code</span><input aria-label="Find attendee by desk code" placeholder="8-character code" value={codeQuery} onChange={(event) => setCodeQuery(event.target.value)} maxLength={8} autoComplete="off" spellCheck={false} /></label>}
+      {canAddVisitor && eventId && groupIds.length > 0 && <button className="checkin-pickup-edit" type="button" onClick={() => setVisitorDialogOpen(true)} disabled={busy || visitorBusy}><UserPlus size={15}/> Add visitor</button>}
     </section>
-    <section className="checkin-toolbar"><strong><Users size={17}/> {presentCount} of {attendees.length} present</strong><label className="checkin-search"><Search size={17}/><input placeholder="Search people or groups" value={query} onChange={(e) => setQuery(e.target.value)}/></label><label className="checkin-sort">Sort <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}><option value="name">Name</option><option value="group">Group</option><option value="present">Present first</option></select><ChevronDown size={14}/></label><label className="checkin-present"><input type="checkbox" checked={presentOnly} onChange={(e) => setPresentOnly(e.target.checked)}/> Present only</label>{canManage && rosterReady && <label className="checkin-search"><span>Desk code</span><input aria-label="Find attendee by desk code" placeholder="8-character code" value={codeQuery} onChange={(e) => setCodeQuery(e.target.value)} maxLength={8} autoComplete="off" spellCheck={false}/></label>}{canAddVisitor && eventId && groupIds.length > 0 && <button className="checkin-pickup-edit" type="button" onClick={() => setVisitorDialogOpen(true)} disabled={busy || visitorBusy}><UserPlus size={15}/> Add visitor</button>}</section>
-    {!eventId || !groupIds.length ? <div className="checkin-empty">Select a meeting and at least one group to see its roster.</div> : <div className="checkin-roster">{shown.map((person) => <article className={`checkin-person ${person.checkedInAt ? "is-present" : ""}`} key={person.id}><div className="checkin-avatar">{person.firstName.slice(0,1)}{person.lastName.slice(0,1)}</div><div className="checkin-person-info"><strong>{person.firstName} {person.lastName}</strong><small>{person.groups.join(" · ")}</small>{person.phone && <small>{person.phone}</small>}{person.authorizedPickups.length > 0 && <small>Authorized pickup: {person.authorizedPickups.map((item) => item.name).join(", ")}</small>}</div>{releaseControl(person)}{canManage && !person.isVisitor && !person.pickupRelease && <button className="checkin-pickup-edit" type="button" onClick={() => openPickupEditor(person)}>Pickup contacts</button>}<button className={person.checkedInAt ? "checkin-reset" : "checkin-mark"} disabled={!canManage || busy || complete || Boolean(person.pickupRelease)} onClick={() => mark(person, !person.checkedInAt)}>{person.checkedInAt ? <><RotateCcw size={15}/> Undo</> : <><Check size={16}/> Present</>}</button></article>)}{!shown.length && <div className="checkin-empty">No attendees match this view.</div>}</div>}
+    {normalizedCode && <p className="checkin-lookup-note">Searching by desk code across this meeting roster.</p>}
+    {!eventId || !groupIds.length ? <div className="checkin-empty">Select a meeting and at least one group to see its roster.</div> : !rosterReady ? <div className="checkin-empty" role="status">Loading the roster…</div> : <div className="checkin-roster">{shown.map((person) => <article className={`checkin-person ${person.checkedInAt ? "is-present" : ""}`} key={person.id}><div className="checkin-avatar">{person.firstName.slice(0,1)}{person.lastName.slice(0,1)}</div><div className="checkin-person-info"><strong>{person.firstName} {person.lastName}</strong><small>{person.groups.join(" · ")}</small>{person.phone && <small>{person.phone}</small>}{person.authorizedPickups.length > 0 && <small>Authorized pickup: {person.authorizedPickups.map((item) => item.name).join(", ")}</small>}</div>{releaseControl(person)}{canManage && !person.isVisitor && !person.pickupRelease && <button className="checkin-pickup-edit" type="button" onClick={() => openPickupEditor(person)}>Pickup contacts</button>}<button className={person.checkedInAt ? "checkin-reset" : "checkin-mark"} disabled={!canManage || busy || complete || Boolean(person.pickupRelease)} onClick={() => mark(person, !person.checkedInAt)}>{person.checkedInAt ? <><RotateCcw size={15}/> Undo</> : <><Check size={16}/> Present</>}</button></article>)}{!shown.length && <div className="checkin-empty">No attendees match this view.</div>}</div>}
     <footer className="checkin-footer"><span>{complete ? `Meeting check-in completed${selected?.completedAt ? ` · ${new Date(selected.completedAt).toLocaleString()}` : ""}` : "Attendance is saved as people arrive."}</span><button onClick={() => void toggleComplete()} disabled={!eventId || busy}>{complete ? "Reopen check-in" : "Complete check-in"}</button></footer>
     {pickupEditor && <div className="checkin-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setPickupEditor(null)}><section className="checkin-pickup-dialog" role="dialog" aria-modal="true" aria-labelledby="checkin-pickup-title"><header><div><h2 id="checkin-pickup-title">Authorized pickup contacts</h2><p>{pickupEditor.firstName} {pickupEditor.lastName} · {selected?.title}</p></div><button type="button" onClick={() => setPickupEditor(null)} aria-label="Close">×</button></header><p>Choose roster contacts a parent or guardian has authorized to collect this child at this meeting. The app records which staff member confirmed the list and when.</p><div className="checkin-pickup-options">{attendees.filter((person) => person.id !== pickupEditor.id && !person.isVisitor).map((person) => <label key={person.id}><input type="checkbox" checked={pickupContactIds.includes(person.id)} onChange={() => setPickupContactIds((current) => current.includes(person.id) ? current.filter((id) => id !== person.id) : [...current, person.id])} /><span>{person.firstName} {person.lastName}{pickupEditor.previousPickupIds?.includes(person.id) ? " · previous pickup contact" : ""}</span></label>)}</div><label className="checkin-guardian-confirm"><input type="checkbox" checked={guardianConfirmed} onChange={(event) => setGuardianConfirmed(event.target.checked)} /><span>I confirmed this pickup list with the parent or guardian.</span></label><div className="checkin-pickup-actions"><button type="button" onClick={() => setPickupEditor(null)}>Cancel</button><button type="button" disabled={busy || !guardianConfirmed} onClick={() => void savePickups()}>Save pickup contacts</button></div></section></div>}
     {visitorDialogOpen && <div className="checkin-dialog-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setVisitorDialogOpen(false)}><form className="checkin-pickup-dialog" role="dialog" aria-modal="true" aria-labelledby="checkin-visitor-title" onSubmit={(event) => void addVisitor(event)}><header><div><h2 id="checkin-visitor-title">Add a walk-in visitor</h2><p>{selected?.title} · {selected?.eventDate}</p></div><button type="button" onClick={() => setVisitorDialogOpen(false)} aria-label="Close">×</button></header><p>Creates a visitor contact in this location and checks them in as a first-time visitor. Possible duplicate people are blocked.</p><label>First name<input name="firstName" required maxLength={80} autoFocus /></label><label>Last name<input name="lastName" required maxLength={80} /></label><label>Email <span className="optional-label">Optional</span><input name="email" type="email" maxLength={254} /></label><label>Phone <span className="optional-label">Optional</span><input name="phone" type="tel" maxLength={40} /></label><div className="checkin-pickup-actions"><button type="button" onClick={() => setVisitorDialogOpen(false)}>Cancel</button><button type="submit" disabled={visitorBusy || busy}><UserPlus size={15}/> {visitorBusy ? "Adding…" : "Add and check in"}</button></div></form></div>}
