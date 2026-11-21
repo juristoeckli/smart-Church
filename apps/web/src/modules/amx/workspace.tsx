@@ -10,7 +10,7 @@ type PanelObject = { id: number; type: string; name: string; x: number; y: numbe
 type PanelPage = { id: number; name: string; kind: string; group?: string | null; canvas: { x?: number | null; y?: number | null; width: number; height: number }; objects: PanelObject[] };
 type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }> };
 type Action = { id: string; name: string; channel: number; port?: number };
-type Settings = { host: string; port: number };
+type Status = { configured: boolean };
 const panel = layoutJson as unknown as PanelLayout;
 const assets = import.meta.glob<string>("../../../../api/src/modules/amx/assets/*", { eager: true, query: "?url", import: "default" });
 const imageUrl = (name?: string) => name ? assets[`../../../../api/src/modules/amx/assets/${name}`] : undefined;
@@ -61,7 +61,7 @@ function labelFor(object: PanelObject) {
 }
 
 export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
-  const [settings, setSettings] = useState<Settings | null>(null);
+  const [status, setStatus] = useState<Status | null>(null);
   const [pageName, setPageName] = useState("Home");
   const [selectedRoom, setSelectedRoom] = useState("");
   const [backStack, setBackStack] = useState<string[]>([]);
@@ -72,13 +72,13 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [popupGroup, setPopupGroup] = useState("");
   const currentPage = findPage(pageName) ?? findPage("Home")!;
   const pageScale = useMemo(() => ({ width: "100%", aspectRatio: `${panel.project.screen.width}/${panel.project.screen.height}` }), []);
-  const configured = Boolean(settings?.host);
+  const configured = Boolean(status?.configured);
 
   useEffect(() => {
     const controller = new AbortController();
-    void fetch("/api/modules/amx/settings", { headers: { "x-department-id": departmentId }, signal: controller.signal })
-      .then((response) => readResponse<Settings>(response)).then(setSettings)
-      .catch((error: unknown) => { if (!controller.signal.aborted) { setFeedback(error instanceof Error ? error.message : "Could not load AMX controller settings."); setFailed(true); } });
+    void fetch("/api/modules/amx/status", { headers: { "x-department-id": departmentId }, signal: controller.signal })
+      .then((response) => readResponse<Status>(response)).then(setStatus)
+      .catch((error: unknown) => { if (!controller.signal.aborted) { setFeedback(error instanceof Error ? error.message : "Could not load AMX controller status."); setFailed(true); } });
     return () => controller.abort();
   }, [departmentId]);
   useEffect(() => { const timer = window.setInterval(() => setTime(new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date())), 30_000); return () => window.clearInterval(timer); }, []);
@@ -194,7 +194,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
         {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
       </div>
     </div>
-    {!configured && settings && <p className="amx-setup-note">Enter the NetLinx master IP address under Settings → Modules → AMX to enable controls.</p>}
+    {!configured && status && <p className="amx-setup-note">A site administrator must enter the NetLinx master IP address under Settings → Modules → AMX to enable controls.</p>}
     <details className="amx-panel-map"><summary>All panel pages</summary><div>{panel.pages.filter((page) => page.kind === "subpage" && page.group === "ModusPopup").map((page) => <button key={page.id} type="button" onClick={() => navigate(page.name)}>{page.name.replaceAll("_", " · ")}</button>)}</div></details>
   </section>;
 }

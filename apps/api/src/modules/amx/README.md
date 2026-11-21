@@ -1,6 +1,6 @@
 # AMX Control
 
-AMX Control is an optional Smart-Church module and is disabled by default. Installations that use AMX pull a separate AMX module image and AMX-enabled web image; standard Smart-Church images exclude the AMX server code and browser bundle. A server administrator enables the module in **Settings → Modules**; a site administrator configures the master under **Settings → Modules → AMX**.
+AMX Control is an optional Smart-Church module and is disabled by default. Installations that use AMX pull a separate AMX module image and AMX-enabled web image; standard Smart-Church images exclude the AMX server code and browser bundle. A server administrator enables the module in **Settings → Modules**; a site administrator configures the master under **Settings → Modules → AMX**. In **Settings → People & access**, a site administrator must grant **AMX room control → Use AMX controls** to each person who should see and operate the module. Site administrators can always operate it. Only site administrators can view or change controller settings. The API enforces the same grant on status and control requests, so hiding the menu is not the only access check.
 
 The room actions use the channel mappings bundled with this integration. Enter the controller address under the AMX module settings for each installation; no site-specific IP address is shipped in the module.
 

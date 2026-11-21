@@ -51,7 +51,7 @@ function cleanSettings(input: AmxSettings): AmxSettings | null {
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
 
-  async function requireAmxAdmin(request: Parameters<typeof resolveDepartmentId>[0], reply: Parameters<typeof resolveDepartmentId>[1]) {
+  async function requireAmxDepartment(request: Parameters<typeof resolveDepartmentId>[0], reply: Parameters<typeof resolveDepartmentId>[1], requireSiteAdmin = false) {
     if (!context.activation.isEnabled()) {
       reply.code(404).send({ error: "AMX Control is not enabled for this installation." });
       return null;
@@ -60,18 +60,36 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       reply.code(503).send({ error: "The account database is unavailable." });
       return null;
     }
-    const departmentId = await resolveDepartmentId(request, reply, true);
+    const departmentId = await resolveDepartmentId(request, reply, requireSiteAdmin);
     if (!departmentId) return null;
     const enabled = await pool.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id=$1", [departmentId]);
     if (!(enabled.rows[0]?.enabled_modules ?? []).includes("amx")) {
       reply.code(404).send({ error: "AMX Control is not enabled for this location." });
       return null;
     }
+    if (!requireSiteAdmin) {
+      const membership = await pool.query<{ role: string; module_permissions: Record<string, string[]> | null }>(
+        "SELECT role,module_permissions FROM department_memberships WHERE department_id=$1 AND user_id=$2",
+        [departmentId, request.authenticatedUser?.id],
+      );
+      const access = membership.rows[0];
+      if (access?.role !== "site_admin" && !(access?.module_permissions?.amx ?? []).includes("control")) {
+        reply.code(403).send({ error: "AMX control access has not been granted for this location." });
+        return null;
+      }
+    }
     return departmentId;
   }
 
+  app.get("/api/modules/amx/status", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    return { configured: Boolean(result.rows[0]?.host) };
+  });
+
   app.get("/api/modules/amx/settings", async (request, reply) => {
-    const departmentId = await requireAmxAdmin(request, reply);
+    const departmentId = await requireAmxDepartment(request, reply, true);
     if (!departmentId) return reply;
     const result = await pool!.query("SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const row = result.rows[0] as { host: string; port: number; username: string; password_ciphertext: string } | undefined;
@@ -90,7 +108,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } } },
   }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
-    const departmentId = await requireAmxAdmin(request, reply);
+    const departmentId = await requireAmxDepartment(request, reply, true);
     if (!departmentId) return reply;
     const settings = cleanSettings(request.body);
     if (!settings) return reply.code(400).send({ error: "Enter a valid controller host, Telnet port, and existing NetLinx login (if required)." });
@@ -107,7 +125,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     schema: { body: { type: "object", additionalProperties: false, required: ["actionId"], properties: { actionId: { type: "string", minLength: 1, maxLength: 64 } } } },
   }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
-    const departmentId = await requireAmxAdmin(request, reply);
+    const departmentId = await requireAmxDepartment(request, reply);
     if (!departmentId) return reply;
     const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>("SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const storedSettings = result.rows[0];
