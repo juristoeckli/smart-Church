@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { ArrowDown, ArrowDownToLine, ArrowUp, BookOpenCheck, CircleDollarSign, FileText, Landmark, Plus, RefreshCw, Search, ShieldCheck, Users, WalletCards } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { DraftPostingReview } from "./DraftPostingReview";
-import { FinancePeriodTurnover, formatLedgerCents } from "./FinancePeriodTurnover";
+import { FinancePeriodTurnover } from "./FinancePeriodTurnover";
+import { formatLedgerCents } from "./ledger-cents";
 import { FinanceReportAccountFilter } from "./FinanceReportAccountFilter";
 import "./finance.css";
 

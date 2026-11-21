@@ -1,20 +1,12 @@
 import { useEffect, useState } from "react";
 import { getActiveLanguage } from "../../i18n";
+import { formatLedgerCents } from "./ledger-cents";
 
 type Interval = "month" | "quarter";
 type TurnoverRow = { periodStart: string; accountId: string; code: string; name: string; accountType: string; debitCents: string; creditCents: string; netCents: string };
 type TurnoverPage = { page: number; hasNext: boolean; rows: TurnoverRow[] };
 const path = "/api/modules/finance/reports/period-turnover";
 const accountTypes = ["asset", "liability", "equity", "income", "expense"] as const;
-
-export function formatLedgerCents(cents: string | number, formatter: Intl.NumberFormat) {
-  const amount = BigInt(cents);
-  const absolute = amount < 0n ? -amount : amount;
-  const whole = absolute / 100n;
-  const signedWhole = amount < 0n ? (whole === 0n ? -0 : -whole) : whole;
-  const fraction = String(absolute % 100n).padStart(2, "0");
-  return formatter.formatToParts(signedWhole).map((part) => part.type === "fraction" ? fraction : part.value).join("");
-}
 
 export function FinancePeriodTurnover({ departmentId, year, currency, canManage, exportFormat, onDownload }: {
   departmentId: string; year: string; currency: string; canManage: boolean; exportFormat: string;
