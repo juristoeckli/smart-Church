@@ -33,10 +33,14 @@ function personalize(text: string, recipient: MailingRecipient) {
   return text.replace(placeholderPattern, (_token, field: string) => values[field.trim().slice("recipient.".length)] ?? "");
 }
 
-export function prepareFormLetter(draft: LetterDraft, recipient: MailingRecipient) {
+function mailingAddressLines(recipient: MailingRecipient) {
   const address = recipient.postalAddress;
+  return [recipient.name, address.street, address.additionalLine, [address.postalCode, address.city].filter(Boolean).join(" "), address.region, address.country].filter((line): line is string => Boolean(line));
+}
+
+export function prepareFormLetter(draft: LetterDraft, recipient: MailingRecipient) {
   return {
-    address: [recipient.name, address.street, address.additionalLine, [address.postalCode, address.city].filter(Boolean).join(" "), address.region, address.country].filter((line): line is string => Boolean(line)),
+    address: mailingAddressLines(recipient),
     subject: personalize(draft.subject.trim(), recipient),
     body: personalize(draft.body.trim(), recipient),
   };
@@ -64,4 +68,29 @@ export function createFormLetterHtml(draft: LetterDraft, recipients: MailingReci
 @media print{.letter+.letter{break-before:page}}
 @media screen{html{background:#efefef}.letter{box-sizing:border-box;background:#fff;margin:1rem auto;padding:clamp(1rem,4vw,20mm);max-width:210mm;min-height:min(297mm,85vh)}}
 </style></head><body>${letters}</body></html>`;
+}
+
+export function createAddressLabelHtml(recipients: MailingRecipient[], firstPosition: number) {
+  const labelsPerSheet = 12;
+  if (!recipients.length) throw new Error("There are no recipients to print.");
+  if (!Number.isInteger(firstPosition) || firstPosition < 1 || firstPosition > labelsPerSheet) {
+    throw new Error("Choose a starting label position between 1 and 12.");
+  }
+  const labels = [
+    ...Array<string>(firstPosition - 1).fill('<div aria-hidden="true"></div>'),
+    ...recipients.map((recipient) => `<address>${mailingAddressLines(recipient).map(escapeHtml).join("<br>")}</address>`),
+  ];
+  const sheets: string[] = [];
+  for (let start = 0; start < labels.length; start += labelsPerSheet) {
+    sheets.push(`<section class="sheet">${labels.slice(start, start + labelsPerSheet).join("")}</section>`);
+  }
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Mailing address labels</title><style>
+@page{size:A4;margin:10mm}html{color:#111;background:#fff;font:9pt/1.25 system-ui,sans-serif}body{margin:0}
+.sheet{display:grid;grid-template-columns:repeat(2,94mm);grid-auto-rows:minmax(44mm,auto);gap:2mm;align-items:stretch}
+.sheet address{box-sizing:border-box;padding:3mm 4mm;font-style:normal;overflow-wrap:anywhere;break-inside:avoid}
+@media print{.sheet+.sheet{break-before:page}}
+</style></head><body>${sheets.join("\n")}</body></html>`;
 }

@@ -1,7 +1,9 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import type { ModuleContext } from "../../module-registry";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
 import { FormLetterComposer } from "./FormLetterComposer";
+import { createAddressLabelHtml } from "./form-letters";
+import { loadRecipients, printMailingDocument } from "./mailing-documents";
 
 type PersonRequest = <T>(url: string, init?: RequestInit) => Promise<T>;
 type HouseholdMember = { id: string; name: string; archived: boolean };
@@ -146,6 +148,41 @@ export function MailingRecipientsExport({ contactIds, departmentId }: { contactI
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<{ error: boolean; message: string } | null>(null);
 
+  const [firstPosition, setFirstPosition] = useState(1);
+  const labelPrint = useRef<AbortController | null>(null);
+  const selectionKey = JSON.stringify([departmentId, contactIds, combine, skipIncomplete, firstPosition]);
+  useLayoutEffect(() => () => labelPrint.current?.abort(), [selectionKey]);
+
+  async function printLabels() {
+    const controller = new AbortController();
+    labelPrint.current?.abort();
+    labelPrint.current = controller;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const { recipients, skipped } = await loadRecipients({
+        contactIds, departmentId, combineHouseholds: combine, skipIncomplete,
+      }, controller.signal);
+      if (controller.signal.aborted) return;
+      if (!recipients.length) {
+        setFeedback({ error: false, message: skipped
+          ? `No labels to print. ${skipped} recipients skipped because of incomplete addresses.`
+          : "No labels to print for the selected people." });
+        return;
+      }
+      await printMailingDocument(createAddressLabelHtml(recipients, firstPosition), "Printable mailing address labels", controller.signal);
+      if (!controller.signal.aborted) {
+        setFeedback({ error: false, message: `${recipients.length} labels prepared${skipped ? `, ${skipped} skipped because of incomplete addresses` : ""}.` });
+      }
+    } catch (reason) {
+      if (!controller.signal.aborted) {
+        setFeedback({ error: true, message: reason instanceof Error ? reason.message : "Could not print address labels." });
+      }
+    } finally {
+      if (labelPrint.current === controller) setBusy(false);
+    }
+  }
+
   async function download(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -179,6 +216,11 @@ export function MailingRecipientsExport({ contactIds, departmentId }: { contactI
       <label><input type="checkbox" checked={combine} onChange={(event) => setCombine(event.target.checked)} /> One recipient per household</label>
       <label><input type="checkbox" checked={skipIncomplete} onChange={(event) => setSkipIncomplete(event.target.checked)} /> Skip incomplete addresses</label>
       <button type="submit" disabled={busy || !contactIds.length}>Export recipients CSV</button>
+      <label>Starting label position<select value={firstPosition} onChange={(event) => setFirstPosition(Number(event.target.value))} disabled={busy}>
+        {Array.from({ length: 12 }, (_, index) => <option key={index} value={index + 1}>{index + 1}</option>)}
+      </select></label>
+      <button type="button" disabled={busy || !contactIds.length} onClick={() => void printLabels()}>Print address labels</button>
+      <small>A4, two columns by six rows, 94 x 44 mm per label. Print at actual size with headers and footers off.</small>
       {feedback && <p role={feedback.error ? "alert" : "status"}>{feedback.message}</p>}
     </form>
     <FormLetterComposer contactIds={contactIds} departmentId={departmentId} combineHouseholds={combine} skipIncomplete={skipIncomplete} />
