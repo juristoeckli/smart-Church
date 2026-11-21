@@ -12,6 +12,7 @@ type PanelLayout = { project: { screen: { width: number; height: number } }; pag
 type Action = { id: string; name: string; channel: number; port?: number };
 type Status = { configured: boolean };
 type LevelFeedback = { page: string; values: Record<string, number>; updatedAt: string };
+type ControllerState = { currentRoom: string | null; activeRooms: string[]; channels: number[]; updatedAt: string };
 const panel = layoutJson as unknown as PanelLayout;
 const assets = import.meta.glob<string>("../../../../api/src/modules/amx/assets/*", { eager: true, query: "?url", import: "default" });
 const imageUrl = (name?: string) => name ? assets[`../../../../api/src/modules/amx/assets/${name}`] : undefined;
@@ -95,7 +96,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [levelValues, setLevelValues] = useState<Record<string, number>>({});
   const [basePageName, setBasePageName] = useState("Home");
   const [overlayPages, setOverlayPages] = useState<string[]>([]);
-  const [selectedRoom, setSelectedRoom] = useState(() => window.sessionStorage.getItem("amx-selected-room") ?? "");
+  const [selectedRoom, setSelectedRoom] = useState("");
   const [busy, setBusy] = useState("");
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
@@ -125,6 +126,32 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       .catch((error: unknown) => { if (!controller.signal.aborted) { setFeedback(error instanceof Error ? error.message : "Could not load AMX controller status."); setFailed(true); } });
     return () => controller.abort();
   }, [departmentId]);
+  useEffect(() => {
+    if (!configured) return;
+    let active = true;
+    let timer = 0;
+    const controller = new AbortController();
+    const pollControllerState = async () => {
+      try {
+        const response = await fetch("/api/modules/amx/controller-state", { headers: { "x-department-id": departmentId }, signal: controller.signal });
+        const state = await readResponse<ControllerState>(response);
+        if (active) {
+          setSelectedRoom(state.currentRoom ?? "");
+          setFeedback("");
+          setFailed(false);
+        }
+      } catch (error) {
+        if (active && !controller.signal.aborted) {
+          setFeedback(error instanceof Error ? `Controller status unavailable: ${error.message}` : "Controller status unavailable.");
+          setFailed(true);
+        }
+      } finally {
+        if (active) timer = window.setTimeout(() => void pollControllerState(), 15_000);
+      }
+    };
+    void pollControllerState();
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [configured, departmentId]);
   useEffect(() => { const timer = window.setInterval(() => setTime(new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date())), 30_000); return () => window.clearInterval(timer); }, []);
 
   useEffect(() => {
@@ -212,7 +239,6 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   }
 
   function chooseRoom(room: string) {
-    window.sessionStorage.setItem("amx-selected-room", room);
     setSelectedRoom(room);
   }
 
