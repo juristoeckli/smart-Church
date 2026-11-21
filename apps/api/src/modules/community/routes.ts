@@ -46,16 +46,20 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!departmentId) return reply;
       const result = await pool!.query(
         `SELECT g.id, g.name, g.description, g.group_type, g.status, g.starts_on, g.ends_on, g.created_at, g.source_system, g.public_signup_enabled, g.public_signup_token,
+                EXISTS (SELECT 1 FROM department_memberships membership
+                  JOIN group_members own_member ON own_member.contact_id=membership.contact_id AND own_member.group_id=g.id
+                 WHERE membership.department_id=g.department_id AND membership.user_id=$2 AND own_member.status='active') AS is_my_group,
                 count(gm.contact_id)::int AS member_count,
                 COALESCE(array_agg(gm.contact_id) FILTER (WHERE gm.contact_id IS NOT NULL), ARRAY[]::uuid[]) AS member_ids,
                 COALESCE(json_agg(json_build_object('contactId',gm.contact_id,'role',gm.role,'status',gm.status,'joinedOn',gm.joined_on) ORDER BY lower(c.last_name),lower(c.first_name)) FILTER (WHERE gm.contact_id IS NOT NULL), '[]'::json) AS member_details
            FROM church_groups g LEFT JOIN group_members gm ON gm.group_id = g.id LEFT JOIN contacts c ON c.id=gm.contact_id
           WHERE g.department_id = $1 GROUP BY g.id ORDER BY lower(g.name), g.created_at`,
-        [departmentId],
+        [departmentId, request.authenticatedUser!.id],
       );
       const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
+      reply.header('cache-control', 'private, no-store');
       return result.rows.map((row) => {
-        const group = mapGroup(row);
+        const group = { ...mapGroup(row), isMyGroup: row.is_my_group === true };
         return canManageGroups ? group : (({ publicSignupToken: _token, ...safeGroup }) => safeGroup)(group);
       });
     });
