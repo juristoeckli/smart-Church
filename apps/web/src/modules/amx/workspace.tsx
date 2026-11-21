@@ -286,7 +286,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   }
 
   const renderObject = (page: PanelPage, object: PanelObject, layer: number): ReactNode => {
-    const activeRoomState = typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
+    const activeRoomState = page.name === "Home" && typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
     const activeModeState = page.name === "Modus" && selectedModeChannel === object.channel;
     const state = stateFor(object, activeRoomState || activeModeState);
     const baseText = labelFor(object, state);
@@ -321,7 +321,15 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       fontSize: font ? `${font.size / 8}cqw` : "1.75cqw",
       fontWeight: font?.subfamily.toLocaleLowerCase().includes("bold") ? 700 : 400,
       fontStyle: font?.subfamily.toLocaleLowerCase().includes("italic") ? "italic" : "normal",
-      backgroundImage: background && background !== "transparent" ? "none" : undefined,
+      backgroundImage: object.type === "general" && typeof object.channel === "number" && object.channel > 0
+        ? activeRoomState || activeModeState
+          ? "linear-gradient(180deg,#0a70bd,#004882)"
+          : background === "#d9d9d9"
+            ? "linear-gradient(180deg,#eeeeea,#c5c5bd)"
+            : background === "#e4e1c1"
+              ? "linear-gradient(180deg,#fffbd9,#f2efc9)"
+              : undefined
+        : undefined,
     };
     const bitmapSize = state?.bitmap ? bitmapDimensions[state.bitmap] : undefined;
     const bitmapStyle: CSSProperties | undefined = bitmap && bitmapSize ? {
@@ -350,7 +358,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     if (!button) return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
     const mapped = actionIndex.has(`${port}:${object.channel}`);
     const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip));
-    return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
+    return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${activeRoomState || activeModeState || state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
   };
 
   const screenStyle: CSSProperties = { ...pageScale, backgroundImage: basePageName === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
