@@ -1,0 +1,37 @@
+.group-completion-dialog {
+  width: min(calc(100vw - 40px), 550px);
+  max-height: 85vh;
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  color: var(--text, #233447);
+}
+
+.group-completion-dialog form,
+.group-completion-dialog label {
+  display: grid;
+  gap: 6px;
+}
+
+.group-completion-dialog form {
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.group-completion-dialog :is(input, textarea) {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.group-completion-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.group-completion-dialog::backdrop { background: #10223588; }

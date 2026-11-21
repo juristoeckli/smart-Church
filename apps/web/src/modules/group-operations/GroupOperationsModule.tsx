@@ -12,7 +12,7 @@ type Member = { id: string; firstName: string; lastName: string; email: string |
 type Rule = { id: string; groupId: string; groupName: string; name: string; contactStatus: "member" | "visitor"; enabled: boolean };
 type Preview = { rule: Rule; matches: Array<{ id: string; firstName: string; lastName: string; email: string | null }>; capped: boolean; applyEnabled: boolean };
 type FollowUp = { id: string; groupId: string; groupName: string; contactId: string; personName: string; assignedContactId: string | null; assignedName: string | null; subject: string; note: string; dueDate: string; status: "open" | "completed"; completedAt: string | null };
-type FeedbackMeeting = { id: string; date: string; title: string; guestCount: number | null };
+type FeedbackMeeting = { id: string; date: string; title: string; guestCount: number | null; completedAt: string | null };
 type LeaderFeedback = { answers: Record<string, string>; updatedBy: string; comment: string; guestCount: number | null };
 type FeedbackQuestion = { id: string; prompt: string; required?: boolean };
 type FeedbackTemplate = { id: string; title: string; questions: FeedbackQuestion[]; anonymousAttendeeResponses: boolean; updatedAt: string };
@@ -202,9 +202,10 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the feedback template."); }
     finally { setBusy(false); }
   }
+  const feedbackCompleted = Boolean(feedbackMeetings.find((meeting) => meeting.id === feedbackMeetingId)?.completedAt);
   async function saveMeetingFeedback(event: FormEvent) {
     event.preventDefault();
-    if (!groupId || !feedbackMeetingId || !isGroupLeader || loadedLeaderScope !== leaderScope || busy) return;
+    if (!groupId || !feedbackMeetingId || !isGroupLeader || loadedLeaderScope !== leaderScope || feedbackCompleted || busy) return;
     setBusy(true); setError("");
     try {
       await request("/api/modules/group-operations/meeting-feedback/responses", { method: "PUT", body: JSON.stringify({ groupId, meetingId: feedbackMeetingId, answers: feedbackAnswers, comment: meetingComment, guestCount: guestCount === "" ? null : Number(guestCount) }) });
@@ -287,12 +288,13 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
           <label>Meeting<select value={feedbackMeetingId} onChange={(event) => setFeedbackMeetingId(event.target.value)}><option value="">Choose meeting</option>{feedbackMeetings.map((meeting) => <option key={meeting.id} value={meeting.id}>{meeting.date}{meeting.title ? " · " + meeting.title : ""}{meeting.guestCount == null ? "" : " · Guests " + meeting.guestCount}</option>)}</select></label>
           {!feedbackMeetings.length && <p className="go-empty">Create a group meeting before recording feedback.</p>}
           {feedbackMeetingId && loadedLeaderScope === leaderScope && <form className="go-form" onSubmit={(event) => void saveMeetingFeedback(event)}>
-            <label>Guest count<input type="number" min={0} max={100000} step={1} value={guestCount} onChange={(event) => setGuestCount(event.target.value)} /></label>
-            <label>Meeting comment<textarea rows={3} maxLength={2000} value={meetingComment} onChange={(event) => setMeetingComment(event.target.value)} /></label>
+            {feedbackCompleted && <p role="status">Reopen attendance in Groups or Check-in to edit leader feedback.</p>}
+            <label>Guest count<input disabled={feedbackCompleted || busy} type="number" min={0} max={100000} step={1} value={guestCount} onChange={(event) => setGuestCount(event.target.value)} /></label>
+            <label>Meeting comment<textarea disabled={feedbackCompleted || busy} rows={3} maxLength={2000} value={meetingComment} onChange={(event) => setMeetingComment(event.target.value)} /></label>
             {feedbackTemplate && <h3>{feedbackTemplate.title}</h3>}
-            {feedbackTemplate?.questions.map((question) => <label key={question.id}>{question.prompt}<textarea rows={3} maxLength={2000} value={feedbackAnswers[question.id] ?? ""} onChange={(event) => setFeedbackAnswers((current) => ({ ...current, [question.id]: event.target.value }))} /></label>)}
+            {feedbackTemplate?.questions.map((question) => <label key={question.id}>{question.prompt}<textarea rows={3} maxLength={2000} disabled={feedbackCompleted || busy} value={feedbackAnswers[question.id] ?? ""} onChange={(event) => setFeedbackAnswers((current) => ({ ...current, [question.id]: event.target.value }))} /></label>)}
             {feedbackUpdatedBy && <small>Last saved by {feedbackUpdatedBy}.</small>}
-            <button className="button button-primary" disabled={busy}><Check size={15} /> Save leader feedback</button>
+            <button className="button button-primary" disabled={busy || feedbackCompleted}><Check size={15} /> Save leader feedback</button>
           </form>}
           {feedbackMeetingId && loadedLeaderScope !== leaderScope && <p className="go-empty" role="status">Loading meeting feedback…</p>}
         </section>

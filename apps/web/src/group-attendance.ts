@@ -30,13 +30,35 @@ export async function getGroupAttendance(meetingId: string, departmentId: string
   return { attendance: result.attendance, completedAt: result.completedAt ?? null };
 }
 
-export async function setGroupAttendanceCompletion(meetingId: string, departmentId: string, csrfToken: string, completedAt: string | null) {
+export async function setGroupAttendanceCompletion(meetingId: string, departmentId: string, csrfToken: string, completedAt: string | null, feedback?: CompletionFeedbackDraft) {
   const response = await fetch(groupAttendanceUrl(meetingId) + "/completion", {
     method: "PUT",
     headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
-    body: JSON.stringify({ completed: !completedAt, expectedCompletedAt: completedAt }),
+    body: JSON.stringify({ completed: !completedAt, expectedCompletedAt: completedAt, ...(feedback ? { feedback } : {}) }),
   });
   const result = await response.json() as { completedAt?: string | null; error?: string };
   if (!response.ok || result.completedAt === undefined) throw new Error(result.error ?? "Could not change group meeting completion.");
   return result.completedAt;
+}
+
+export type CompletionFeedbackDraft = {
+  comment?: string;
+  guestCount?: number | null;
+  answers: Record<string, string>;
+  expectedUpdatedAt: string | null;
+};
+type CompletionFeedbackForm = CompletionFeedbackDraft & {
+  title: string | null;
+  questions: { id: string; prompt: string }[];
+  comment: string;
+  guestCount: number | null;
+};
+
+export async function getGroupCompletionFeedback(meetingId: string, departmentId: string, signal?: AbortSignal) {
+  const response = await fetch(groupAttendanceUrl(meetingId) + "/completion-feedback", {
+    headers: { "x-department-id": departmentId }, signal, cache: "no-store",
+  });
+  const result = await response.json() as { feedback?: CompletionFeedbackForm | null; error?: string };
+  if (!response.ok || result.feedback === undefined) throw new Error(result.error ?? "Could not load leader feedback.");
+  return result.feedback;
 }

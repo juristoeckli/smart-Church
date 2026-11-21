@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Search } from "lucide-react";
 import "./module.css";
-import { groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type GroupAttendanceSnapshot, type GroupAttendanceStatus } from "../../group-attendance";
+import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
+import { groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceSnapshot, type GroupAttendanceStatus } from "../../group-attendance";
 
 type Group = { id: string; name: string; importedFrom?: string };
 type Meeting = { id: string; date: string; title: string; completedAt?: string | null };
@@ -95,19 +96,21 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
     }
   }
 
-  async function changeMeetingCompletion() {
-    if (!meeting || !roster.data || saving || changes.length) return;
+  async function changeMeetingCompletion(feedback?: CompletionFeedbackDraft) {
+    if (!meeting || !roster.data || saving || changes.length) return false;
     setSaving(true);
     setError("");
     setNotice("");
     try {
-      const updated = await setGroupAttendanceCompletion(meeting.id, departmentId, csrfToken, completedAt);
+      const updated = await setGroupAttendanceCompletion(meeting.id, departmentId, csrfToken, completedAt, feedback);
       if (!updated) setNotice("Attendance reopened.");
       if (!target) meetings.reload();
       roster.reload();
+      return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not change group meeting completion.");
-      roster.reload();
+      if (!feedback) roster.reload();
+      return false;
     } finally {
       setSaving(false);
     }
@@ -157,7 +160,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
           {changes.length ? "Discard changes and reload" : "Reload attendance"}
         </button>
         {completedAt && <strong>Attendance completed.</strong>}
-        <button className="checkin-print" type="button" disabled={saving || Boolean(changes.length)} onClick={() => void changeMeetingCompletion()}>{completedAt ? "Reopen attendance" : "Complete attendance"}</button>
+        <GroupMeetingCompletion key={departmentId + ":" + meeting.id} meetingId={meeting.id} departmentId={departmentId} completedAt={completedAt} disabled={saving || Boolean(changes.length)} buttonClass="checkin-print" onComplete={changeMeetingCompletion} />
         <button className="checkin-print" type="button" disabled={saving || Boolean(completedAt) || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
       </section>
       <div className="checkin-roster">

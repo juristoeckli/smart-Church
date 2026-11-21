@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { saveGroupLeaderFeedback } from "../../group-leader-feedback.js";
 import { registerGroupOperationsReplication } from "./replication.js";
 
 const uuid = { type: "string", format: "uuid" };
@@ -88,7 +89,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const canSubmitFeedback = Boolean(await activeGroupContact(request, request.query.groupId, departmentId));
     if (!canManageFeedback && !canSubmitFeedback) return reply.code(403).send({ error: "Active group membership is required to view meeting feedback." });
     const meetings = await pool!.query(
-      `SELECT meeting.id,meeting.meeting_date::text AS date,meeting.title,feedback.guest_count AS "guestCount"
+      `SELECT meeting.id,meeting.meeting_date::text AS date,meeting.title,meeting.attendance_completed_at AS "completedAt",feedback.guest_count AS "guestCount"
          FROM group_meetings meeting
          LEFT JOIN group_meeting_feedback_responses feedback
            ON $3 AND feedback.department_id=meeting.department_id AND feedback.group_id=meeting.group_id AND feedback.meeting_id=meeting.id
@@ -304,30 +305,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     if (!(await canManageGroup(request, request.body.groupId, departmentId))) return reply.code(403).send({ error: "Group leader access is required to submit meeting feedback." });
-    const meeting = await pool!.query("SELECT id FROM group_meetings WHERE id=$1 AND group_id=$2 AND department_id=$3", [request.body.meetingId, request.body.groupId, departmentId]);
-    if (!meeting.rowCount) return reply.code(404).send({ error: "Meeting not found for this group." });
-    const template = await pool!.query<{ questions: Array<{ id: string; prompt: string }> }>("SELECT questions FROM group_meeting_feedback_templates WHERE group_id=$1 AND department_id=$2", [request.body.groupId, departmentId]);
-    const questions = template.rows[0]?.questions ?? [];
-    const allowedIds = new Set(questions.map((question) => question.id));
-    if (Object.keys(request.body.answers).some((id) => !allowedIds.has(id))) return reply.code(400).send({ error: "The feedback form changed. Reload it before saving." });
-    const answers = Object.fromEntries(Object.entries(request.body.answers).map(([id, value]) => [id, value.trim()]));
-    const { groupId, meetingId, comment, guestCount } = request.body;
-    const saved = await pool!.query(`INSERT INTO group_meeting_feedback_responses AS prior
-        (id,department_id,group_id,meeting_id,answers,created_by,updated_by,meeting_comment,guest_count)
-      VALUES($1,$2,$3,$4,$5::jsonb,$6,$6,COALESCE($7,''),$8)
-      ON CONFLICT(meeting_id) DO UPDATE SET
-        answers=(prior.answers - $9::text[]) || EXCLUDED.answers,
-        updated_by=EXCLUDED.updated_by,updated_at=now(),
-        meeting_comment=COALESCE($7,prior.meeting_comment),
-        guest_count=CASE WHEN $10 THEN EXCLUDED.guest_count ELSE prior.guest_count END
-      WHERE prior.department_id=EXCLUDED.department_id AND prior.group_id=EXCLUDED.group_id
-      RETURNING id`, [
-        randomUUID(), departmentId, groupId, meetingId, JSON.stringify(answers), request.authenticatedUser?.id ?? null,
-        comment?.trim() ?? null, guestCount ?? null, [...allowedIds], guestCount !== undefined,
-      ]);
-    if (!saved.rowCount) return reply.code(409).send({ error: "The meeting feedback belongs to a different group or location." });
-    await recordAudit(departmentId, request.body.groupId, request, "meeting_feedback_saved", request.body.meetingId, { answerCount: Object.keys(answers).length });
-    return { saved: true };
+    const { groupId, meetingId } = request.body;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      const meeting = (await client.query<{ attendance_completed_at: Date | null }>(
+        "SELECT attendance_completed_at FROM group_meetings WHERE id=$1 AND group_id=$2 AND department_id=$3 FOR UPDATE",
+        [meetingId, groupId, departmentId],
+      )).rows[0];
+      if (!meeting) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Meeting not found for this group." }); }
+      if (meeting.attendance_completed_at) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Reopen attendance before changing this meeting's leader feedback." });
+      }
+      const failure = await saveGroupLeaderFeedback(client, { groupId, meetingId, departmentId }, request.body, request.authenticatedUser?.id ?? null);
+      if (failure) {
+        await client.query("ROLLBACK");
+        return reply.code(failure.status).send({ error: failure.error });
+      }
+      await client.query("COMMIT");
+      realtime.publish("module:group-operations:changed", departmentId, { action: "meeting_feedback_saved", groupId, recordId: meetingId });
+      return { saved: true };
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
   });
 
   app.get<{ Querystring: { groupId?: string } }>("/api/modules/group-operations/routines", async (request, reply) => {

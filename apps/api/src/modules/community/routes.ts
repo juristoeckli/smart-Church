@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { BookableResource, ChurchGroup, GroupLifecycleStatus, LocationPermission, ResourceBooking } from "@smart-church/contracts";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
+import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback, saveGroupLeaderFeedback, type CompletionFeedback } from "../../group-leader-feedback.js";
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { registerCommunityReplication } from "./replication.js";
 
@@ -533,15 +534,32 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       );
     }
 
-    routes.put<{ Params: { id: string }; Body: { completed: boolean; expectedCompletedAt: string | null } }>("/api/group-meetings/:id/attendance/completion", { schema: {
+    routes.get<{ Params: { id: string } }>("/api/group-meetings/:id/attendance/completion-feedback", { schema: { params: meetingParams } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const meeting = (await pool!.query<{ source_system: string | null; group_id: string }>(
+        `SELECT g.source_system,m.group_id FROM group_meetings m JOIN church_groups g ON g.id=m.group_id AND g.department_id=m.department_id
+          WHERE m.id=$1 AND m.department_id=$2`,
+        [request.params.id, departmentId],
+      )).rows[0];
+      if (!meeting) return reply.code(404).send({ error: "Group meeting not found." });
+      if (meeting.source_system === "churchtools" || meeting.source_system === "elvanto") return reply.code(403).send({ error: "Imported group attendance is managed in the source system." });
+      reply.header("cache-control", "private, no-store");
+      if (!isServerModuleEnabled("group-operations") || !await groupFeedbackEnabled(pool!, departmentId)) return { feedback: null };
+      return { feedback: await readGroupLeaderFeedback(pool!, { meetingId: request.params.id, groupId: meeting.group_id, departmentId }) };
+    });
+
+    routes.put<{ Params: { id: string }; Body: { completed: boolean; expectedCompletedAt: string | null; feedback?: CompletionFeedback } }>("/api/group-meetings/:id/attendance/completion", { schema: {
       params: meetingParams,
       body: { type: "object", additionalProperties: false, required: ["completed", "expectedCompletedAt"], properties: {
-        completed: { type: "boolean" }, expectedCompletedAt: { type: ["string", "null"], format: "date-time" },
+        completed: { type: "boolean" }, expectedCompletedAt: { type: ["string", "null"], format: "date-time" }, feedback: completionFeedbackSchema,
       } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       if (!validateMutation(request, reply)) return reply;
+      const { feedback } = request.body;
+      if (feedback && !request.body.completed) return reply.code(400).send({ error: "Submit leader feedback when completing a meeting." });
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
@@ -554,12 +572,28 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const completedAt = meeting.attendance_completed_at ? new Date(meeting.attendance_completed_at).toISOString() : null;
         const expected = request.body.expectedCompletedAt ? new Date(request.body.expectedCompletedAt).toISOString() : null;
         if (Boolean(completedAt) === request.body.completed) {
+          if (feedback) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "This meeting was already completed. Reload attendance before continuing." });
+          }
           await client.query("COMMIT");
           return { completedAt };
         }
         if (completedAt !== expected) {
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "Group meeting completion changed. Reload attendance and try again." });
+        }
+        if (feedback) {
+          if (!isServerModuleEnabled("group-operations") || !await groupFeedbackEnabled(client, departmentId)) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "Leader feedback is unavailable for this location." });
+          }
+          const failure = await saveGroupLeaderFeedback(client, { meetingId: request.params.id, groupId: meeting.group_id, departmentId }, feedback,
+            request.authenticatedUser?.id ?? null, feedback);
+          if (failure) {
+            await client.query("ROLLBACK");
+            return reply.code(failure.status).send({ error: failure.error });
+          }
         }
         const updated = await client.query(
           `UPDATE group_meetings SET attendance_completed_at=CASE WHEN $2 THEN date_trunc('milliseconds', clock_timestamp()) ELSE NULL END
@@ -569,6 +603,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         await client.query("COMMIT");
         realtime.publish("core:groups:changed", departmentId, {
           groupId: meeting.group_id, meetingId: request.params.id, action: request.body.completed ? "meeting-completed" : "meeting-reopened",
+        });
+        if (feedback) realtime.publish("module:group-operations:changed", departmentId, {
+          groupId: meeting.group_id, recordId: request.params.id, action: "meeting_feedback_saved",
         });
         return { completedAt: updated.rows[0].attendance_completed_at };
       } catch (error) { await client.query("ROLLBACK"); throw error; }
