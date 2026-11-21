@@ -338,7 +338,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const activeRoomState = page.name === "Home" && typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
     const activeModeState = page.name === "Modus" && selectedModeChannel === object.channel;
     const feedbackPort = object.channelPort && object.channelPort > 0 ? object.channelPort : 1;
-    const activePanelState = object.hitStyle === "passThru" && typeof object.channel === "number"
+    const activePanelState = typeof object.channel === "number"
       && (activePanelChannels[String(feedbackPort)] ?? []).includes(object.channel);
     const state = stateFor(object, activeRoomState || activeModeState || activePanelState);
     const baseText = labelFor(object, state);
