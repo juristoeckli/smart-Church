@@ -35,17 +35,22 @@ export function selectChurchToolsJournalRow(raw: Readonly<Record<string, unknown
   const contraCostCenterId = sourceId(raw.contraCostCenterId);
   const splitParentId = sourceId(raw.splitTransactionId);
   const taxBaseId = sourceId(raw.taxBaseId);
+  const taxTransactionId = sourceId(raw.taxTransactionId);
+  const taxRateId = sourceId(raw.taxRateId);
+  const stornoBaseId = sourceId(raw.stornoBaseId);
+  const stornoTransactionId = sourceId(raw.stornoTransactionId);
   const flags = {
     split: Boolean(splitParentId),
-    tax: Boolean(taxBaseId || sourceId(raw.taxTransactionId) || sourceId(raw.taxRateId)),
-    cancellation: Boolean(sourceId(raw.stornoBaseId) || sourceId(raw.stornoTransactionId)),
+    tax: Boolean(taxBaseId || taxTransactionId || taxRateId),
+    cancellation: Boolean(stornoBaseId || stornoTransactionId),
     transfer: Boolean((debitAccountId && debitAccountId === creditAccountId) || contraCostCenterId),
     immutable: raw.isImmutable !== false,
     discount: Boolean(sourceId(raw.cashDiscountId) || typeof raw.cashDiscountAmount === "number" && raw.cashDiscountAmount !== 0),
     donation: Boolean(sourceId(raw.donatorId) || sourceId(raw.donatorSpouseId) || raw.donator || raw.donatorSpouse || raw.isWaiverOfReimbursementOfExpenses === true),
-    invalidCostCenter: raw.costCenterId !== null && raw.costCenterId !== undefined && !costCenterId,
+    invalidCostCenter: [raw.costCenterId, raw.contraCostCenterId].some((value) => value != null && !sourceId(value)),
   };
-  return { sourceId: sourceId(raw.id)!, date: String(raw.documentDate), documentNumber, amount, debitAccountId, creditAccountId, costCenterId, contraCostCenterId, splitParentId, taxBaseId, flags };
+  return { sourceId: sourceId(raw.id)!, date: String(raw.documentDate), documentNumber, amount, debitAccountId, creditAccountId,
+    costCenterId, contraCostCenterId, splitParentId, taxBaseId, taxTransactionId, taxRateId, stornoBaseId, stornoTransactionId, flags };
 }
 
 type JournalRow = ReturnType<typeof selectChurchToolsJournalRow>;

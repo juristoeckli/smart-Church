@@ -14,6 +14,7 @@ import { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
 import { buildChurchToolsFinanceJournalDryRun, isTwoDecimalFinanceCurrency, selectChurchToolsJournalRow } from "./finance-journal-dry-run.js";
 import { createFinanceDraftBatch, createReviewedJournalDrafts, journalDraftBatchId, planReviewedJournalDrafts, readJournalDraftReceipt } from "./finance-journal-drafts.js";
 import { planReviewedSplitDrafts, readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
+import { reconcileChurchToolsSpecialJournal } from "./finance-special-review.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -862,20 +863,27 @@ function journalScopeError({ startDate, endDate, sourceCurrency }: JournalScope)
   return null;
 }
 async function readReviewedJournalSource(config: Settings, scope: JournalScope) {
-  const { periodId, startDate, endDate } = scope;
+  const { periodId } = scope;
   const source = await readFinanceMappingSource(config, periodId);
   if (!source) return null;
-  if (startDate < source.period.startDate || endDate > source.period.endDate) throw new Error("The preview dates must stay within the selected ChurchTools accounting period.");
   const token = decrypt(config.encrypted_login_token);
   const accounts = readChurchToolsFinanceCodes(source.chart.accounts, periodId, "account");
   const costCenters = readChurchToolsFinanceCodes(source.chart.costCenters, periodId, "cost center");
+  const rows = await readScopedJournalRows(config.instance_url, token, scope, source.period, accounts, costCenters);
+  return { source, rows };
+}
+
+async function readScopedJournalRows(instanceUrl: string, token: string, { periodId, startDate, endDate }: JournalScope,
+  period: { startDate: string; endDate: string }, accounts: ReadonlyMap<string, string>, costCenters: ReadonlyMap<string, string>,
+) {
+  if (startDate < period.startDate || endDate > period.endDate) throw new Error("The preview dates must stay within the selected ChurchTools accounting period.");
   const rows: ReturnType<typeof selectChurchToolsJournalRow>[] = [];
   await readChurchToolsFinanceJournal((page, limit) => {
     const query = new URLSearchParams({ accounting_period_id: periodId, start_date: startDate, end_date: endDate,
       order_by: "date", order_direction: "ASC", page: String(page), limit: String(limit) });
-    return get(config.instance_url, token, `finance/transactions?${query}`);
+    return get(instanceUrl, token, `finance/transactions?${query}`);
   }, accounts, costCenters, startDate, endDate, { maxPages: 5, inspectRow: (row) => rows.push(selectChurchToolsJournalRow(row)) });
-  return { source, rows };
+  return rows;
 }
 
 async function evaluateReviewedJournal(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, scope: JournalScope,
@@ -1906,6 +1914,34 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const status = error instanceof ChurchToolsFinanceRangeError ? 413
           : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools journal dry-run." });
+      }
+    });
+    routes.get<{ Querystring: JournalScope }>("/api/modules/sync/churchtools/finance/special-journal-review", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
+        sourceCurrency: { type: "string", pattern: "^[A-Z]{3}$" },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const scope = request.query;
+      const invalid = journalScopeError(scope);
+      if (invalid) return reply.code(400).send({ error: invalid });
+      try {
+        const token = decrypt(config.encrypted_login_token);
+        const periods = await listChurchToolsFinancePeriods(config.instance_url, token);
+        const period = periods.find((item) => item.periodId === scope.periodId);
+        if (!period) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        const rows = await readScopedJournalRows(config.instance_url, token, scope, period, new Map(), new Map());
+        return reply.header("Cache-Control", "private, no-store").send({
+          formatVersion: 1, sourceInstance: config.instance_url, period,
+          scope, ...reconcileChurchToolsSpecialJournal(rows),
+        });
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceRangeError ? 413
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not reconcile ChurchTools tax and cancellation transactions." });
       }
     });
     routes.get<{ Querystring: JournalScope }>("/api/modules/sync/churchtools/finance/split-review", {
