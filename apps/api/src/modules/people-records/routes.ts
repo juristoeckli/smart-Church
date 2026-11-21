@@ -797,6 +797,53 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       changed(d, contactId);
       return reply.code(201).send({ id });
     });
+    routes.get<{ Params: { contactId: string } }>("/api/people-records/:contactId/group-memberships", {
+      schema: { params: { type: "object", required: ["contactId"], properties: { contactId: uuid } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      reply.header("cache-control", "private, no-store");
+      const contact = await pool!.query("SELECT 1 FROM contacts WHERE department_id=$1 AND id=$2", [departmentId, request.params.contactId]);
+      if (!contact.rowCount) return reply.code(404).send({ error: "Person not found at this location." });
+
+      const manageGroups = request.activeDepartmentRole === "site_admin"
+        || (request.activeDepartmentPermissions ?? []).includes("groups_manage")
+        || (request.activeDepartmentModulePermissions?.["group-hierarchy"] ?? []).includes("manage");
+      const accessibleGroups = `SELECT g.id,g.name,g.status FROM church_groups g WHERE g.department_id=$1
+        AND ($3::boolean OR EXISTS (
+          SELECT 1 FROM department_memberships account
+          JOIN group_members own ON own.contact_id=account.contact_id AND own.group_id=g.id
+          WHERE account.department_id=g.department_id AND account.user_id=$4 AND own.status='active'
+            AND regexp_replace(lower(own.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager')
+        ))`;
+      const params = [departmentId, request.params.contactId, manageGroups, request.authenticatedUser!.id];
+      const current = await pool!.query(
+        `WITH accessible_groups AS (${accessibleGroups})
+         SELECT g.id AS "groupId",g.name AS "groupName",g.status AS "groupStatus",
+                member.role,member.status,member.joined_on::text AS "joinedOn"
+           FROM accessible_groups g JOIN group_members member ON member.group_id=g.id
+          WHERE member.contact_id=$2 ORDER BY lower(g.name),g.id`,
+        params,
+      );
+      const table = await pool!.query<{ present: boolean }>("SELECT to_regclass('group_hierarchy_history') IS NOT NULL AS present");
+      if (!table.rows[0]?.present) return { current: current.rows, history: [], historyAvailable: false };
+      const history = await pool!.query(
+        `WITH accessible_groups AS (${accessibleGroups}), changes AS (
+           SELECT g.id AS "groupId",g.name AS "groupName",h.action,h.created_at AS "createdAt",
+                  h.before_data->>'role' AS "previousRole",h.after_data->>'role' AS role,
+                  h.before_data->>'status' AS "previousStatus",h.after_data->>'status' AS status,
+                  COALESCE(h.before_data->>'joinedOn',h.before_data->>'joined_on') AS "previousJoinedOn",
+                  COALESCE(h.after_data->>'joinedOn',h.after_data->>'joined_on') AS "joinedOn"
+             FROM group_hierarchy_history h JOIN accessible_groups g ON g.id=h.group_id
+            WHERE h.department_id=$1 AND h.entity_kind='membership' AND h.entity_id=$2
+         )
+         SELECT DISTINCT "groupId","groupName",action,"createdAt","previousRole",role,"previousStatus",status,"previousJoinedOn","joinedOn"
+           FROM changes WHERE action <> 'updated' OR ("previousRole","previousStatus","previousJoinedOn") IS DISTINCT FROM (role,status,"joinedOn")
+          ORDER BY "createdAt" DESC,"groupId",action LIMIT 301`,
+        params,
+      );
+      return { current: current.rows, history: history.rows.slice(0, 300), historyAvailable: true, historyTruncated: history.rows.length > 300 };
+    });
     routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/history",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query("SELECT id,action,subject,before_value AS \"beforeValue\",after_value AS \"afterValue\",created_at AS \"createdAt\" FROM people_record_history WHERE department_id=$1 AND contact_id=$2 ORDER BY created_at DESC LIMIT 300",[d,request.params.contactId]);return r.rows;});
     routes.post<{Body:{rows:Array<{firstName:string;lastName:string;email?:string;phone?:string;postalAddress?:PostalAddress;fields?:Record<string,string>}>}}>("/api/people-records/import-preview",{schema:{body:{type:"object",required:["rows"],properties:{rows:{type:"array",maxItems:500,items:{type:"object",additionalProperties:false,required:["firstName","lastName"],properties:{firstName:{type:"string",maxLength:100},lastName:{type:"string",maxLength:100},email:{type:"string",maxLength:254},phone:{type:"string",maxLength:60},postalAddress:postalAddressSchema,fields:{type:"object",maxProperties:100,additionalProperties:{type:"string",maxLength:2000}}}}}}}}},async(request,reply)=>{const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const [existing,definitions]=await Promise.all([pool!.query("SELECT id,first_name,last_name,email,phone FROM contacts WHERE department_id=$1",[d]),pool!.query<{field_key:string;field_type:string;options:unknown;required:boolean}>("SELECT field_key,field_type,options,required FROM people_record_fields WHERE department_id=$1 AND active=true",[d])]);const available=new Map(definitions.rows.map(field=>[field.field_key,field]));const normalize=(v?:string)=>v?.trim().toLocaleLowerCase()??"";const rows=request.body.rows.map((row,index)=>{let validationError:string|undefined;const firstName=row.firstName.trim(),lastName=row.lastName.trim();if(!firstName||!lastName)validationError="First and last name are required.";else if(firstName.length>80||lastName.length>80)validationError="Names must be 80 characters or fewer.";else if(row.email&&(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email.trim())||row.email.trim().length>254))validationError="Enter a valid email address.";else if(row.phone&&row.phone.trim().length>40)validationError="Phone numbers must be 40 characters or fewer.";const custom:Record<string,unknown>={};for(const field of definitions.rows){if(field.required&&!row.fields?.[field.field_key]?.trim())validationError??=`${field.field_key} is required.`}for(const [key,raw] of Object.entries(row.fields??{})){const field=available.get(key);if(!field){validationError??=`Custom field “${key}” is not active at this location.`;continue}const value=raw.trim();if(!value){if(field.required)validationError??=`${key} is required.`;continue}if(field.field_type==="text"){if(value.length>2000)validationError??=`${key} must be at most 2000 characters.`;else custom[key]=value}else if(field.field_type==="date"){const parsed=new Date(`${value}T00:00:00.000Z`);if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(parsed.getTime())||parsed.toISOString().slice(0,10)!==value)validationError??=`${key} must be a valid date.`;else custom[key]=value}else if(field.field_type==="boolean"){if(!["true","false","yes","no","1","0"].includes(value.toLowerCase()))validationError??=`${key} must be yes or no.`;else custom[key]=["true","yes","1"].includes(value.toLowerCase())}else if(field.field_type==="select"){if(!Array.isArray(field.options)||!field.options.includes(value))validationError??=`${key} must match a configured choice.`;else custom[key]=value}else validationError??=`${key} has an unsupported field type.`}const postalAddress=normalizePostalAddress(row.postalAddress);const person={firstName,lastName,...(Object.keys(postalAddress).length?{postalAddress}:{}),...(row.email?.trim()?{email:row.email.trim()}:{}),...(row.phone?.trim()?{phone:row.phone.trim()}:{}),...(Object.keys(custom).length?{fields:custom}:{})};const exact=existing.rows.find(c=>(normalize(person.email)&&normalize(c.email)===normalize(person.email))||(normalize(c.first_name)===normalize(firstName)&&normalize(c.last_name)===normalize(lastName)&&normalize(c.phone)===normalize(person.phone)));return{row:index+1,person,match:exact?{id:exact.id,firstName:exact.first_name,lastName:exact.last_name,email:exact.email}:null,decision:validationError?"invalid":exact?"review":"new",...(validationError?{validationError}:{})};});return{rows,counts:{new:rows.filter(x=>x.decision==="new").length,review:rows.filter(x=>x.decision==="review").length,invalid:rows.filter(x=>x.decision==="invalid").length,imported:0},message:"Preview only. No person records were changed."};});
     routes.post<{Body:{rows:Array<{row:number;firstName:string;lastName:string;email?:string;phone?:string;postalAddress?:PostalAddress;fields?:Record<string,string>;status?:"member"|"visitor"}>}}>("/api/people-records/import-apply",{schema:{body:{type:"object",required:["rows"],properties:{rows:{type:"array",minItems:1,maxItems:500,items:{type:"object",additionalProperties:false,required:["row","firstName","lastName"],properties:{row:{type:"integer",minimum:1},firstName:{type:"string",maxLength:100},lastName:{type:"string",maxLength:100},email:{type:"string",maxLength:254},phone:{type:"string",maxLength:60},postalAddress:postalAddressSchema,fields:{type:"object",maxProperties:100,additionalProperties:{type:"string",maxLength:2000}},status:{type:"string",enum:["member","visitor"]}}}}}}}},async(request,reply)=>{
