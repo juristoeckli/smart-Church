@@ -42,6 +42,8 @@
 .community-post-comment p { margin: 0.25rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .community-comment-form { display: flex; gap: 0.5rem; }
 .community-comment-form input { flex: 1; min-width: 0; }
+.community-comment-mention-editor { display: grid; gap: .4rem; margin-top: .45rem; }
+.community-comment-mention-editor > input { max-width: 22rem; }
 .community-comment-submit { display: grid; width: 42px; flex: 0 0 42px; place-items: center; border: 0; border-radius: 10px; color: white; background: var(--accent); cursor: pointer; }
 .community-comment-submit:disabled { opacity: 0.45; cursor: default; }
 .community-feed-error, .community-feed-feedback, .community-feed-empty { margin: 0; padding: 0.8rem 1rem; border-radius: 10px; }

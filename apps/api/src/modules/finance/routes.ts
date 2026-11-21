@@ -198,10 +198,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("BEGIN"); await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [departmentId]);
       const existing = await client.query("SELECT accounting_year,label,start_date::text,end_date::text,status FROM finance_accounting_years WHERE department_id=$1 AND accounting_year=$2 FOR UPDATE", [departmentId, Number(request.params.year)]);
       if (!existing.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Accounting year not found." }); }
+      if (request.body.status === "closed" && existing.rows[0]!.status !== "closed") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Close the year with a balanced closing and carry-forward workflow." }); }
+      if (request.body.status === "open" && existing.rows[0]!.status === "closed") {
+        const transferred = await client.query("SELECT 1 FROM finance_year_end_transfers WHERE department_id=$1 AND source_year=$2", [departmentId, Number(request.params.year)]);
+        if (transferred.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A year with posted closing entries cannot be reopened. Correct the entries with audited reversals." }); }
+      }
       const overlap = await client.query("SELECT 1 FROM finance_accounting_years WHERE department_id=$1 AND accounting_year<>$2 AND start_date<=$4::date AND end_date>=$3::date LIMIT 1", [departmentId, Number(request.params.year), request.body.startDate, request.body.endDate]);
       if (overlap.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Accounting year dates cannot overlap another configured year." }); }
       const changedDates = existing.rows[0]!.start_date !== request.body.startDate || existing.rows[0]!.end_date !== request.body.endDate;
       if (changedDates) {
+        const linkedTransfer = await client.query("SELECT 1 FROM finance_year_end_transfers WHERE department_id=$1 AND (source_year=$2 OR target_year=$2) LIMIT 1", [departmentId, Number(request.params.year)]);
+        if (linkedTransfer.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Accounting-year dates cannot change after a closing or carry-forward journal has been posted." }); }
         const outside = await client.query("SELECT 1 FROM finance_transactions WHERE department_id=$1 AND accounting_year=$2 AND (booking_date<$3::date OR booking_date>$4::date) UNION ALL SELECT 1 FROM finance_receipt_batches WHERE department_id=$1 AND accounting_year=$2 AND (period_start<$3::date OR period_end>$4::date) LIMIT 1", [departmentId, Number(request.params.year), request.body.startDate, request.body.endDate]);
         if (outside.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The date range would exclude existing transactions or receipts. Preserve their dates or use another accounting year." }); }
       }
@@ -217,7 +224,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const configured = await pool!.query<{ accountingYear: number; label: string; startDate: string; endDate: string; status: string }>("SELECT accounting_year AS \"accountingYear\",label,start_date::text AS \"startDate\",end_date::text AS \"endDate\",status FROM finance_accounting_years WHERE department_id=$1 AND accounting_year=$2", [departmentId, year]);
     if (!configured.rowCount) return reply.code(404).send({ error: "Accounting year not found." });
     const period = configured.rows[0]!;
-    const [totals, bankRows, budgets, settings] = await Promise.all([
+    const [totals, bankRows, budgets, settings, transfer] = await Promise.all([
       pool!.query<{ transactions: string; debitCents: string; creditCents: string; incomeCents: string; expenseCents: string }>(
         `SELECT count(DISTINCT t.id)::text AS transactions,COALESCE(sum(l.debit_cents),0)::text AS \"debitCents\",COALESCE(sum(l.credit_cents),0)::text AS \"creditCents\",
                 COALESCE(sum(CASE WHEN a.account_type='income' THEN l.credit_cents-l.debit_cents ELSE 0 END),0)::text AS \"incomeCents\",
@@ -237,6 +244,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            LEFT JOIN finance_accounts actual_account ON actual_account.department_id=l.department_id AND actual_account.id=l.account_id
           WHERE b.department_id=$1 AND b.accounting_year=$2 GROUP BY b.id,a.code,a.name,a.account_type,c.code,c.name ORDER BY a.code,c.code,b.id LIMIT 5000`, [departmentId, year]),
       pool!.query<{ currency: string }>("SELECT currency_code AS currency FROM finance_settings WHERE department_id=$1", [departmentId]),
+      pool!.query("SELECT source_year AS \"sourceYear\",target_year AS \"targetYear\",closing_transaction_id AS \"closingTransactionId\",opening_transaction_id AS \"openingTransactionId\",closing_equity_account_id AS \"closingEquityAccountId\",created_at AS \"createdAt\" FROM finance_year_end_transfers WHERE department_id=$1 AND source_year=$2", [departmentId, year]),
     ]);
     const total = totals.rows[0]!; const unmatched = bankRows.rows[0]!;
     return {
@@ -245,7 +253,90 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       totals: { transactionCount: Number(total.transactions), debitCents: asMoney(total.debitCents), creditCents: asMoney(total.creditCents), incomeCents: asMoney(total.incomeCents), expenseCents: asMoney(total.expenseCents) },
       unreconciledBank: { rowCount: Number(unmatched.rowCount), amountCents: asMoney(unmatched.amountCents) },
       budgetVariance: budgets.rows.map((row) => ({ ...row, budgetCents: asMoney(row.budgetCents), actualCents: asMoney(row.actualCents), varianceCents: asMoney(row.budgetCents) - asMoney(row.actualCents) })),
+      yearEndTransfer: transfer.rows[0] ?? null,
     };
+  });
+
+  app.post<{ Params: { year: string }; Body: { targetYear: number; closingEquityAccountId: string } }>("/api/modules/finance/accounting-years/:year/close-and-carry-forward", { schema: { params: { type: "object", additionalProperties: false, required: ["year"], properties: { year: { type: "string", pattern: "^(19[0-9]{2}|20[0-9]{2}|21[0-9]{2}|2200)$" } } }, body: { type: "object", additionalProperties: false, required: ["targetYear", "closingEquityAccountId"], properties: { targetYear: { type: "integer", minimum: 1900, maximum: 2200 }, closingEquityAccountId: uuid } } } }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
+    const sourceYear = Number(request.params.year); const targetYear = request.body.targetYear;
+    if (targetYear !== sourceYear + 1) return reply.code(400).send({ error: "Carry-forward can only target the immediately following accounting year." });
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [departmentId]);
+      const years = await client.query<{ accounting_year: number; start_date: string; end_date: string; status: string }>("SELECT accounting_year,start_date::text,end_date::text,status FROM finance_accounting_years WHERE department_id=$1 AND accounting_year=ANY($2::smallint[]) ORDER BY accounting_year FOR UPDATE", [departmentId, [sourceYear, targetYear]]);
+      const source = years.rows.find((row) => row.accounting_year === sourceYear); const target = years.rows.find((row) => row.accounting_year === targetYear);
+      if (!source || !target) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Configure both the source and next accounting year first." }); }
+      if (source.status !== "open" || target.status !== "open") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The source and target accounting years must both be open." }); }
+      if (target.start_date <= source.end_date) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The target period must begin after the source period ends." }); }
+      const existing = await client.query("SELECT source_year FROM finance_year_end_transfers WHERE department_id=$1 AND source_year=$2", [departmentId, sourceYear]);
+      if (existing.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Closing and carry-forward entries already exist for this accounting year." }); }
+      const equity = await client.query("SELECT id FROM finance_accounts WHERE department_id=$1 AND id=$2 AND active AND account_type='equity' FOR SHARE", [departmentId, request.body.closingEquityAccountId]);
+      if (!equity.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an active equity account for the closing balance." }); }
+
+      // P&L accounts are zeroed by reversing their net debit/credit balances; the offset goes to equity by cost center.
+      const profitLoss = await client.query<{ account_id: string; cost_center_id: string | null; net_cents: string }>(
+        `SELECT l.account_id,l.cost_center_id,sum(l.debit_cents-l.credit_cents)::text AS net_cents
+           FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
+           JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id
+          WHERE t.department_id=$1 AND t.booking_date BETWEEN $2::date AND $3::date AND t.status='posted' AND a.account_type IN ('income','expense')
+          GROUP BY l.account_id,l.cost_center_id HAVING sum(l.debit_cents-l.credit_cents)<>0 ORDER BY l.account_id,l.cost_center_id`, [departmentId, source.start_date, source.end_date]);
+      const pnlByCenter = new Map<string, { costCenterId: string | null; net: bigint }>();
+      const closingLines: Array<{ accountId: string; costCenterId: string | null; debit: bigint; credit: bigint; text: string }> = [];
+      for (const row of profitLoss.rows) {
+        const net = BigInt(row.net_cents); const centerKey = row.cost_center_id ?? "none";
+        const aggregate = pnlByCenter.get(centerKey) ?? { costCenterId: row.cost_center_id, net: 0n };
+        aggregate.net += net; pnlByCenter.set(centerKey, aggregate);
+        closingLines.push({ accountId: row.account_id, costCenterId: row.cost_center_id, debit: net < 0n ? -net : 0n, credit: net > 0n ? net : 0n, text: "Year-end result close" });
+      }
+      for (const aggregate of pnlByCenter.values()) {
+        if (aggregate.net !== 0n) closingLines.push({ accountId: request.body.closingEquityAccountId, costCenterId: aggregate.costCenterId, debit: aggregate.net > 0n ? aggregate.net : 0n, credit: aggregate.net < 0n ? -aggregate.net : 0n, text: "Year-end result transferred to equity" });
+      }
+      const balanceRows = await client.query<{ account_id: string; cost_center_id: string | null; net_cents: string }>(
+        `SELECT l.account_id,l.cost_center_id,sum(l.debit_cents-l.credit_cents)::text AS net_cents
+           FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
+           JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id
+          WHERE t.department_id=$1 AND t.booking_date<=$2::date AND t.status='posted' AND a.account_type IN ('asset','liability','equity')
+          GROUP BY l.account_id,l.cost_center_id HAVING sum(l.debit_cents-l.credit_cents)<>0 ORDER BY l.account_id,l.cost_center_id`, [departmentId, source.end_date]);
+      const openingLines = balanceRows.rows.map((row) => { const net = BigInt(row.net_cents); return { accountId: row.account_id, costCenterId: row.cost_center_id, debit: net > 0n ? net : 0n, credit: net < 0n ? -net : 0n, text: "Opening balance carried forward" }; });
+      // Include the P&L result just credited or debited to the selected equity
+      // account in the source year, so the target's net equity is complete.
+      for (const line of closingLines.filter((entry) => entry.accountId === request.body.closingEquityAccountId)) {
+        const existingLine = openingLines.find((entry) => entry.accountId === line.accountId && entry.costCenterId === line.costCenterId);
+        const net = (existingLine ? existingLine.debit - existingLine.credit : 0n) + line.debit - line.credit;
+        if (existingLine) openingLines.splice(openingLines.indexOf(existingLine), 1);
+        if (net !== 0n) openingLines.push({ accountId: line.accountId, costCenterId: line.costCenterId, debit: net > 0n ? net : 0n, credit: net < 0n ? -net : 0n, text: "Opening balance carried forward" });
+      }
+      for (const [name, lines] of [["closing", closingLines], ["opening", openingLines]] as const) {
+        if (lines.length > 32767) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `The ${name} entry exceeds the supported journal line limit.` }); }
+        for (const line of lines) if (line.debit > 9_000_000_000_000_000n || line.credit > 9_000_000_000_000_000n) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `A ${name} balance exceeds the supported safe amount range.` }); }
+      }
+      const debitSum = (lines: typeof closingLines) => lines.reduce((sum, line) => sum + line.debit, 0n);
+      if (debitSum(closingLines) !== closingLines.reduce((sum, line) => sum + line.credit, 0n) || debitSum(openingLines) !== openingLines.reduce((sum, line) => sum + line.credit, 0n)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The calculated closing balances are not balanced. No entries were posted." }); }
+
+      async function postYearEnd(lines: typeof closingLines, bookingDate: string, accountingYear: number, receiptNumber: string, bookingText: string) {
+        if (!lines.length) return null;
+        if (lines.length < 2) throw new Error("A year-end journal requires at least two lines.");
+        const id = randomUUID();
+        await client.query("INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)", [id, departmentId, bookingDate, accountingYear, receiptNumber, bookingText, request.authenticatedUser?.id ?? null]);
+        for (let index = 0; index < lines.length; index += 1) {
+          const line = lines[index]!;
+          await client.query("INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,cost_center_id,debit_cents,credit_cents,line_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [randomUUID(), departmentId, id, index + 1, line.accountId, line.costCenterId, line.debit.toString(), line.credit.toString(), line.text]);
+        }
+        await audit(client, departmentId!, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, entryType: "year_end", lineCount: lines.length });
+        return id;
+      }
+      const closingId = await postYearEnd(closingLines, source.end_date, sourceYear, `YE-CLOSE-${sourceYear}`, `Year-end closing entries ${sourceYear}`);
+      const openingId = await postYearEnd(openingLines, target.start_date, targetYear, `YE-OPEN-${targetYear}`, `Opening balances carried forward from ${sourceYear}`);
+      const transferId = randomUUID();
+      await client.query("INSERT INTO finance_year_end_transfers(id,department_id,source_year,target_year,closing_equity_account_id,closing_transaction_id,opening_transaction_id,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)", [transferId, departmentId, sourceYear, targetYear, request.body.closingEquityAccountId, closingId, openingId, request.authenticatedUser?.id ?? null]);
+      await client.query("UPDATE finance_accounting_years SET status='closed',updated_by=$3,updated_at=now() WHERE department_id=$1 AND accounting_year=$2", [departmentId, sourceYear, request.authenticatedUser?.id ?? null]);
+      await audit(client, departmentId!, request, "accounting_year_closed_with_carry_forward", "year_end_transfer", transferId, { sourceYear, targetYear, closingTransactionId: closingId, openingTransactionId: openingId, closingEquityAccountId: request.body.closingEquityAccountId, closingLineCount: closingLines.length, openingLineCount: openingLines.length });
+      await client.query("COMMIT");
+      publish(departmentId, "year-end-transfer-created", transferId); publish(departmentId, "accounting-year-updated", String(sourceYear));
+      return reply.code(201).send({ id: transferId, sourceYear, targetYear, closingTransactionId: closingId, openingTransactionId: openingId, status: "completed" });
+    } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   });
 
   app.get("/api/modules/finance/receipts/settings", async (request, reply) => {

@@ -60,6 +60,10 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const [publishAt, setPublishAt] = useState("");
   const [commentsEnabled, setCommentsEnabled] = useState(true);
   const [commentDrafts, setCommentDrafts] = useState<Record<string, string>>({});
+  const [commentMentionOpen, setCommentMentionOpen] = useState<Record<string, boolean>>({});
+  const [commentMentionQueries, setCommentMentionQueries] = useState<Record<string, string>>({});
+  const [commentMentionOptions, setCommentMentionOptions] = useState<Record<string, EntityOption[]>>({});
+  const [commentMentionPeople, setCommentMentionPeople] = useState<Record<string, EntityOption[]>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -168,6 +172,22 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
       .then((response) => response.json() as Promise<EntityOption[]>).then(setEntityOptions).catch(() => undefined), 180);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [departmentId, linkType, linkQuery, canMentionPeople]);
+
+  useEffect(() => {
+    if (!canMentionPeople) { setCommentMentionOptions({}); return; }
+    const controllers: AbortController[] = [];
+    const timers = Object.entries(commentMentionQueries).map(([postId, query]) => {
+      if (!commentMentionOpen[postId] || !query.trim()) {
+        setCommentMentionOptions((current) => ({ ...current, [postId]: [] }));
+        return undefined;
+      }
+      const controller = new AbortController();
+      controllers.push(controller);
+      return window.setTimeout(() => void fetch(`/api/modules/community-feed/entities?${new URLSearchParams({ type: "person", q: query })}`, { headers: { "x-department-id": departmentId }, signal: controller.signal })
+        .then((response) => response.json() as Promise<EntityOption[]>).then((options) => setCommentMentionOptions((current) => ({ ...current, [postId]: options }))).catch(() => undefined), 180);
+    });
+    return () => { controllers.forEach((controller) => controller.abort()); timers.forEach((timer) => { if (timer !== undefined) window.clearTimeout(timer); }); };
+  }, [departmentId, commentMentionOpen, commentMentionQueries, canMentionPeople]);
 
   function addLink(option: EntityOption) {
     if (linkType === "person") {
@@ -307,8 +327,12 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     const commentBody = (commentDrafts[post.id] ?? "").trim();
     if (!commentBody) return;
     try {
-      await sendMutation(`/api/modules/community-feed/posts/${post.id}/comments`, "POST", { body: commentBody });
+      const mentions = (commentMentionPeople[post.id] ?? []).filter((person) => commentBody.includes(`@${person.label}`));
+      await sendMutation(`/api/modules/community-feed/posts/${post.id}/comments`, "POST", { body: commentBody, mentions: mentions.map((person) => person.id) });
       setCommentDrafts((current) => ({ ...current, [post.id]: "" }));
+      setCommentMentionPeople((current) => ({ ...current, [post.id]: [] }));
+      setCommentMentionQueries((current) => ({ ...current, [post.id]: "" }));
+      setCommentMentionOptions((current) => ({ ...current, [post.id]: [] }));
       await load();
       await loadNotifications();
     } catch (reason) { setError(reason instanceof Error ? t(reason.message) : t("Could not add your comment.")); }
@@ -381,7 +405,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
         })}</div>}{post.attachments?.length > 0 && <div className="community-post-attachments">{post.attachments.map((file) => file.contentType.startsWith("image/") ? <a key={file.id} href={file.url} target="_blank" rel="noreferrer"><img src={file.url} alt={file.filename} loading="lazy" /></a> : <a key={file.id} href={file.url} target="_blank" rel="noreferrer">{file.filename}</a>)}</div>}
         <div className="community-post-actions">{(["like", "love", "pray", "celebrate"] as const).map((reaction) => { const labels = { like: "Like", love: "Love", pray: "Pray", celebrate: "Celebrate" }; const icons = { like: "👍", love: "❤️", pray: "🙏", celebrate: "🎉" }; return <button key={reaction} type="button" className={post.myReaction === reaction ? "community-post-like is-liked" : "community-post-like"} onClick={() => void setReaction(post, reaction)} aria-pressed={post.myReaction === reaction} aria-label={t(labels[reaction])} title={t(labels[reaction])}>{icons[reaction]} {post.reactions?.[reaction] ?? 0}</button>; })}<span><MessageCircle size={16} />{post.comments.length} {t(post.comments.length === 1 ? "comment" : "comments")}</span><button type="button" className="community-post-details" onClick={() => { setDetailsPost(post); setEditingDetails(false); }}>{t("View details")}</button><button type="button" className="community-post-details" onClick={() => void sharePost(post)}><Link2 size={14} /> {t("Share")}</button><button type="button" className="community-post-details" onClick={() => void toggleHidden(post)}>{feedScope === "hidden" ? t("Show again") : t("Hide post")}</button>{!post.canDelete && feedScope !== "hidden" && <button type="button" className="community-post-details" onClick={() => { setReportTarget(post); setReportReason("inappropriate"); setReportDetails(""); }}>{t("Report post")}</button>}{post.canDelete && <><button type="button" className="community-post-details" onClick={() => void toggleComments(post)}>{post.commentsEnabled ? t("Turn comments off") : t("Turn comments on")}</button><button type="button" className="community-post-details" onClick={() => beginEdit(post)}>{t("Edit")}</button></>}</div>
         {post.comments.length > 0 && <div className="community-post-comments">{post.comments.map((item) => <div className="community-post-comment" key={item.id}><strong>{item.authorName}</strong><p>{item.body}</p><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></div>)}</div>}
-        {post.commentsEnabled && !isScheduled(post) && <form className="community-comment-form" onSubmit={(event) => void comment(post, event)}><input aria-label={t("Write a comment…")} maxLength={1000} placeholder={t("Write a comment…")} value={commentDrafts[post.id] ?? ""} onChange={(event) => setCommentDrafts((current) => ({ ...current, [post.id]: event.target.value }))} /><button type="submit" className="community-comment-submit" disabled={!(commentDrafts[post.id] ?? "").trim()} aria-label={t("Post comment")}><Send size={16} /></button></form>}
+        {post.commentsEnabled && !isScheduled(post) && <><form className="community-comment-form" onSubmit={(event) => void comment(post, event)}><input aria-label={t("Write a comment…")} maxLength={1000} placeholder={t("Write a comment…")} value={commentDrafts[post.id] ?? ""} onChange={(event) => setCommentDrafts((current) => ({ ...current, [post.id]: event.target.value }))} /><button type="submit" className="community-comment-submit" disabled={!(commentDrafts[post.id] ?? "").trim()} aria-label={t("Post comment")}><Send size={16} /></button></form>{canMentionPeople && <div className="community-comment-mention-editor"><button type="button" className="community-post-details" aria-expanded={Boolean(commentMentionOpen[post.id])} onClick={() => setCommentMentionOpen((current) => ({ ...current, [post.id]: !current[post.id] }))}>{t("Mention a person")}</button>{commentMentionOpen[post.id] && <><input aria-label={t("Search this location")} placeholder={t("Search this location")} value={commentMentionQueries[post.id] ?? ""} onChange={(event) => setCommentMentionQueries((current) => ({ ...current, [post.id]: event.target.value }))} />{(commentMentionOptions[post.id] ?? []).length > 0 && <div role="listbox" className="community-entity-options">{commentMentionOptions[post.id]!.map((person) => <button type="button" key={person.id} onClick={() => { setCommentMentionPeople((current) => ({ ...current, [post.id]: [...(current[post.id] ?? []).filter((item) => item.id !== person.id), person] })); setCommentDrafts((current) => ({ ...current, [post.id]: `${current[post.id] ?? ""}${current[post.id]?.trim() ? " " : ""}@${person.label}`.slice(0, 1000) })); setCommentMentionQueries((current) => ({ ...current, [post.id]: "" })); setCommentMentionOptions((current) => ({ ...current, [post.id]: [] })); }}>{person.label}</button>)}</div>}{(commentMentionPeople[post.id] ?? []).length > 0 && <div className="community-post-link-chips">{commentMentionPeople[post.id]!.map((person) => <button type="button" key={person.id} onClick={() => { setCommentMentionPeople((current) => ({ ...current, [post.id]: current[post.id]?.filter((item) => item.id !== person.id) ?? [] })); setCommentDrafts((current) => ({ ...current, [post.id]: (current[post.id] ?? "").replace(`@${person.label}`, "").replace(/\s{2,}/g, " ") })); }}>@{person.label} ×</button>)}</div>}</>}</div>}</>}
       </article>) : <p className="community-feed-empty">{t("There are no posts yet. Share the first update with your church.")}</p>}
     </section>
     {detailsPost && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setDetailsPost(null)}><section className="modal community-post-details-modal" role="dialog" aria-modal="true" aria-labelledby="community-post-details-title"><div className="modal-heading"><div><span className="eyebrow">{t("Church life")}</span><h2 id="community-post-details-title">{editingDetails ? t("Edit post") : detailsPost.title || t("Community update")}</h2><p>{detailsPost.authorName} · {formatPostDate(detailsPost.createdAt)}</p></div><button className="icon-button" type="button" aria-label={t("Close dialog")} onClick={() => { setDetailsPost(null); setEditingDetails(false); }}><span aria-hidden="true">×</span></button></div>{editingDetails ? <form className="community-post-edit-form" onSubmit={(event) => void savePostEdit(event)}><input aria-label={t("Post title")} maxLength={120} value={editTitle} onChange={(event) => setEditTitle(event.target.value)} /><textarea aria-label={t("Post text")} maxLength={4000} minLength={1} required rows={7} value={editBody} onChange={(event) => setEditBody(event.target.value)} /><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setEditingDetails(false)}>{t("Cancel")}</button><button className="button button-primary" type="submit" disabled={!editBody.trim()}>{t("Save changes")}</button></div></form> : <><p className="community-post-details-body">{detailsPost.body}</p><section className="community-post-details-comments"><h3>{t("Comments ({count})").replace("{count}", String(detailsPost.comments.length))}</h3>{detailsPost.comments.length ? <ul>{detailsPost.comments.map((item) => <li key={item.id}><strong>{item.authorName}</strong><p>{item.body}</p><time dateTime={item.createdAt}>{formatPostDate(item.createdAt)}</time></li>)}</ul> : <p>{t("No comments yet.")}</p>}</section><div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setDetailsPost(null)}>{t("Close")}</button></div></>}</section></div>}

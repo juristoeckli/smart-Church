@@ -4,7 +4,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { createWikiPdf } from "./pdf.js";
 
 type WikiAudience = "location" | "group" | "managers";
-type WikiPageRow = { id: string; category_id: string; title: string; content_html: string; status: "active" | "archived"; redirect_url: string | null; is_homepage: boolean; audience?: WikiAudience; audience_group_id?: string | null; created_at: Date | string; updated_at: Date | string; updated_by: string | null; editor_name?: string | null };
+type WikiPageRow = { id: string; category_id: string; title: string; content_html: string; status: "active" | "archived"; redirect_page_id?: string | null; is_homepage: boolean; audience?: WikiAudience; audience_group_id?: string | null; created_at: Date | string; updated_at: Date | string; updated_by: string | null; editor_name?: string | null };
 type WikiCategoryRow = { id: string; name: string; parent_id: string | null; position: number; archived_at: Date | string | null; created_at: Date | string; updated_at: Date | string };
 const allowedTags = new Set(["a", "b", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "li", "ol", "p", "pre", "s", "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"]);
 
@@ -30,7 +30,7 @@ function safeHtml(value: string): string {
 }
 
 function pageDto(row: WikiPageRow) {
-  return { id: row.id, categoryId: row.category_id, title: row.title, contentHtml: row.content_html, status: row.status, redirectUrl: row.redirect_url, isHomepage: row.is_homepage, audience: row.audience ?? "location", audienceGroupId: row.audience_group_id ?? null, createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), updatedBy: row.updated_by, editorName: row.editor_name ?? null };
+  return { id: row.id, categoryId: row.category_id, title: row.title, contentHtml: row.content_html, status: row.status, redirectPageId: row.redirect_page_id ?? null, isHomepage: row.is_homepage, audience: row.audience ?? "location", audienceGroupId: row.audience_group_id ?? null, createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString(), updatedBy: row.updated_by, editorName: row.editor_name ?? null };
 }
 function categoryDto(row: WikiCategoryRow) {
   return { id: row.id, name: row.name, parentId: row.parent_id, position: row.position, archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null, createdAt: new Date(row.created_at).toISOString(), updatedAt: new Date(row.updated_at).toISOString() };
@@ -202,14 +202,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const status = isWikiManager(request) && request.query.status === "archived" ? "archived" : "active";
     const search = (request.query.search ?? "").trim().slice(0, 120);
-    const result = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,''::text AS content_html,page.status,page.redirect_url,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.status=$2 AND ($3::uuid IS NULL OR page.category_id=$3) AND ($4='' OR page.title ILIKE '%'||$4||'%' OR ($5::boolean AND regexp_replace(page.content_html,'<[^>]*>',' ','g') ILIKE '%'||$4||'%')) AND ${pageReadCondition("page", 5, 6)} ORDER BY page.is_homepage DESC,page.updated_at DESC,lower(page.title) LIMIT 300`, [departmentId, status, request.query.categoryId ?? null, search, isWikiManager(request), request.authenticatedUser!.id]);
+    const result = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,''::text AS content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.status=$2 AND ($3::uuid IS NULL OR page.category_id=$3) AND ($4='' OR page.title ILIKE '%'||$4||'%' OR ($5::boolean AND regexp_replace(page.content_html,'<[^>]*>',' ','g') ILIKE '%'||$4||'%')) AND ${pageReadCondition("page", 5, 6)} ORDER BY page.is_homepage DESC,page.updated_at DESC,lower(page.title) LIMIT 300`, [departmentId, status, request.query.categoryId ?? null, search, isWikiManager(request), request.authenticatedUser!.id]);
     return result.rows.map(pageDto);
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id", async (request, reply) => {
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
-    const pageResult = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,page.content_html,page.status,page.redirect_url,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.id=$2 AND (${pageReadCondition("page", 3, 4)} OR page.status='archived' AND $3::boolean)`, [departmentId, request.params.id, isWikiManager(request), request.authenticatedUser!.id]);
+    const pageResult = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,page.content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.id=$2 AND (${pageReadCondition("page", 3, 4)} OR page.status='archived' AND $3::boolean)`, [departmentId, request.params.id, isWikiManager(request), request.authenticatedUser!.id]);
     if (!pageResult.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
     pageResult.rows[0].content_html = await hideUnreadableWikiEntityLinks(pageResult.rows[0].content_html, request, departmentId);
     const [links, files] = await Promise.all([
@@ -217,8 +217,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       pool!.query("SELECT stored.id,stored.title,stored.file_name AS \"fileName\",stored.content_type AS \"contentType\",stored.file_size AS \"fileSize\",stored.created_at AS \"createdAt\" FROM wiki_page_files link JOIN stored_files stored ON stored.id=link.file_id AND stored.department_id=link.department_id WHERE link.department_id=$1 AND link.page_id=$2 AND stored.deleted_at IS NULL ORDER BY link.created_at DESC", [departmentId, request.params.id]),
     ]);
     const visibleLinks = await Promise.all(links.rows.map(async (link) => await canFollowWikiLink(String(link.url), request, departmentId) ? link : null));
-    const safeRedirect = pageResult.rows[0].redirect_url && await canFollowWikiLink(pageResult.rows[0].redirect_url, request, departmentId) ? pageResult.rows[0].redirect_url : null;
-    pageResult.rows[0].redirect_url = safeRedirect;
+    const redirectPageId = pageResult.rows[0].redirect_page_id;
+    if (redirectPageId) {
+      const target = await pool!.query("SELECT 1 FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [redirectPageId, departmentId]);
+      if (!target.rowCount || !await canReadPage(request, departmentId, redirectPageId)) pageResult.rows[0].redirect_page_id = null;
+    }
     return { ...pageDto(pageResult.rows[0]), links: visibleLinks.filter((link) => link !== null), files: files.rows };
   });
 
@@ -243,7 +246,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
-      const result = await client.query<WikiPageRow>("INSERT INTO wiki_pages(id,department_id,category_id,title,content_html,audience,audience_group_id,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id,category_id,title,content_html,status,redirect_url,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by", [id, departmentId, request.body.categoryId, title, content, audience, audienceGroupId, request.authenticatedUser!.id]);
+      const result = await client.query<WikiPageRow>("INSERT INTO wiki_pages(id,department_id,category_id,title,content_html,audience,audience_group_id,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id,category_id,title,content_html,status,redirect_page_id,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by", [id, departmentId, request.body.categoryId, title, content, audience, audienceGroupId, request.authenticatedUser!.id]);
       await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, id, title, content, request.authenticatedUser!.id]);
       await client.query("COMMIT");
       changed(departmentId, { action: "page-created", pageId: id });
@@ -252,7 +255,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
-  app.put<{ Params: { id: string }; Body: { categoryId: string; title: string; contentHtml: string; redirectUrl?: string | null; audience: WikiAudience; audienceGroupId?: string | null } }>("/api/modules/wiki/pages/:id", { schema: { body: { type: "object", additionalProperties: false, required: ["categoryId", "title", "contentHtml", "audience"], properties: { categoryId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 180 }, contentHtml: { type: "string", maxLength: 500000 }, redirectUrl: { anyOf: [{ type: "string", maxLength: 2000 }, { type: "null" }] }, audience: { type: "string", enum: ["location","group","managers"] }, audienceGroupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } } } }, async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { categoryId: string; title: string; contentHtml: string; redirectPageId?: string | null; audience: WikiAudience; audienceGroupId?: string | null } }>("/api/modules/wiki/pages/:id", { schema: { body: { type: "object", additionalProperties: false, required: ["categoryId", "title", "contentHtml", "audience"], properties: { categoryId: { type: "string", format: "uuid" }, title: { type: "string", minLength: 1, maxLength: 180 }, contentHtml: { type: "string", maxLength: 500000 }, redirectPageId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, audience: { type: "string", enum: ["location","group","managers"] }, audienceGroupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } } } }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await site(request, reply, true);
     if (!departmentId) return reply;
@@ -260,8 +263,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!title) return reply.code(400).send({ error: "Page title is required." });
     const category = await pool!.query("SELECT id FROM wiki_categories WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [request.body.categoryId, departmentId]);
     if (!category.rowCount) return reply.code(404).send({ error: "Choose an active Wiki category." });
-    const redirectUrl = request.body.redirectUrl?.trim() || null;
-    if (redirectUrl && (!/^(https?:\/\/|\/)/i.test(redirectUrl) || /^\/\//.test(redirectUrl))) return reply.code(400).send({ error: "Redirect must use an HTTP(S) URL or a local path." });
+    const redirectPageId = request.body.redirectPageId ?? null;
+    if (redirectPageId === request.params.id) return reply.code(400).send({ error: "A page cannot redirect to itself." });
     const audience = request.body.audience;
     const audienceGroupId = request.body.audienceGroupId ?? null;
     if (audience === "group" && !audienceGroupId) return reply.code(400).send({ error: "Choose a group for group-only visibility." });
@@ -275,13 +278,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
-      const current = await client.query<WikiPageRow>("SELECT id,category_id,title,content_html,status,redirect_url,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by FROM wiki_pages WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`wiki-redirect:${departmentId}`]);
+      const current = await client.query<WikiPageRow>("SELECT id,category_id,title,content_html,status,redirect_page_id,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by FROM wiki_pages WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
       if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Wiki page not found." }); }
       const before = current.rows[0];
-      if (before.title !== title || before.content_html !== content || before.category_id !== request.body.categoryId || before.redirect_url !== redirectUrl || before.audience !== audience || (before.audience_group_id ?? null) !== audienceGroupId) {
+      if (redirectPageId) {
+        const target = await client.query("SELECT id FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [redirectPageId, departmentId]);
+        if (!target.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an active Wiki page in this location." }); }
+        const cycle = await client.query(`WITH RECURSIVE chain(id) AS (
+          SELECT $1::uuid
+          UNION
+          SELECT page.redirect_page_id FROM wiki_pages page JOIN chain ON page.id=chain.id
+           WHERE page.department_id=$2 AND page.redirect_page_id IS NOT NULL
+        ) SELECT 1 FROM chain WHERE id=$3 LIMIT 1`, [redirectPageId, departmentId, request.params.id]);
+        if (cycle.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "This redirect would create a loop." }); }
+      }
+      if (before.title !== title || before.content_html !== content || before.category_id !== request.body.categoryId || before.redirect_page_id !== redirectPageId || before.audience !== audience || (before.audience_group_id ?? null) !== audienceGroupId) {
         await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, before.id, before.title, before.content_html, request.authenticatedUser!.id]);
       }
-      const result = await client.query<WikiPageRow>("UPDATE wiki_pages SET category_id=$3,title=$4,content_html=$5,redirect_url=$6,audience=$7,audience_group_id=$8,updated_by=$9,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,category_id,title,content_html,status,redirect_url,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by", [request.params.id, departmentId, request.body.categoryId, title, content, redirectUrl, audience, audienceGroupId, request.authenticatedUser!.id]);
+      const result = await client.query<WikiPageRow>("UPDATE wiki_pages SET category_id=$3,title=$4,content_html=$5,redirect_page_id=$6,audience=$7,audience_group_id=$8,updated_by=$9,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,category_id,title,content_html,status,redirect_page_id,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by", [request.params.id, departmentId, request.body.categoryId, title, content, redirectPageId, audience, audienceGroupId, request.authenticatedUser!.id]);
       await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, title, content, request.authenticatedUser!.id]);
       await client.query("COMMIT");
       changed(departmentId, { action: "page-updated", pageId: request.params.id });
@@ -334,13 +349,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const version = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_page_versions WHERE id=$1 AND page_id=$2 AND department_id=$3", [request.params.versionId, request.params.id, departmentId]);
     if (!version.rowCount) return reply.code(404).send({ error: "Wiki page version not found." });
-    const current = await pool!.query<WikiPageRow>("SELECT id,category_id,title,content_html,status,redirect_url,is_homepage,created_at,updated_at,updated_by FROM wiki_pages WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
+    const current = await pool!.query<WikiPageRow>("SELECT id,category_id,title,content_html,status,redirect_page_id,is_homepage,created_at,updated_at,updated_by FROM wiki_pages WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
     if (!current.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
       await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, current.rows[0].title, current.rows[0].content_html, request.authenticatedUser!.id]);
-      const result = await client.query<WikiPageRow>("UPDATE wiki_pages SET title=$3,content_html=$4,updated_by=$5,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,category_id,title,content_html,status,redirect_url,is_homepage,created_at,updated_at,updated_by", [request.params.id, departmentId, version.rows[0].title, version.rows[0].content_html, request.authenticatedUser!.id]);
+      const result = await client.query<WikiPageRow>("UPDATE wiki_pages SET title=$3,content_html=$4,updated_by=$5,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,category_id,title,content_html,status,redirect_page_id,is_homepage,created_at,updated_at,updated_by", [request.params.id, departmentId, version.rows[0].title, version.rows[0].content_html, request.authenticatedUser!.id]);
       await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, version.rows[0].title, version.rows[0].content_html, request.authenticatedUser!.id]);
       await client.query("COMMIT");
       changed(departmentId, { action: "page-restored", pageId: request.params.id });

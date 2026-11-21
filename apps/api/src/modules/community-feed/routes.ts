@@ -15,35 +15,37 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   let scheduledMentionTimer: ReturnType<typeof setInterval> | undefined;
   let scheduledMentionJobRunning = false;
   context.replication.register({
-    schemaVersion: "9",
+    schemaVersion: "10",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Community Feed database is unavailable."], recordCount: 0 };
-      const result = await pool.query<{ posts: string; likes: string; comments: string; attachments: string; links: string; notifications: string; reports: string; preferences: string }>(
+      const result = await pool.query<{ posts: string; likes: string; comments: string; commentMentions: string; attachments: string; links: string; notifications: string; reports: string; preferences: string }>(
         `SELECT (SELECT count(*) FROM community_posts WHERE department_id=$1)::text AS posts,
                 (SELECT count(*) FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1))::text AS likes,
                 (SELECT count(*) FROM community_post_comments WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1))::text AS comments,
+                (SELECT count(*) FROM community_comment_mentions WHERE department_id=$1)::text AS "commentMentions",
                 (SELECT count(*) FROM community_post_attachments WHERE department_id=$1)::text AS attachments,
                 (SELECT count(*) FROM community_post_links WHERE department_id=$1)::text AS links,
                 (SELECT count(*) FROM community_post_notifications WHERE department_id=$1)::text AS notifications,
                 (SELECT count(*) FROM community_post_reports WHERE department_id=$1)::text AS reports,
                 (SELECT count(*) FROM community_post_notification_preferences WHERE department_id=$1)::text AS preferences`, [departmentId],
       );
-      return { ready: true, blockers: [], recordCount: Number(result.rows[0].posts) + Number(result.rows[0].likes) + Number(result.rows[0].comments) + Number(result.rows[0].attachments) + Number(result.rows[0].links) + Number(result.rows[0].notifications) + Number(result.rows[0].reports) + Number(result.rows[0].preferences) };
+      return { ready: true, blockers: [], recordCount: Number(result.rows[0].posts) + Number(result.rows[0].likes) + Number(result.rows[0].comments) + Number(result.rows[0].commentMentions) + Number(result.rows[0].attachments) + Number(result.rows[0].links) + Number(result.rows[0].notifications) + Number(result.rows[0].reports) + Number(result.rows[0].preferences) };
     },
     exportSnapshot: async (client: PoolClient, departmentId) => {
       const posts = await client.query("SELECT * FROM community_posts WHERE department_id=$1 ORDER BY id", [departmentId]);
       const likes = await client.query("SELECT * FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY post_id,user_id", [departmentId]);
       const comments = await client.query("SELECT * FROM community_post_comments WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY id", [departmentId]);
+      const commentMentions = await client.query("SELECT * FROM community_comment_mentions WHERE department_id=$1 ORDER BY comment_id,contact_id", [departmentId]);
       const attachments = await client.query("SELECT id,post_id,department_id,uploaded_by,filename,content_type,encode(content,'base64') AS data,created_at FROM community_post_attachments WHERE department_id=$1 ORDER BY id", [departmentId]);
       const links = await client.query("SELECT * FROM community_post_links WHERE department_id=$1 ORDER BY post_id,link_type,entity_id", [departmentId]);
       const notifications = await client.query("SELECT * FROM community_post_notifications WHERE department_id=$1 ORDER BY id", [departmentId]);
       const reports = await client.query("SELECT * FROM community_post_reports WHERE department_id=$1 ORDER BY id", [departmentId]);
       const preferences = await client.query("SELECT * FROM community_post_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId]);
-      return { version: 9, posts: posts.rows, likes: likes.rows, comments: comments.rows, attachments: attachments.rows, links: links.rows, notifications: notifications.rows, reports: reports.rows, preferences: preferences.rows };
+      return { version: 10, posts: posts.rows, likes: likes.rows, comments: comments.rows, commentMentions: commentMentions.rows, attachments: attachments.rows, links: links.rows, notifications: notifications.rows, reports: reports.rows, preferences: preferences.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(Number((input as { version?: unknown }).version)) || !Array.isArray((input as { posts?: unknown }).posts) || !Array.isArray((input as { likes?: unknown }).likes) || !Array.isArray((input as { comments?: unknown }).comments)) throw new Error("The Community Feed snapshot is invalid.");
-      const snapshot = input as { posts: Array<Record<string, unknown>>; likes: Array<Record<string, unknown>>; comments: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
+      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number((input as { version?: unknown }).version)) || !Array.isArray((input as { posts?: unknown }).posts) || !Array.isArray((input as { likes?: unknown }).likes) || !Array.isArray((input as { comments?: unknown }).comments)) throw new Error("The Community Feed snapshot is invalid.");
+      const snapshot = input as { posts: Array<Record<string, unknown>>; likes: Array<Record<string, unknown>>; comments: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
       await client.query("DELETE FROM community_post_reports WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_post_notification_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_post_notifications WHERE department_id=$1", [departmentId]);
@@ -55,6 +57,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const post of snapshot.posts) await client.query("INSERT INTO community_posts(id,department_id,author_user_id,title,body,created_at,updated_at,publish_at,comments_enabled,group_id,visibility,mentions_notified_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [post.id, departmentId, restoreContext.userIdMap.get(String(post.author_user_id)) ?? post.author_user_id, post.title, post.body, post.created_at, post.updated_at, post.publish_at ?? null, post.comments_enabled ?? true, post.group_id ?? null, post.visibility ?? "location", post.mentions_notified_at ?? null]);
       for (const like of snapshot.likes) await client.query("INSERT INTO community_post_likes(post_id,user_id,created_at,reaction_type) VALUES($1,$2,$3,$4)", [like.post_id, restoreContext.userIdMap.get(String(like.user_id)) ?? like.user_id, like.created_at, like.reaction_type ?? "like"]);
       for (const comment of snapshot.comments) await client.query("INSERT INTO community_post_comments(id,post_id,author_user_id,body,created_at) VALUES($1,$2,$3,$4,$5)", [comment.id, comment.post_id, restoreContext.userIdMap.get(String(comment.author_user_id)) ?? comment.author_user_id, comment.body, comment.created_at]);
+      const commentMentions = snapshot.commentMentions ?? [];
+      for (const mention of commentMentions) await client.query("INSERT INTO community_comment_mentions(department_id,post_id,comment_id,contact_id,created_at) VALUES($1,$2,$3,$4,$5)", [departmentId, mention.post_id, mention.comment_id, mention.contact_id, mention.created_at]);
       const attachments = snapshot.attachments ?? [];
       const links = snapshot.links ?? [];
       for (const file of attachments) await client.query("INSERT INTO community_post_attachments(id,post_id,department_id,uploaded_by,filename,content_type,content,created_at) VALUES($1,$2,$3,$4,$5,$6,decode($7,'base64'),$8)", [file.id, file.post_id, departmentId, restoreContext.userIdMap.get(String(file.uploaded_by)) ?? file.uploaded_by, file.filename, file.content_type, file.data, file.created_at]);
@@ -65,14 +69,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const report of reports) await client.query("INSERT INTO community_post_reports(id,department_id,post_id,reporter_user_id,reason,details,status,reviewed_by,reviewed_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [report.id, departmentId, report.post_id, restoreContext.userIdMap.get(String(report.reporter_user_id)) ?? report.reporter_user_id, report.reason, report.details ?? "", report.status ?? "open", report.reviewed_by == null ? null : restoreContext.userIdMap.get(String(report.reviewed_by)) ?? report.reviewed_by, report.reviewed_at ?? null, report.created_at]);
       const preferences = snapshot.preferences ?? [];
       for (const preference of preferences) await client.query("INSERT INTO community_post_notification_preferences(department_id,user_id,notify_posts,notify_reactions,notify_comments,notify_email_posts,notify_email_reactions,notify_email_comments,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [departmentId, restoreContext.userIdMap.get(String(preference.user_id)) ?? preference.user_id, preference.notify_posts ?? true, preference.notify_reactions ?? true, preference.notify_comments ?? true, preference.notify_email_posts ?? true, preference.notify_email_reactions ?? true, preference.notify_email_comments ?? true, preference.updated_at ?? new Date()]);
-      return { recordCount: snapshot.posts.length + snapshot.likes.length + snapshot.comments.length + attachments.length + links.length + notifications.length + reports.length + preferences.length };
+      return { recordCount: snapshot.posts.length + snapshot.likes.length + snapshot.comments.length + commentMentions.length + attachments.length + links.length + notifications.length + reports.length + preferences.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9].includes(Number((input as { version?: unknown }).version))) return { ready: false, blockers: ["No verified Community Feed snapshot is available."] };
-      const snapshot = input as { posts?: Array<Record<string, unknown>>; likes?: Array<Record<string, unknown>>; comments?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
+      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number((input as { version?: unknown }).version))) return { ready: false, blockers: ["No verified Community Feed snapshot is available."] };
+      const snapshot = input as { posts?: Array<Record<string, unknown>>; likes?: Array<Record<string, unknown>>; comments?: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
       const actualPosts = (await client.query("SELECT * FROM community_posts WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualLikes = (await client.query("SELECT * FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY post_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualComments = (await client.query("SELECT * FROM community_post_comments WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualCommentMentions = (await client.query("SELECT * FROM community_comment_mentions WHERE department_id=$1 ORDER BY comment_id,contact_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualAttachments = (await client.query("SELECT id,post_id,department_id,uploaded_by,filename,content_type,encode(content,'base64') AS data,created_at FROM community_post_attachments WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualLinks = (await client.query("SELECT * FROM community_post_links WHERE department_id=$1 ORDER BY post_id,link_type,entity_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualNotifications = (await client.query("SELECT * FROM community_post_notifications WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
@@ -108,6 +113,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         compare("Posts", snapshot.posts ?? [], actualPosts, ["author_user_id"]),
         compare("Likes", snapshot.likes ?? [], actualLikes, ["user_id"]),
         compare("Comments", snapshot.comments ?? [], actualComments, ["author_user_id"]),
+        ...(snapshotVersion >= 10 ? [compare("Comment mentions", snapshot.commentMentions ?? [], actualCommentMentions, [])] : []),
         ...(snapshotVersion >= 4 ? [compare("Attachments", snapshot.attachments ?? [], actualAttachments, ["uploaded_by"]), compare("Links", snapshot.links ?? [], actualLinks, [])] : []),
         ...(snapshotVersion >= 5 ? [compare("Notifications", snapshot.notifications ?? [], actualNotifications, ["recipient_user_id", "actor_user_id"])] : []),
         ...(snapshotVersion >= 6 ? [compare("Reports", snapshot.reports ?? [], actualReports, ["reporter_user_id", "reviewed_by"])] : []),
@@ -209,6 +215,42 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM post JOIN recipients recipient ON recipient.user_id<>$4
        ON CONFLICT DO NOTHING`,
       [postId, departmentId, contactIds, actorId],
+    );
+  }
+
+  async function createCommentMentionNotifications(postId: string, commentId: string, departmentId: string, actorId: string, contactIds: string[], body: string) {
+    if (!pool || !contactIds.length) return;
+    await pool.query(
+      `WITH post AS (
+         SELECT id,department_id,group_id,visibility FROM community_posts
+          WHERE id=$1 AND department_id=$2 AND comments_enabled=TRUE AND (publish_at IS NULL OR publish_at<=now())
+       ), mentioned AS (
+         SELECT DISTINCT contact.id AS contact_id
+           FROM unnest($3::uuid[]) requested(contact_id)
+           JOIN contacts contact ON contact.id=requested.contact_id AND contact.department_id=$2 AND contact.status='member'
+           JOIN post ON TRUE
+          WHERE position('@'||trim(contact.first_name||' '||contact.last_name) IN $6)>0
+            AND (post.visibility<>'members' OR EXISTS (
+            SELECT 1 FROM group_members group_member
+             WHERE group_member.group_id=post.group_id AND group_member.contact_id=contact.id AND group_member.status='active'
+          ))
+       ), saved AS (
+         INSERT INTO community_comment_mentions(department_id,post_id,comment_id,contact_id)
+         SELECT $2,$1,$4,mentioned.contact_id FROM mentioned
+         ON CONFLICT(department_id,comment_id,contact_id) DO NOTHING
+         RETURNING contact_id
+       )
+       INSERT INTO community_post_notifications(id,department_id,post_id,recipient_user_id,actor_user_id,kind,comment_id,in_app_enabled,email_enabled)
+       SELECT gen_random_uuid(),post.department_id,post.id,membership.user_id,$5,'mention',$4,true,false
+         FROM post JOIN mentioned ON TRUE
+         JOIN department_memberships membership ON membership.department_id=post.department_id AND membership.contact_id=mentioned.contact_id
+        WHERE membership.user_id<>$5
+          AND (post.visibility<>'members' OR EXISTS (
+            SELECT 1 FROM group_members group_member
+             WHERE group_member.group_id=post.group_id AND group_member.contact_id=mentioned.contact_id AND group_member.status='active'
+          ))
+       ON CONFLICT DO NOTHING`,
+      [postId, departmentId, contactIds, commentId, actorId, body],
     );
   }
 
@@ -320,7 +362,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool.query(
       `SELECT notification.id,notification.post_id AS "postId",notification.kind,notification.created_at AS "createdAt",notification.read_at AS "readAt",
               actor.display_name AS "actorName",post.title AS "postTitle",
-              CASE notification.kind WHEN 'post' THEN 'posted an update' WHEN 'reaction' THEN 'reacted to your post' WHEN 'mention' THEN 'mentioned you in a post' ELSE 'commented on a post' END AS summary
+              CASE notification.kind WHEN 'post' THEN 'posted an update' WHEN 'reaction' THEN 'reacted to your post' WHEN 'mention' THEN CASE WHEN notification.comment_id IS NULL THEN 'mentioned you in a post' ELSE 'mentioned you in a comment' END ELSE 'commented on a post' END AS summary
          FROM community_post_notifications notification
          JOIN community_posts post ON post.id=notification.post_id AND post.department_id=notification.department_id
          LEFT JOIN app_users actor ON actor.id=notification.actor_user_id
@@ -852,10 +894,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { reaction: null };
   });
 
-  app.post<{ Params: { postId: string }; Body: { body: string } }>("/api/modules/community-feed/posts/:postId/comments", {
+  app.post<{ Params: { postId: string }; Body: { body: string; mentions?: string[] } }>("/api/modules/community-feed/posts/:postId/comments", {
     schema: {
       params: { type: "object", required: ["postId"], properties: { postId: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["body"], properties: { body: { type: "string", minLength: 1, maxLength: 1000 } } },
+      body: { type: "object", additionalProperties: false, required: ["body"], properties: { body: { type: "string", minLength: 1, maxLength: 1000 }, mentions: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } },
     },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
@@ -864,6 +906,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const body = request.body.body.trim();
     if (!body) return reply.code(400).send({ error: "Write a comment before posting." });
+    const mentionIds = [...new Set(request.body.mentions ?? [])];
+    const peoplePermissions = request.activeDepartmentPermissions ?? [];
+    if (mentionIds.length && request.activeDepartmentRole !== "site_admin" && !peoplePermissions.includes("people_view_private") && !peoplePermissions.includes("people_manage")) return reply.code(403).send({ error: "Private People access is required to mention people in Community Feed comments." });
     const result = await pool.query(
       `INSERT INTO community_post_comments (id,post_id,author_user_id,body)
        SELECT $1,post.id,$4,$5 FROM community_posts post WHERE post.id=$2 AND post.department_id=$3 AND post.comments_enabled=TRUE AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 4, 6)}
@@ -871,6 +916,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       [randomUUID(), request.params.postId, departmentId, request.authenticatedUser!.id, body, request.activeDepartmentRole === "site_admin"],
     );
     if (!result.rowCount) return reply.code(404).send({ error: "This post could not be found." });
+    if (mentionIds.length) await createCommentMentionNotifications(request.params.postId, String(result.rows[0].id), departmentId, request.authenticatedUser!.id, mentionIds, body);
     const author = await pool.query("SELECT display_name FROM app_users WHERE id=$1", [request.authenticatedUser!.id]);
     const comment = { ...result.rows[0], authorName: author.rows[0].display_name };
     await createFeedNotifications(request.params.postId, departmentId, request.authenticatedUser!.id, "comment", String(comment.id));
