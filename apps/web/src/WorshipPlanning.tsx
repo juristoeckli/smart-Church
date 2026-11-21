@@ -15,13 +15,13 @@ const emptySong = (): SongDraft => ({ title: "", authors: "", defaultKey: "", no
 const emptyPlan = (): PlanDraft => ({ name: "", description: "", positions: [], items: [], active: true });
 const localizedError = (message: string) => translateModuleMessage("core-events", getActiveLanguage(), message);
 
-export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, onNotice, selectedSongId, directorySearch, selectedSongRequestId, onSelectedSongHandled }: { departmentId: string; canManage: boolean; onClose: () => void; onChanged: () => void; onNotice: (message: string) => void; selectedSongId?: string; directorySearch?: DirectorySearchNavigation; selectedSongRequestId?: number; onSelectedSongHandled?: (requestId: number) => void }) {
-  const [tab, setTab] = useState<Tab>("songs");
+export function WorshipPlanning({ departmentId, canManage, onClose, onChanged, onNotice, selectedSongId, directorySearch, selectedSongRequestId, onSelectedSongHandled, initialTemplate }: { departmentId: string; canManage: boolean; onClose: () => void; onChanged: () => void; onNotice: (message: string) => void; selectedSongId?: string; directorySearch?: DirectorySearchNavigation; selectedSongRequestId?: number; onSelectedSongHandled?: (requestId: number) => void; initialTemplate?: Omit<ServicePlanTemplate, "id"> }) {
+  const [tab, setTab] = useState<Tab>(canManage && initialTemplate ? "plans" : "songs");
   const [songs, setSongs] = useState<WorshipSong[]>([]);
   const [plans, setPlans] = useState<ServicePlanTemplate[]>([]);
   const [qualifications, setQualifications] = useState<VolunteerQualification[]>([]);
   const [songDraft, setSongDraft] = useState<SongDraft | null>(null);
-  const [planDraft, setPlanDraft] = useState<PlanDraft | null>(null);
+  const [planDraft, setPlanDraft] = useState<PlanDraft | null>(canManage ? initialTemplate ?? null : null);
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
