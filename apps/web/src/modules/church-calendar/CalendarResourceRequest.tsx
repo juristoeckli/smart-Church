@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { zonedInputToUtc } from "../resource-scheduler/zoned-input";
 
 type Resource = {
   id: string; name: string; location: string; active: boolean;
@@ -7,12 +6,12 @@ type Resource = {
 };
 
 type Props = {
-  appointmentId: string; defaultPurpose: string; startsAt: string; endsAt: string;
-  headers: Record<string, string>; onCreated: (bookingId: string) => void;
+  appointmentId: string; occurrenceStartAt: string; defaultPurpose: string; startsAt: string; endsAt: string;
+  headers: Record<string, string>; onCreated: () => void;
 };
 
-export function CalendarResourceRequest({ appointmentId, defaultPurpose, startsAt, endsAt, headers, onCreated }: Props) {
-  const [data, setData] = useState<{ resources: Resource[]; timeZone: string; canManage: boolean }>();
+export function CalendarResourceRequest({ appointmentId, occurrenceStartAt, defaultPurpose, startsAt, endsAt, headers, onCreated }: Props) {
+  const [data, setData] = useState<{ resources: Resource[]; canManage: boolean }>();
   const [open, setOpen] = useState(false);
   const [resourceId, setResourceId] = useState("");
   const [purpose, setPurpose] = useState(defaultPurpose);
@@ -60,15 +59,14 @@ export function CalendarResourceRequest({ appointmentId, defaultPurpose, startsA
         headers,
         body: JSON.stringify({
           resourceId, purpose: purpose.trim(), quantity: units, leadInMinutes: before, cleanupMinutes: after,
-          startsAt: zonedInputToUtc(startsAt.slice(0, 16), data.timeZone),
-          endsAt: zonedInputToUtc(endsAt.slice(0, 16), data.timeZone),
-          linkedAppointmentId: appointmentId,
+          startsAt, endsAt,
+          linkedAppointmentId: appointmentId, linkedOccurrenceStartAt: occurrenceStartAt,
         }),
       });
       const body = await response.json() as { error?: string; bookingIds?: string[] };
       if (!response.ok) throw new Error(body.error ?? "Could not reserve this resource.");
       if (!body.bookingIds?.[0]) throw new Error("The booking response was incomplete. Reload before trying again.");
-      onCreated(body.bookingIds[0]);
+      onCreated();
       setOpen(false);
       selectResource("");
     } catch (reason) {
@@ -80,7 +78,7 @@ export function CalendarResourceRequest({ appointmentId, defaultPurpose, startsA
   return <div className="church-calendar-extra-date wide">
     {!open ? <button type="button" className="button button-secondary" onClick={() => setOpen(true)}>Book a resource</button> : <>
       <strong>Book a resource for this occurrence</strong>
-      <small>Uses the saved appointment time{data ? " in " + data.timeZone : ""}. Booking is saved separately from appointment edits.</small>
+      <small>Uses the saved appointment time. Changes to the appointment and resource booking are saved separately.</small>
       {data?.canManage && <div>
         <label>Booking purpose<input value={purpose} onChange={(event) => setPurpose(event.target.value)} maxLength={240} disabled={busy} /><small>Shown in Resource Scheduler.</small></label>
         <label>Resource<select value={resourceId} onChange={(event) => selectResource(event.target.value)} disabled={busy}>

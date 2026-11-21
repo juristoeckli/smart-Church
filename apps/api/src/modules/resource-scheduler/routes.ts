@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import type { PoolClient } from "pg";
+import { calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, wallDate, type Recurrence } from "../../calendar-occurrences.js";
+import { canonicalTimeZone } from "../../calendar-time.js";
 
 type Frequency = "once" | "daily" | "weekly" | "monthly" | "yearly";
 type RepeatRule = { frequency: Frequency; interval?: number; endsOn?: string; count?: number; weekdays?: number[] };
 type SeriesInput = {
   resourceId: string; purpose: string; startsAt: string; endsAt: string; quantity?: number;
   leadInMinutes?: number; cleanupMinutes?: number; recurrence?: RepeatRule;
-  extraDates?: string[]; excludedDates?: string[]; linkedAppointmentId?: string | null;
+  extraDates?: string[]; excludedDates?: string[]; linkedAppointmentId?: string | null; linkedOccurrenceStartAt?: string;
 };
 type FutureEditInput = { fromDate: string; purpose: string; startsAt: string; endsAt: string; quantity: number; leadInMinutes: number; cleanupMinutes: number; recurrence: RepeatRule };
 
@@ -213,6 +216,36 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return Boolean(result.rowCount);
   }
 
+  async function lockOccurrenceWindow(client: PoolClient, request: FastifyRequest, departmentId: string, appointmentId: string, original: string, locationTimeZone: string) {
+    const access = sharedCalendarLinkAccess(request);
+    const result = await client.query<{ starts_at: string; ends_at: string; recurrence: Recurrence | null; time_zone: string | null; all_day: boolean }>(
+      `SELECT to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+              to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,appointment.recurrence,appointment.time_zone,appointment.all_day
+         FROM church_calendar_appointments appointment
+         JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+        WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+          AND ((calendar.scope='community' AND $3::boolean) OR (calendar.scope='group' AND $4::boolean))
+        FOR UPDATE OF appointment FOR SHARE OF calendar`, [appointmentId, departmentId, access.community, access.group],
+    );
+    const appointment = result.rows[0];
+    if (!appointment) return null;
+    const exception = (await client.query<{ cancelled: boolean; overrides: Record<string, unknown> }>(
+      "SELECT cancelled,overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp FOR SHARE", [appointmentId, original],
+    )).rows[0];
+    if (exception?.cancelled) return null;
+    const extra = (await client.query<{ ends_at: string }>(
+      `SELECT to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at FROM church_calendar_extra_dates
+        WHERE appointment_id=$1 AND starts_at=$2::timestamp FOR SHARE`, [appointmentId, original],
+    )).rows[0];
+    if (!extra && !calendarOccurrenceExists(appointment, original)) return null;
+    const overrides = exception?.overrides ?? {};
+    const duration = wallDate(appointment.ends_at).getTime() - wallDate(appointment.starts_at).getTime();
+    const startsAt = cleanLocalDateTime(overrides.startsAt) ?? original;
+    const endsAt = cleanLocalDateTime(overrides.endsAt) ?? extra?.ends_at ?? localDateTime(new Date(wallDate(original).getTime() + duration));
+    const timeZone = appointment.time_zone ?? canonicalTimeZone(locationTimeZone) ?? "UTC";
+    return calendarBookingWindow(startsAt, endsAt, (overrides.allDay ?? appointment.all_day) === true, timeZone);
+  }
+
   async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: { query: (sql: string, values?: unknown[]) => Promise<any> }) {
     const seriesResult = await queryable.query("SELECT * FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [seriesId, departmentId]);
     const series = seriesResult.rows[0];
@@ -366,6 +399,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       quantity: { type: "integer", minimum: 1, maximum: 10000 }, leadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, cleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 },
       recurrence: { type: "object", additionalProperties: false, properties: { frequency: { type: "string", enum: ["once", "daily", "weekly", "monthly", "yearly"] }, interval: { type: "integer", minimum: 1, maximum: 366 }, endsOn: { type: "string", format: "date" }, count: { type: "integer", minimum: 1, maximum: 500 }, weekdays: { type: "array", maxItems: 7, items: { type: "integer", minimum: 0, maximum: 6 } } } },
       extraDates: { type: "array", maxItems: 100, items: { type: "string", format: "date" } }, excludedDates: { type: "array", maxItems: 100, items: { type: "string", format: "date" } }, linkedAppointmentId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] },
+      linkedOccurrenceStartAt: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$" },
     } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply);
@@ -387,6 +421,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const resource = resourceResult.rows[0];
     if (!resource) return reply.code(404).send({ error: "Choose an active resource in this location." });
     const appointmentId = request.body.linkedAppointmentId ?? null;
+    const occurrenceStart = cleanLocalDateTime(request.body.linkedOccurrenceStartAt);
+    if (request.body.linkedOccurrenceStartAt !== undefined && (!appointmentId || !occurrenceStart || repeat.frequency !== "once" || extraDates.length || excludedDates.length)) {
+      return reply.code(400).send({ error: "Choose one saved calendar occurrence for this booking." });
+    }
     if (appointmentId) {
       if (!isManager(request)) return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
       const exists = await context.pool!.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
@@ -399,7 +437,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const zoneResult = await context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
     const timeZone = zoneResult.rows[0]?.time_zone ?? "UTC";
     if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
-    const instances = seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
+    const instances = occurrenceStart
+      ? [{ startsAt, endsAt, localDate: occurrenceDateKey(startsAt, timeZone) }]
+      : seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
     const status = resource.requires_approval && !isManager(request) ? "requested" : "approved";
     const seriesId = randomUUID(); const client = await context.pool!.connect(); const bookingIds: string[] = [];
@@ -409,13 +449,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "This location is read-only on this installation." });
       }
-      if (appointmentId && !await lockLinkableAppointment(client, request, departmentId, appointmentId)) {
+      if (appointmentId && occurrenceStart) {
+        const window = await lockOccurrenceWindow(client, request, departmentId, appointmentId, occurrenceStart, timeZone);
+        if (!window) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Shared calendar occurrence not found in this location." });
+        }
+        if (Date.parse(window.startsAtUtc) !== startsAt.getTime() || Date.parse(window.endsAtUtc) !== endsAt.getTime()) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The appointment time changed. Refresh Calendar before booking." });
+        }
+      } else if (appointmentId && !await lockLinkableAppointment(client, request, departmentId, appointmentId)) {
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
       }
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.body.resourceId]);
       await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, appointmentId]);
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, occurrenceStart ? null : appointmentId]);
       for (const day of new Set(extraDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
       for (const day of new Set(excludedDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
       for (const occurrence of instances) {
@@ -425,7 +475,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [bookingId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes]);
         await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.localDate)]);
         if (appointmentId) {
-          await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [appointmentId, bookingId, request.authenticatedUser!.id]);
+          await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by,occurrence_start) VALUES($1,$2,$3,$4::timestamp) ON CONFLICT DO NOTHING", [appointmentId, bookingId, request.authenticatedUser!.id, occurrenceStart]);
         }
       }
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_created',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, seriesId, JSON.stringify({ occurrenceCount: instances.length, status, quantity, leadInMinutes, cleanupMinutes })]);
@@ -436,6 +486,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       throw error;
     } finally { client.release(); }
     context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId, action: "series-created" });
+    if (appointmentId) context.realtime.publish("module:church-calendar:changed", departmentId, { appointmentId, action: "resource-linked" });
     return reply.code(201).send({ seriesId, occurrenceCount: instances.length, status, bookingIds });
   });
 

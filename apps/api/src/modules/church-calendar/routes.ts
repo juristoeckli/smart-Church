@@ -1,11 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "./appointment-time.js";
+import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
+import { addDays, calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, occurrenceStarts, startOfDay, wallDate, type Recurrence } from "../../calendar-occurrences.js";
 
 type CalendarScope = "community" | "group" | "personal";
-type Frequency = "daily" | "weekly" | "monthly" | "monthly_weekday" | "yearly" | "manual";
-type Recurrence = { frequency: Frequency; interval?: number; weekdays?: number[]; weekday?: number; weekOfMonth?: number; endsOn?: string; count?: number; dates?: string[] };
 type AppointmentInput = {
   calendarId: string; title: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; allDay?: boolean;
   place?: string; url?: string; internalOnly?: boolean; tags?: string[]; recurrence?: Recurrence | null; linkedEventId?: string | null;
@@ -21,88 +20,6 @@ type AppointmentRow = {
 type Occurrence = Record<string, unknown> & { appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string };
 
 const calendarFields = ["title", "subtitle", "description", "startsAt", "endsAt", "allDay", "place", "url", "internalOnly", "tags", "linkedEventId", "signupGroupId", "responsibleContactId"] as const;
-
-function cleanLocalDateTime(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const cleaned = value.trim().replace(" ", "T").slice(0, 19);
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(cleaned)) return null;
-  const wallTime = cleaned.length === 16 ? `${cleaned}:00` : cleaned;
-  const date = new Date(`${wallTime}Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 19) === wallTime ? wallTime : null;
-}
-
-function wallDate(value: string) {
-  return new Date(`${value.replace(" ", "T").slice(0, 19)}Z`);
-}
-
-function localDateTime(date: Date) {
-  const p = (value: number) => String(value).padStart(2, "0");
-  return `${date.getUTCFullYear()}-${p(date.getUTCMonth() + 1)}-${p(date.getUTCDate())}T${p(date.getUTCHours())}:${p(date.getUTCMinutes())}:${p(date.getUTCSeconds())}`;
-}
-
-function startOfDay(value: string) {
-  return new Date(`${value.slice(0, 10)}T00:00:00Z`);
-}
-
-function addDays(date: Date, amount: number) {
-  const result = new Date(date);
-  result.setUTCDate(result.getUTCDate() + amount);
-  return result;
-}
-
-function occurrenceStarts(row: AppointmentRow, from: string, to: string, maxOccurrences = 500): Date[] {
-  const start = new Date(`${row.starts_at.replace(" ", "T")}Z`);
-  const fromDate = startOfDay(from);
-  const toDate = startOfDay(to);
-  const rule = row.recurrence;
-  if (!rule) return start >= new Date(`${from.replace(" ", "T")}Z`) && start <= new Date(`${to.replace(" ", "T")}Z`) ? [start] : [];
-  const byManualDate = (date: string) => {
-    const candidate = new Date(`${date.slice(0, 10)}T${row.starts_at.slice(11, 19)}Z`);
-    return Number.isFinite(candidate.getTime()) ? candidate : null;
-  };
-  if (rule.frequency === "manual") {
-    const through = addDays(rule.endsOn ? new Date(Math.min(startOfDay(rule.endsOn).getTime(), toDate.getTime())) : toDate, 1);
-    const requestedDates = [...new Set(rule.dates ?? [])].sort();
-    return requestedDates.map(byManualDate).filter((date): date is Date => Boolean(date && date >= start && date < through))
-      .slice(0, rule.count ?? requestedDates.length).filter((date) => date >= fromDate).slice(0, maxOccurrences);
-  }
-  const dates: Date[] = [];
-  const interval = Math.min(365, Math.max(1, Math.floor(Number(rule.interval) || 1)));
-  const endsOn = rule.endsOn ? startOfDay(rule.endsOn) : toDate;
-  const last = new Date(Math.min(toDate.getTime(), endsOn.getTime()));
-  let occurrenceCount = 0;
-  for (let day = startOfDay(row.starts_at); day <= last && dates.length < maxOccurrences; day = addDays(day, 1)) {
-    if (day < startOfDay(row.starts_at)) continue;
-    const delta = Math.round((startOfDay(localDateTime(day).slice(0, 10)).getTime() - startOfDay(row.starts_at.slice(0, 10)).getTime()) / 86_400_000);
-    const weeks = Math.floor(delta / 7);
-    const months = (day.getUTCFullYear() - start.getUTCFullYear()) * 12 + day.getUTCMonth() - start.getUTCMonth();
-    let matches = false;
-    if (rule.frequency === "daily") matches = delta % interval === 0;
-    else if (rule.frequency === "weekly") {
-      const monday = (value: Date) => { const copy = startOfDay(localDateTime(value)); copy.setUTCDate(copy.getUTCDate() - ((copy.getUTCDay() + 6) % 7)); return copy; };
-      const weekDelta = Math.round((monday(day).getTime() - monday(start).getTime()) / (7 * 86_400_000));
-      matches = weekDelta % interval === 0 && (rule.weekdays?.length ? rule.weekdays.includes(day.getUTCDay()) : day.getUTCDay() === start.getUTCDay());
-    } else if (rule.frequency === "monthly") matches = months >= 0 && months % interval === 0 && day.getUTCDate() === start.getUTCDate();
-    else if (rule.frequency === "monthly_weekday") {
-      const ordinal = rule.weekOfMonth;
-      const weekday = rule.weekday;
-      const ordinalMatches = ordinal === -1
-        ? addDays(day, 7).getUTCMonth() !== day.getUTCMonth()
-        : Math.floor((day.getUTCDate() - 1) / 7) + 1 === ordinal;
-      matches = months >= 0 && months % interval === 0 && weekday !== undefined && day.getUTCDay() === weekday && ordinalMatches;
-    }
-    else if (rule.frequency === "yearly") matches = day.getUTCMonth() === start.getUTCMonth() && day.getUTCDate() === start.getUTCDate() && (day.getUTCFullYear() - start.getUTCFullYear()) % interval === 0;
-    if (!matches || day < startOfDay(row.starts_at)) continue;
-    occurrenceCount += 1;
-    if (rule.count && occurrenceCount > rule.count) break;
-    if (day >= fromDate) {
-      const occurrence = new Date(day);
-      occurrence.setUTCHours(start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds(), 0);
-      dates.push(occurrence);
-    }
-  }
-  return dates;
-}
 
 function normalizeInput(input: AppointmentInput): AppointmentInput | string {
   const title = typeof input.title === "string" ? input.title.trim() : "";
@@ -449,8 +366,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT appointment_id,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
          FROM church_calendar_extra_dates WHERE appointment_id=ANY($1::uuid[]) AND starts_at <= $3::timestamp AND ends_at >= $2::timestamp`, [ids, from, to],
     );
-    const resourceLinks = await context.pool.query<{ appointment_id: string; resource_booking_id: string }>(
-      "SELECT appointment_id,resource_booking_id FROM church_calendar_resource_links WHERE appointment_id=ANY($1::uuid[])", [ids],
+    const resourceLinks = await context.pool.query<{
+      appointment_id: string; resource_booking_id: string; occurrence_start: string | null; name: string; status: string;
+      lead_in_minutes: number; cleanup_minutes: number; starts_at: Date; ends_at: Date;
+    }>(
+      `SELECT link.appointment_id,link.resource_booking_id,to_char(link.occurrence_start,'YYYY-MM-DD"T"HH24:MI:SS') AS occurrence_start,
+              resource.name,booking.status,
+              COALESCE((to_jsonb(booking)->>'lead_in_minutes')::int,0) AS lead_in_minutes,
+              COALESCE((to_jsonb(booking)->>'cleanup_minutes')::int,0) AS cleanup_minutes,
+              booking.starts_at,booking.ends_at
+         FROM church_calendar_resource_links link
+         JOIN resource_bookings booking ON booking.id=link.resource_booking_id AND booking.department_id=$2
+         JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=$2
+        WHERE link.appointment_id=ANY($1::uuid[])
+        ORDER BY resource.name,booking.starts_at,link.resource_booking_id`, [ids, departmentId],
     );
     const exceptionMap = new Map(exceptions.rows.map((row) => [`${row.appointment_id}:${row.original_start.replace(" ", "T")}`, row]));
     const canViewResponsiblePeople = canSeePrivatePeople(request);
@@ -489,8 +418,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     )).rows.map((event) => [event.id, event] as const) : []);
     const extraMap = new Map<string, Array<{ startsAt: string; endsAt: string }>>();
     for (const row of extraDates.rows) extraMap.set(row.appointment_id, [...(extraMap.get(row.appointment_id) ?? []), { startsAt: row.starts_at.replace(" ", "T"), endsAt: row.ends_at.replace(" ", "T") }]);
-    const links = new Map<string, string[]>();
-    for (const row of resourceLinks.rows) links.set(row.appointment_id, [...(links.get(row.appointment_id) ?? []), row.resource_booking_id]);
+    const links = new Map<string, typeof resourceLinks.rows>();
+    for (const row of resourceLinks.rows) {
+      const key = row.occurrence_start ? `${row.appointment_id}:${row.occurrence_start}` : row.appointment_id;
+      const existing = links.get(key);
+      if (existing) existing.push(row); else links.set(key, [row]);
+    }
     const output: Occurrence[] = [];
     for (const row of appointments) {
       const seriesTimeZone = row.time_zone ?? null;
@@ -524,6 +457,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (end < wallDate(from) || startAt > to) continue;
         const allDay = (override.allDay ?? row.all_day) === true;
         const instants = allDay ? null : appointmentInstants(startAt, endAt, timeZone);
+        const resourceWindow = allDay ? calendarBookingWindow(startAt, endAt, true, timeZone) : instants;
+        const seriesBookings = links.get(row.id) ?? [];
+        const resourceBookings = [...seriesBookings, ...(links.get(`${row.id}:${original}`) ?? [])].map((booking) => ({
+          id: booking.resource_booking_id, name: booking.name, status: booking.status,
+          leadInMinutes: booking.lead_in_minutes, cleanupMinutes: booking.cleanup_minutes,
+          ...(booking.occurrence_start ? { scope: "occurrence", timeMismatch: !resourceWindow
+            || booking.starts_at.getTime() !== Date.parse(resourceWindow.startsAtUtc) || booking.ends_at.getTime() !== Date.parse(resourceWindow.endsAtUtc) } : { scope: "series" }),
+        }));
         output.push({
           appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, originalOccurrenceStartAt: original, seriesTimeZone, timeZone,
           startsAtUtc: instants?.startsAtUtc ?? null, endsAtUtc: instants?.endsAtUtc ?? null, timeShifted: instants?.shifted ?? false, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
@@ -531,7 +472,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           title: override.title ?? row.title, subtitle: override.subtitle ?? row.subtitle, description: override.description ?? row.description,
           allDay: override.allDay ?? row.all_day, place: override.place ?? row.place, url: override.url ?? row.url,
           internalOnly, tags: override.tags ?? row.tags,
-          recurrence: row.recurrence, linkedEventId: linkedEvent?.id ?? null, linkedEventCancelled: linkedEvent?.cancelled ?? false, eventRegistration, resourceBookingIds: links.get(row.id) ?? [],
+          recurrence: row.recurrence, linkedEventId: linkedEvent?.id ?? null, linkedEventCancelled: linkedEvent?.cancelled ?? false, eventRegistration,
+          resourceBookingIds: seriesBookings.map((booking) => booking.resource_booking_id), resourceBookings,
+          resourceWindow: resourceWindow && { startsAt: resourceWindow.startsAtUtc, endsAt: resourceWindow.endsAtUtc },
           signupGroupId, signupGroupName: signupGroup?.name ?? null,
           signupToken: signupGroup?.public_signup_enabled ? signupGroup.public_signup_token : null,
           responsibleContactId: canViewResponsiblePeople && responsibleContactId && responsibleNames.has(responsibleContactId) ? responsibleContactId : null,
@@ -900,7 +843,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
     if (resourceIds.length) {
-      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
+      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")
+        || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
       const found = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
       if (found.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
     }
@@ -988,6 +932,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const values = normalized;
     const scope = request.query.scope ?? "series";
     let resourceTargetId = row.id;
+    const updateSeriesLinks = normalized.resourceBookingIds !== undefined && !(scope === "occurrence" && row.recurrence);
     const timeZone = normalized.timeZone === undefined ? row.time_zone ?? null : normalized.timeZone;
     const effectiveZone = timeZone ?? (normalized.timeZone === null ? canonicalTimeZone(row.location_time_zone) : null);
     if (!validAppointmentTimes(normalized, effectiveZone)) return responseError(reply, 400, invalidAppointmentTime);
@@ -996,8 +941,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const occurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
     const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
-    if (resourceIds.length) {
-      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
+    if (updateSeriesLinks && resourceIds.length) {
+      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")
+        || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
       const resourceRows = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
       if (resourceRows.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
     }
@@ -1036,6 +982,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
           [newId, departmentId, row.calendar_id, values.title, values.subtitle, values.description, nextStart, nextEnd, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, JSON.stringify(normalized.recurrence ?? row.recurrence), values.linkedEventId ?? row.linked_event_id, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, userId(request), timeZone],
         );
+        const scoped = await client.query<{ original: string }>(
+          `SELECT DISTINCT to_char(occurrence_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original FROM church_calendar_resource_links
+            WHERE appointment_id=$1 AND occurrence_start>=$2::timestamp`, [row.id, occurrenceStart],
+        );
+        const nextRule = { starts_at: nextStart, recurrence: normalized.recurrence ?? row.recurrence };
+        const retained = scoped.rows.map(({ original }) => original).filter((original) => calendarOccurrenceExists(nextRule, original));
+        if (retained.length) await client.query(
+          "UPDATE church_calendar_resource_links SET appointment_id=$2 WHERE appointment_id=$1 AND occurrence_start=ANY($3::timestamp[])",
+          [row.id, newId, retained],
+        );
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
@@ -1046,12 +1002,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const seriesDuration = Math.max(0, wallDate(normalized.endsAt).getTime() - wallDate(normalized.startsAt).getTime());
       const seriesEndAt = localDateTime(new Date(seriesStart.getTime() + seriesDuration));
       await context.pool.query(
-        `UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,time_zone=$17,updated_at=now() WHERE id=$1 AND department_id=$2`,
-        [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone],
+        `WITH changed AS (
+           UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,time_zone=$17,updated_at=now()
+            WHERE id=$1 AND department_id=$2 RETURNING id
+         ) UPDATE church_calendar_resource_links link SET occurrence_start=$6::timestamp
+            FROM changed WHERE link.appointment_id=changed.id AND link.occurrence_start=$18::timestamp`,
+        [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
       );
     }
-    await context.pool.query("DELETE FROM church_calendar_resource_links WHERE appointment_id=$1", [resourceTargetId]);
-    for (const resourceId of resourceIds) await context.pool.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3)", [resourceTargetId, resourceId, userId(request)]);
+    if (updateSeriesLinks) {
+      await context.pool.query(
+        "DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL AND NOT (resource_booking_id=ANY($2::uuid[]))",
+        [resourceTargetId, resourceIds],
+      );
+      if (resourceIds.length) await context.pool.query(
+        `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
+         SELECT $1,booking_id,$3 FROM unnest($2::uuid[]) booking(booking_id) ON CONFLICT DO NOTHING`,
+        [resourceTargetId, resourceIds, userId(request)],
+      );
+    }
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, scope });
     return { updated: true };
   });
