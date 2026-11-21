@@ -4,6 +4,7 @@ import type { ChurchGroup, Contact, GroupLifecycleStatus } from "@smart-church/c
 import { formatUserDate } from "./date-format";
 import { getGroupAttendance, groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type GroupAttendanceEntry as AttendanceEntry, type GroupAttendanceSnapshot, type CompletionFeedbackDraft } from "./group-attendance";
 import { GroupMeetingCompletion } from "./GroupMeetingCompletion";
+import { GroupWaitlist } from "./GroupWaitlist";
 import { GroupAttendanceReport } from "./GroupAttendanceReport";
 import type { DirectorySearchNavigation } from "./module-registry";
 import { getActiveLanguage, translate } from "./i18n";
@@ -120,6 +121,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [endsOn, setEndsOn] = useState("");
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [waitlistPendingScope, setWaitlistPendingScope] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [feedback, setFeedback] = useState("");
@@ -175,6 +177,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const changeDirectoryPage = (page: number) => setDirectoryPagination({ filterKey: directoryFilterKey, page });
 
   const selected = visibleGroups.find((group) => group.id === selectedId) ?? null;
+  const waitlistScope = departmentId + ":" + (selected?.id ?? "");
+  const waitlistPending = waitlistPendingScope === waitlistScope;
   const memberListChanged = Boolean(selected && (
     memberDraft.length !== selected.memberIds.length || memberDraft.some((id) => !selected.memberIds.includes(id)) ||
     memberDraft.some((id) => {
@@ -220,6 +224,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     }
   }
 
+  const currentGroupDepartment = useRef(departmentId);
+  currentGroupDepartment.current = departmentId;
   async function loadGroups(signal?: AbortSignal) {
     setLoading(true);
     setError("");
@@ -227,12 +233,12 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       const response = await fetch("/api/groups", { headers: { "x-department-id": departmentId }, signal });
       const result = await response.json() as (ChurchGroup & { isMyGroup?: boolean })[] | { error?: string };
       if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? "Could not load groups." : "Could not load groups.");
-      if (signal?.aborted) return;
+      if (signal?.aborted || currentGroupDepartment.current !== departmentId) return;
       setGroups(result);
       setLoadedDepartmentId(departmentId);
       setSelectedId((current) => result.some((group) => group.id === current) ? current : result[0]?.id ?? "");
-    } catch (reason) { if (!signal?.aborted) setError(reason instanceof Error ? reason.message : "Could not load groups."); }
-    finally { if (!signal?.aborted) setLoading(false); }
+    } catch (reason) { if (!signal?.aborted && currentGroupDepartment.current === departmentId) setError(reason instanceof Error ? reason.message : "Could not load groups."); }
+    finally { if (!signal?.aborted && currentGroupDepartment.current === departmentId) setLoading(false); }
   }
 
   useEffect(() => {
@@ -449,13 +455,14 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   }
 
   async function saveMembers() {
-    if (!selected) return;
+    if (!selected || waitlistPending) return;
     setSaving(true);
     setError("");
     try {
       const members = memberDraft.map((contactId) => ({ contactId, role: memberDetailsDraft[contactId]?.role.trim() || "Member", status: memberDetailsDraft[contactId]?.status ?? "active", ...(memberDetailsDraft[contactId]?.joinedOn ? { joinedOn: memberDetailsDraft[contactId].joinedOn } : {}) }));
       const response = await fetch(`/api/groups/${selected.id}/members`, {
-        method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId }, body: JSON.stringify({ members }),
+        method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ members, expectedMembers: selected.memberDetails ?? [] }),
       });
       const result = await response.json() as { memberIds?: string[]; memberDetails?: ChurchGroup["memberDetails"]; error?: string };
       if (!response.ok || !result.memberIds || !result.memberDetails) throw new Error(result.error ?? "Could not save group members.");
@@ -637,7 +644,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
             const matches = contacts.filter((person) => person.email?.trim().toLocaleLowerCase() === joinRequest.email.toLocaleLowerCase());
             return <article className="group-join-request" key={joinRequest.id}><div><strong>{joinRequest.firstName} {joinRequest.lastName}</strong><small>{joinRequest.email} · {formatUserDate(joinRequest.createdAt, true)}</small></div>{matches.length > 1 && <label>{translate("groups.matchPerson")}<select value={requestContactIds[joinRequest.id] ?? ""} onChange={(event) => setRequestContactIds((current) => ({ ...current, [joinRequest.id]: event.target.value }))}><option value="">{translate("groups.choosePerson")}</option>{matches.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select></label>}{matches.length === 0 && <small>{translate("groups.approvalCreatesVisitor")}</small>}<div className="group-join-request-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => void reviewJoinRequest(joinRequest, "declined")}>{translate("groups.decline")}</button><button className="button button-primary" type="button" disabled={saving || matches.length > 1 && !requestContactIds[joinRequest.id]} onClick={() => void reviewJoinRequest(joinRequest, "approved")}><Check size={14} />{translate("groups.approve")}</button></div></article>;
           })}</div> : <p className="community-empty">{translate("groups.noJoinRequests")}</p>}</section>}
-          <div className="community-members-heading"><div><h3>{translate("groups.members")}</h3><p>{translate("groups.personCount").replace("{count}", String(selected.memberCount))}{selected.importedFrom ? translate("groups.managedInChurchTools") : ""}</p></div>{canManage && !selected.importedFrom && <button className="button button-primary" type="button" disabled={saving || memberDraft.length === selected.memberIds.length && memberDraft.every((id) => selected.memberIds.includes(id))} onClick={() => void saveMembers()}><Check size={15} />{translate("groups.saveMembers")}</button>}</div>
+          <div className="community-members-heading"><div><h3>{translate("groups.members")}</h3><p>{translate("groups.personCount").replace("{count}", String(selected.memberCount))}{selected.importedFrom ? translate("groups.managedInChurchTools") : ""}</p></div>{canManage && !selected.importedFrom && <button className="button button-primary" type="button" disabled={saving || waitlistPending || !memberListChanged} onClick={() => void saveMembers()}><Check size={15} />{translate("groups.saveMembers")}</button>}</div>
           {canManage && !selected.importedFrom && <label className="search-field community-member-search"><Search size={15} /><input aria-label={translate("groups.searchPeople")} placeholder={translate("groups.searchPeople")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>}
           {selected.importedFrom ? <p className="community-empty">{translate("groups.importedMemberships")}</p> : contacts.length ? <div className="community-member-list">{visibleContacts.map((person) => {
             const isMember = memberDraft.includes(person.id);
@@ -649,6 +656,11 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
               } else setMemberDraft((current) => current.filter((id) => id !== person.id));
             }} /><span className="community-member-avatar">{person.firstName[0]}{person.lastName[0]}</span><span className="group-member-person"><strong>{person.firstName} {person.lastName}</strong><small>{person.status === "member" ? translate("groups.member") : translate("groups.visitor")}</small></span>{isMember && <div className="group-membership-controls">{canManage ? <><input aria-label={translate("groups.roleFor").replace("{name}", `${person.firstName} ${person.lastName}`)} maxLength={80} value={details.role} onChange={(event) => setMemberDetailsDraft((current) => ({ ...current, [person.id]: { ...details, role: event.target.value } }))} /><select aria-label={translate("groups.statusFor").replace("{name}", `${person.firstName} ${person.lastName}`)} value={details.status} onChange={(event) => setMemberDetailsDraft((current) => ({ ...current, [person.id]: { ...details, status: event.target.value as typeof details.status } }))}><option value="active">{translate("groups.active")}</option><option value="paused">{translate("groups.paused")}</option><option value="waitlist">{translate("groups.waitlist")}</option></select><input type="date" aria-label={translate("groups.joinDateFor").replace("{name}", `${person.firstName} ${person.lastName}`)} value={details.joinedOn ?? ""} onChange={(event) => setMemberDetailsDraft((current) => ({ ...current, [person.id]: { ...details, joinedOn: event.target.value || undefined } }))} /></> : <small>{details.role} · {details.status}</small>}</div>}</div>;
           })}</div> : <p className="community-empty">{translate("groups.addPeopleFirst")}</p>}
+          {canManage && loadedDepartmentId === departmentId && !selected.importedFrom && <GroupWaitlist
+            key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} csrfToken={csrfToken}
+            rosterRevision={JSON.stringify(selected.memberDetails ?? [])} disabled={saving || memberListChanged}
+            onPending={(pending) => setWaitlistPendingScope((scope) => pending ? waitlistScope : scope === waitlistScope ? "" : scope)} onChanged={loadGroups}
+          />}
           {!selected.importedFrom && <section className="group-attendance-section" aria-labelledby="group-attendance-title">
             <div className="community-members-heading"><div><h3 id="group-attendance-title">{translate("groups.attendance")}</h3><p>{translate("groups.attendanceHelp")}</p></div></div>
             {canManage && <form className="group-meeting-form" onSubmit={(event) => void createMeeting(event)}><label>{translate("groups.meetingDate")}<input type="date" required value={meetingDate} onChange={(event) => setMeetingDate(event.target.value)} /></label><label>{translate("groups.meetingName")} <span className="optional-label">{translate("groups.optional")}</span><input maxLength={160} value={meetingTitle} onChange={(event) => setMeetingTitle(event.target.value)} placeholder={translate("groups.meetingNameExample")} /></label><button className="button button-primary" type="submit" disabled={saving || memberListChanged}><Plus size={15} />{translate("groups.createMeeting")}</button>{memberListChanged && <small className="group-meeting-help">{translate("groups.saveRosterFirst")}</small>}</form>}

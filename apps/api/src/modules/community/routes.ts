@@ -5,6 +5,7 @@ import type { BookableResource, ChurchGroup, GroupLifecycleStatus, LocationPermi
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback, saveGroupLeaderFeedback, type CompletionFeedback } from "../../group-leader-feedback.js";
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
+import { groupMemberDraftSchema, groupMembershipState, groupWaitlist, type GroupMembershipDraft } from "./group-waitlist.js";
 import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -265,9 +266,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return { updated };
     });
 
-    routes.put<{ Params: { id: string }; Body: { members: { contactId: string; role: string; status: "active" | "paused" | "waitlist"; joinedOn?: string }[] } }>("/api/groups/:id/members", { schema: {
+    routes.put<{ Params: { id: string }; Body: { members: GroupMembershipDraft[]; expectedMembers?: GroupMembershipDraft[] } }>("/api/groups/:id/members", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["members"], properties: { members: { type: "array", maxItems: 2000, items: { type: "object", additionalProperties: false, required: ["contactId", "role", "status"], properties: { contactId: { type: "string", format: "uuid" }, role: { type: "string", minLength: 1, maxLength: 80 }, status: { type: "string", enum: ["active", "paused", "waitlist"] }, joinedOn: { type: "string", format: "date" } } } } } },
+      body: { type: "object", additionalProperties: false, required: ["members"], properties: {
+        members: { type: "array", maxItems: 2000, items: groupMemberDraftSchema },
+        expectedMembers: { type: "array", maxItems: 2000, items: groupMemberDraftSchema },
+      } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
@@ -283,15 +287,117 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           const people = await client.query("SELECT id FROM contacts WHERE department_id = $1 AND id = ANY($2::uuid[])", [departmentId, contactIds]);
           if (people.rowCount !== contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "One or more selected people do not belong to this site." }); }
         }
-        await client.query("DELETE FROM group_members WHERE group_id = $1", [request.params.id]);
-        for (const member of request.body.members) await client.query("INSERT INTO group_members (group_id,contact_id,role,status,joined_on) VALUES ($1,$2,$3,$4,$5)", [request.params.id, member.contactId, member.role.trim(), member.status, member.joinedOn ?? null]);
+        if (request.body.expectedMembers) {
+          const before = await client.query<GroupMembershipDraft>(
+            `SELECT contact_id AS "contactId",role,status,joined_on::text AS "joinedOn" FROM group_members WHERE group_id=$1 FOR UPDATE`,
+            [request.params.id],
+          );
+          if (groupMembershipState(before.rows) !== groupMembershipState(request.body.expectedMembers)) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "Group membership changed. Refresh the group before saving your changes." });
+          }
+        }
+        const members = request.body.members.map((member) => ({ ...member, role: member.role.trim() }));
+        if (members.some((member) => !member.role)) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Enter a role for every group member." });
+        }
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser?.id ?? ""]);
+        await client.query("DELETE FROM group_members WHERE group_id=$1 AND NOT (contact_id=ANY($2::uuid[]))", [request.params.id, contactIds]);
+        if (members.length) await client.query(
+          `INSERT INTO group_members AS member(group_id,contact_id,role,status,joined_on,waitlisted_at)
+           SELECT $1,src."contactId",src.role,src.status,src."joinedOn",CASE WHEN src.status='waitlist' THEN statement_timestamp() END
+             FROM jsonb_to_recordset($2::jsonb) AS src("contactId" uuid,role text,status text,"joinedOn" date)
+           ON CONFLICT (group_id,contact_id) DO UPDATE SET role=EXCLUDED.role,status=EXCLUDED.status,joined_on=EXCLUDED.joined_on
+           WHERE (member.role,member.status,member.joined_on) IS DISTINCT FROM (EXCLUDED.role,EXCLUDED.status,EXCLUDED.joined_on)`,
+          [request.params.id, JSON.stringify(members)],
+        );
         await client.query("COMMIT");
-        return { memberIds: contactIds, memberDetails: request.body.members };
+        realtime.publish("core:groups:changed", departmentId, { groupId: request.params.id, action: "members-updated" });
+        return { memberIds: contactIds, memberDetails: members };
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
       } finally { client.release(); }
     });
+
+    const waitlistParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
+    const waitlistOrder = { type: "array", maxItems: 2000, uniqueItems: true, items: { type: "string", format: "uuid" } } as const;
+    routes.get<{ Params: { id: string } }>("/api/groups/:id/waitlist", { schema: { params: waitlistParams } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      const group = (await pool!.query<{ source_system: string | null }>(
+        "SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId],
+      )).rows[0];
+      if (!group) return reply.code(404).send({ error: "Group not found." });
+      if (group.source_system === "churchtools" || group.source_system === "elvanto") return reply.code(403).send({ error: "This group's waitlist is managed in the source system." });
+      reply.header("cache-control", "private, no-store");
+      return groupWaitlist(pool!, departmentId, request.params.id);
+    });
+
+    type QueueChange = { expectedOrder: string[] } & ({ order: string[] } | { promoteContactId: string });
+    routes.put<{ Params: { id: string }; Body: QueueChange }>("/api/groups/:id/waitlist", { schema: {
+      params: waitlistParams,
+      body: {
+        type: "object", additionalProperties: false, required: ["expectedOrder"],
+        oneOf: [{ required: ["order"] }, { required: ["promoteContactId"] }],
+        properties: { expectedOrder: waitlistOrder, order: waitlistOrder, promoteContactId: { type: "string", format: "uuid" } },
+      },
+    } }, async (request, reply) => {
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const groupId = request.params.id;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        const group = (await client.query<{ source_system: string | null }>(
+          "SELECT source_system FROM church_groups WHERE id=$1 AND department_id=$2 FOR UPDATE", [groupId, departmentId],
+        )).rows[0];
+        if (!group) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+        if (group.source_system === "churchtools" || group.source_system === "elvanto") {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "This group's waitlist is managed in the source system." });
+        }
+        const queue = await groupWaitlist(client, departmentId, groupId, true);
+        const currentOrder = queue.map(({ contactId }) => contactId);
+        if (JSON.stringify(currentOrder) !== JSON.stringify(request.body.expectedOrder)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The waitlist changed. Refresh it before continuing." });
+        }
+        const promoteContactId = "promoteContactId" in request.body ? request.body.promoteContactId : null;
+        const order = "order" in request.body ? request.body.order : null;
+        if ((promoteContactId && !currentOrder.includes(promoteContactId)) ||
+            (order && (currentOrder.length !== order.length || order.some((contactId) => !currentOrder.includes(contactId))))) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Choose people from the current waitlist." });
+        }
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser?.id ?? ""]);
+        if (promoteContactId) {
+          await client.query(
+            `UPDATE group_members member SET status='active', joined_on=COALESCE(member.joined_on,
+               (current_timestamp AT TIME ZONE COALESCE(zone.name,'UTC'))::date)
+               FROM departments site LEFT JOIN pg_timezone_names zone ON zone.name=site.time_zone
+              WHERE site.id=$1 AND member.group_id=$2 AND member.contact_id=$3 AND member.status='waitlist'`,
+            [departmentId, groupId, promoteContactId],
+          );
+        } else if (order && JSON.stringify(order) !== JSON.stringify(currentOrder)) {
+          await client.query(
+            `UPDATE group_members member SET waitlist_priority=ranking.position::int
+               FROM unnest($2::uuid[]) WITH ORDINALITY ranking(contact_id, position)
+              WHERE member.group_id=$1 AND member.contact_id=ranking.contact_id AND member.status='waitlist'
+                AND member.waitlist_priority IS DISTINCT FROM ranking.position::int`,
+            [groupId, order],
+          );
+        }
+        const next = await groupWaitlist(client, departmentId, groupId);
+        await client.query("COMMIT");
+        realtime.publish("core:groups:changed", departmentId, { groupId, action: promoteContactId ? "waitlist-member-promoted" : "waitlist-reordered" });
+        return next;
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+
 
     routes.delete<{ Params: { id: string } }>("/api/groups/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");

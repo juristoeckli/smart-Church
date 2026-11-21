@@ -14,12 +14,15 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 20 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 21 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
   tables.event_registrations = (tables.event_registrations ?? []).map((row) => ({ ...row, cancellation_token_hash: row.cancellation_token_hash ?? null, additional_attendee: row.additional_attendee ?? false, party_id: row.party_id ?? null }));
   tables.contacts = (tables.contacts ?? []).map((row) => ({ ...row, postal_address: row.postal_address ?? {}, archived_at: row.archived_at ?? null }));
   tables.service_events = (tables.service_events ?? []).map((row) => ({ ...row, responsible_contact_id: row.responsible_contact_id ?? null }));
   tables.worship_songs = (tables.worship_songs ?? []).map((row) => ({ ...row, bpm: row.bpm ?? null, time_signature: row.time_signature ?? null }));
+  tables.group_members = (tables.group_members ?? []).map((row) => ({
+    ...row, waitlist_priority: row.waitlist_priority ?? null, waitlisted_at: row.waitlisted_at ?? null,
+  }));
   tables.church_groups = (tables.church_groups ?? []).map((raw) => {
     const row = { ...raw };
     if (row.status === undefined) row.status = "active";
@@ -137,7 +140,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 20, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 21, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -154,7 +157,7 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "11",
+    schemaVersion: "12",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
