@@ -190,6 +190,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
     <footer>{publicText(language, "smartChurch")}</footer>
   </section></main>;
 
+  const remainingPlaces = event?.capacity ? Math.max(event.capacity - event.registeredCount, 0) : null;
   const date = event ? new Intl.DateTimeFormat(language, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${event.eventDate}T12:00:00Z`)) : "";
   return <main className="public-registration-page"><section className="public-registration-card">
     <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
@@ -200,7 +201,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
       {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, attendees.length ? (submitted === "registered" ? "partyRegistered" : "partyWaitlisted") : (submitted === "registered" ? "registered" : "waitlisted"))}</h2><p>{publicText(language, attendees.length ? "partyLinksHelp" : (submitted === "registered" ? "registeredHelp" : "waitlistedHelp"))}</p></div></div>
         : !event.registrationOpen ? <p className="public-registration-message">{publicText(language, "registrationClosed")}</p>
           : <>
-            <p className="public-registration-capacity">{event.capacity ? publicText(language, "placesRemaining", { count: Math.max(event.capacity - event.registeredCount, 0) }) : publicText(language, "registrationOpen")}{event.waitlistCount ? publicText(language, "waitlistCount", { count: event.waitlistCount }) : ""}</p>
+            <p className="public-registration-capacity">{remainingPlaces === null ? publicText(language, "registrationOpen") : publicText(language, remainingPlaces === 1 ? "placeRemaining" : "placesRemaining", { count: remainingPlaces })}{event.waitlistCount ? publicText(language, "waitlistCount", { count: event.waitlistCount }) : ""}</p>
             <form className="public-registration-form" onSubmit={(submitEvent) => void register(submitEvent)}>
               <div className="form-row"><label>{publicText(language, "firstName")}<input name="firstName" autoComplete="given-name" maxLength={80} required /></label><label>{publicText(language, "lastName")}<input name="lastName" autoComplete="family-name" maxLength={80} required /></label></div>
               <label>{publicText(language, "email")}<input type="email" name="email" autoComplete="email" maxLength={254} required /></label>
