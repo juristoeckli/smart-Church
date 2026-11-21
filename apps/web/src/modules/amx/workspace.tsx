@@ -56,6 +56,10 @@ const detailBackgrounds: Array<[RegExp, string]> = [
   [/^Detail_(?:Auton_)?Geb_/, "Gebetsaal2.png"],
 ];
 const pageBackgroundMaps: Record<string, { image: string; x: number; y: number; width: number; height: number }> = {
+  // The microphone pages place controls over the room plan. The TP4 stores
+  // the controls as objects but does not expose this backdrop as an object.
+  Que_Mik: { image: "Gemeindesaal.png", x: 0, y: 0, width: 781, height: 500 },
+  Lan_Mik: { image: "Gemeindesaal.png", x: 0, y: 0, width: 781, height: 500 },
   // The TP4's Gemeindesaal speaker page places this compact floor plan behind
   // its speaker controls and room-routing list.
   Que_Lautsprecher: { image: "Gemeindesaal_kleinst.png", x: 0, y: 60, width: 525, height: 394 },
@@ -327,8 +331,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
     const port = portForObject(page, object);
-    const background = toCssColor(state?.fontColor) ?? toCssColor(state?.backgroundColor);
-    const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
+    const isAudioSourceHeader = /^(Kanzel|Ambient|Chor Summe|Stativ Mik \d+|Drahtlos \d+)$/i.test(object.name.trim());
+    const background = isAudioSourceHeader ? "#000" : toCssColor(state?.fontColor) ?? toCssColor(state?.backgroundColor);
+    const foreground = isAudioSourceHeader ? "#fff" : toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
     const bitmap = imageUrl(state?.bitmap);
     const font = panel.fonts?.find((item) => item.id === state?.fontId);
     const originX = page.kind === "subpage" ? page.canvas.x ?? 0 : 0;
@@ -416,3 +421,4 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     {!configured && status && <p className="amx-setup-note">A site administrator must enter the NetLinx master IP address under Settings → Modules → AMX to enable controls.</p>}
   </section>;
 }
+
