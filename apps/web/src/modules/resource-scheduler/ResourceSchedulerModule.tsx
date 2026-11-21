@@ -256,7 +256,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage }: 
 
   function openOccurrenceEdit(booking: Booking) {
     if (!booking.seriesId) return;
-    const date = booking.occurrenceDate ?? booking.startsAt.slice(0, 10);
+    const date = scheduledBookingDate(booking);
     const allDay = Boolean(booking.allDayDate);
     setOccurrenceEdit({
       seriesAllDay: Boolean(booking.seriesAllDay), allDay, date, seriesId: booking.seriesId, timeZone: booking.timeZone,
@@ -296,7 +296,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage }: 
   function openFutureEdit(booking: Booking) {
     if (!booking.seriesId) return;
     const recurrence = booking.recurrence ?? { frequency: "once" };
-    setFutureEdit({ allDay: Boolean(booking.seriesAllDay), seriesId: booking.seriesId, timeZone: booking.timeZone, fromDate: booking.occurrenceDate ?? booking.startsAt.slice(0, 10), purpose: booking.purpose, startsAt: localInputInZone(new Date(booking.startsAt), booking.timeZone), endsAt: localInputInZone(new Date(booking.endsAt), booking.timeZone), quantity: booking.quantity, leadInMinutes: booking.leadInMinutes, cleanupMinutes: booking.cleanupMinutes, frequency: recurrence.frequency, interval: recurrence.interval ?? 1, endsOn: recurrence.endsOn ?? "" });
+    setFutureEdit({ allDay: Boolean(booking.seriesAllDay), seriesId: booking.seriesId, timeZone: booking.timeZone, fromDate: scheduledBookingDate(booking), purpose: booking.purpose, startsAt: localInputInZone(new Date(booking.startsAt), booking.timeZone), endsAt: localInputInZone(new Date(booking.endsAt), booking.timeZone), quantity: booking.quantity, leadInMinutes: booking.leadInMinutes, cleanupMinutes: booking.cleanupMinutes, frequency: recurrence.frequency, interval: recurrence.interval ?? 1, endsOn: recurrence.endsOn ?? "" });
     setFuturePreview(null); setError(""); setNotice("");
   }
 
@@ -332,14 +332,16 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage }: 
     finally { setSaving(false); }
   }
 
-  const matchingResourceIds = new Set(data.bookings.filter((booking) => days.includes(booking.allDayDate ?? booking.occurrenceDate ?? booking.startsAt.slice(0, 10))).map((booking) => booking.resourceId));
+  const scheduledBookingDate = (booking: Booking) => booking.allDayDate ?? booking.occurrenceDate
+    ?? localInputInZone(new Date(booking.startsAt), booking.timeZone ?? data.timeZone).slice(0, 10);
+  const matchingResourceIds = new Set(data.bookings.filter((booking) => days.includes(scheduledBookingDate(booking))).map((booking) => booking.resourceId));
   const locationResources = loadedDepartment === departmentId ? data.resources : [];
   const resourceOptions = locationResources.filter((resource) => !category || resource.category === category);
   const filteredResources = resourceOptions.filter((resource) =>
     (resourceFilter === "all" || resource.id === resourceFilter) && (!markedOnly || resource.marked)
     && (!search || resource.matchesSearch || matchingResourceIds.has(resource.id)));
   const earliestBookingDay = loadedDepartment === departmentId ? localInputInZone(new Date(Date.now() + 15 * 60_000), data.timeZone).slice(0, 10) : "";
-  const bookingsFor = (resourceId: string, day: string) => data.bookings.filter((booking) => booking.resourceId === resourceId && (booking.allDayDate ?? booking.occurrenceDate ?? booking.startsAt.slice(0, 10)) === day);
+  const bookingsFor = (resourceId: string, day: string) => data.bookings.filter((booking) => booking.resourceId === resourceId && (scheduledBookingDate(booking)) === day);
 
   function printSchedule() {
     const table = matrixRef.current?.querySelector("table");
