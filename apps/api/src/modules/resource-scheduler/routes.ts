@@ -225,18 +225,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units) };
   }
 
-  app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string; search?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
     const from = request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : new Date().toISOString().slice(0, 10);
     const to = request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+    const search = typeof request.query.search === "string" ? request.query.search.trim().slice(0, 100) : "";
     const [department, resources, bookings] = await Promise.all([
       context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,
+          ($4::text='' OR (strpos(lower(resource.name),lower($4))>0 OR strpos(lower(resource.category),lower($4))>0 OR strpos(lower(resource.location),lower($4))>0)) AS "matchesSearch",
           EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=resource.department_id AND mark.resource_id=resource.id AND mark.user_id=$3) AS marked,
           COALESCE(settings.total_units,1) AS "totalUnits",COALESCE(settings.default_lead_in_minutes,0) AS "defaultLeadInMinutes",COALESCE(settings.default_cleanup_minutes,0) AS "defaultCleanupMinutes"
         FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.resource_id=resource.id AND settings.department_id=resource.department_id
-        WHERE resource.department_id=$1 AND ($2 OR resource.active=true) ORDER BY resource.location,resource.category,resource.name`, [departmentId, isManager(request), request.authenticatedUser!.id]),
+        WHERE resource.department_id=$1 AND ($2 OR resource.active=true) ORDER BY resource.location,resource.category,resource.name`, [departmentId, isManager(request), request.authenticatedUser!.id, search]),
       context.pool!.query(`SELECT booking.id,booking.resource_id AS "resourceId",resource.name AS "resourceName",resource.location,
           booking.requested_by AS "requestedBy",requester.display_name AS "requesterName",booking.purpose,
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
@@ -253,7 +255,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE booking.department_id=$1 AND booking.ends_at >= ($2::date::timestamptz - interval '1 day') AND booking.starts_at < ($3::date::timestamptz + interval '1 day')
           AND ($4::text IS NULL OR booking.status=$4) AND ($5::uuid IS NULL OR booking.resource_id=$5)
           AND (NOT $8::boolean OR EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=booking.department_id AND mark.resource_id=booking.resource_id AND mark.user_id=$6))
-        ORDER BY booking.starts_at,resource.name LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true"]),
+          AND ($7::boolean OR resource.active=true)
+          AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
+        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search]),
     ]);
     return { resources: resources.rows, bookings: bookings.rows, canManage: isManager(request), timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
   });

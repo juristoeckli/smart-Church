@@ -6,7 +6,7 @@
 .resource-scheduler-week, .resource-scheduler-filters { display: flex; align-items: center; gap: .65rem; flex-wrap: wrap; }
 .resource-scheduler-week strong { min-width: 13rem; text-align: center; }
 .resource-scheduler-filters label, .resource-scheduler-modal label { display: grid; gap: .35rem; color: var(--text-secondary, #64748b); font-size: .82rem; font-weight: 600; }
-.resource-scheduler-filters select, .resource-scheduler-modal input, .resource-scheduler-modal select { min-width: 10rem; padding: .62rem .7rem; border: 1px solid var(--border-color, #cbd5e1); border-radius: 8px; color: var(--text-primary, #1e293b); background: var(--surface, #fff); font: inherit; }
+.resource-scheduler-filters select, .resource-scheduler-filters input[type="search"], .resource-scheduler-modal input, .resource-scheduler-modal select { min-width: 10rem; padding: .62rem .7rem; border: 1px solid var(--border-color, #cbd5e1); border-radius: 8px; color: var(--text-primary, #1e293b); background: var(--surface, #fff); font: inherit; }
 .resource-scheduler-matrix-wrap { max-width: 100%; overflow: auto; border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; background: var(--surface, #fff); }
 .resource-scheduler-matrix { width: 100%; min-width: 1050px; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .resource-scheduler-matrix th, .resource-scheduler-matrix td { vertical-align: top; padding: .65rem; border-right: 1px solid var(--border-color, #e2e8f0); border-bottom: 1px solid var(--border-color, #e2e8f0); text-align: left; }

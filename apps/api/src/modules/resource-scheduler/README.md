@@ -17,3 +17,5 @@ The migration defaults every existing resource to one available unit and adds qu
 - Series owners and resource managers can list and remove individual extra dates. Removing a date cancels its pending booking, removes it from recurrence metadata, records an audit row, and publishes a schedule update. An approved extra-date booking must be cancelled individually first; its occurrence history remains visible after the extra-date marker is removed.
 
 Members and managers can mark resources on the weekly matrix and select **Marked only** to filter their schedule and printout. Marks are stored separately for each account and location.
+
+The weekly matrix searches resource name, category, and location as well as booking purpose and requester name. Search combines with resource, status, and marked-only filters before the booking limit. Printing uses the displayed matches.
