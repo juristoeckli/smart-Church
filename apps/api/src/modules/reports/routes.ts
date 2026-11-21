@@ -4,9 +4,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import type { Pool, PoolClient } from "pg";
 import { registerReportDesigner } from "./designer.js";
+import { groupGrowthSql, validGroupGrowthRange } from "./group-growth.js";
+import { canonicalTimeZone } from "../../calendar-time.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
-type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
 
@@ -20,6 +22,7 @@ const catalog = [
   { key: "group-roster" as const, title: "Group roster", description: "Members, roles and membership dates for one group.", permission: "groups" as const },
   { key: "group-leaders" as const, title: "Group leaders", description: "Current active leaders, co-leaders, owners, and managers for active groups.", permission: "groups" as const },
   { key: "group-hierarchy" as const, title: "Group hierarchy", description: "Active groups with parent and child group names, lifecycle status, and date range.", permission: "groups" as const },
+  { key: "group-growth" as const, title: "Group membership growth", description: "Net active membership gains and losses recorded by week or month.", permission: "groups" as const },
   { key: "group-meeting-attendance" as const, title: "Group meeting attendance", description: "Present, absent and excused totals by group meeting.", permission: "groups" as const },
   { key: "group-meeting-feedback" as const, title: "Group meeting feedback", description: "Leader and attendee answers by group meeting; respondent identities are omitted.", permission: "groups" as const },
   { key: "group-lifecycle" as const, title: "Group lifecycle history", description: "Group creation, edits, and deletion history with prior and updated names, descriptions, and parent links.", permission: "groups" as const },
@@ -65,7 +68,7 @@ function validDate(value: unknown) {
 function normalizeFilters(input: unknown): ReportFilters | string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  for (const key of Object.keys(value)) if (!["from", "to", "groupId", "status", "followUpStatus", "accountingYear"].includes(key)) return "This report includes an unsupported filter.";
+  for (const key of Object.keys(value)) if (!["from", "to", "groupId", "status", "followUpStatus", "accountingYear", "period"].includes(key)) return "This report includes an unsupported filter.";
   const filters: ReportFilters = {};
   if (value.from !== undefined) { if (!validDate(value.from)) return "Choose a valid start date."; filters.from = String(value.from); }
   if (value.to !== undefined) { if (!validDate(value.to)) return "Choose a valid end date."; filters.to = String(value.to); }
@@ -80,6 +83,10 @@ function normalizeFilters(input: unknown): ReportFilters | string {
     const year = typeof value.accountingYear === "number" ? value.accountingYear : Number(value.accountingYear);
     if (!Number.isInteger(year) || year < 1900 || year > 2200) return "Choose a valid accounting year.";
     filters.accountingYear = year;
+  }
+  if (value.period !== undefined) {
+    if (value.period !== "month" && value.period !== "week") return "Choose weekly or monthly grouping.";
+    filters.period = value.period;
   }
   return filters;
 }
@@ -132,7 +139,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "finance-donor-giving" || (state.finance && state.financeDonors))
       && (item.key !== "group-meeting-attendance" || state.groupAttendance)
       && (item.key !== "group-meeting-feedback" || state.groupFeedback)
-      && (item.key !== "group-lifecycle" || state.groupLifecycle)
+      && (!["group-lifecycle", "group-growth"].includes(item.key) || state.groupLifecycle)
       && (item.key !== "group-hierarchy" || state.groupHierarchy)
       && (item.key !== "event-service-plan" || state.eventServicePlan)
       && (!item.key.startsWith("event-registration-") || state.eventRegistrations)
@@ -240,6 +247,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           ORDER BY church_group.name LIMIT 5000`,
         [departmentId, filters.groupId ?? null],
       );
+      rows = result.rows;
+    } else if (reportKey === "group-growth") {
+      if (!validGroupGrowthRange(filters.from, filters.to)) throw new Error("Choose a valid date range of up to 731 calendar days.");
+      const location = await db.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+      const timeZone = canonicalTimeZone(location.rows[0]?.time_zone) ?? "UTC";
+      columns = [
+        { key: "periodStart", label: "Period starts" }, { key: "groupName", label: "Group" }, { key: "groupType", label: "Current group type" },
+        { key: "gains", label: "Active gains" }, { key: "losses", label: "Active losses" }, { key: "net", label: "Net change" },
+      ];
+      const result = await db.query(groupGrowthSql, [departmentId, filters.groupId ?? null, filters.from, filters.to, filters.period ?? "month", timeZone]);
       rows = result.rows;
     } else if (reportKey === "group-meeting-attendance") {
       columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "present", label: "Present" }, { key: "absent", label: "Absent" }, { key: "excused", label: "Excused" }];
@@ -514,8 +531,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!hasPermission(request, "groups")) return denied(reply);
     return (await pool!.query("SELECT id,name FROM church_groups WHERE department_id=$1 ORDER BY name LIMIT 2000", [departmentId])).rows;
   });
-  app.get<{ Querystring: ExportFormatQuery & { reportKey?: ReportKey; from?: string; to?: string; groupId?: string; status?: ReportFilters["status"]; followUpStatus?: ReportFilters["followUpStatus"]; accountingYear?: number } }>("/api/modules/reports/run", {
-    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 } } } },
+  app.get<{ Querystring: ExportFormatQuery & ReportFilters & { reportKey?: ReportKey } }>("/api/modules/reports/run", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 }, period: { type: "string", enum: ["month", "week"] } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
@@ -549,6 +566,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!(await installedReports(request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
     const filters = normalizeFilters(request.body.filters);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
+    if (request.body.reportKey === "group-growth" && !validGroupGrowthRange(filters.from, filters.to)) {
+      return reply.code(400).send({ error: "Choose a valid date range of up to 731 calendar days." });
+    }
     const name = cleanText(request.body.name, 120);
     if (!name) return reply.code(400).send({ error: "Enter a name for this saved report." });
     try {
