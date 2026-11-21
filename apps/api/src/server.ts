@@ -473,12 +473,14 @@ app.addHook("preHandler", async (request, reply) => {
       if (!await isDepartmentWritable(writeDepartment)) return reply.code(423).send({ error: "This location is a read-only redundancy standby or its write-fence state could not be verified." });
     }
   }
+  const calendarSubscriptionRequest = (request.method === "GET" || request.method === "HEAD")
+    && new URL(request.url, "http://localhost").pathname === "/api/public/church-calendar/subscription.ics";
   const publicCalendarSyncRequest = request.method === "GET" && (
     /^\/api\/public\/calendar-sync\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)
     || /^\/api\/public\/church-calendar\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)
     || /^\/api\/modules\/calendar-sync\/oauth\/callback\/(google|microsoft)$/.test(new URL(request.url, "http://localhost").pathname)
   );
-  if (publicCalendarSyncRequest || request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
+  if (calendarSubscriptionRequest || publicCalendarSyncRequest || request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/") || ["/api/public/signage/pair","/api/public/signage/pairing/start","/api/public/signage/pairing/status"].includes(request.url)) return;
   if (!databaseReady) return;
   const authorization = request.headers.authorization;

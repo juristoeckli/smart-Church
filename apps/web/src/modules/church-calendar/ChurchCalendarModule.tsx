@@ -6,7 +6,7 @@ import "./church-calendar.css";
 
 type Scope = "community" | "group" | "personal";
 type View = "day" | "week" | "month" | "year" | "list";
-type Calendar = { id: string; name: string; scope: Scope; groupId: string | null; groupName?: string; ownerUserId: string | null; color: string; isOwner?: boolean; hasPublicFeed?: boolean };
+type Calendar = { id: string; name: string; scope: Scope; groupId: string | null; groupName?: string; ownerUserId: string | null; color: string; isOwner?: boolean; hasPublicFeed?: boolean; canSubscribe?: boolean; hasSubscription?: boolean };
 type Frequency = "daily" | "weekly" | "monthly" | "monthly_weekday" | "yearly" | "manual";
 type Recurrence = { frequency: Frequency; interval: number; weekdays: number[]; weekday?: number; weekOfMonth?: number; endsOn?: string; count?: number; dates?: string[] };
 type EventRegistration = { token: string; capacity: number | null; open: boolean; registered: number; waitlisted: number };
@@ -133,7 +133,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [eventStaffAssignments, setEventStaffAssignments] = useState<Record<number, string>>({});
   const [eventStaffLabels, setEventStaffLabels] = useState<Record<string, string>>({});
   const [imageFile, setImageFile] = useState<File | null>(null);
-  const [publicFeedUrl, setPublicFeedUrl] = useState("");
+  const [issuedFeed, setIssuedFeed] = useState<{ url: string; departmentId: string; name: string; confidential: boolean } | null>(null);
   const canManageShared = canManageSite || (department.modulePermissions?.["church-calendar"] ?? []).includes("manage") || (department.permissions ?? []).some((permission) => ["events_manage", "groups_manage"].includes(permission));
   const canManageGroups = canManageSite || department.role === "site_admin" || (department.permissions ?? []).includes("groups_manage");
   const canManageEvents = canManageSite || department.role === "site_admin" || (department.permissions ?? []).includes("events_manage");
@@ -373,15 +373,32 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
 
   async function issuePublicFeed(calendar: Calendar) {
     if (busy) return;
-    setBusy(true); setError(""); setPublicFeedUrl("");
-    try { const result = await api<{ url: string }>(`/api/modules/church-calendar/calendars/${calendar.id}/public-feed`, { method: "POST", headers: mutationHeaders, body: "{}" }); setPublicFeedUrl(new URL(result.url, window.location.origin).toString()); setNotice(calendar.hasPublicFeed ? "Public feed link rotated. The previous link no longer works." : "Public feed link created."); await load(); }
+    setBusy(true); setError(""); setIssuedFeed(null);
+    try { const result = await api<{ url: string }>(`/api/modules/church-calendar/calendars/${calendar.id}/public-feed`, { method: "POST", headers: mutationHeaders, body: "{}" }); setIssuedFeed({ url: new URL(result.url, window.location.origin).toString(), departmentId, name: calendar.name, confidential: false }); setNotice(calendar.hasPublicFeed ? "Public feed link rotated. The previous link no longer works." : "Public feed link created."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create the public feed link."); }
     finally { setBusy(false); }
   }
 
+  async function changeSubscription(calendar: Calendar, method: "POST" | "DELETE") {
+    setBusy(true); setError(""); setNotice(""); setIssuedFeed(null);
+    try {
+      const result = await api<{ url?: string }>(`/api/modules/church-calendar/calendars/${calendar.id}/subscription`, { method, headers: mutationHeaders, body: "{}" });
+      if (result.url) setIssuedFeed({ url: new URL(result.url, window.location.origin).toString(), departmentId, name: calendar.name, confidential: true });
+      setNotice(method === "DELETE" ? "Calendar subscription revoked." : calendar.hasSubscription ? "Previous subscription link replaced." : "Calendar subscription created.");
+      await load();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update the subscription.");
+    } finally { setBusy(false); }
+  }
+
+  async function copyFeed(url: string) {
+    try { await navigator.clipboard.writeText(url); setNotice("Calendar link copied."); }
+    catch { setError("Select and copy the calendar link."); }
+  }
+
   async function revokePublicFeed(calendar: Calendar) {
     if (busy || !window.confirm(`Revoke the public feed for ${calendar.name}? Existing subscribers will stop receiving updates.`)) return;
-    setBusy(true); setError(""); setPublicFeedUrl("");
+    setBusy(true); setError(""); setIssuedFeed(null);
     try { await api(`/api/modules/church-calendar/calendars/${calendar.id}/public-feed`, { method: "DELETE", headers: mutationHeaders, body: "{}" }); setNotice("Public calendar feed revoked."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke the public feed."); }
     finally { setBusy(false); }
@@ -469,7 +486,24 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
           <option value="device">Device ({deviceTimeZone})</option>
           <optgroup label="Named time zones">{viewerTimeZones.map((zone) => <option key={zone} value={zone}>{zone}</option>)}</optgroup>
         </select>
-      </label><h2>My calendars</h2><div className="church-calendar-list">{calendars.map((calendar) => <label key={calendar.id}><input type="checkbox" checked={selectedCalendarIds.includes(calendar.id)} onChange={(event) => setSelectedCalendarIds((current) => event.target.checked ? [...current, calendar.id] : current.filter((id) => id !== calendar.id))} /><i style={{ background: calendar.color }} /><span>{calendar.name}</span><small>{calendar.scope === "personal" ? "Personal" : calendar.scope === "group" ? calendar.groupName ?? "Group" : "Community"}</small></label>)}</div>{canManageShared && calendars.filter((calendar) => calendar.scope === "community").length > 0 && <section className="church-calendar-public-feed-settings"><h2>Public calendar feeds</h2>{calendars.filter((calendar) => calendar.scope === "community").map((calendar) => <div key={calendar.id}><span>{calendar.name}</span>{calendar.hasPublicFeed ? <><small>Feed enabled</small><button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Rotate link</button><button type="button" className="church-calendar-feed-button" onClick={() => void revokePublicFeed(calendar)} disabled={busy}>Revoke</button></> : <button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Create feed link</button>}</div>)}</section>}{publicFeedUrl && <div className="church-calendar-feed-result"><strong>Copy this calendar URL. It is shown only once.</strong><a href={publicFeedUrl}>{publicFeedUrl}</a></div>}{!calendars.length && !loading && <p className="church-calendar-empty">Create your first personal calendar or a shared calendar.</p>}</aside>
+      </label><h2>My calendars</h2><div className="church-calendar-list">{calendars.map((calendar) => <label key={calendar.id}><input type="checkbox" checked={selectedCalendarIds.includes(calendar.id)} onChange={(event) => setSelectedCalendarIds((current) => event.target.checked ? [...current, calendar.id] : current.filter((id) => id !== calendar.id))} /><i style={{ background: calendar.color }} /><span>{calendar.name}</span><small>{calendar.scope === "personal" ? "Personal" : calendar.scope === "group" ? calendar.groupName ?? "Group" : "Community"}</small></label>)}</div>{canManageShared && calendars.filter((calendar) => calendar.scope === "community").length > 0 && <section className="church-calendar-public-feed-settings"><h2>Public calendar feeds</h2>{calendars.filter((calendar) => calendar.scope === "community").map((calendar) => <div key={calendar.id}><span>{calendar.name}</span>{calendar.hasPublicFeed ? <><small>Feed enabled</small><button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Rotate link</button><button type="button" className="church-calendar-feed-button" onClick={() => void revokePublicFeed(calendar)} disabled={busy}>Revoke</button></> : <button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Create feed link</button>}</div>)}</section>}{calendars.some((calendar) => calendar.canSubscribe || calendar.hasSubscription) && <section className="church-calendar-public-feed-settings">
+        <h2>My calendar subscriptions</h2>
+        {calendars.filter((calendar) => calendar.canSubscribe || calendar.hasSubscription).map((calendar) => <div key={calendar.id}>
+          <span>{calendar.name}</span>
+          {calendar.canSubscribe && <button type="button" className="church-calendar-feed-button" disabled={busy} onClick={() => void changeSubscription(calendar, "POST")}>{calendar.hasSubscription ? "Replace link" : "Create link"}</button>}
+          {calendar.hasSubscription && <button type="button" className="church-calendar-feed-button" disabled={busy} onClick={() => void changeSubscription(calendar, "DELETE")}>Revoke</button>}
+        </div>)}
+      </section>}
+      {issuedFeed?.departmentId === departmentId && <section className="church-calendar-feed-result" aria-label="Calendar link">
+        <strong>{issuedFeed.name}</strong>
+        <label>Calendar link <input value={issuedFeed.url} readOnly onFocus={(event) => event.target.select()} /></label>
+        {issuedFeed.confidential && <small>Keep this link private. Anyone with it can read this feed while your access is active.</small>}
+        <div className="church-calendar-feed-actions">
+          <a href={issuedFeed.url.replace(/^https?:/, "webcal:")} referrerPolicy="no-referrer">Subscribe in calendar app</a>
+          <button type="button" className="church-calendar-feed-button" onClick={() => void copyFeed(issuedFeed.url)}>Copy link</button>
+          <a href={issuedFeed.url} download="calendar.ics" referrerPolicy="no-referrer">Download .ics</a>
+        </div>
+      </section>}{!calendars.length && !loading && <p className="church-calendar-empty">Create your first personal calendar or a shared calendar.</p>}</aside>
       <section className="church-calendar-main"><div className="church-calendar-toolbar"><div className="church-calendar-date-nav"><button type="button" className="icon-button" aria-label="Previous" onClick={() => move(-1)}><ChevronLeft size={18} /></button><button type="button" className="icon-button" aria-label="Next" onClick={() => move(1)}><ChevronRight size={18} /></button><h2>{view === "year" ? anchor.getFullYear() : monthLabel(anchor, language)}</h2><button type="button" className="church-calendar-today" onClick={() => setAnchor(new Date())}>Today</button></div><div className="church-calendar-views" role="group" aria-label="Calendar view">{(["day", "week", "month", "year", "list"] as View[]).map((item) => <button type="button" key={item} className={view === item ? "active" : ""} aria-pressed={view === item} onClick={() => setView(item)}>{item[0].toUpperCase()+item.slice(1)}</button>)}</div></div>
         {loading ? <div className="church-calendar-loading"><RotateCcw size={18} className="spinning" /> Loading appointments…</div> : view === "month" ? <div className="church-calendar-month"><div className="church-calendar-weekdays">{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => <span key={day}>{day}</span>)}</div><div className="church-calendar-month-grid">{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <div key={index} className={`church-calendar-day ${day.getMonth() !== anchor.getMonth() ? "outside" : ""}`}><button className="church-calendar-day-number" type="button" onClick={() => { setAnchor(day); setView("day"); }}>{day.getDate()}</button>{eventsForDay(day).slice(0,4).map(appointmentButton)}{eventsForDay(day).length > 4 && <small>+{eventsForDay(day).length-4} more</small>}</div>; })}</div></div> : view === "week" || view === "day" ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => Number(displayStart(event).slice(5,7)) === month + 1).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(dateFromLocal(displayStart(item)), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong><small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{timeLabel(item)}</span><ChevronRight size={16} /></button>{(item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
         {!loading && !visibleAppointments.length && <div className="church-calendar-empty-state"><CalendarDays size={28} /><strong>No appointments in this view</strong><span>Try another date or add an appointment.</span><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div>}
