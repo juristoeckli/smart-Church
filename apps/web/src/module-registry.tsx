@@ -24,7 +24,7 @@ export interface ModuleContext {
   onChatConversationOpened?: (conversationId: string) => void;
   onActiveChatChange?: (conversationId: string | null) => void;
   refreshCsrfToken?: () => Promise<string>;
-  onNavigateEntity?: (type: "person" | "group" | "song", id: string) => void;
+  onNavigateEntity?: (type: "person" | "group" | "wiki" | "song", id: string) => void;
 }
 
 export interface ModuleSettingsContext {

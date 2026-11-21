@@ -15,13 +15,12 @@ Members can report another author's visible post with a reason (spam, inappropri
 ## Media and linked records
 
 - Authors and site admins can attach up to five files per post. Each file is limited to 1 MiB. Accepted types are JPEG, PNG, GIF, WebP, PDF, and plain text. Uploads are stored in the module database with the location and post IDs; downloads require the current location and the same post visibility checks as the feed.
-- Authors and site admins can link a post to an active location Person, Group, Wiki page, or Worship song. Search is allow-listed by entity type and location; link creation revalidates that the target exists in that location. The UI renders these as typed references, rather than accepting arbitrary external URLs.
+- Authors and site admins can link a post to an active location Person, Group, Wiki page, or Worship song. Search is allow-listed by entity type and location; link creation revalidates that the target exists in that location. The UI renders these as typed references, rather than accepting arbitrary external URLs. Person, Group, Wiki, and Worship song references navigate to their location-scoped destination. Wiki navigation opens the page through the Wiki module's permission-checked page API; unavailable or newly restricted targets show the module's safe error state.
 - Wiki link search, creation and feed display respect the linked page's audience; inaccessible or archived Wiki pages are not suggested or shown.
 - Feed snapshots are version 7 and include post attachments, links, notifications, reports, and per-user notification preferences. Restore accepts versions 1 through 7; older snapshots continue to restore with empty newer records.
 
 ## Known gaps
 
 - Attachments are limited to five 1 MiB files per post and the accepted MIME list above; there is no image resizing, video, audio, or virus scanning.
-- Linked references currently display their type and label. They are not deep links because the app's modules do not expose a single stable cross-module route contract.
 - The moderation queue is site-admin-only; role-delegated moderators, automatic post removal, push notifications, email digests, and per-person mention delivery are not implemented. Community Feed emails are individual generic alerts, not digests, and use the shared location-level email opt-in rather than per-kind email controls.
 - Song search is available when the Worship Planning table exists; Wiki search is available when the Wiki tables exist. The current module-only implementation catches missing optional Wiki/Song tables and returns no matches.

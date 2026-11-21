@@ -1543,12 +1543,24 @@ function WorkspaceApp() {
     onChatConversationOpened,
     onActiveChatChange,
     refreshCsrfToken,
-    onNavigateEntity: (type: "person" | "group" | "song", id: string) => {
+    onNavigateEntity: (type: "person" | "group" | "wiki" | "song", id: string) => {
       if (!/^[a-z0-9-]{1,80}$/i.test(id)) return;
+      if (type === "wiki") {
+        const wikiModule = registeredModules.find((module) => module.id === "wiki");
+        if (!wikiModule || !enabledDynamicModules.some((module) => module.id === wikiModule.id) || !moduleAvailable(wikiModule, department, canManageSite)) {
+          setNotice("This Wiki page is unavailable in this location.");
+          return;
+        }
+        const requestId = ++entityNavigationRequestId.current;
+        setModuleState({ moduleId: wikiModule.id, departmentId: department.id, value: `wiki-page:${id}:${requestId}` });
+        setPage(modulePage(wikiModule.id));
+        return;
+      }
       if (type === "person") {
         const peopleModule = registeredModules.find((module) => module.id === "people-records");
         if (peopleModule && enabledDynamicModules.some((module) => module.id === peopleModule.id) && moduleAvailable(peopleModule, department, canManageSite)) {
-          setModuleState({ moduleId: peopleModule.id, departmentId: department.id, value: `person:${id}` });
+          const requestId = ++entityNavigationRequestId.current;
+          setModuleState({ moduleId: peopleModule.id, departmentId: department.id, value: `person:${id}:${requestId}` });
           setPage(modulePage(peopleModule.id));
           return;
         }

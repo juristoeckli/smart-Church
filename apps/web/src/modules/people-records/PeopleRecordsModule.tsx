@@ -30,7 +30,7 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   useEffect(()=>{void load()},[load]);
   const loadPerson=useCallback(async(p:Person,section="history")=>{setSelected(p);setDetailsSection(section);try{const [items,personDates]=await Promise.all([request<Extra[]>(`/api/people-records/${p.id}/${section}`),request<{birthDate:string|null;weddingAnniversary:string|null}>(`/api/people-records/${p.id}/dates`)]);setExtras(items);setDates(personDates)}catch(e){setError(e instanceof Error?e.message:"Could not load person details.")}},[request]);
   useEffect(()=>{
-    const match=state.match(/^person:([a-z0-9-]{1,80})$/i);
+    const match=state.match(/^person:([a-z0-9-]{1,80})(?::\d+)?$/i);
     if(!match)return;
     void request<Person>(`/api/people-records/${match[1]}`).then(person=>loadPerson(person)).catch(error=>setError(error instanceof Error?error.message:"Could not open the linked person."));
   },[state,request,loadPerson]);

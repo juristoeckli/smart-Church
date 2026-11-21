@@ -20,7 +20,7 @@ function categoryTree(categories: Category[], parentId: string | null = null, de
 function humanDate(value: string) { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)); }
 function sizeLabel(bytes: number) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 
-export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime, onNavigateEntity }: ModuleContext) {
+export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime, state, onNavigateEntity }: ModuleContext) {
   const editor = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -103,6 +103,18 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
       if (editor.current) editor.current.innerHTML = detail.contentHtml;
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not open Wiki page."); }
   }
+
+  useEffect(() => {
+    const match = /^wiki-page:([a-z0-9-]{1,80}):\d+$/i.exec(state);
+    if (!match) return;
+    setStatus("active");
+    setSearch("");
+    setSelectedCategoryId("");
+    setEditing(false);
+    setCreating(false);
+    setError("");
+    void openPage(match[1]);
+  }, [state]);
 
   function followWikiEntityLink(event: MouseEvent<HTMLElement>) {
     if (editing) return;
