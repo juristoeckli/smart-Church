@@ -94,3 +94,6 @@
 .staffing-roster-table th,.staffing-roster-table td{min-width:145px;max-width:280px;vertical-align:top;text-align:start;white-space:normal;overflow-wrap:anywhere}
 .staffing-roster-table ul{padding:0;margin:0;list-style:none;display:grid;gap:8px}
 .staffing-roster-table small{display:block;margin-top:3px}
+
+.event-details-section li.event-details-plan-section{padding:.45rem .75rem;border:0;background:transparent}
+.event-details-plan-section>strong{min-width:0;overflow-wrap:anywhere;font-size:.85rem}

@@ -20,7 +20,7 @@ export function servicePlanSectionHeading(plan: ServicePlanItem[], index: number
 export function servicePlanPrintHtml({ title, plan, songs, context, cancelled, responsible, assigneesForRole }: ServicePlanPrintOptions): string {
   const rows = plan.map((item, index) => {
     const section = servicePlanSectionHeading(plan, index);
-    const group = section ? `</tbody><tbody><tr><th scope="rowgroup" colspan="6">${printHtml(section)}</th></tr>` : "";
+    const group = section ? `${index === 0 ? "" : "</tbody><tbody>"}<tr><th scope="rowgroup" colspan="6">${printHtml(section)}</th></tr>` : "";
     const song = songs.find((candidate) => candidate.id === item.songId);
     const arrangement = song?.arrangements.find((candidate) => candidate.id === item.arrangementId);
     const key = arrangement?.key || song?.defaultKey;
