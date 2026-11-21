@@ -8,6 +8,23 @@ type WikiPageRow = { id: string; category_id: string; title: string; content_htm
 type WikiCategoryRow = { id: string; name: string; parent_id: string | null; position: number; archived_at: Date | string | null; created_at: Date | string; updated_at: Date | string };
 const allowedTags = new Set(["a", "b", "blockquote", "br", "code", "del", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "s", "span", "strong", "table", "tbody", "td", "th", "thead", "tr", "u", "ul"]);
 
+const inlineImageContentTypes = ["image/jpeg", "image/png", "image/webp"];
+
+function matchesInlineImageType(data: Buffer, contentType: string): boolean {
+  if (data.length < 1 || data.length > 2_000_000) return false;
+  switch (contentType) {
+    case "image/jpeg":
+      return data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff;
+    case "image/png":
+      return data.subarray(0, 8).toString("hex") === "89504e470d0a1a0a";
+    case "image/webp":
+      return data.length >= 16 && data.toString("ascii", 0, 4) === "RIFF" && data.toString("ascii", 8, 12) === "WEBP"
+        && data.readUInt32LE(4) === data.length - 8 && ["VP8 ", "VP8L", "VP8X"].includes(data.toString("ascii", 12, 16));
+    default:
+      return false;
+  }
+}
+
 function safeHtml(value: string, pageId?: string): string {
   let html = value.slice(0, 500_000)
     .replace(/<(script|style|iframe|object|embed|svg|math|form|input|button|textarea|select|option|meta|link)[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
@@ -309,10 +326,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         `SELECT attachment.file_id FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
          WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=ANY($3::uuid[])
-           AND stored.deleted_at IS NULL AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000`,
-        [departmentId, request.params.id, inlineImages.map((image) => image.fileId)],
+           AND stored.deleted_at IS NULL AND stored.content_type=ANY($4::text[]) AND stored.file_size BETWEEN 1 AND 2000000`,
+        [departmentId, request.params.id, inlineImages.map((image) => image.fileId), inlineImageContentTypes],
       );
-      if (linked.rowCount !== inlineImages.length) return reply.code(400).send({ error: "Inline images must be JPEG attachments on this page and no larger than 2 MB." });
+      if (linked.rowCount !== inlineImages.length) return reply.code(400).send({ error: "Inline images must be JPEG, PNG, or WebP attachments on this page and no larger than 2 MB." });
     }
     const client = await pool!.connect();
     try {
@@ -579,17 +596,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki image not found." });
-    const result = await pool!.query<{ file_data: Buffer }>(
-      `SELECT stored.file_data
+    const result = await pool!.query<{ file_data: Buffer; content_type: string }>(
+      `SELECT stored.file_data,stored.content_type
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=$3
-          AND stored.deleted_at IS NULL AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000`,
-      [departmentId, request.params.id, request.params.fileId],
+          AND stored.deleted_at IS NULL AND stored.content_type=ANY($4::text[]) AND stored.file_size BETWEEN 1 AND 2000000`,
+      [departmentId, request.params.id, request.params.fileId, inlineImageContentTypes],
     );
     const file = result.rows[0];
-    if (!file) return reply.code(404).send({ error: "Wiki image not found." });
-    return reply.type("image/jpeg").header("Content-Disposition", "inline").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "private, no-store").send(file.file_data);
+    if (!file || !matchesInlineImageType(file.file_data, file.content_type)) return reply.code(404).send({ error: "Wiki image not found." });
+    return reply.type(file.content_type).header("Content-Disposition", "inline").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "private, no-store").send(file.file_data);
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/export/html", async (request, reply) => {
