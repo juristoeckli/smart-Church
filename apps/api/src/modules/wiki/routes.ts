@@ -636,18 +636,60 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
-  app.post<{ Params: { id: string }; Body: { title: string; url: string } }>("/api/modules/wiki/pages/:id/links", { schema: { body: { type: "object", additionalProperties: false, required: ["title", "url"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, url: { type: "string", minLength: 1, maxLength: 2000 } } } } }, async (request, reply) => {
+  type WikiLinkInput = { title: string; url: string };
+  const wikiLinkSchema = { type: "object", additionalProperties: false, required: ["title", "url"], properties: {
+    title: { type: "string", minLength: 1, maxLength: 160 }, url: { type: "string", minLength: 1, maxLength: 2000 },
+  } };
+  function cleanWikiLink(input: WikiLinkInput) {
+    const title = input.title.trim(), url = input.url.trim();
+    return title && /^(https?:\/\/|\/|#)/i.test(url) && !/^\/\//.test(url) ? { title, url } : null;
+  }
+  const invalidLink = "Enter a link title and a safe HTTP(S) or local URL.";
+
+  app.post<{ Params: { id: string }; Body: WikiLinkInput }>("/api/modules/wiki/pages/:id/links", { schema: { body: wikiLinkSchema } }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await site(request, reply, true);
     if (!departmentId) return reply;
-    const title = request.body.title.trim();
-    const url = request.body.url.trim();
-    if (!title || !/^(https?:\/\/|\/|#)/i.test(url) || /^\/\//.test(url)) return reply.code(400).send({ error: "Enter a link title and a safe HTTP(S) or local URL." });
+    const link = cleanWikiLink(request.body);
+    if (!link) return reply.code(400).send({ error: invalidLink });
     const page = await pool!.query("SELECT id FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
     if (!page.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
-    const result = await pool!.query("INSERT INTO wiki_page_links(id,department_id,page_id,title,url,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,title,url,created_at", [randomUUID(), departmentId, request.params.id, title, url, request.authenticatedUser!.id]);
+    const result = await pool!.query("INSERT INTO wiki_page_links(id,department_id,page_id,title,url,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,title,url,created_at", [randomUUID(), departmentId, request.params.id, link.title, link.url, request.authenticatedUser!.id]);
     changed(departmentId, { action: "link-added", pageId: request.params.id });
     return reply.code(201).send(result.rows[0]);
+  });
+
+  app.patch<{ Params: { id: string; linkId: string }; Body: WikiLinkInput }>("/api/modules/wiki/pages/:id/links/:linkId", {
+    schema: { body: wikiLinkSchema, params: { type: "object", required: ["id", "linkId"], properties: {
+      id: { type: "string", format: "uuid" }, linkId: { type: "string", format: "uuid" },
+    } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await site(request, reply, true); if (!departmentId) return reply;
+    const link = cleanWikiLink(request.body);
+    if (!link) return reply.code(400).send({ error: invalidLink });
+    const client = await pool!.connect();
+    let updated: (WikiLinkInput & { id: string; created_at: Date }) | undefined;
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only." });
+      }
+      const page = await client.query("SELECT 1 FROM wiki_pages WHERE department_id=$1 AND id=$2 AND status='active' FOR SHARE", [departmentId, request.params.id]);
+      if (!page.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Active Wiki page not found." });
+      }
+      const result = await client.query<NonNullable<typeof updated>>(`UPDATE wiki_page_links SET title=$4,url=$5 WHERE department_id=$1 AND page_id=$2 AND id=$3
+        RETURNING id,title,url,created_at`, [departmentId, request.params.id, request.params.linkId, link.title, link.url]);
+      updated = result.rows[0];
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    if (!updated) return reply.code(404).send({ error: "Page link not found." });
+    changed(departmentId, { action: "link-updated", pageId: request.params.id });
+    return updated;
   });
 
   app.delete<{ Params: { id: string; linkId: string } }>("/api/modules/wiki/pages/:id/links/:linkId", async (request, reply) => {
