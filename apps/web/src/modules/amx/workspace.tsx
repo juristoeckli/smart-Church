@@ -99,6 +99,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const overlayPagesRef = useRef(overlayPages);
   overlayPagesRef.current = overlayPages;
   const lastControllerRoom = useRef<string | null | undefined>(undefined);
+  const heldPresses = useRef(new Map<string, { pressId?: string; releaseRequested: boolean }>());
   const [selectedRoom, setSelectedRoom] = useState("");
   const [activePanelChannels, setActivePanelChannels] = useState<Record<string, number[]>>({});
   const [busy, setBusy] = useState("");
@@ -284,6 +285,57 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     } finally { setBusy(""); }
   }
 
+  async function holdAction(action: Action) {
+    if (!configured || heldPresses.current.has(action.id)) return;
+    const held = { releaseRequested: false };
+    heldPresses.current.set(action.id, held);
+    setBusy(action.id); setFeedback(""); setFailed(false);
+    try {
+      const result = await readResponse<{ pressId: string }>(await fetch("/api/modules/amx/press", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ actionId: action.id }),
+      }));
+      held.pressId = result.pressId;
+      if (held.releaseRequested) void releaseHeldAction(action.id);
+    } catch (error) {
+      heldPresses.current.delete(action.id);
+      setFeedback(error instanceof Error ? error.message : "Could not hold the AMX control.");
+      setFailed(true);
+    } finally { setBusy(""); }
+  }
+
+  async function releaseHeldAction(actionId: string) {
+    const held = heldPresses.current.get(actionId);
+    if (!held) return;
+    if (!held.pressId) {
+      held.releaseRequested = true;
+      return;
+    }
+    heldPresses.current.delete(actionId);
+    try {
+      await readResponse(await fetch("/api/modules/amx/release", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ pressId: held.pressId }),
+      }));
+    } catch (error) {
+      setFeedback(error instanceof Error ? error.message : "Could not release the AMX control.");
+      setFailed(true);
+    }
+  }
+
+  useEffect(() => {
+    const releaseAll = () => {
+      for (const actionId of heldPresses.current.keys()) void releaseHeldAction(actionId);
+    };
+    window.addEventListener("blur", releaseAll);
+    return () => {
+      window.removeEventListener("blur", releaseAll);
+      releaseAll();
+    };
+  }, [departmentId, csrfToken]);
+
   async function handleObject(object: PanelObject, sourcePage: PanelPage = currentPage) {
     const label = labelFor(object);
     if (["zurück", "back"].some((word) => label.trim().toLocaleLowerCase().endsWith(word))) {
@@ -310,24 +362,18 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     if (sourcePage.name === "Modus" && object.pageFlip === "DetailPopup") {
       const mode = channel === 5 ? "Volumen" : channel === 6 ? "Mikrofon" : channel === 7 ? "Lautsprecher" : "";
       const target = mode ? mainAudioPage(selectedRoom, mode) : undefined;
-      const modeAction = systemActions.find((item) => item.channel === channel);
       if (!target) {
         setFeedback("Select a room before opening its controls.");
         setFailed(true);
-      } else if (!modeAction) {
-        setFeedback("This AMX mode button has no confirmed controller mapping.");
-        setFailed(true);
       } else {
-        if (await send(modeAction, sourcePage, true)) navigate(target.name);
+        // The touchpanel's mode buttons only switch its local page. Keep this
+        // navigation local so Smart-Church never changes the physical panel page.
+        navigate(target.name);
       }
       return;
     }
     if (sourcePage.name === "Modus" && channel === 8) {
-      const modeAction = systemActions.find((item) => item.channel === channel);
-      if (!modeAction) {
-        setFeedback("This AMX mode button has no confirmed controller mapping.");
-        setFailed(true);
-      } else if (await send(modeAction, sourcePage, true)) navigate("Regie");
+      navigate("Regie");
       return;
     }
     const sent = action ? await send(action, sourcePage) : true;
@@ -453,9 +499,19 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     if (!button) return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}
       aria-label={isStatusOnlyUnknown ? `Channel status indicator ${object.channel ?? "unknown"}` : undefined}
       title={isStatusOnlyUnknown ? "TP4 channel feedback only; input mapping is unknown." : undefined}>{inner}</div>;
-    const mapped = actionIndex.has(`${port}:${object.channel}`);
-    const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip));
-    return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${activeRoomState || activeModeState || state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
+    const mappedAction = actionIndex.get(`${port}:${object.channel}`);
+    const mapped = Boolean(mappedAction);
+    const modeNavigation = page.name === "Modus" && [5, 6, 7, 8].includes(object.channel ?? -1);
+    const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip)) || modeNavigation;
+    const holdButton = mappedAction && /^(?:\\+|\\-|−)$/.test(baseText.trim()) ? mappedAction : undefined;
+    return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${activeRoomState || activeModeState || state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped && !localNavigation)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped && !localNavigation ? "Set the NetLinx host in AMX module settings." : undefined}
+      onPointerDown={holdButton ? (event) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); void holdAction(holdButton); } : undefined}
+      onPointerUp={holdButton ? () => void releaseHeldAction(holdButton.id) : undefined}
+      onPointerCancel={holdButton ? () => void releaseHeldAction(holdButton.id) : undefined}
+      onLostPointerCapture={holdButton ? () => void releaseHeldAction(holdButton.id) : undefined}
+      onKeyDown={holdButton ? (event) => { if ((event.key === " " || event.key === "Enter") && !event.repeat) { event.preventDefault(); void holdAction(holdButton); } } : undefined}
+      onKeyUp={holdButton ? (event) => { if (event.key === " " || event.key === "Enter") { event.preventDefault(); void releaseHeldAction(holdButton.id); } } : undefined}
+      onClick={holdButton ? (event) => event.preventDefault() : () => void handleObject(object, page)}>{inner}{mapped && busy === mappedAction?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
   };
 
   const renderPageBackdrop = (page: PanelPage, layer: number): ReactNode => {
