@@ -739,8 +739,64 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result=await pool!.query("DELETE FROM people_record_relationships WHERE department_id=$1 AND id=$3 AND (person_id=$2 OR related_person_id=$2) RETURNING relationship,person_id,related_person_id,relationship_type_id",[d,request.params.contactId,request.params.id]);if(!result.rowCount)return reply.code(404).send({error:"Relationship not found."});
       await history(d,request.params.contactId,request,"relationship_removed",result.rows[0].relationship,result.rows[0],null);changed(d,request.params.contactId);return{ok:true};
     });
-    routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/consents",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query("SELECT id,purpose,status,captured_at AS \"capturedAt\",expires_at AS \"expiresAt\",notes FROM people_record_consents WHERE department_id=$1 AND contact_id=$2 ORDER BY captured_at DESC",[d,request.params.contactId]);return r.rows;});
-    routes.post<{Params:{contactId:string};Body:{purpose:string;status:"granted"|"withdrawn"|"pending";expiresAt?:string|null;notes?:string}}>("/api/people-records/:contactId/consents",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}},body:{type:"object",required:["purpose","status"],properties:{purpose:{type:"string",minLength:1,maxLength:100},status:{type:"string",enum:["granted","withdrawn","pending"]},expiresAt:{type:["string","null"],format:"date"},notes:{type:"string",maxLength:1000}}}}},async(request,reply)=>{const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const c=await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2",[d,request.params.contactId]);if(!c.rowCount)return reply.code(404).send({error:"Person not found at this location."});const id=randomUUID();await pool!.query("INSERT INTO people_record_consents(id,department_id,contact_id,purpose,status,expires_at,notes,actor_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",[id,d,request.params.contactId,request.body.purpose.trim(),request.body.status,request.body.expiresAt??null,request.body.notes??"",request.authenticatedUser?.id??null]);await history(d,request.params.contactId,request,"consent_recorded",request.body.purpose,null,{status:request.body.status,expiresAt:request.body.expiresAt??null});changed(d,request.params.contactId);return reply.code(201).send({id});});
+    routes.get<{ Params: { contactId: string } }>("/api/people-records/:contactId/consents", {
+      schema: { params: { type: "object", required: ["contactId"], properties: { contactId: uuid } } },
+    }, async (request, reply) => {
+      const d = await department(request, reply);
+      if (!d) return reply;
+      const result = await pool!.query(
+        'SELECT consent.id, consent.purpose, consent.status, consent.captured_at AS "capturedAt", consent.expires_at AS "expiresAt", consent.notes, consent.source, actor.display_name AS "actorName" FROM people_record_consents consent LEFT JOIN app_users actor ON actor.id=consent.actor_user_id WHERE consent.department_id=$1 AND consent.contact_id=$2 ORDER BY consent.captured_at DESC, consent.id',
+        [d, request.params.contactId],
+      );
+      reply.header("cache-control", "private, no-store");
+      return result.rows;
+    });
+
+    routes.post<{ Params: { contactId: string }; Body: { purpose: string; status: "granted" | "withdrawn" | "pending"; expiresAt?: string | null; notes?: string; source?: string } }>("/api/people-records/:contactId/consents", {
+      schema: {
+        params: { type: "object", required: ["contactId"], properties: { contactId: uuid } },
+        body: { type: "object", required: ["purpose", "status"], properties: {
+          purpose: { type: "string", minLength: 1, maxLength: 100 },
+          status: { type: "string", enum: ["granted", "withdrawn", "pending"] },
+          expiresAt: { type: ["string", "null"], format: "date" },
+          notes: { type: "string", maxLength: 1000 },
+          source: { type: "string", maxLength: 120 },
+        } },
+      },
+    }, async (request, reply) => {
+      const d = await department(request, reply, true);
+      if (!d || !validateMutation(request, reply)) return reply;
+      const purpose = request.body.purpose.trim();
+      if (!purpose) return reply.code(400).send({ error: "Enter a consent purpose." });
+      const { contactId } = request.params;
+      const { status, expiresAt = null } = request.body;
+      const source = request.body.source?.trim() ?? "";
+      const actorId = request.authenticatedUser?.id ?? null;
+      const id = randomUUID();
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, d)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This location is not writable." });
+        }
+        const person = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2 FOR KEY SHARE", [d, contactId]);
+        if (!person.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Person not found at this location." });
+        }
+        await client.query("INSERT INTO people_record_consents(id,department_id,contact_id,purpose,status,expires_at,notes,actor_user_id,source) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [id,d,contactId,purpose,status,expiresAt,request.body.notes?.trim() ?? "",actorId,source]);
+        await client.query("INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,after_value) VALUES($1,$2,$3,$4,'consent_recorded',$5,$6::jsonb)", [randomUUID(),d,contactId,actorId,purpose,JSON.stringify({ status, expiresAt, source })]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+      changed(d, contactId);
+      return reply.code(201).send({ id });
+    });
     routes.get<{Params:{contactId:string}}>("/api/people-records/:contactId/history",{schema:{params:{type:"object",required:["contactId"],properties:{contactId:uuid}}}},async(request,reply)=>{const d=await department(request,reply);if(!d)return reply;const r=await pool!.query("SELECT id,action,subject,before_value AS \"beforeValue\",after_value AS \"afterValue\",created_at AS \"createdAt\" FROM people_record_history WHERE department_id=$1 AND contact_id=$2 ORDER BY created_at DESC LIMIT 300",[d,request.params.contactId]);return r.rows;});
     routes.post<{Body:{rows:Array<{firstName:string;lastName:string;email?:string;phone?:string;postalAddress?:PostalAddress;fields?:Record<string,string>}>}}>("/api/people-records/import-preview",{schema:{body:{type:"object",required:["rows"],properties:{rows:{type:"array",maxItems:500,items:{type:"object",additionalProperties:false,required:["firstName","lastName"],properties:{firstName:{type:"string",maxLength:100},lastName:{type:"string",maxLength:100},email:{type:"string",maxLength:254},phone:{type:"string",maxLength:60},postalAddress:postalAddressSchema,fields:{type:"object",maxProperties:100,additionalProperties:{type:"string",maxLength:2000}}}}}}}}},async(request,reply)=>{const d=await department(request,reply,true);if(!d)return reply;if(!validateMutation(request,reply))return reply;const [existing,definitions]=await Promise.all([pool!.query("SELECT id,first_name,last_name,email,phone FROM contacts WHERE department_id=$1",[d]),pool!.query<{field_key:string;field_type:string;options:unknown;required:boolean}>("SELECT field_key,field_type,options,required FROM people_record_fields WHERE department_id=$1 AND active=true",[d])]);const available=new Map(definitions.rows.map(field=>[field.field_key,field]));const normalize=(v?:string)=>v?.trim().toLocaleLowerCase()??"";const rows=request.body.rows.map((row,index)=>{let validationError:string|undefined;const firstName=row.firstName.trim(),lastName=row.lastName.trim();if(!firstName||!lastName)validationError="First and last name are required.";else if(firstName.length>80||lastName.length>80)validationError="Names must be 80 characters or fewer.";else if(row.email&&(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.email.trim())||row.email.trim().length>254))validationError="Enter a valid email address.";else if(row.phone&&row.phone.trim().length>40)validationError="Phone numbers must be 40 characters or fewer.";const custom:Record<string,unknown>={};for(const field of definitions.rows){if(field.required&&!row.fields?.[field.field_key]?.trim())validationError??=`${field.field_key} is required.`}for(const [key,raw] of Object.entries(row.fields??{})){const field=available.get(key);if(!field){validationError??=`Custom field “${key}” is not active at this location.`;continue}const value=raw.trim();if(!value){if(field.required)validationError??=`${key} is required.`;continue}if(field.field_type==="text"){if(value.length>2000)validationError??=`${key} must be at most 2000 characters.`;else custom[key]=value}else if(field.field_type==="date"){const parsed=new Date(`${value}T00:00:00.000Z`);if(!/^\d{4}-\d{2}-\d{2}$/.test(value)||!Number.isFinite(parsed.getTime())||parsed.toISOString().slice(0,10)!==value)validationError??=`${key} must be a valid date.`;else custom[key]=value}else if(field.field_type==="boolean"){if(!["true","false","yes","no","1","0"].includes(value.toLowerCase()))validationError??=`${key} must be yes or no.`;else custom[key]=["true","yes","1"].includes(value.toLowerCase())}else if(field.field_type==="select"){if(!Array.isArray(field.options)||!field.options.includes(value))validationError??=`${key} must match a configured choice.`;else custom[key]=value}else validationError??=`${key} has an unsupported field type.`}const postalAddress=normalizePostalAddress(row.postalAddress);const person={firstName,lastName,...(Object.keys(postalAddress).length?{postalAddress}:{}),...(row.email?.trim()?{email:row.email.trim()}:{}),...(row.phone?.trim()?{phone:row.phone.trim()}:{}),...(Object.keys(custom).length?{fields:custom}:{})};const exact=existing.rows.find(c=>(normalize(person.email)&&normalize(c.email)===normalize(person.email))||(normalize(c.first_name)===normalize(firstName)&&normalize(c.last_name)===normalize(lastName)&&normalize(c.phone)===normalize(person.phone)));return{row:index+1,person,match:exact?{id:exact.id,firstName:exact.first_name,lastName:exact.last_name,email:exact.email}:null,decision:validationError?"invalid":exact?"review":"new",...(validationError?{validationError}:{})};});return{rows,counts:{new:rows.filter(x=>x.decision==="new").length,review:rows.filter(x=>x.decision==="review").length,invalid:rows.filter(x=>x.decision==="invalid").length,imported:0},message:"Preview only. No person records were changed."};});
     routes.post<{Body:{rows:Array<{row:number;firstName:string;lastName:string;email?:string;phone?:string;postalAddress?:PostalAddress;fields?:Record<string,string>;status?:"member"|"visitor"}>}}>("/api/people-records/import-apply",{schema:{body:{type:"object",required:["rows"],properties:{rows:{type:"array",minItems:1,maxItems:500,items:{type:"object",additionalProperties:false,required:["row","firstName","lastName"],properties:{row:{type:"integer",minimum:1},firstName:{type:"string",maxLength:100},lastName:{type:"string",maxLength:100},email:{type:"string",maxLength:254},phone:{type:"string",maxLength:60},postalAddress:postalAddressSchema,fields:{type:"object",maxProperties:100,additionalProperties:{type:"string",maxLength:2000}},status:{type:"string",enum:["member","visitor"]}}}}}}}},async(request,reply)=>{

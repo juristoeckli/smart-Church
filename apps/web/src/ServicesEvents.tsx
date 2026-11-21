@@ -195,6 +195,25 @@ function registrationAttendeeRole(registration: ManageableEventRegistration) {
   return registration.partyId ? "Primary contact" : "";
 }
 
+function previousYearDate(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  const prior = new Date(0);
+  prior.setUTCFullYear(year - 1, month, 0);
+  if (year <= 1 || !Number.isFinite(prior.getTime())) return "";
+  return [String(year - 1).padStart(4, "0"), String(month).padStart(2, "0"), String(Math.min(day, prior.getUTCDate())).padStart(2, "0")].join("-");
+}
+
+function filterAttendanceDates(events: ServiceEvent[], from: string, through: string) {
+  return events.filter((event) => event.attendanceRecordedAt && (!from || event.eventDate >= from) && (!through || event.eventDate <= through));
+}
+
+function sumAttendance(events: ServiceEvent[]) {
+  return events.reduce((counts, event) => ({
+    adults: counts.adults + (event.attendanceAdults ?? 0),
+    children: counts.children + (event.attendanceChildren ?? 0),
+  }), { adults: 0, children: 0 });
+}
+
 function csvCell(value: string | number) {
   const cell = String(value);
   const safeCell = typeof value === "string" && /^[\s\u0000-\u001f]*[=+\-@\uFF1D\uFF0B\uFF0D\uFF20]|^[\t\r\n]/u.test(cell) ? "'" + cell : cell;
@@ -351,6 +370,9 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [filter, setFilter] = useState<EventFilter>("upcoming");
+  const [attendanceFrom, setAttendanceFrom] = useState("");
+  const [attendanceTo, setAttendanceTo] = useState("");
+  useEffect(() => { setAttendanceFrom(""); setAttendanceTo(""); }, [departmentId]);
   const [roleCategoryFilter, setRoleCategoryFilter] = useState("");
   const [responsibleFilter, setResponsibleFilter] = useState("");
   const [staffingFilter, setStaffingFilter] = useState<"all" | "mine" | "requested" | "unfilled">("all");
@@ -461,13 +483,13 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const filteredEvents = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const filtered = events.filter((event) => {
-      const matchesFilter = filter === "all" || (filter === "upcoming" ? event.eventDate >= today : event.eventDate < today);
+      const matchesFilter = scheduleView === "attendance" || filter === "all" || (filter === "upcoming" ? event.eventDate >= today : event.eventDate < today);
       const matchesQuery = !normalizedQuery || [event.title, event.location, eventKindLabel(event.kind), event.description]
         .some((value) => value?.toLocaleLowerCase().includes(normalizedQuery));
       return matchesFilter && matchesQuery;
     });
-    return filter === "past" ? filtered.reverse() : filtered;
-  }, [events, filter, query, today]);
+    return scheduleView !== "attendance" && filter === "past" ? filtered.reverse() : filtered;
+  }, [events, filter, query, scheduleView, today]);
   const roleCategoryOptions = useMemo(() => [...new Set(events.flatMap((event) => (event.positions ?? []).map((position) => position.category?.trim()).filter((category): category is string => Boolean(category))))].sort((a, b) => a.localeCompare(b)), [events]);
   const hasUncategorizedRoles = useMemo(() => events.some((event) => (event.positions ?? []).some((position) => !position.category?.trim())), [events]);
   const roleCategoryMatches = (position: ServicePosition) => roleCategoryFilter === ""
@@ -494,8 +516,13 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const dutyRosterEvents = roleCategoryFilter || showUnfilledRoles || showMyDuties
     ? matchingResponsibleEvents.filter((event) => (!(showUnfilledRoles || showMyRequests) || !event.cancelledAt) && event.positions?.some(dutyPositionMatches))
     : matchingResponsibleEvents;
-  const attendanceEvents = useMemo(() => filteredEvents.filter((event) => event.attendanceRecordedAt), [filteredEvents]);
-  const attendanceTotal = attendanceEvents.reduce((total, event) => total + (event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0), 0);
+  const attendanceDatesInvalid = Boolean(attendanceFrom && attendanceTo && attendanceFrom > attendanceTo);
+  const attendanceEvents = attendanceDatesInvalid ? [] : filterAttendanceDates(filteredEvents, attendanceFrom, attendanceTo);
+  const attendanceCounts = sumAttendance(attendanceEvents);
+  const priorFrom = attendanceFrom && previousYearDate(attendanceFrom);
+  const priorTo = attendanceTo && previousYearDate(attendanceTo);
+  const priorAttendanceEvents = !attendanceDatesInvalid && priorFrom && priorTo ? filterAttendanceDates(filteredEvents, priorFrom, priorTo) : null;
+  const priorAttendanceCounts = priorAttendanceEvents?.length ? sumAttendance(priorAttendanceEvents) : null;
   const calendarDays = useMemo(() => {
     const [year, month] = calendarMonth.split("-").map(Number);
     const firstDay = new Date(Date.UTC(year, month - 1, 1));
@@ -988,15 +1015,15 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         <div className="directory-heading"><div><h2>{translate("events.schedule")}</h2><p>{translate("events.scheduleDescription")}</p></div></div>
         <div className="directory-toolbar event-toolbar">
           <div className="search-field"><Search size={17} /><input aria-label={translate("events.searchLabel")} placeholder={translate("events.searchPlaceholder")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>{canManage && (scheduleView === "list" || scheduleView === "workload") && <label className="event-role-category-filter">Role category<select aria-label="Filter duty roster by role category" value={roleCategoryFilter} onChange={(event) => setRoleCategoryFilter(event.target.value)}><option value="">All role categories</option>{roleCategoryOptions.map((category) => <option key={category} value={category}>{category}</option>)}{hasUncategorizedRoles && <option value={UNCATEGORIZED_ROLE_FILTER}>Uncategorized</option>}</select></label>}
-          <div className="filter-tabs" role="tablist" aria-label={translate("events.filterSchedule")}>
+          {scheduleView !== "attendance" && <div className="filter-tabs" role="tablist" aria-label={translate("events.filterSchedule")}>
             <button className={filter === "upcoming" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "upcoming"} onClick={() => setFilter("upcoming")}>{translate("events.upcomingTab")} <span>{upcomingEvents.length}</span></button>
             <button className={filter === "all" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "all"} onClick={() => setFilter("all")}>{translate("events.allTab")} <span>{events.length}</span></button>
             <button className={filter === "past" ? "filter-tab filter-tab-active" : "filter-tab"} type="button" role="tab" aria-selected={filter === "past"} onClick={() => setFilter("past")}>{translate("events.pastTab")} <span>{events.filter((event) => event.eventDate < today).length}</span></button>
-          </div>
+          </div>}
           <div className="schedule-view-toggle" role="group" aria-label={translate("events.scheduleView")}>
             <button className={scheduleView === "list" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "list"} onClick={() => setScheduleView("list")}>{translate("events.listView")}</button>
             <button className={scheduleView === "month" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "month"} onClick={() => setScheduleView("month")}>{translate("events.monthView")}</button>
-            <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => { setFilter("all"); setScheduleView("attendance"); }}>{translate("events.attendanceReport")}</button>
+            <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => setScheduleView("attendance")}>{translate("events.attendanceReport")}</button>
             {canManage && <button className={scheduleView === "workload" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "workload"} onClick={() => setScheduleView("workload")}>Workload</button>}
           </div>
           {scheduleView === "list" && <label className="event-role-category-filter">Staffing<select value={!canManage && staffingFilter === "unfilled" ? "all" : staffingFilter} onChange={(event) => setStaffingFilter(event.target.value as typeof staffingFilter)}><option value="all">All roles</option><option value="mine">My assignments</option><option value="requested">My pending requests</option>{canManage && <option value="unfilled">Unfilled roles only</option>}</select></label>}
@@ -1005,7 +1032,23 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
         </div>
 
         {scheduleView === "workload" && canManage ? (isLoading || loadError ? <p className="empty-state">{isLoading ? translate("events.loading") : translate("events.scheduleLoadFailed")}</p> : <VolunteerWorkload events={matchingResponsibleEvents} contacts={contacts} matchesCategory={roleCategoryMatches} onOpenEvent={setDetailsEvent} />) : scheduleView === "attendance" ? <div className="attendance-report">
-          <div className="attendance-report-heading"><p>{translate("events.attendanceReportSummary").replace("{gatherings}", String(attendanceEvents.length)).replace("{visits}", String(attendanceTotal))}</p><button className="button button-secondary" type="button" onClick={downloadAttendanceReport} disabled={attendanceEvents.length === 0}><Download size={15} />{translate("events.exportAttendance")}</button></div>
+          <div className="attendance-report-heading">
+            <div>
+              <div className="form-row">
+                <label>Attendance from<input type="date" value={attendanceFrom} onChange={(event) => setAttendanceFrom(event.target.value)} /></label>
+                <label>Attendance through<input type="date" value={attendanceTo} onChange={(event) => setAttendanceTo(event.target.value)} /></label>
+              </div>
+              {attendanceDatesInvalid ? <p role="alert">The start date must be on or before the end date.</p> : <>
+                <p>{translate("events.attendanceReportSummary").replace("{gatherings}", String(attendanceEvents.length)).replace("{visits}", String(attendanceCounts.adults + attendanceCounts.children))} · {translate("events.adults")}: {attendanceCounts.adults} · {translate("events.children")}: {attendanceCounts.children}</p>
+                {priorAttendanceEvents && !isLoading && !loadError && <p>
+                  Previous year ({formatEventDate(priorFrom)} – {formatEventDate(priorTo)}): {priorAttendanceCounts
+                    ? translate("events.attendanceReportSummary").replace("{gatherings}", String(priorAttendanceEvents.length)).replace("{visits}", String(priorAttendanceCounts.adults + priorAttendanceCounts.children))
+                    : "No attendance recorded."}
+                </p>}
+              </>}
+            </div>
+            <button className="button button-secondary" type="button" onClick={downloadAttendanceReport} disabled={attendanceEvents.length === 0}><Download size={15} />{translate("events.exportAttendance")}</button>
+          </div>
           <div className="table-scroll"><table className="people-table event-table attendance-report-table"><thead><tr><th>{translate("events.date")}</th><th>{translate("events.gathering")}</th><th>{translate("events.type")}</th><th>{translate("events.adults")}</th><th>{translate("events.children")}</th><th>{translate("events.total")}</th><th>{translate("events.recordedAt")}</th></tr></thead><tbody>
             {attendanceEvents.map((event) => <tr key={event.id}><td>{formatEventDate(event.eventDate)}</td><td>{event.title}</td><td>{eventKindLabel(event.kind)}</td><td>{event.attendanceAdults ?? 0}</td><td>{event.attendanceChildren ?? 0}</td><td>{(event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0)}</td><td>{event.attendanceRecordedAt ? formatUserDate(event.attendanceRecordedAt, true) : "—"}</td></tr>)}
             {attendanceEvents.length === 0 && <tr><td colSpan={7} className="empty-state">{isLoading ? translate("events.loading") : translate("events.attendanceReportEmpty")}</td></tr>}

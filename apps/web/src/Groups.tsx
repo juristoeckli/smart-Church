@@ -21,7 +21,7 @@ const groupColumns = [
 type GroupColumn = (typeof groupColumns)[number]["key"];
 const defaultGroupColumns: GroupColumn[] = groupColumns.map(({ key }) => key);
 
-type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sourceFilter?: GroupSourceFilter; sortOrder?: GroupSortOrder; displayMode?: "list" | "table"; visibleColumns?: GroupColumn[]; createdAt: string; updatedAt: string };
+type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sourceFilter?: GroupSourceFilter; myGroupsOnly?: boolean; sortOrder?: GroupSortOrder; displayMode?: "list" | "table"; visibleColumns?: GroupColumn[]; createdAt: string; updatedAt: string };
 
 function csvCell(value: string | number) {
   const text = String(value);
@@ -263,7 +263,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     try {
       const url = action === "save" ? "/api/groups/views" : "/api/groups/views/" + encodeURIComponent(selectedSavedViewId);
       const name = savedViewName.trim();
-      const body = action === "rename" ? { name } : { name, searchText: directorySearch, statusFilter, groupTypeFilter, sourceFilter, sortOrder, displayMode, visibleColumns };
+      const body = action === "rename" ? { name } : { name, searchText: directorySearch, statusFilter, groupTypeFilter, sourceFilter, myGroupsOnly, sortOrder, displayMode, visibleColumns };
       const response = await fetch(url, { method: action === "save" ? "POST" : "PATCH", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify(body) });
       const result = await response.json() as SavedGroupView | { error?: string };
       if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save this view." : "Could not save this view.");
@@ -288,7 +288,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
 
   function applySavedView(id: string) {
     const view = savedViews.find((item) => item.id === id);
-    setSelectedSavedViewId(id); setSourceFilter(view?.sourceFilter ?? "all"); setSavedViewName(view?.name ?? ""); setDirectorySearch(view?.searchText ?? ""); setStatusFilter(view?.statusFilter ?? "all"); setGroupTypeFilter(view?.groupTypeFilter ?? ""); setSortOrder(view?.sortOrder ?? "name_asc");
+    setSelectedSavedViewId(id); setMyGroupsOnly(view?.myGroupsOnly ?? false); setSourceFilter(view?.sourceFilter ?? "all"); setSavedViewName(view?.name ?? ""); setDirectorySearch(view?.searchText ?? ""); setStatusFilter(view?.statusFilter ?? "all"); setGroupTypeFilter(view?.groupTypeFilter ?? ""); setSortOrder(view?.sortOrder ?? "name_asc");
     setDisplayMode(view?.displayMode ?? "list");
     setVisibleColumns(view?.visibleColumns ?? defaultGroupColumns);
   }

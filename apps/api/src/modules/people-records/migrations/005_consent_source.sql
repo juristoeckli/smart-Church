@@ -1,0 +1,1 @@
+ALTER TABLE people_record_consents ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT '';
