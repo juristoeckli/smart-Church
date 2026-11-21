@@ -54,3 +54,5 @@
 .resource-scheduler-booked-days-table { width: 100%; min-width: 28rem; border-collapse: collapse; }
 .resource-scheduler-booked-days-table th, .resource-scheduler-booked-days-table td { text-align: start; padding: .55rem .75rem; border-bottom: 1px solid var(--border-color, #e2e8f0); }
 .resource-scheduler-booked-days-table small { display: block; font-weight: normal; }
+
+.resource-scheduler-cell-request { margin-top: .3rem; }
