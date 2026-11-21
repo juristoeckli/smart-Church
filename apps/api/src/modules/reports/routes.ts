@@ -6,7 +6,7 @@ import { registerReportDesigner } from "./designer.js";
 type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
 type ReportRow = Record<string, string | number | boolean | null>;
-type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string };
+type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean };
 
 const catalog = [
   { key: "people-directory" as const, title: "People directory", description: "Contact list with status and contact details.", permission: "people" as const },
@@ -526,12 +526,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/reports/saved", async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    const result = await pool!.query<SavedReport>("SELECT id,report_key,name,filters,owner_user_id,updated_at FROM saved_report_definitions WHERE department_id=$1 ORDER BY lower(name),id", [departmentId]);
+    const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
     const availableKeys = new Set((await installedReports(request)).map((item) => item.key));
-    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at }));
+    return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit }));
   });
-  app.post<{ Body: { reportKey: ReportKey; name: string; filters: unknown } }>("/api/modules/reports/saved", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["reportKey", "name", "filters"], properties: { reportKey: { type: "string", enum: catalog.map((item) => item.key) }, name: { type: "string", minLength: 1, maxLength: 120 }, filters: { type: "object", additionalProperties: true } } } },
+  app.post<{ Body: { reportKey: ReportKey; name: string; filters: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/saved", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["reportKey", "name", "filters"], properties: { reportKey: { type: "string", enum: catalog.map((item) => item.key) }, name: { type: "string", minLength: 1, maxLength: 120 }, filters: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
@@ -543,9 +543,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const name = cleanText(request.body.name, 120);
     if (!name) return reply.code(400).send({ error: "Enter a name for this saved report." });
     try {
-      const result = await pool!.query("INSERT INTO saved_report_definitions(id,department_id,owner_user_id,report_key,name,filters) VALUES($1,$2,$3,$4,$5,$6::jsonb) RETURNING id,report_key AS \"reportKey\",name,filters,updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, request.body.reportKey, name, JSON.stringify(filters)]);
+      const result = await pool!.query("INSERT INTO saved_report_definitions(id,department_id,owner_user_id,report_key,name,filters,share_scope) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING id,report_key AS \"reportKey\",name,filters,share_scope AS \"shareScope\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, request.body.reportKey, name, JSON.stringify(filters), request.body.shareScope ?? "private"]);
       return reply.code(201).send(result.rows[0]);
     } catch { return reply.code(409).send({ error: "A saved report with that name already exists in your account." }); }
+  });
+  app.put<{ Params: { id: string }; Body: { shareScope: "private" | "department" } }>("/api/modules/reports/saved/:id/sharing", {
+    schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["shareScope"], properties: { shareScope: { type: "string", enum: ["private", "department"] } } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    if (!canModule(request, "manage")) return denied(reply);
+    if (!validateMutation(request, reply)) return reply;
+    const result = await pool!.query("UPDATE saved_report_definitions SET share_scope=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND (owner_user_id=$3 OR $5::boolean) RETURNING id,share_scope AS \"shareScope\"", [request.params.id, departmentId, request.authenticatedUser!.id, request.body.shareScope, request.activeDepartmentRole === "site_admin"]);
+    if (!result.rowCount) return reply.code(404).send({ error: "Saved report not found or you cannot change its sharing." });
+    return result.rows[0];
   });
   app.delete<{ Params: { id: string } }>("/api/modules/reports/saved/:id", {
     schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } },

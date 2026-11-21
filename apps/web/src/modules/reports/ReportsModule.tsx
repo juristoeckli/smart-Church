@@ -9,13 +9,13 @@ type ReportColumn = { key: string; label: string };
 type ReportResult = { reportKey: ReportKey; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>> };
 type GroupOption = { id: string; name: string };
 type Filters = { from?: string; to?: string; groupId?: string; status?: string; followUpStatus?: string; accountingYear?: string };
-type SavedReport = { id: string; reportKey: ReportKey; name: string; filters: Filters; ownerId: string };
+type SavedReport = { id: string; reportKey: ReportKey; name: string; filters: Filters; ownerId: string; shareScope: "private" | "department"; canEdit: boolean };
 type DesignerField = { key: string; label: string; type: "text" | "number" | "date" };
 type DesignerDataset = { key: "people" | "groups" | "memberships" | "events" | "finance"; title: string; description: string; fields: DesignerField[] };
 type DesignerFilter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string };
 type DesignerDefinition = { dataset: DesignerDataset["key"]; columns: string[]; filters: Array<{ field: string; operator: DesignerFilter["operator"]; value: string | number }>; sortBy: string; direction: "asc" | "desc"; groupBy?: string; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
 type DesignerResult = { dataset: DesignerDataset["key"]; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>>; totalRows: number; capped: boolean };
-type SavedDesignerReport = { id: string; name: string; definition: DesignerDefinition; createdAt: string; updatedAt: string };
+type SavedDesignerReport = { id: string; name: string; definition: DesignerDefinition; shareScope: "private" | "department"; canEdit: boolean; createdAt: string; updatedAt: string };
 
 function csvCell(value: unknown) {
   const text = String(value ?? "");
@@ -31,6 +31,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
   const [filters, setFilters] = useState<Filters>({});
   const [result, setResult] = useState<ReportResult | null>(null);
   const [savedName, setSavedName] = useState("");
+  const [shareSavedReport, setShareSavedReport] = useState(false);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
@@ -49,6 +50,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
   const [designerAggregateField, setDesignerAggregateField] = useState("");
   const [designerResult, setDesignerResult] = useState<DesignerResult | null>(null);
   const [designerReportName, setDesignerReportName] = useState("");
+  const [shareDesignerReport, setShareDesignerReport] = useState(false);
   const [selectedDesignerId, setSelectedDesignerId] = useState("");
   const [designerRunning, setDesignerRunning] = useState(false);
   const canManageReports = canManageSite || (department.modulePermissions?.reports ?? []).includes("manage");
@@ -120,8 +122,9 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     if (!reportKey || !savedName.trim()) return;
     setError(""); setMessage("");
     try {
-      await request("/api/modules/reports/saved", { method: "POST", body: JSON.stringify({ reportKey, name: savedName.trim(), filters }) });
+      await request("/api/modules/reports/saved", { method: "POST", body: JSON.stringify({ reportKey, name: savedName.trim(), filters, shareScope: shareSavedReport ? "department" : "private" }) });
       setSavedName("");
+      setShareSavedReport(false);
       setMessage("Saved report definition.");
       await loadSupportingData();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the report."); }
@@ -133,6 +136,14 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
       await request("/api/modules/reports/saved/" + item.id, { method: "DELETE", headers: { "x-csrf-token": csrfToken } });
       setSaved((current) => current.filter((entry) => entry.id !== item.id));
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not delete the saved report."); }
+  }
+
+  async function setDefinitionSharing(item: SavedReport) {
+    const shareScope = item.shareScope === "department" ? "private" : "department";
+    try {
+      await request(`/api/modules/reports/saved/${item.id}/sharing`, { method: "PUT", body: JSON.stringify({ shareScope }) });
+      setSaved((current) => current.map((entry) => entry.id === item.id ? { ...entry, shareScope } : entry));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not change report sharing."); }
   }
 
   function definitionForDesigner(): DesignerDefinition | null {
@@ -160,8 +171,8 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     const definition = definitionForDesigner(); if (!definition || !designerReportName.trim()) return;
     try {
       const path = selectedDesignerId ? `/api/modules/reports/designer/saved/${selectedDesignerId}` : "/api/modules/reports/designer/saved";
-      await request(path, { method: selectedDesignerId ? "PUT" : "POST", body: JSON.stringify({ name: designerReportName.trim(), definition }) });
-      setMessage(selectedDesignerId ? "Updated personal report." : "Saved personal report."); setSavedDesigner(await request<SavedDesignerReport[]>("/api/modules/reports/designer/saved"));
+      await request(path, { method: selectedDesignerId ? "PUT" : "POST", body: JSON.stringify({ name: designerReportName.trim(), definition, shareScope: shareDesignerReport ? "department" : "private" }) });
+      setMessage(selectedDesignerId ? "Updated report." : "Saved report."); setSavedDesigner(await request<SavedDesignerReport[]>("/api/modules/reports/designer/saved"));
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the report."); }
   }
 
@@ -171,11 +182,19 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not delete the report."); }
   }
 
+  async function setDesignerSharing(savedReport: SavedDesignerReport) {
+    const shareScope = savedReport.shareScope === "department" ? "private" : "department";
+    try {
+      await request(`/api/modules/reports/designer/saved/${savedReport.id}/sharing`, { method: "PUT", body: JSON.stringify({ shareScope }) });
+      setSavedDesigner((current) => current.map((item) => item.id === savedReport.id ? { ...item, shareScope } : item));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not change report sharing."); }
+  }
+
   function loadDesigner(savedReport: SavedDesignerReport) {
     const definition = savedReport.definition;
     datasetKeyRef.current = definition.dataset; setDatasetKey(definition.dataset); setDesignerColumns(definition.columns); setDesignerFilters(definition.filters.map((filter) => ({ ...filter, value: String(filter.value) })));
     setDesignerSortBy(definition.sortBy); setDesignerDirection(definition.direction); setDesignerGroupBy(definition.groupBy ?? "");
-    setDesignerAggregate(definition.aggregate?.operation ?? "count"); setDesignerAggregateField(definition.aggregate?.field ?? ""); setDesignerReportName(savedReport.name); setSelectedDesignerId(savedReport.id); setDesignerResult(null);
+    setDesignerAggregate(definition.aggregate?.operation ?? "count"); setDesignerAggregateField(definition.aggregate?.field ?? ""); setDesignerReportName(savedReport.name); setShareDesignerReport(savedReport.shareScope === "department"); setSelectedDesignerId(savedReport.canEdit ? savedReport.id : ""); setDesignerResult(null);
   }
 
   function downloadDesignerCsv() {
@@ -206,10 +225,10 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
             <div className="reports-date-filters"><label>Sort by<select value={designerSortBy} onChange={(event) => setDesignerSortBy(event.target.value)}>{activeDataset.fields.map((field) => <option key={field.key} value={field.key}>{field.label}</option>)}</select></label><label>Order<select value={designerDirection} onChange={(event) => setDesignerDirection(event.target.value as "asc" | "desc")}><option value="asc">Ascending</option><option value="desc">Descending</option></select></label></div>
             <label>Group by (optional)<select value={designerGroupBy} onChange={(event) => { setDesignerGroupBy(event.target.value); if (!designerAggregateField) setDesignerAggregateField(activeDataset.fields.find((field) => field.type === "number")?.key ?? ""); }}><option value="">No grouping</option>{activeDataset.fields.map((field) => <option key={field.key} value={field.key}>{field.label}</option>)}</select></label>
             {designerGroupBy && <div className="reports-date-filters"><label>Aggregate<select value={designerAggregate} onChange={(event) => setDesignerAggregate(event.target.value as "count" | "sum" | "average")}><option value="count">Count rows</option><option value="sum" disabled={!activeDataset.fields.some((field) => field.type === "number")}>Sum</option><option value="average" disabled={!activeDataset.fields.some((field) => field.type === "number")}>Average</option></select></label>{designerAggregate !== "count" && <label>Numeric field<select value={designerAggregateField} onChange={(event) => setDesignerAggregateField(event.target.value)}>{activeDataset.fields.filter((field) => field.type === "number").map((field) => <option key={field.key} value={field.key}>{field.label}</option>)}</select></label>}</div>}
-            <div className="reports-designer-actions"><button className="button button-primary" type="button" onClick={() => void previewDesigner()} disabled={designerRunning || designerColumns.length === 0}><Play size={16} />{designerRunning ? "Running…" : "Preview report"}</button><input aria-label="Personal report name" maxLength={120} value={designerReportName} onChange={(event) => setDesignerReportName(event.target.value)} placeholder="Name this report" /><button className="button button-secondary" type="button" onClick={() => void saveDesigner()} disabled={!designerReportName.trim() || !designerColumns.length}><Save size={15} />{selectedDesignerId ? "Update" : "Save"}</button>{selectedDesignerId && <button className="button button-secondary" type="button" onClick={() => { setSelectedDesignerId(""); setDesignerReportName(""); }}>Save as new</button>}</div>
+            <div className="reports-designer-actions"><button className="button button-primary" type="button" onClick={() => void previewDesigner()} disabled={designerRunning || designerColumns.length === 0}><Play size={16} />{designerRunning ? "Running…" : "Preview report"}</button><input aria-label="Report name" maxLength={120} value={designerReportName} onChange={(event) => setDesignerReportName(event.target.value)} placeholder="Name this report" /><label className="reports-share-option"><input type="checkbox" checked={shareDesignerReport} onChange={(event) => setShareDesignerReport(event.target.checked)} />Share with users authorized for this dataset</label><button className="button button-secondary" type="button" onClick={() => void saveDesigner()} disabled={!designerReportName.trim() || !designerColumns.length}><Save size={15} />{selectedDesignerId ? "Update" : "Save"}</button>{selectedDesignerId && <button className="button button-secondary" type="button" onClick={() => { setSelectedDesignerId(""); setDesignerReportName(""); }}>Save as new</button>}</div>
           </>}
         </section>
-        <aside className="reports-panel reports-saved"><h2>Personal reports</h2>{savedDesigner.length ? <ul>{savedDesigner.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => loadDesigner(item)}>{item.name}<small>{designerCatalog.find((dataset) => dataset.key === item.definition.dataset)?.title ?? item.definition.dataset}</small></button><button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void removeDesigner(item)}><Trash2 size={15} /></button></li>)}</ul> : <p className="reports-description">Saved designs are private to your account.</p>}</aside>
+        <aside className="reports-panel reports-saved"><h2>Saved designs</h2>{savedDesigner.length ? <ul>{savedDesigner.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => loadDesigner(item)}>{item.name}<small>{designerCatalog.find((dataset) => dataset.key === item.definition.dataset)?.title ?? item.definition.dataset} · {item.shareScope === "department" ? "Shared with dataset-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDesignerSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void removeDesigner(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved designs are private to your account unless you choose to share them.</p>}</aside>
       </div>}
       {designerResult && <section className="reports-results"><div className="reports-results-heading"><div><h2>{designerResult.title}</h2><p>{designerResult.totalRows} rows · previewing {designerResult.rows.length} · generated {new Date(designerResult.generatedAt).toLocaleString()}{designerResult.capped ? " · dataset capped at 5,000 source rows" : ""}</p></div><button className="button button-secondary" type="button" onClick={downloadDesignerCsv}><Download size={16} />Export preview CSV</button></div>{designerResult.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{designerResult.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{designerResult.rows.map((row, index) => <tr key={index}>{designerResult.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match this report.</p>}</section>}
     </> : definitions.length === 0 ? <p className="reports-empty">No reports are available for your permissions. Ask an administrator for Reports access and the relevant People, Groups, Events or Finance permissions.</p> : <div className="reports-layout">
@@ -223,9 +242,9 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
         {reportKey === "visitor-follow-up" && <label>Follow-up state<select value={filters.followUpStatus ?? ""} onChange={(event) => setFilter("followUpStatus", event.target.value)}><option value="">All states</option><option value="needed">Needed</option><option value="done">Done</option><option value="not_needed">Not needed</option></select></label>}
         {reportKey === "finance-budget-vs-actual" && <label>Accounting year (optional)<input type="number" min={1900} max={2200} value={filters.accountingYear ?? ""} onChange={(event) => setFilter("accountingYear", event.target.value)} placeholder="All years" /></label>}
         <button className="button button-primary" type="button" onClick={() => void runReport()} disabled={running || !reportKey || (reportKey === "event-absence-conflicts" && (!filters.from || !filters.to || filters.to < filters.from || Date.parse(`${filters.to}T00:00:00Z`) - Date.parse(`${filters.from}T00:00:00Z`) > 366 * 86_400_000))}><Play size={16} />{running ? "Running…" : "Run report"}</button>
-        {canManageReports && reportKey && <form className="reports-save-form" onSubmit={(event) => void saveDefinition(event)}><label>Save this definition<input maxLength={120} value={savedName} onChange={(event) => setSavedName(event.target.value)} placeholder="e.g. Monthly visitor follow-up" /></label><button className="button button-secondary" type="submit" disabled={!savedName.trim()}><Save size={15} />Save</button></form>}
+        {canManageReports && reportKey && <form className="reports-save-form" onSubmit={(event) => void saveDefinition(event)}><label>Save this definition<input maxLength={120} value={savedName} onChange={(event) => setSavedName(event.target.value)} placeholder="e.g. Monthly visitor follow-up" /></label><label className="reports-share-option"><input type="checkbox" checked={shareSavedReport} onChange={(event) => setShareSavedReport(event.target.checked)} />Share with users authorized for this report</label><button className="button button-secondary" type="submit" disabled={!savedName.trim()}><Save size={15} />Save</button></form>}
       </section>
-      <aside className="reports-panel reports-saved"><h2>Saved reports</h2>{saved.length ? <ul>{saved.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => { setReportKey(item.reportKey); setFilters(item.filters ?? {}); setResult(null); }}>{item.name}<small>{definitions.find((definition) => definition.key === item.reportKey)?.title}</small></button>{canManageReports && <button className="reports-delete" type="button" aria-label={"Delete " + item.name} onClick={() => void deleteDefinition(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved report definitions will appear here.</p>}</aside>
+      <aside className="reports-panel reports-saved"><h2>Saved reports</h2>{saved.length ? <ul>{saved.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => { setReportKey(item.reportKey); setFilters(item.filters ?? {}); setResult(null); }}>{item.name}<small>{definitions.find((definition) => definition.key === item.reportKey)?.title} · {item.shareScope === "department" ? "Shared with report-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDefinitionSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void deleteDefinition(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved report definitions will appear here.</p>}</aside>
     </div>}
     {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
   </main>;

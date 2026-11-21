@@ -14,38 +14,41 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
   let scheduledMentionTimer: ReturnType<typeof setInterval> | undefined;
   let scheduledMentionJobRunning = false;
+  let scheduledExpiryJobRunning = false;
   context.replication.register({
-    schemaVersion: "10",
+    schemaVersion: "11",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The Community Feed database is unavailable."], recordCount: 0 };
-      const result = await pool.query<{ posts: string; likes: string; comments: string; commentMentions: string; attachments: string; links: string; notifications: string; reports: string; preferences: string }>(
+      const result = await pool.query<{ posts: string; likes: string; comments: string; commentMentions: string; lifecycleAudit: string; attachments: string; links: string; notifications: string; reports: string; preferences: string }>(
         `SELECT (SELECT count(*) FROM community_posts WHERE department_id=$1)::text AS posts,
                 (SELECT count(*) FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1))::text AS likes,
                 (SELECT count(*) FROM community_post_comments WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1))::text AS comments,
                 (SELECT count(*) FROM community_comment_mentions WHERE department_id=$1)::text AS "commentMentions",
+                (SELECT count(*) FROM community_post_lifecycle_audit WHERE department_id=$1)::text AS "lifecycleAudit",
                 (SELECT count(*) FROM community_post_attachments WHERE department_id=$1)::text AS attachments,
                 (SELECT count(*) FROM community_post_links WHERE department_id=$1)::text AS links,
                 (SELECT count(*) FROM community_post_notifications WHERE department_id=$1)::text AS notifications,
                 (SELECT count(*) FROM community_post_reports WHERE department_id=$1)::text AS reports,
                 (SELECT count(*) FROM community_post_notification_preferences WHERE department_id=$1)::text AS preferences`, [departmentId],
       );
-      return { ready: true, blockers: [], recordCount: Number(result.rows[0].posts) + Number(result.rows[0].likes) + Number(result.rows[0].comments) + Number(result.rows[0].commentMentions) + Number(result.rows[0].attachments) + Number(result.rows[0].links) + Number(result.rows[0].notifications) + Number(result.rows[0].reports) + Number(result.rows[0].preferences) };
+      return { ready: true, blockers: [], recordCount: Number(result.rows[0].posts) + Number(result.rows[0].likes) + Number(result.rows[0].comments) + Number(result.rows[0].commentMentions) + Number(result.rows[0].lifecycleAudit) + Number(result.rows[0].attachments) + Number(result.rows[0].links) + Number(result.rows[0].notifications) + Number(result.rows[0].reports) + Number(result.rows[0].preferences) };
     },
     exportSnapshot: async (client: PoolClient, departmentId) => {
       const posts = await client.query("SELECT * FROM community_posts WHERE department_id=$1 ORDER BY id", [departmentId]);
       const likes = await client.query("SELECT * FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY post_id,user_id", [departmentId]);
       const comments = await client.query("SELECT * FROM community_post_comments WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY id", [departmentId]);
       const commentMentions = await client.query("SELECT * FROM community_comment_mentions WHERE department_id=$1 ORDER BY comment_id,contact_id", [departmentId]);
+      const lifecycleAudit = await client.query("SELECT * FROM community_post_lifecycle_audit WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
       const attachments = await client.query("SELECT id,post_id,department_id,uploaded_by,filename,content_type,encode(content,'base64') AS data,created_at FROM community_post_attachments WHERE department_id=$1 ORDER BY id", [departmentId]);
       const links = await client.query("SELECT * FROM community_post_links WHERE department_id=$1 ORDER BY post_id,link_type,entity_id", [departmentId]);
       const notifications = await client.query("SELECT * FROM community_post_notifications WHERE department_id=$1 ORDER BY id", [departmentId]);
       const reports = await client.query("SELECT * FROM community_post_reports WHERE department_id=$1 ORDER BY id", [departmentId]);
       const preferences = await client.query("SELECT * FROM community_post_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId]);
-      return { version: 10, posts: posts.rows, likes: likes.rows, comments: comments.rows, commentMentions: commentMentions.rows, attachments: attachments.rows, links: links.rows, notifications: notifications.rows, reports: reports.rows, preferences: preferences.rows };
+      return { version: 11, posts: posts.rows, likes: likes.rows, comments: comments.rows, commentMentions: commentMentions.rows, lifecycleAudit: lifecycleAudit.rows, attachments: attachments.rows, links: links.rows, notifications: notifications.rows, reports: reports.rows, preferences: preferences.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number((input as { version?: unknown }).version)) || !Array.isArray((input as { posts?: unknown }).posts) || !Array.isArray((input as { likes?: unknown }).likes) || !Array.isArray((input as { comments?: unknown }).comments)) throw new Error("The Community Feed snapshot is invalid.");
-      const snapshot = input as { posts: Array<Record<string, unknown>>; likes: Array<Record<string, unknown>>; comments: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
+      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(Number((input as { version?: unknown }).version)) || !Array.isArray((input as { posts?: unknown }).posts) || !Array.isArray((input as { likes?: unknown }).likes) || !Array.isArray((input as { comments?: unknown }).comments)) throw new Error("The Community Feed snapshot is invalid.");
+      const snapshot = input as { posts: Array<Record<string, unknown>>; likes: Array<Record<string, unknown>>; comments: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; lifecycleAudit?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
       await client.query("DELETE FROM community_post_reports WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_post_notification_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_post_notifications WHERE department_id=$1", [departmentId]);
@@ -54,11 +57,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("DELETE FROM community_post_attachments WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_post_links WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM community_posts WHERE department_id=$1", [departmentId]);
-      for (const post of snapshot.posts) await client.query("INSERT INTO community_posts(id,department_id,author_user_id,title,body,created_at,updated_at,publish_at,comments_enabled,group_id,visibility,mentions_notified_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [post.id, departmentId, restoreContext.userIdMap.get(String(post.author_user_id)) ?? post.author_user_id, post.title, post.body, post.created_at, post.updated_at, post.publish_at ?? null, post.comments_enabled ?? true, post.group_id ?? null, post.visibility ?? "location", post.mentions_notified_at ?? null]);
+      for (const post of snapshot.posts) await client.query("INSERT INTO community_posts(id,department_id,author_user_id,title,body,created_at,updated_at,publish_at,comments_enabled,group_id,visibility,mentions_notified_at,expires_at,expired_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)", [post.id, departmentId, restoreContext.userIdMap.get(String(post.author_user_id)) ?? post.author_user_id, post.title, post.body, post.created_at, post.updated_at, post.publish_at ?? null, post.comments_enabled ?? true, post.group_id ?? null, post.visibility ?? "location", post.mentions_notified_at ?? null, post.expires_at ?? null, post.expired_at ?? null]);
       for (const like of snapshot.likes) await client.query("INSERT INTO community_post_likes(post_id,user_id,created_at,reaction_type) VALUES($1,$2,$3,$4)", [like.post_id, restoreContext.userIdMap.get(String(like.user_id)) ?? like.user_id, like.created_at, like.reaction_type ?? "like"]);
       for (const comment of snapshot.comments) await client.query("INSERT INTO community_post_comments(id,post_id,author_user_id,body,created_at) VALUES($1,$2,$3,$4,$5)", [comment.id, comment.post_id, restoreContext.userIdMap.get(String(comment.author_user_id)) ?? comment.author_user_id, comment.body, comment.created_at]);
       const commentMentions = snapshot.commentMentions ?? [];
       for (const mention of commentMentions) await client.query("INSERT INTO community_comment_mentions(department_id,post_id,comment_id,contact_id,created_at) VALUES($1,$2,$3,$4,$5)", [departmentId, mention.post_id, mention.comment_id, mention.contact_id, mention.created_at]);
+      for (const audit of snapshot.lifecycleAudit ?? []) await client.query("INSERT INTO community_post_lifecycle_audit(id,department_id,post_id,actor_user_id,action,details,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)", [audit.id, departmentId, audit.post_id, audit.actor_user_id == null ? null : restoreContext.userIdMap.get(String(audit.actor_user_id)) ?? audit.actor_user_id, audit.action, JSON.stringify(audit.details ?? {}), audit.created_at]);
       const attachments = snapshot.attachments ?? [];
       const links = snapshot.links ?? [];
       for (const file of attachments) await client.query("INSERT INTO community_post_attachments(id,post_id,department_id,uploaded_by,filename,content_type,content,created_at) VALUES($1,$2,$3,$4,$5,$6,decode($7,'base64'),$8)", [file.id, file.post_id, departmentId, restoreContext.userIdMap.get(String(file.uploaded_by)) ?? file.uploaded_by, file.filename, file.content_type, file.data, file.created_at]);
@@ -69,15 +73,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       for (const report of reports) await client.query("INSERT INTO community_post_reports(id,department_id,post_id,reporter_user_id,reason,details,status,reviewed_by,reviewed_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [report.id, departmentId, report.post_id, restoreContext.userIdMap.get(String(report.reporter_user_id)) ?? report.reporter_user_id, report.reason, report.details ?? "", report.status ?? "open", report.reviewed_by == null ? null : restoreContext.userIdMap.get(String(report.reviewed_by)) ?? report.reviewed_by, report.reviewed_at ?? null, report.created_at]);
       const preferences = snapshot.preferences ?? [];
       for (const preference of preferences) await client.query("INSERT INTO community_post_notification_preferences(department_id,user_id,notify_posts,notify_reactions,notify_comments,notify_email_posts,notify_email_reactions,notify_email_comments,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [departmentId, restoreContext.userIdMap.get(String(preference.user_id)) ?? preference.user_id, preference.notify_posts ?? true, preference.notify_reactions ?? true, preference.notify_comments ?? true, preference.notify_email_posts ?? true, preference.notify_email_reactions ?? true, preference.notify_email_comments ?? true, preference.updated_at ?? new Date()]);
-      return { recordCount: snapshot.posts.length + snapshot.likes.length + snapshot.comments.length + commentMentions.length + attachments.length + links.length + notifications.length + reports.length + preferences.length };
+      const lifecycleAudit = snapshot.lifecycleAudit ?? [];
+      return { recordCount: snapshot.posts.length + snapshot.likes.length + snapshot.comments.length + commentMentions.length + lifecycleAudit.length + attachments.length + links.length + notifications.length + reports.length + preferences.length };
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
-      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number((input as { version?: unknown }).version))) return { ready: false, blockers: ["No verified Community Feed snapshot is available."] };
-      const snapshot = input as { posts?: Array<Record<string, unknown>>; likes?: Array<Record<string, unknown>>; comments?: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
+      if (!input || typeof input !== "object" || ![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(Number((input as { version?: unknown }).version))) return { ready: false, blockers: ["No verified Community Feed snapshot is available."] };
+      const snapshot = input as { posts?: Array<Record<string, unknown>>; likes?: Array<Record<string, unknown>>; comments?: Array<Record<string, unknown>>; commentMentions?: Array<Record<string, unknown>>; lifecycleAudit?: Array<Record<string, unknown>>; attachments?: Array<Record<string, unknown>>; links?: Array<Record<string, unknown>>; notifications?: Array<Record<string, unknown>>; reports?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>> };
       const actualPosts = (await client.query("SELECT * FROM community_posts WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualLikes = (await client.query("SELECT * FROM community_post_likes WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY post_id,user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualComments = (await client.query("SELECT * FROM community_post_comments WHERE post_id IN (SELECT id FROM community_posts WHERE department_id=$1) ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualCommentMentions = (await client.query("SELECT * FROM community_comment_mentions WHERE department_id=$1 ORDER BY comment_id,contact_id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualLifecycleAudit = (await client.query("SELECT * FROM community_post_lifecycle_audit WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualAttachments = (await client.query("SELECT id,post_id,department_id,uploaded_by,filename,content_type,encode(content,'base64') AS data,created_at FROM community_post_attachments WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualLinks = (await client.query("SELECT * FROM community_post_links WHERE department_id=$1 ORDER BY post_id,link_type,entity_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualNotifications = (await client.query("SELECT * FROM community_post_notifications WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
@@ -97,6 +103,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (Number((input as { version?: unknown }).version) < 9) {
         for (const post of snapshot.posts ?? []) post.mentions_notified_at ??= null;
       }
+      const snapshotVersion = Number((input as { version?: unknown }).version);
+      if (snapshotVersion < 11) {
+        for (const post of snapshot.posts ?? []) { post.expires_at ??= null; post.expired_at ??= null; }
+      }
       const compare = (name: string, source: Array<Record<string, unknown>>, actual: Array<Record<string, unknown>>, userColumns: string[]) => {
         if (source.length !== actual.length) return `${name} row count differs.`;
         const expectedRows = source.map((row) => {
@@ -108,12 +118,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const actualRows = actual.map(canonical).sort();
         return expectedRows.some((row, index) => row !== actualRows[index]) ? `${name} content differs.` : null;
       };
-      const snapshotVersion = Number((input as { version?: unknown }).version);
       const blockers = [
         compare("Posts", snapshot.posts ?? [], actualPosts, ["author_user_id"]),
         compare("Likes", snapshot.likes ?? [], actualLikes, ["user_id"]),
         compare("Comments", snapshot.comments ?? [], actualComments, ["author_user_id"]),
         ...(snapshotVersion >= 10 ? [compare("Comment mentions", snapshot.commentMentions ?? [], actualCommentMentions, [])] : []),
+        ...(snapshotVersion >= 11 ? [compare("Post lifecycle audit", snapshot.lifecycleAudit ?? [], actualLifecycleAudit, ["actor_user_id"])] : []),
         ...(snapshotVersion >= 4 ? [compare("Attachments", snapshot.attachments ?? [], actualAttachments, ["uploaded_by"]), compare("Links", snapshot.links ?? [], actualLinks, [])] : []),
         ...(snapshotVersion >= 5 ? [compare("Notifications", snapshot.notifications ?? [], actualNotifications, ["recipient_user_id", "actor_user_id"])] : []),
         ...(snapshotVersion >= 6 ? [compare("Reports", snapshot.reports ?? [], actualReports, ["reporter_user_id", "reviewed_by"])] : []),
@@ -135,7 +145,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const created = await pool.query<{ id: string }>(
       `WITH post AS (
          SELECT id,department_id,author_user_id,group_id,visibility FROM community_posts
-          WHERE id=$1 AND department_id=$2 AND (publish_at IS NULL OR publish_at<=now())
+         WHERE id=$1 AND department_id=$2 AND expired_at IS NULL AND (expires_at IS NULL OR expires_at>now()) AND (publish_at IS NULL OR publish_at<=now())
        ), recipients AS (
          SELECT post.author_user_id AS user_id FROM post
          UNION
@@ -198,7 +208,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     await queryable.query(
       `WITH post AS (
          SELECT id,department_id,group_id,visibility FROM community_posts
-          WHERE id=$1 AND department_id=$2
+          WHERE id=$1 AND department_id=$2 AND expired_at IS NULL AND (expires_at IS NULL OR expires_at>now())
        ), recipients AS (
          SELECT DISTINCT membership.user_id
            FROM unnest($3::uuid[]) mentioned(contact_id)
@@ -223,7 +233,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     await pool.query(
       `WITH post AS (
          SELECT id,department_id,group_id,visibility FROM community_posts
-          WHERE id=$1 AND department_id=$2 AND comments_enabled=TRUE AND (publish_at IS NULL OR publish_at<=now())
+          WHERE id=$1 AND department_id=$2 AND expired_at IS NULL AND (expires_at IS NULL OR expires_at>now()) AND comments_enabled=TRUE AND (publish_at IS NULL OR publish_at<=now())
        ), mentioned AS (
          SELECT DISTINCT contact.id AS contact_id
            FROM unnest($3::uuid[]) requested(contact_id)
@@ -263,7 +273,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const due: { rows: Array<{ id: string; department_id: string; author_user_id: string; publishAt: string }> } = await pool.query<{ id: string; department_id: string; author_user_id: string; publishAt: string }>(
           `SELECT post.id,post.department_id,post.author_user_id,post.publish_at::text AS "publishAt"
              FROM community_posts post
-            WHERE post.publish_at IS NOT NULL AND post.publish_at<=now() AND post.mentions_notified_at IS NULL
+            WHERE post.publish_at IS NOT NULL AND post.publish_at<=now() AND post.mentions_notified_at IS NULL AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now())
               AND EXISTS (SELECT 1 FROM community_post_mentions mention WHERE mention.department_id=post.department_id AND mention.post_id=post.id)
               AND ($1::timestamptz IS NULL OR (post.publish_at,post.id)>($1::timestamptz,$2::uuid))
             ORDER BY post.publish_at,post.id LIMIT 100`,
@@ -278,7 +288,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             if (!await context.lockDepartmentForWrite(client, candidate.department_id)) { await client.query("ROLLBACK"); continue; }
             const locked = await client.query<{ id: string; department_id: string; author_user_id: string }>(
               `SELECT id,department_id,author_user_id FROM community_posts
-                WHERE id=$1 AND publish_at IS NOT NULL AND publish_at<=now() AND mentions_notified_at IS NULL
+                WHERE id=$1 AND publish_at IS NOT NULL AND publish_at<=now() AND mentions_notified_at IS NULL AND expired_at IS NULL AND (expires_at IS NULL OR expires_at>now())
                 FOR UPDATE SKIP LOCKED`, [candidate.id],
             );
             if (!locked.rowCount) { await client.query("ROLLBACK"); continue; }
@@ -307,11 +317,59 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   }
 
+  async function runScheduledPostExpirations() {
+    if (!pool || !isDatabaseReady() || !context.activation.isEnabled() || scheduledExpiryJobRunning) return;
+    scheduledExpiryJobRunning = true;
+    try {
+      while (true) {
+        const due = await pool.query<{ id: string; department_id: string; expires_at: Date | string }>(
+          `SELECT id,department_id,expires_at FROM community_posts
+            WHERE expires_at IS NOT NULL AND expires_at<=now() AND expired_at IS NULL
+            ORDER BY expires_at,id LIMIT 100`,
+        );
+        if (!due.rowCount) break;
+        let expiredCount = 0;
+        for (const candidate of due.rows) {
+          const client = await pool.connect();
+          try {
+            await client.query("BEGIN");
+            if (!await context.lockDepartmentForWrite(client, candidate.department_id)) { await client.query("ROLLBACK"); continue; }
+            const locked = await client.query<{ id: string; expires_at: Date | string }>(
+              `SELECT id,expires_at FROM community_posts
+                WHERE id=$1 AND department_id=$2 AND expires_at<=now() AND expired_at IS NULL
+                FOR UPDATE SKIP LOCKED`, [candidate.id, candidate.department_id],
+            );
+            if (!locked.rowCount) { await client.query("ROLLBACK"); continue; }
+            const expired = await client.query<{ expired_at: Date | string }>(
+              "UPDATE community_posts SET expired_at=now(),updated_at=now() WHERE id=$1 AND department_id=$2 AND expired_at IS NULL RETURNING expired_at",
+              [candidate.id, candidate.department_id],
+            );
+            if (!expired.rowCount) { await client.query("ROLLBACK"); continue; }
+            await client.query(
+              `INSERT INTO community_post_lifecycle_audit(id,department_id,post_id,action,details)
+               VALUES($1,$2,$3,'expired',$4::jsonb)`,
+              [randomUUID(), candidate.department_id, candidate.id, JSON.stringify({ expiresAt: new Date(locked.rows[0]!.expires_at).toISOString() })],
+            );
+            await client.query("COMMIT");
+            expiredCount += 1;
+            realtime.publish("module:community-feed:changed", candidate.department_id, { postId: candidate.id, action: "expired" });
+          } catch (error) {
+            await client.query("ROLLBACK").catch(() => undefined);
+            app.log.error({ err: error, postId: candidate.id }, "Could not expire a Community Feed post.");
+          } finally { client.release(); }
+        }
+        if (due.rows.length < 100 || expiredCount === 0) break;
+      }
+    } catch (error) {
+      app.log.error({ err: error }, "Could not process Community Feed post expirations.");
+    } finally { scheduledExpiryJobRunning = false; }
+  }
+
   app.addHook("onReady", async () => {
     if (!pool || !isDatabaseReady()) return;
-    await runScheduledMentionNotifications();
+    await Promise.all([runScheduledMentionNotifications(), runScheduledPostExpirations()]);
     scheduledMentionTimer = setInterval(() => {
-      void runScheduledMentionNotifications();
+      void Promise.all([runScheduledMentionNotifications(), runScheduledPostExpirations()]);
     }, 60_000);
     scheduledMentionTimer.unref?.();
   });
@@ -366,7 +424,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM community_post_notifications notification
          JOIN community_posts post ON post.id=notification.post_id AND post.department_id=notification.department_id
          LEFT JOIN app_users actor ON actor.id=notification.actor_user_id
-        WHERE notification.department_id=$1 AND notification.recipient_user_id=$2 AND notification.in_app_enabled=true
+        WHERE notification.department_id=$1 AND notification.recipient_user_id=$2 AND notification.in_app_enabled=true AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now())
           AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 2, 3)}
         ORDER BY notification.created_at DESC LIMIT 50`,
       [departmentId, userId, request.activeDepartmentRole === "site_admin"],
@@ -441,13 +499,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { subscribed: false };
   });
 
-  app.get<{ Querystring: { scope?: "all" | "mine" | "groups" | "following" | "hidden"; groupId?: string } }>("/api/modules/community-feed/posts", {
-    schema: { querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["all", "mine", "groups", "following", "hidden"] }, groupId: { type: "string", format: "uuid" } } } },
+  app.get<{ Querystring: { scope?: "all" | "mine" | "groups" | "following" | "hidden" | "expired"; groupId?: string } }>("/api/modules/community-feed/posts", {
+    schema: { querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["all", "mine", "groups", "following", "hidden", "expired"] }, groupId: { type: "string", format: "uuid" } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
     const currentUserId = request.authenticatedUser!.id;
+    const canReviewReports = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.["community-feed"] ?? []).includes("moderate");
+    if (request.query.scope === "expired" && !canReviewReports) return reply.code(403).send({ error: "Community Feed moderator access is required to review expired posts." });
     const wikiSchema = await pool.query<{ present: boolean }>("SELECT to_regclass('public.wiki_pages') IS NOT NULL AS present");
     const canReadRestrictedWiki = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentModulePermissions?.wiki ?? []).includes("manage");
     const visibleLinks = wikiSchema.rows[0]?.present
@@ -468,7 +528,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               EXISTS (SELECT 1 FROM community_post_likes like_row WHERE like_row.post_id=post.id AND like_row.user_id=$2 AND like_row.reaction_type='like') AS "likedByMe",
               (SELECT reaction_type FROM community_post_likes like_row WHERE like_row.post_id=post.id AND like_row.user_id=$2) AS "myReaction",
               COALESCE((SELECT json_object_agg(reaction_type,reaction_count) FROM (SELECT reaction_type,count(*)::int AS reaction_count FROM community_post_likes WHERE post_id=post.id GROUP BY reaction_type) reaction_rows), '{}'::json) AS reactions,
-              post.publish_at AS "publishAt",post.comments_enabled AS "commentsEnabled",post.group_id AS "groupId",post.visibility,
+              post.publish_at AS "publishAt",post.expires_at AS "expiresAt",post.expired_at AS "expiredAt",post.comments_enabled AS "commentsEnabled",post.group_id AS "groupId",post.visibility,
               linked_group.name AS "groupName",
               COALESCE((SELECT json_agg(json_build_object('id',attachment.id,'filename',attachment.filename,'contentType',attachment.content_type,'url','/api/modules/community-feed/attachments/'||attachment.id) ORDER BY attachment.created_at,attachment.id) FROM community_post_attachments attachment WHERE attachment.post_id=post.id AND attachment.department_id=post.department_id), '[]'::json) AS attachments,
               ${visibleLinks} AS links,
@@ -481,13 +541,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                WHERE comment.post_id=post.id), '[]'::json) AS comments
          FROM community_posts post JOIN app_users author ON author.id=post.author_user_id
          LEFT JOIN church_groups linked_group ON linked_group.id=post.group_id AND linked_group.department_id=post.department_id
-        WHERE post.department_id=$1 AND (post.publish_at IS NULL OR post.publish_at<=now() OR post.author_user_id=$2 OR $3)
+        WHERE post.department_id=$1 AND (COALESCE($4,'all')='expired' AND post.expired_at IS NOT NULL OR COALESCE($4,'all')<>'expired' AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now()))
+          AND (post.publish_at IS NULL OR post.publish_at<=now() OR post.author_user_id=$2 OR $3)
           AND ${groupAccess("post", 2, 3)}
           AND (COALESCE($4,'all')<>'mine' OR post.author_user_id=$2)
           AND (COALESCE($4,'all')<>'groups' OR post.group_id IS NOT NULL)
           AND (COALESCE($4,'all')<>'following' OR EXISTS (SELECT 1 FROM community_post_subscriptions subscription WHERE subscription.user_id=$2 AND subscription.department_id=$1 AND subscription.group_id=post.group_id))
           AND ($5::uuid IS NULL OR post.group_id=$5)
-          AND (CASE WHEN $4='hidden' THEN EXISTS (SELECT 1 FROM community_post_hidden hidden_row WHERE hidden_row.post_id=post.id AND hidden_row.user_id=$2) ELSE NOT EXISTS (SELECT 1 FROM community_post_hidden hidden_row WHERE hidden_row.post_id=post.id AND hidden_row.user_id=$2) END)
+          AND (CASE WHEN $4='hidden' THEN EXISTS (SELECT 1 FROM community_post_hidden hidden_row WHERE hidden_row.post_id=post.id AND hidden_row.user_id=$2) WHEN $4='expired' THEN TRUE ELSE NOT EXISTS (SELECT 1 FROM community_post_hidden hidden_row WHERE hidden_row.post_id=post.id AND hidden_row.user_id=$2) END)
         ORDER BY COALESCE(post.publish_at,post.created_at) DESC,post.id DESC LIMIT 100`,
       [departmentId, currentUserId, request.activeDepartmentRole === "site_admin", request.query.scope ?? "all", request.query.groupId ?? null, canReadRestrictedWiki],
     );
@@ -586,7 +647,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     };
     if (!signatures[type]) return reply.code(400).send({ error: "The file contents do not match an allowed file type." });
     const canAttach = await pool.query(
-      `SELECT 1 FROM community_posts post WHERE post.id=$1 AND post.department_id=$2 AND (post.author_user_id=$3 OR $4)`,
+      `SELECT 1 FROM community_posts post WHERE post.id=$1 AND post.department_id=$2 AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now()) AND (post.author_user_id=$3 OR $4)`,
       [request.params.postId, departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"],
     );
     if (!canAttach.rowCount) return reply.code(404).send({ error: "This post could not be found or you cannot edit it." });
@@ -605,7 +666,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const result = await pool.query<{ content: Buffer; content_type: string; filename: string }>(
       `SELECT attachment.content,attachment.content_type,attachment.filename FROM community_post_attachments attachment JOIN community_posts post ON post.id=attachment.post_id
-       WHERE attachment.id=$1 AND attachment.department_id=$2 AND (post.publish_at IS NULL OR post.publish_at<=now() OR post.author_user_id=$3 OR $4) AND ${groupAccess("post", 3, 4)}`,
+       WHERE attachment.id=$1 AND attachment.department_id=$2 AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now()) AND (post.publish_at IS NULL OR post.publish_at<=now() OR post.author_user_id=$3 OR $4) AND ${groupAccess("post", 3, 4)}`,
       [request.params.attachmentId, departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"],
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Attachment not found." });
@@ -713,8 +774,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { reviewed: true, status: request.body.status };
   });
 
-  app.post<{ Body: { title?: string; body: string; mentions?: string[]; publishAt?: string | null; commentsEnabled?: boolean; groupId?: string | null; visibility?: "location" | "members" } }>("/api/modules/community-feed/posts", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["body"], properties: { title: { type: "string", maxLength: 120 }, body: { type: "string", minLength: 1, maxLength: 4000 }, mentions: { type: "array", uniqueItems: true, maxItems: 20, items: { type: "string", format: "uuid" } }, publishAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] }, commentsEnabled: { type: "boolean" }, groupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, visibility: { type: "string", enum: ["location", "members"] } } } },
+  app.post<{ Body: { title?: string; body: string; mentions?: string[]; publishAt?: string | null; expiresAt?: string | null; commentsEnabled?: boolean; groupId?: string | null; visibility?: "location" | "members" } }>("/api/modules/community-feed/posts", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["body"], properties: { title: { type: "string", maxLength: 120 }, body: { type: "string", minLength: 1, maxLength: 4000 }, mentions: { type: "array", uniqueItems: true, maxItems: 20, items: { type: "string", format: "uuid" } }, publishAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] }, expiresAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] }, commentsEnabled: { type: "boolean" }, groupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, visibility: { type: "string", enum: ["location", "members"] } } } },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;
@@ -724,6 +785,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!body) return reply.code(400).send({ error: "Write something before publishing." });
     const publishAt = request.body.publishAt ? new Date(request.body.publishAt) : null;
     if (publishAt && !Number.isFinite(publishAt.getTime())) return reply.code(400).send({ error: "Choose a valid publication date and time." });
+    const expiresAt = request.body.expiresAt ? new Date(request.body.expiresAt) : null;
+    if (expiresAt && (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Math.max(Date.now(), publishAt?.getTime() ?? 0))) return reply.code(400).send({ error: "Choose an expiry time after publication." });
     const groupId = request.body.groupId ?? null;
     const visibility = request.body.visibility ?? "location";
     const mentionIds = request.body.mentions ?? [];
@@ -746,11 +809,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!access.rowCount) return reply.code(403).send({ error: "Choose a group you belong to." });
     }
     const result = await pool.query(
-      `INSERT INTO community_posts (id,department_id,author_user_id,title,body,publish_at,comments_enabled,group_id,visibility)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       RETURNING id,title,body,created_at AS "createdAt",author_user_id AS "authorId",publish_at AS "publishAt",comments_enabled AS "commentsEnabled",group_id AS "groupId",visibility`,
-      [randomUUID(), departmentId, request.authenticatedUser!.id, request.body.title?.trim() ?? "", body, publishAt, request.body.commentsEnabled ?? true, groupId, visibility],
+      `INSERT INTO community_posts (id,department_id,author_user_id,title,body,publish_at,expires_at,comments_enabled,group_id,visibility)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       RETURNING id,title,body,created_at AS "createdAt",author_user_id AS "authorId",publish_at AS "publishAt",expires_at AS "expiresAt",comments_enabled AS "commentsEnabled",group_id AS "groupId",visibility`,
+      [randomUUID(), departmentId, request.authenticatedUser!.id, request.body.title?.trim() ?? "", body, publishAt, expiresAt, request.body.commentsEnabled ?? true, groupId, visibility],
     );
+    if (expiresAt) await pool.query("INSERT INTO community_post_lifecycle_audit(id,department_id,post_id,actor_user_id,action,details) VALUES($1,$2,$3,$4,'expiry_scheduled',$5::jsonb)", [randomUUID(), departmentId, result.rows[0].id, request.authenticatedUser!.id, JSON.stringify({ expiresAt: expiresAt.toISOString() })]);
     const author = await pool.query("SELECT display_name FROM app_users WHERE id=$1", [request.authenticatedUser!.id]);
     const post = { ...result.rows[0], authorName: author.rows[0].display_name, likeCount: 0, likedByMe: false, myReaction: null, reactions: {}, canDelete: true, comments: [] };
     if (mentionIds.length) {
@@ -763,6 +827,42 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     realtime.publish("module:community-feed:changed", departmentId, { postId: post.id, action: "created" });
     return reply.code(201).send(post);
+  });
+
+  app.patch<{ Params: { postId: string }; Body: { expiresAt: string | null } }>("/api/modules/community-feed/posts/:postId/expiration", {
+    schema: { params: { type: "object", required: ["postId"], properties: { postId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["expiresAt"], properties: { expiresAt: { anyOf: [{ type: "string", format: "date-time" }, { type: "null" }] } } } },
+  }, async (request, reply) => {
+    if (!pool || !isDatabaseReady()) return unavailable(reply);
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const expiresAt = request.body.expiresAt ? new Date(request.body.expiresAt) : null;
+    if (expiresAt && (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now())) return reply.code(400).send({ error: "Choose a future expiry time." });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This location is currently read-only." }); }
+      const current = await client.query<{ expires_at: Date | string | null }>(
+        `SELECT expires_at FROM community_posts WHERE id=$1 AND department_id=$2
+          AND expired_at IS NULL AND (author_user_id=$3 OR $4) FOR UPDATE`,
+        [request.params.postId, departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"],
+      );
+      if (!current.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This post could not be found or cannot be edited." }); }
+      if (expiresAt) {
+        const updated = await client.query<{ publish_at: Date | string | null }>("UPDATE community_posts SET expires_at=$3,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING publish_at", [request.params.postId, departmentId, expiresAt]);
+        const publishAt = updated.rows[0]!.publish_at;
+        if (publishAt && expiresAt.getTime() <= new Date(publishAt).getTime()) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Expiry must be after the scheduled publication time." }); }
+      } else await client.query("UPDATE community_posts SET expires_at=NULL,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.postId, departmentId]);
+      const previous = current.rows[0]!.expires_at ? new Date(current.rows[0]!.expires_at).toISOString() : null;
+      const next = expiresAt?.toISOString() ?? null;
+      if (previous !== next) await client.query(
+        "INSERT INTO community_post_lifecycle_audit(id,department_id,post_id,actor_user_id,action,details) VALUES($1,$2,$3,$4,$5,$6::jsonb)",
+        [randomUUID(), departmentId, request.params.postId, request.authenticatedUser!.id, !next ? "expiry_cancelled" : !previous ? "expiry_scheduled" : "expiry_changed", JSON.stringify({ previousExpiresAt: previous, expiresAt: next })],
+      );
+      await client.query("COMMIT");
+      realtime.publish("module:community-feed:changed", departmentId, { postId: request.params.postId, action: "expiry-updated" });
+      return { expiresAt: next };
+    } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   });
 
   app.post<{ Params: { postId: string } }>("/api/modules/community-feed/posts/:postId/publish", {
@@ -832,7 +932,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const result = await pool.query(
       `INSERT INTO community_post_likes (post_id,user_id,reaction_type)
-       SELECT post.id,$3,'like' FROM community_posts post WHERE post.id=$1 AND post.department_id=$2 AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 3, 4)}
+       SELECT post.id,$3,'like' FROM community_posts post WHERE post.id=$1 AND post.department_id=$2 AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now()) AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 3, 4)}
        ON CONFLICT (post_id,user_id) DO UPDATE SET reaction_type='like',created_at=now() RETURNING post_id`,
       [request.params.postId, departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"],
     );
@@ -869,7 +969,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool.query(
       `INSERT INTO community_post_likes(post_id,user_id,reaction_type)
        SELECT post.id,$3,$4 FROM community_posts post
-        WHERE post.id=$1 AND post.department_id=$2 AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 3, 5)}
+        WHERE post.id=$1 AND post.department_id=$2 AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now()) AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 3, 5)}
        ON CONFLICT(post_id,user_id) DO UPDATE SET reaction_type=EXCLUDED.reaction_type,created_at=now()
        RETURNING post_id`,
       [request.params.postId, departmentId, request.authenticatedUser!.id, request.body.reaction, request.activeDepartmentRole === "site_admin"],
@@ -911,7 +1011,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (mentionIds.length && request.activeDepartmentRole !== "site_admin" && !peoplePermissions.includes("people_view_private") && !peoplePermissions.includes("people_manage")) return reply.code(403).send({ error: "Private People access is required to mention people in Community Feed comments." });
     const result = await pool.query(
       `INSERT INTO community_post_comments (id,post_id,author_user_id,body)
-       SELECT $1,post.id,$4,$5 FROM community_posts post WHERE post.id=$2 AND post.department_id=$3 AND post.comments_enabled=TRUE AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 4, 6)}
+       SELECT $1,post.id,$4,$5 FROM community_posts post WHERE post.id=$2 AND post.department_id=$3 AND post.expired_at IS NULL AND (post.expires_at IS NULL OR post.expires_at>now()) AND post.comments_enabled=TRUE AND (post.publish_at IS NULL OR post.publish_at<=now()) AND ${groupAccess("post", 4, 6)}
        RETURNING id,post_id AS "postId",body,author_user_id AS "authorId",created_at AS "createdAt"`,
       [randomUUID(), request.params.postId, departmentId, request.authenticatedUser!.id, body, request.activeDepartmentRole === "site_admin"],
     );

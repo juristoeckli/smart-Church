@@ -194,10 +194,10 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   app.get("/api/modules/reports/designer/saved", async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     const keys = (await datasets(request, departmentId)).map((item) => item.key);
-    const result = await pool!.query("SELECT id,name,definition,created_at AS \"createdAt\",updated_at AS \"updatedAt\" FROM saved_designer_reports WHERE department_id=$1 AND owner_user_id=$2 AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
+    const result = await pool!.query("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
     return result.rows;
   });
-  app.post<{ Body: { name: string; definition: unknown } }>("/api/modules/reports/designer/saved", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true } } } } }, async (request, reply) => {
+  app.post<{ Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     const available = await datasets(request, departmentId);
@@ -209,11 +209,11 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     const name = typeof request.body.name === "string" ? request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120) : "";
     if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
     try {
-      const result = await pool!.query("INSERT INTO saved_designer_reports(id,department_id,owner_user_id,name,definition) VALUES($1,$2,$3,$4,$5::jsonb) RETURNING id,name,definition,created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition)]);
+      const result = await pool!.query("INSERT INTO saved_designer_reports(id,department_id,owner_user_id,name,definition,share_scope) VALUES($1,$2,$3,$4,$5::jsonb,$6) RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [randomUUID(), departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? "private"]);
       return reply.code(201).send(result.rows[0]);
     } catch { return reply.code(409).send({ error: "A personal report with that name already exists." }); }
   });
-  app.put<{ Params: { id: string }; Body: { name: string; definition: unknown } }>("/api/modules/reports/designer/saved/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true } } } } }, async (request, reply) => {
+  app.put<{ Params: { id: string }; Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     const available = await datasets(request, departmentId);
@@ -225,10 +225,17 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     const name = request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
     if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
     try {
-      const result = await pool!.query("UPDATE saved_designer_reports SET name=$4,definition=$5::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,name,definition,created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [request.params.id, departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition)]);
+      const result = await pool!.query("UPDATE saved_designer_reports SET name=$4,definition=$5::jsonb,share_scope=COALESCE($6,share_scope),updated_at=now() WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [request.params.id, departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? null]);
       if (!result.rowCount) return reply.code(404).send({ error: "Personal report not found." });
       return result.rows[0];
     } catch { return reply.code(409).send({ error: "A personal report with that name already exists." }); }
+  });
+  app.put<{ Params: { id: string }; Body: { shareScope: "private" | "department" } }>("/api/modules/reports/designer/saved/:id/sharing", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["shareScope"], properties: { shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
+    const departmentId = await scope(request, reply); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const result = await pool!.query("UPDATE saved_designer_reports SET share_scope=$4,updated_at=now() WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,share_scope AS \"shareScope\"", [request.params.id, departmentId, request.authenticatedUser!.id, request.body.shareScope]);
+    if (!result.rowCount) return reply.code(404).send({ error: "Personal report not found." });
+    return result.rows[0];
   });
   app.delete<{ Params: { id: string } }>("/api/modules/reports/designer/saved/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
