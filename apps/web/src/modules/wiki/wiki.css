@@ -12,3 +12,12 @@
 .wiki-bulk-audience label { display: grid; gap: .25rem; }
 .wiki-bulk-page-row { display: flex; align-items: center; gap: .35rem; min-width: 0; }
 .wiki-bulk-page-row > button { flex: 1; min-width: 0; }
+
+.wiki-page-layout{display:flex;gap:.35rem;margin:.55rem 0}
+.wiki-page-layout button[aria-pressed=true]{background:var(--accent-soft,#e8f1ff);color:var(--accent,#1459bd)}
+.wiki-page-gallery{grid-template-columns:repeat(auto-fit,minmax(min(100%,155px),1fr));gap:.6rem}
+.wiki-page-gallery .wiki-bulk-page-row{position:relative;min-width:0}
+.wiki-page-gallery .wiki-bulk-page-row>input{position:absolute;top:.65rem;right:.65rem}
+.wiki-page-gallery .wiki-page-item{height:100%;min-height:120px;padding:.7rem 2rem .7rem .7rem;border:1px solid var(--border,#d9e1ea);overflow-wrap:anywhere}
+.wiki-page-gallery-icon{color:var(--accent,#1459bd);margin-bottom:.3rem}
+@media(min-width:1200px){.wiki-page-gallery-layout{grid-template-columns:minmax(175px,210px) minmax(330px,400px) minmax(0,1fr)}}

@@ -118,16 +118,19 @@ function VolunteerWorkload({ events, contacts, matchesCategory, onOpenEvent }: {
   matchesCategory: (position: ServicePosition) => boolean;
   onOpenEvent: (event: ServiceEvent) => void;
 }) {
-  type Assignment = { event: ServiceEvent; role: string; status: "Confirmed" | "Requested" | "Declined"; index: number };
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const invalidRange = Boolean(fromDate && toDate && fromDate > toDate);
+  type Assignment = { event: ServiceEvent; role: string; category: string; status: "Confirmed" | "Requested" | "Declined"; index: number };
   const names = new Map(contacts.map((contact) => [contact.id, `${contact.firstName} ${contact.lastName}`]));
   const assignments = new Map<string, Assignment[]>();
   for (const event of events) {
-    if (event.cancelledAt) continue;
+    if (event.cancelledAt || invalidRange || (fromDate && event.eventDate < fromDate) || (toDate && event.eventDate > toDate)) continue;
     for (const [index, position] of (event.positions ?? []).entries()) {
       if (!position.contactId || !matchesCategory(position)) continue;
       const status = position.responseStatus === "accepted" ? "Confirmed" : position.responseStatus === "declined" ? "Declined" : "Requested";
       const rows = assignments.get(position.contactId) ?? [];
-      rows.push({ event, role: position.name, status, index });
+      rows.push({ event, role: position.name, category: position.category?.trim() ?? "", status, index });
       assignments.set(position.contactId, rows);
     }
   }
@@ -138,7 +141,30 @@ function VolunteerWorkload({ events, contacts, matchesCategory, onOpenEvent }: {
     declined: rows.filter((row) => row.status === "Declined").length,
   })).sort((a, b) => (b.confirmed + b.requested) - (a.confirmed + a.requested) || a.name.localeCompare(b.name));
 
+  function exportWorkload() {
+    const rows = [
+      ["Volunteer", "Date", "Event", "Role category", "Role", "Response"],
+      ...people.flatMap((person) => person.rows.map(({ event, role, category, status }) =>
+        [person.name, event.eventDate, event.title, category, role, status])),
+    ];
+    const csv = "\uFEFF" + rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "volunteer-workload.csv";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
   return <section className="event-workload" aria-label="Volunteer workload">
+    <div className="form-row">
+      <label>From date<input type="date" value={fromDate} max={toDate || undefined} onChange={(event) => setFromDate(event.target.value)} /></label>
+      <label>Through date<input type="date" value={toDate} min={fromDate || undefined} onChange={(event) => setToDate(event.target.value)} /></label>
+      <button className="button button-secondary" type="button" onClick={exportWorkload} disabled={!people.length}><Download size={15} />Export workload</button>
+    </div>
+    {invalidRange && <p role="alert">Choose an end date on or after the start date.</p>}
     <p>Assignments for the current event filters. Cancelled events are excluded. Expand a volunteer to open an event.</p>
     {!people.length ? <p className="empty-state">No volunteer assignments match these filters.</p> : people.map((person) => <details key={person.id}>
       <summary><strong>{person.name}</strong><span>{person.confirmed} confirmed · {person.requested} requested · {person.declined} declined</span></summary>
@@ -151,7 +177,9 @@ function VolunteerWorkload({ events, contacts, matchesCategory, onOpenEvent }: {
 }
 
 function csvCell(value: string | number) {
-  return `"${String(value).replace(/"/g, '""')}"`;
+  const cell = String(value);
+  const safeCell = typeof value === "string" && /^[\s\u0000-\u001f]*[=+\-@\uFF1D\uFF0B\uFF0D\uFF20]|^[\t\r\n]/u.test(cell) ? "'" + cell : cell;
+  return `"${safeCell.replace(/"/g, '""')}"`;
 }
 
 function printHtml(value: string | number) {
