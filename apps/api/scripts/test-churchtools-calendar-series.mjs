@@ -15,9 +15,9 @@ const occurrence = (day, hour, event) => ({ startDate: `${day}T0${hour}:15:00Z`,
 const appointment = { id: 7, calendar: { id: 2 }, repeatId: 7, allDay: false, title: "Sunday service",
   exceptions: [{ date: "2026-04-05" }], additionals: [{ date: "2026-04-06", isRepeated: false }] };
 const dates = {
-  "2026-03-22": occurrence("2026-03-22", 8, { id: 20 }),
+  "2026-03-22": occurrence("2026-03-22", 8, { domainType: "event", domainIdentifier: "20" }),
   "2026-03-29": occurrence("2026-03-29", 7),
-  "2026-04-06": occurrence("2026-04-06", 7, { id: 30 }),
+  "2026-04-06": occurrence("2026-04-06", 7, { domainType: "event", domainIdentifier: "30" }),
 };
 const fixture = (overrides = {}) => ({ data: { appointment, calculatedDates: dates, ...overrides } });
 const review = (overrides) => reviewChurchToolsCalendarSeries(fixture(overrides), "2", "7", "Europe/Zurich");
@@ -25,6 +25,10 @@ const result = review();
 assert.deepEqual(result.recurrence, { frequency: "manual", interval: 1, endsOn: "2026-04-06", dates: Object.keys(dates) });
 assert.deepEqual(result.dates.map(({ startsAt }) => startsAt.slice(11)), ["09:15:00", "09:15:00", "09:15:00"]);
 assert.deepEqual(result.dates.map(({ eventId }) => eventId), ["20", null, "30"]);
+const noEvents = Object.fromEntries(Object.entries(dates).map(([day, occurrence]) => [day, { ...occurrence, event: null }]));
+assert.equal(review({ calculatedDates: noEvents }).sourceHash, result.sourceHash);
+const wrongDomain = { ...dates, "2026-03-22": { ...dates["2026-03-22"], event: { domainType: "group", domainIdentifier: "20", id: 20 } } };
+assert.equal(review({ calculatedDates: wrongDomain }).dates[0].eventId, null);
 assert.equal(review({ calculatedDates: Object.fromEntries(Object.entries(dates).reverse()) }).sourceHash, result.sourceHash);
 assert.notEqual(review({ appointment: { ...appointment, title: "New title" } }).sourceHash, result.sourceHash);
 assert.throws(() => review({ appointment: { ...appointment, id: 8 } }), /different appointment/);

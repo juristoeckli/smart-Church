@@ -17,6 +17,7 @@ import { planReviewedSplitDrafts, readChurchToolsSplitGroup, reconcileChurchTool
 import { reconcileChurchToolsSpecialJournal } from "./finance-special-review.js";
 import { readChurchToolsCancellationReadiness } from "./finance-cancellation-readiness.js";
 import { readChurchToolsAllDaySeriesDates, reviewChurchToolsCalendarSeries } from "./calendar-series.js";
+import { applyCalendarServiceEventLinks, calendarServiceEventLinkFingerprint, reviewCalendarServiceEventLinks } from "./calendar-series-event-links.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -1466,13 +1467,22 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             throw error;
           }
         }) : null;
+        const sourceAppointments = new Map<string, string | null>();
+        for (const event of eventsResult.items) {
+          const sourceId = typeof event.id === "number" && Number.isSafeInteger(event.id) && event.id > 0 ? String(event.id) : null;
+          if (!sourceId) continue;
+          const appointmentId = typeof event.appointmentId === "number" && Number.isSafeInteger(event.appointmentId)
+            && event.appointmentId > 0 ? String(event.appointmentId) : null;
+          sourceAppointments.set(sourceId, !sourceAppointments.has(sourceId) && event.isCanceled === false ? appointmentId : null);
+        }
         const eventRecords = mappedEvents.map((event, index) => {
           const detail = detailedAgendas?.[index];
+          const provenance = { eventInstanceUrl: config.instance_url, sourceAppointmentId: sourceAppointments.get(event.sourceId) ?? null };
           return detail ? {
-            area: "event", ...event, agendaState: detail.state, agendaItems: detail.agenda?.items,
+            area: "event", ...event, ...provenance, agendaState: detail.state, agendaItems: detail.agenda?.items,
             agendaInstanceUrl: config.instance_url,
             unmappedFields: detail.agenda ? [...detail.agenda.unmappedFields, ...(detail.agenda.unsupported ? ["agenda.unsupportedItems"] : [])] : event.unmappedFields,
-          } : { area: "event", ...event };
+          } : { area: "event", ...event, ...provenance };
         });
         const resourceRows = resourcesResult.items.map((resource) => {
           const capacityValue = Number(resource.capacity ?? resource.maxPersons ?? resource.max_persons);
@@ -1667,8 +1677,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                   ON CONFLICT (group_id,contact_id) DO NOTHING`, [linked.rows[0].id, dept, memberSourceIds]);
               }
             } else if (record.area === "event") {
-              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN service_events local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='event' AND link.source_id=$2", [dept, sourceId]);
-              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              const instanceUrl = typeof record.eventInstanceUrl === "string" ? record.eventInstanceUrl : null;
+              if (instanceUrl) {
+                const configured = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, instanceUrl]);
+                if (!configured.rowCount) throw new Error("ChurchTools connection changed after preview.");
+              }
+              let linked = await db.query<{ id: string; source_system: string | null }>("SELECT link.local_record_id::text AS id, local.source_system FROM churchtools_migration_links link JOIN service_events local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='event' AND link.source_id=$2 FOR UPDATE OF local", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string; source_system: string | null }>("SELECT id,source_system FROM service_events WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              if (linked.rowCount) {
+                const prior = await db.query<{ instance_url: string }>("SELECT instance_url FROM churchtools_service_event_provenance WHERE event_id=$1", [linked.rows[0].id]);
+                if (prior.rows[0] && prior.rows[0].instance_url !== instanceUrl) throw new Error("This event already belongs to another verified ChurchTools connection.");
+              }
               if (!linked.rowCount) {
                 const collision = await db.query("SELECT 1 FROM service_events WHERE department_id=$1 AND lower(title)=lower($2) AND event_date=$3 AND start_time=$4 LIMIT 1", [dept, record.title, record.date, record.start]);
                 if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
@@ -1687,13 +1706,31 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 ? JSON.stringify(await resolveChurchToolsAgendaSongs(db, dept, record.agendaInstanceUrl, record.agendaItems))
                 : record.agendaState && linked.rowCount ? null : JSON.stringify(record.timePlan ?? []);
               const values = [dept, record.title, record.date, record.isAllDay === true, record.start, record.end, record.location || "ChurchTools", record.description ?? null, record.room ?? "", timePlan === null ? null : JSON.stringify(positions), timePlan, sourceId];
+              async function recordProvenance(eventId: string) {
+                if (!instanceUrl || !/^[1-9][0-9]*$/.test(sourceId)) return;
+                if (typeof record.sourceAppointmentId !== "string" || !/^[1-9][0-9]*$/.test(record.sourceAppointmentId)) {
+                  await db.query(`DELETE FROM churchtools_service_event_provenance
+                    WHERE department_id=$1 AND instance_url=$2 AND source_event_id=$3 AND event_id=$4`, [dept, instanceUrl, sourceId, eventId]);
+                  return;
+                }
+                const verified = await db.query(`INSERT INTO churchtools_service_event_provenance(department_id,instance_url,source_event_id,event_id,source_appointment_id)
+                  VALUES ($1,$2,$3,$4,$5) ON CONFLICT (department_id,instance_url,source_event_id)
+                  DO UPDATE SET source_appointment_id=EXCLUDED.source_appointment_id
+                  WHERE churchtools_service_event_provenance.event_id=EXCLUDED.event_id`, [dept, instanceUrl, sourceId, eventId, record.sourceAppointmentId]);
+                if (!verified.rowCount) throw new Error("This ChurchTools event already has another verified local record.");
+              }
               if (linked.rowCount) {
                 await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=COALESCE($11::jsonb,positions),time_plan=COALESCE($12::jsonb,time_plan),updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(0, 11)]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+                if (linked.rows[0].source_system === null) await recordProvenance(linked.rows[0].id);
                 batchUpdated += 1;
               } else {
                 const inserted = await db.query<{ id: string }>("INSERT INTO service_events (id,department_id,title,kind,event_date,is_all_day,start_time,end_time,location,description,room,positions,time_plan) VALUES (gen_random_uuid(),$1,$2,'service',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb) ON CONFLICT DO NOTHING RETURNING id", values.slice(0, 11));
-                if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
+                if (inserted.rowCount) {
+                  await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]);
+                  await recordProvenance(inserted.rows[0].id);
+                  batchCreated += 1;
+                } else batchSkipped += 1;
               }
             } else if (record.area === "resource") {
               let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN bookable_resources local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='resource' AND link.source_id=$2", [dept, sourceId]);
@@ -1896,13 +1933,13 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not preview ChurchTools finance data." });
       }
     });
-    type CalendarSeriesScope = { calendarId: string; seriesId: string; timeZone: string; targetCalendarId: string; reviewHash?: string };
+    type CalendarSeriesScope = { calendarId: string; seriesId: string; timeZone: string; targetCalendarId: string; reviewHash?: string; linkServiceEvents?: boolean };
     const calendarSeriesSchema = { type: "object", additionalProperties: false,
       required: ["calendarId", "seriesId", "timeZone", "targetCalendarId"], properties: {
         calendarId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
         seriesId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
         timeZone: { type: "string", minLength: 1, maxLength: 80 }, targetCalendarId: { type: "string", format: "uuid" },
-        reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" }, linkServiceEvents: { type: "boolean" },
       } } as const;
     async function calendarSeriesAvailable(dept: string) {
       const { rows } = await pool!.query<{ available: boolean }>(`SELECT to_regclass('public.church_calendar_calendars') IS NOT NULL
@@ -1942,7 +1979,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const config = await settings(dept);
       if (!config) return reply.code(404).send({ error: "Configure ChurchTools before importing appointments." });
       if (!await calendarSeriesAvailable(dept)) return reply.code(409).send({ error: "Enable Calendar before importing a series." });
-      const { calendarId, seriesId, timeZone, targetCalendarId, reviewHash } = request.body;
+      const { calendarId, seriesId, timeZone, targetCalendarId, reviewHash, linkServiceEvents = false } = request.body;
       const target = await pool!.query(selectPersonalCalendars + " AND id=$3", [dept, actor, targetCalendarId]);
       if (!target.rowCount) return reply.code(404).send({ error: "Choose an available personal calendar." });
       let review: ReturnType<typeof reviewChurchToolsCalendarSeries>;
@@ -1962,14 +1999,20 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read the ChurchTools appointment series." });
       }
       const args = [dept, config.instance_url, calendarId, seriesId];
-      const expectedReviewHash = createHash("sha256").update(JSON.stringify([...args, actor, targetCalendarId, review.sourceHash])).digest("hex");
+      const reviewFingerprint = (links: Awaited<ReturnType<typeof reviewCalendarServiceEventLinks>>) => createHash("sha256")
+        .update(JSON.stringify([...args, actor, targetCalendarId, review.sourceHash,
+          ...(linkServiceEvents ? [calendarServiceEventLinkFingerprint(links)] : [])])).digest("hex");
       if (!reviewHash) {
         const { rows } = await pool!.query<CalendarSeriesLink>(selectCalendarSeriesLink, args);
+        const current = calendarSeriesAction(rows[0], review.sourceHash, targetCalendarId);
+        const links = linkServiceEvents && (current === "create" || current === "already_imported")
+          ? await reviewCalendarServiceEventLinks(pool!, dept, config.instance_url, review, rows[0]?.appointment_id ?? null, targetCalendarId) : [];
+        const action = current === "already_imported" && links.some(({ status }) => status === "ready") ? "link_existing" : current;
         return reply.header("Cache-Control", "private, no-store").send({
-          review, reviewHash: expectedReviewHash, action: calendarSeriesAction(rows[0], review.sourceHash, targetCalendarId),
+          review, reviewHash: reviewFingerprint(links), action,
+          eventLinks: links.map(({ originalStart, status }) => ({ originalStart, status })),
         });
       }
-      if (reviewHash !== expectedReviewHash) return reply.code(409).send({ error: "The source series or destination changed. Review it again before importing." });
       const db = await pool!.connect();
       try {
         await db.query("BEGIN");
@@ -1985,18 +2028,33 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           await db.query("ROLLBACK");
           return reply.code(409).send({ error: "The connection or personal calendar changed. Review it again." });
         }
+        const { rows: [existing] } = await db.query<CalendarSeriesLink>(selectCalendarSeriesLink + " FOR UPDATE OF link", args);
+        const current = calendarSeriesAction(existing, review.sourceHash, targetCalendarId);
+        if (current !== "create" && current !== "already_imported") {
+          await db.query("ROLLBACK");
+          return reply.code(409).send({ error: "This source series already has a local copy. Review changes in Calendar." });
+        }
+        const links = linkServiceEvents
+          ? await reviewCalendarServiceEventLinks(db, dept, config.instance_url, review, existing?.appointment_id ?? null, targetCalendarId, true) : [];
+        if (reviewHash !== reviewFingerprint(links)) {
+          await db.query("ROLLBACK");
+          return reply.code(409).send({ error: "The source series, service events, or destination changed. Review it again before applying." });
+        }
+        if (existing?.appointment_id) {
+          const linkedEvents = await applyCalendarServiceEventLinks(db, existing.appointment_id, actor, links);
+          await db.query("COMMIT");
+          return reply.header("Cache-Control", "private, no-store").send({
+            action: linkedEvents ? "linked_existing" : "already_imported", appointmentId: existing.appointment_id, linkedEvents,
+          });
+        }
         const appointmentId = randomUUID();
         // Claim the source key before inserting so concurrent retries converge on one local series.
         const claimed = await db.query(`INSERT INTO churchtools_migration_calendar_series
           (department_id,instance_url,source_calendar_id,source_series_id,appointment_id,source_hash)
           VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, [...args, appointmentId, review.sourceHash]);
         if (!claimed.rowCount) {
-          const { rows } = await db.query<CalendarSeriesLink>(selectCalendarSeriesLink, args);
           await db.query("ROLLBACK");
-          if (calendarSeriesAction(rows[0], review.sourceHash, targetCalendarId) === "already_imported") {
-            return reply.header("Cache-Control", "private, no-store").send({ action: "already_imported", appointmentId: rows[0].appointment_id });
-          }
-          return reply.code(409).send({ error: "This source series already has a local copy. Review changes in Calendar." });
+          return reply.code(409).send({ error: "Another import just linked this series. Open a fresh review." });
         }
         await db.query(`INSERT INTO church_calendar_appointments
           (id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,recurrence,internal_only,time_zone,created_by,all_day)
@@ -2007,8 +2065,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (review.extraDates.length) await db.query(`INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by)
           SELECT $1,dates."startsAt",dates."endsAt",$2 FROM jsonb_to_recordset($3::jsonb) AS dates("startsAt" timestamp,"endsAt" timestamp)`,
         [appointmentId, actor, JSON.stringify(review.extraDates)]);
+        const linkedEvents = await applyCalendarServiceEventLinks(db, appointmentId, actor, links);
         await db.query("COMMIT");
-        return reply.code(201).header("Cache-Control", "private, no-store").send({ action: "created", appointmentId });
+        return reply.code(201).header("Cache-Control", "private, no-store").send({ action: "created", appointmentId, linkedEvents });
       } catch (error) {
         await db.query("ROLLBACK");
         if (error && typeof error === "object" && "code" in error && error.code === "55P03") return reply.code(409).send({ error: "The calendar is busy. Retry the reviewed import." });

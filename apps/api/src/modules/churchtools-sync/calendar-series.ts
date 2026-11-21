@@ -64,11 +64,14 @@ export function reviewChurchToolsCalendarSeries(payload: unknown, calendarId: st
   const allDay = base.allDay === true;
   const dates = entries.map(([date, value]) => {
     const occurrence = object(value);
-    const eventId = id(object(occurrence?.event)?.id);
+    const event = object(occurrence?.event);
+    const legacyEventId = id(event?.id);
+    const eventId = event?.domainType === "event" && typeof event.domainIdentifier === "string"
+      && /^[1-9][0-9]{0,15}$/.test(event.domainIdentifier) ? event.domainIdentifier : null;
     if (allDay) {
       const end = allDayEnds.get(date);
       if (!validDay(end) || end < date) throw new Error("ChurchTools did not return the verified inclusive end of an all-day occurrence.");
-      return { date, startsAt: `${date}T00:00:00`, endsAt: `${end}T23:59:59`, startsAtUtc: null, endsAtUtc: null, eventId };
+      return { date, startsAt: `${date}T00:00:00`, endsAt: `${end}T23:59:59`, startsAtUtc: null, endsAtUtc: null, eventId, legacyEventId };
     }
     const start = instant(occurrence?.startDate);
     const end = instant(occurrence?.endDate);
@@ -80,7 +83,7 @@ export function reviewChurchToolsCalendarSeries(payload: unknown, calendarId: st
       || roundTrip.endsAtUtc !== new Date(end).toISOString()) {
       throw new Error("An occurrence cannot be represented exactly in the confirmed local time zone.");
     }
-    return { date, startsAt, endsAt, startsAtUtc: roundTrip.startsAtUtc, endsAtUtc: roundTrip.endsAtUtc, eventId };
+    return { date, startsAt, endsAt, startsAtUtc: roundTrip.startsAtUtc, endsAtUtc: roundTrip.endsAtUtc, eventId, legacyEventId };
   });
   const { startsAt, endsAt } = dates[0];
   const localDuration = (start: string, end: string) => Date.parse(`${end}Z`) - Date.parse(`${start}Z`);
@@ -104,9 +107,12 @@ export function reviewChurchToolsCalendarSeries(payload: unknown, calendarId: st
     if (lastDay > endsOn) endsOn = lastDay;
   }
   const recurrence = { frequency: "manual", interval: 1, endsOn, dates: manualDates };
-  const review = { calendarId, seriesId, zone, title, subtitle, description, pattern, startsAt, endsAt, recurrence, dates };
+  const review = { calendarId, seriesId, zone, title, subtitle, description, pattern, startsAt, endsAt, recurrence, dates: dates.map(({ legacyEventId: _legacy, ...occurrence }) => occurrence) };
   // Keep the source identity used by timed imports that predate native extra dates.
   const originalRecurrence = { frequency: "manual", interval: 1, endsOn: dates.at(-1)!.date, dates: dates.map(({ date }) => date) };
-  const hashed = allDay || hasVaryingTimes ? { ...review, allDay, extraDates } : { ...review, recurrence: originalRecurrence };
+  // Older snapshots hashed the legacy id field. Keep those date hashes stable while
+  // independently binding exact domain identifiers into the reviewed link plan.
+  const originalReview = { ...review, dates: dates.map(({ legacyEventId, ...occurrence }) => ({ ...occurrence, eventId: legacyEventId })) };
+  const hashed = allDay || hasVaryingTimes ? { ...originalReview, allDay, extraDates } : { ...originalReview, recurrence: originalRecurrence };
   return { ...review, allDay, extraDates, sourceHash: createHash("sha256").update(JSON.stringify(hashed)).digest("hex") };
 }
