@@ -5,6 +5,14 @@
 @media(max-width:950px){.wiki-page{grid-template-columns:minmax(160px,220px) minmax(200px,1fr)}.wiki-editor{grid-column:1/-1;min-height:480px}}
 @media(max-width:640px){.wiki-page{grid-template-columns:1fr}.wiki-panel{max-height:230px}.wiki-editor-header{display:grid}.wiki-detail-sections{grid-template-columns:1fr}}
 .wiki-print-document{display:none}
+.wiki-file-drop-zone {
+  border: 1px dashed var(--border, #cbd5e1);
+  border-radius: 8px;
+  color: var(--text-muted, #64748b);
+  font-size: .85rem;
+  padding: .75rem;
+  text-align: center;
+}
 @media print {
   body:has(> .wiki-print-document){height:auto;min-height:0;margin:0;overflow:visible;background:#fff}
   body:has(> .wiki-print-document) > :not(.wiki-print-document){display:none!important}
