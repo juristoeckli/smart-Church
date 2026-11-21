@@ -11,6 +11,7 @@ const COMMAND_CHANNEL_RELEASE = 0x0085;
 const COMMAND_DEVICE_STATUS = 0x0104;
 const COMMAND_DEVICE_STATUS_END = 0x010a;
 const COMMAND_LEVEL_VALUE = 0x000a;
+const CHANNEL_ON_STATUS_COMMANDS = new Set([0x0018, 0x0084, 0x0086, 0x0088]);
 
 type Address = { device: number; port: number; system: number };
 type Frame = { flags: number; destination: Buffer; source: Buffer; messageId: number; command: number; data: Buffer };
@@ -221,3 +222,33 @@ export async function readIcspDeviceLevels(host: string, target: Address, reques
     session.socket.destroy();
   }
 }
+
+/** Read channels currently on for an existing device, without changing device state. */
+export async function readIcspDeviceChannels(host: string, target: Address) {
+  const session = await openIcspSession(host);
+  try {
+    const targetData = Buffer.alloc(6);
+    targetData.writeUInt16BE(target.device, 0);
+    targetData.writeUInt16BE(target.port, 2);
+    targetData.writeUInt16BE(target.system, 4);
+    await session.sendCommand(COMMAND_DEVICE_STATUS, targetData);
+
+    const channels = new Set<number>();
+    const deadline = Date.now() + 11000;
+    while (Date.now() < deadline) {
+      const frame = await session.nextFrame(Math.min(3000, Math.max(1, deadline - Date.now())));
+      if (CHANNEL_ON_STATUS_COMMANDS.has(frame.command) && frame.data.length >= 8) {
+        const device = frame.data.readUInt16BE(0);
+        const port = frame.data.readUInt16BE(2);
+        const system = frame.data.readUInt16BE(4);
+        const channel = frame.data.readUInt16BE(6);
+        if (device === target.device && port === target.port && system === target.system && channel > 0) channels.add(channel);
+      }
+      if (frame.command === COMMAND_DEVICE_STATUS_END || frame.command === COMMAND_NAK) break;
+    }
+    return [...channels].sort((left, right) => left - right);
+  } finally {
+    session.socket.destroy();
+  }
+}
+
