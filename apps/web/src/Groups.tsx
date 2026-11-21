@@ -3,6 +3,7 @@ import { Check, ContactRound, Download, Link2, Pencil, Plus, Search, Trash2 } fr
 import type { ChurchGroup, Contact, GroupLifecycleStatus } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
 import { getGroupAttendance, groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type GroupAttendanceEntry as AttendanceEntry, type GroupAttendanceSnapshot, type CompletionFeedbackDraft } from "./group-attendance";
+import { GroupDuplicateForm } from "./GroupDuplicateForm";
 import { GroupMeetingCompletion } from "./GroupMeetingCompletion";
 import { GroupSignupFormEditor } from "./GroupSignupFormEditor";
 import { GroupWaitlist } from "./GroupWaitlist";
@@ -713,6 +714,21 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       <section className="directory-card community-group-detail">
         {selected ? <>
           <div className="directory-heading"><div><h2>{selected.name}</h2><p>{selected.importedFrom ? translate("groups.importedReadOnly") : selected.description || translate("groups.descriptionFallback")}</p><small className="community-group-lifecycle">{selected.groupType ? `${selected.groupType} · ` : ""}{selected.status}{selected.startsOn ? ` · starts ${formatUserDate(selected.startsOn)}` : ""}{selected.endsOn ? ` · ends ${formatUserDate(selected.endsOn)}` : ""}</small></div>{canManage && !selected.importedFrom && <div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => setEditing((current) => !current)}><Pencil size={14} />{editing ? translate("groups.cancelEdit") : translate("groups.edit")}</button><button className="button button-danger" type="button" onClick={() => void deleteGroup(selected)}><Trash2 size={14} />{translate("groups.delete")}</button></div>}</div>
+          {canManage && !selected.importedFrom && loadedDepartmentId === departmentId && <GroupDuplicateForm
+            key={departmentId + ":" + selected.id} groupId={selected.id} groupName={selected.name} departmentId={departmentId} csrfToken={csrfToken}
+            onCreated={async id => {
+              if (currentGroupDepartment.current !== departmentId) return;
+              setDirectorySearch("");
+              setStatusFilter("all");
+              setSourceFilter("all");
+              setGroupTypeFilter("");
+              setMyGroupsOnly(false);
+              setSelectedSavedViewId("");
+              setDetailsGroup(null);
+              setEditing(false);
+              await loadGroups();
+              if (currentGroupDepartment.current === departmentId) setSelectedId(id);
+            }}/>}
           {onOpenGroupPeople && loadedDepartmentId === departmentId && selected.status === "active" && <button className="button button-secondary"
             type="button" onClick={() => onOpenGroupPeople(selected.id)}>Open active members in People</button>}
           {canManage && editing && <form className="community-group-form" onSubmit={saveGroup}><label>{translate("groups.name")}<input required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} /></label><label>{translate("groups.description")}<textarea rows={2} maxLength={1000} value={description} onChange={(event) => setDescription(event.target.value)} /></label><label>Group type <span className="optional-label">optional</span><input maxLength={80} value={groupType} onChange={(event) => setGroupType(event.target.value)} placeholder="Youth, small group, ministry" /></label><label>Lifecycle status<select value={groupStatus} onChange={(event) => setGroupStatus(event.target.value as GroupLifecycleStatus)}><option value="active">Active</option><option value="draft">Draft</option><option value="ended">Ended</option><option value="archived">Archived</option></select></label><label>Start date <span className="optional-label">optional</span><input type="date" value={startsOn} onChange={(event) => setStartsOn(event.target.value)} /></label><label>End date <span className="optional-label">optional</span><input type="date" value={endsOn} onChange={(event) => setEndsOn(event.target.value)} min={startsOn || undefined} /></label><button className="button button-primary" type="submit" disabled={saving}><Check size={15} />{translate("groups.save")}</button></form>}

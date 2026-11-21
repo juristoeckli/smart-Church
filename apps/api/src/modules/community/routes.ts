@@ -13,6 +13,7 @@ import { captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAns
 import { previewGroupWaitlistPromotion, promotionBatchSize } from "./group-waitlist-promotion.js";
 import { checkGroupAdmissionCapacity } from "./signup-capacity.js";
 import { defaultSignupPolicy, editableSignupPolicy, normalizeSignupPolicy, signupState } from "./signup-policy.js";
+import { registerGroupDuplication } from "./group-duplication.js";
 import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -145,6 +146,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!deleted.rowCount) return reply.code(404).send({ error: "Saved group view not found." });
       return { deleted: true };
     });
+
+    registerGroupDuplication(routes, dependencies, (request, reply) => department(request, reply, "groups_manage"));
 
     routes.post<{ Body: { name: string; description?: string; groupType?: string; status?: GroupLifecycleStatus; startsOn?: string | null; endsOn?: string | null } }>("/api/groups", { schema: {
       body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 }, groupType: { type: "string", maxLength: 80 }, status: { type: "string", enum: ["active", "draft", "ended", "archived"] }, startsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] }, endsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] } } },
