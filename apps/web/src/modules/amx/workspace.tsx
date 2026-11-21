@@ -100,6 +100,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [busy, setBusy] = useState("");
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
+  const [controllerStatusError, setControllerStatusError] = useState("");
   const [time, setTime] = useState(() => new Intl.DateTimeFormat("de-CH", { hour: "2-digit", minute: "2-digit" }).format(new Date()));
   const currentPage = findPage(overlayPages.at(-1) ?? basePageName) ?? findPage("Home")!;
   const visibleModePage = [...overlayPages].reverse().find((name) => name === "Regie" || /_(Volume|Mik|Lautsprecher)$/.test(name));
@@ -137,13 +138,11 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
         const state = await readResponse<ControllerState>(response);
         if (active) {
           setSelectedRoom(state.currentRoom ?? "");
-          setFeedback("");
-          setFailed(false);
+          setControllerStatusError("");
         }
       } catch (error) {
         if (active && !controller.signal.aborted) {
-          setFeedback(error instanceof Error ? `Controller status unavailable: ${error.message}` : "Controller status unavailable.");
-          setFailed(true);
+          setControllerStatusError(error instanceof Error ? `Controller status unavailable: ${error.message}` : "Controller status unavailable.");
         }
       } finally {
         if (active) timer = window.setTimeout(() => void pollControllerState(), 15_000);
@@ -440,7 +439,10 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     <div className="amx-panel-frame">
       <div className="amx-panel-screen" style={screenStyle}>
         {visiblePages.flatMap((page, layer) => [renderPageBackdrop(page, layer), ...page.objects.map((object) => renderObject(page, object, layer))])}
-        {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
+        {(controllerStatusError || feedback) && <div className="amx-toast-stack" role="status" aria-live="polite">
+          {controllerStatusError && <p className="amx-toast amx-toast-error">{controllerStatusError}</p>}
+          {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`}>{feedback}</p>}
+        </div>}
         {currentPage.name === "PWR_COUNT" && failed && <button type="button" className="amx-progress-continue" onClick={() => { setBasePageName("Modus"); setOverlayPages([]); setFeedback(""); setFailed(false); }}>Weiter</button>}
       </div>
     </div>
