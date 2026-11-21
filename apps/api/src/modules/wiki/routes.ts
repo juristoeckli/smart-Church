@@ -476,7 +476,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
     if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
     const content = await hideUnreadableWikiEntityLinks(safeHtml(result.rows[0].content_html), request, departmentId);
+    const attachedImages = await pool!.query<{ title: string; fileName: string; fileData: Buffer }>(
+      `SELECT stored.title,stored.file_name AS "fileName",stored.file_data AS "fileData"
+         FROM wiki_page_files attachment
+         JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
+        WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.deleted_at IS NULL
+          AND stored.content_type='image/jpeg' AND stored.file_size BETWEEN 1 AND 2000000
+        ORDER BY attachment.created_at,attachment.file_id LIMIT 5`,
+      [departmentId, request.params.id],
+    );
     const filename = result.rows[0].title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "wiki-page";
-    return reply.type("application/pdf").header("Content-Disposition", `attachment; filename="${filename}.pdf"`).header("X-Content-Type-Options", "nosniff").send(createWikiPdf(result.rows[0].title, content));
+    const images = attachedImages.rows.map((image) => ({ title: image.title, fileName: image.fileName, data: image.fileData }));
+    return reply.type("application/pdf").header("Content-Disposition", `attachment; filename="${filename}.pdf"`).header("X-Content-Type-Options", "nosniff").send(createWikiPdf(result.rows[0].title, content, images));
   });
 }

@@ -295,7 +295,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("INSERT INTO finance_receipt_batches(id,department_id,accounting_year,period_start,period_end,collective,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)", [batchId, departmentId, period.year, period.from, period.to, request.body.collective, request.authenticatedUser?.id ?? null]);
       const currency = (await client.query<{ currency_code: string }>("SELECT currency_code FROM finance_settings WHERE department_id=$1", [departmentId])).rows[0]?.currency_code ?? "CHF";
       let nextNumber = BigInt(settings.rows[0]!.next_number);
-      const receipts: Array<{ id: string; receiptNumber: string; donorName: string; amountCents: number; printUrl: string }> = [];
+      const receipts: Array<{ id: string; batchId: string; receiptNumber: string; donorName: string; amountCents: number; printUrl: string; batchPrintUrl: string }> = [];
       for (const donor of eligible.rows) {
         const receiptId = randomUUID();
         const receiptNumber = `${settings.rows[0]!.numbering_prefix}-${period.year}-${nextNumber.toString().padStart(6, "0")}`;
@@ -303,7 +303,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (amountCents <= 0) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A donor total is outside the supported safe amount range." }); }
         const renderedText = renderReceiptText(settings.rows[0]!.template_text, { donorName: donor.donorName, period: `${period.from} to ${period.to}`, amount: (amountCents / 100).toFixed(2), currency, organization: settings.rows[0]!.organization_name });
         await client.query("INSERT INTO finance_donation_receipts(id,department_id,batch_id,donor_id,receipt_number,donor_name_snapshot,donor_email_snapshot,amount_cents,currency_code,period_start,period_end,rendered_text,transaction_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::uuid[])", [receiptId, departmentId, batchId, donor.donorId, receiptNumber, donor.donorName, donor.donorEmail, amountCents, currency, period.from, period.to, renderedText, donor.transactionIds]);
-        receipts.push({ id: receiptId, receiptNumber, donorName: donor.donorName, amountCents, printUrl: `/api/modules/finance/receipts/${receiptId}/print` }); nextNumber += 1n;
+        receipts.push({ id: receiptId, batchId, receiptNumber, donorName: donor.donorName, amountCents, printUrl: `/api/modules/finance/receipts/${receiptId}/print`, batchPrintUrl: `/api/modules/finance/receipts/batches/${batchId}/print` }); nextNumber += 1n;
       }
       await client.query("UPDATE finance_receipt_settings SET next_number=$2,updated_by=$3,updated_at=now() WHERE department_id=$1", [departmentId, nextNumber.toString(), request.authenticatedUser?.id ?? null]);
       await audit(client, departmentId, request, "donation_receipts_issued", "receipt_batch", batchId, { accountingYear: period.year, periodStart: period.from, periodEnd: period.to, collective: request.body.collective, count: receipts.length });
@@ -318,7 +318,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null;
     const result = await pool!.query(`SELECT r.id,r.batch_id AS "batchId",r.receipt_number AS "receiptNumber",r.donor_name_snapshot AS "donorName",r.amount_cents AS "amountCents",r.currency_code AS currency,r.period_start AS "periodStart",r.period_end AS "periodEnd",r.created_at AS "createdAt",b.collective FROM finance_donation_receipts r JOIN finance_receipt_batches b ON b.department_id=r.department_id AND b.id=r.batch_id WHERE r.department_id=$1 AND ($2::smallint IS NULL OR b.accounting_year=$2) ORDER BY r.created_at DESC,r.receipt_number LIMIT 500`, [departmentId, year]);
-    return result.rows.map((row) => ({ ...row, amountCents: asMoney(row.amountCents), printUrl: `/api/modules/finance/receipts/${row.id}/print` }));
+    return result.rows.map((row) => ({ ...row, amountCents: asMoney(row.amountCents), printUrl: `/api/modules/finance/receipts/${row.id}/print`, batchPrintUrl: `/api/modules/finance/receipts/batches/${row.batchId}/print` }));
+  });
+
+  app.get<{ Params: { batchId: string } }>("/api/modules/finance/receipts/batches/:batchId/print", { schema: { params: { type: "object", additionalProperties: false, required: ["batchId"], properties: { batchId: uuid } } } }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    const result = await pool!.query<{ receipt_number: string; donor_name_snapshot: string; amount_cents: string; currency_code: string; period_start: string; period_end: string; rendered_text: string }>(
+      "SELECT receipt_number,donor_name_snapshot,amount_cents::text,currency_code,period_start::text,period_end::text,rendered_text FROM finance_donation_receipts WHERE department_id=$1 AND batch_id=$2 ORDER BY receipt_number,id",
+      [departmentId, request.params.batchId],
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Receipt batch not found." });
+    const documents = result.rows.map((receipt) => `<article class="receipt"><header><h1>Donation receipt</h1><strong>${escapeHtml(receipt.receipt_number)}</strong></header><p class="meta">${escapeHtml(receipt.donor_name_snapshot)} · ${escapeHtml(receipt.period_start)} to ${escapeHtml(receipt.period_end)} · ${escapeHtml((asMoney(receipt.amount_cents) / 100).toFixed(2))} ${escapeHtml(receipt.currency_code)}</p><div class="receipt-body">${escapeHtml(receipt.rendered_text)}</div></article>`).join("");
+    return reply.type("text/html; charset=utf-8").header("X-Content-Type-Options", "nosniff").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'").header("Content-Disposition", `inline; filename="donation-receipts-${request.params.batchId}.html"`).send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Donation receipt batch</title><style>body{font:16px/1.55 system-ui,sans-serif;color:#17212b;margin:0;background:#f4f6f8}.toolbar{max-width:780px;margin:1rem auto;text-align:right}.receipt{box-sizing:border-box;max-width:780px;min-height:500px;margin:1rem auto 3rem;padding:3rem;background:white;box-shadow:0 8px 30px #0001;break-after:page;page-break-after:always}.receipt:last-of-type{break-after:auto;page-break-after:auto}header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #ccd4dc;padding-bottom:1rem}.meta{color:#475569;font-size:.9rem}.receipt-body{white-space:pre-wrap;margin-top:3rem}@media print{body{background:white}.toolbar{display:none}.receipt{margin:0;box-shadow:none;max-width:none;min-height:0;break-after:page;page-break-after:always}.receipt:last-of-type{break-after:auto;page-break-after:auto}}</style><div class="toolbar"><button onclick="window.print()">Print batch</button></div>${documents}</html>`);
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/receipts/:id/print", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
