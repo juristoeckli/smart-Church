@@ -1,3 +1,4 @@
+import { registerEventVolunteerAbsenceRoutes } from "./event-volunteer-absences.js";
 import { registerRegistrationReceiptRoutes } from "./event-registration-notices.js";
 import { completedCheckInError, writeCoreEventAttendance } from "./event-attendance.js";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
@@ -3634,6 +3635,10 @@ app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registratio
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
+
+registerEventVolunteerAbsenceRoutes(app, { pool: pool ?? null, available: () => databaseReady,
+  resolveScope: (request, reply, manage) => activeDepartmentId(request, reply, false, false, manage ? "events_manage" : undefined),
+  validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 registerRegistrationReceiptRoutes(app, { pool: pool ?? null, isDatabaseReady: () => databaseReady,
   validateMutation: validModuleMutation, lockDepartmentForWrite });

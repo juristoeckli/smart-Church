@@ -25,6 +25,9 @@ import { applyChurchToolsServiceTemplates, readChurchToolsServiceTemplates, revi
 
 import { applyChurchToolsVolunteerResponses, readChurchToolsVolunteerResponses, reviewChurchToolsVolunteerResponses, VolunteerResponseReviewError } from "./volunteer-responses.js";
 
+import { validVolunteerAbsenceRange } from "../../event-volunteer-absences.js";
+import { readChurchToolsAbsencePreview } from "./absence-preview.js";
+
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
 const elvantoAreas = ["people", "peopleFlows", "groups", "services", "songs", "calendar", "financial"] as const;
@@ -2078,6 +2081,36 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         }
         throw error;
       } finally { db.release(); }
+    });
+
+    routes.get<{ Querystring: { personId: string; from: string; through: string } }>("/api/modules/sync/churchtools/absence-preview", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["personId", "from", "through"], properties: {
+        personId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, from: { type: "string", format: "date" },
+        through: { type: "string", format: "date" },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true);
+      if (!dept) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing absences." });
+      const { personId, from, through } = request.query;
+      if (!validVolunteerAbsenceRange({ startsOn: from, endsOn: through }) || through === "9999-12-31") {
+        return reply.code(400).send({ error: "Choose a date range of up to 366 calendar days." });
+      }
+      const verified = await pool!.query(`SELECT 1 FROM churchtools_migration_person_provenance proof
+        JOIN contacts person ON person.department_id=proof.department_id AND person.id=proof.contact_id AND person.archived_at IS NULL
+        WHERE proof.department_id=$1 AND proof.instance_url=$2 AND proof.source_person_id=$3`, [dept, config.instance_url, personId]);
+      if (!verified.rowCount) return reply.code(404).send({ error: "Verify this person through a fresh ChurchTools People migration first." });
+      try {
+        const nextDay = new Date(Date.parse(through) + 86_400_000).toISOString().slice(0, 10);
+        const query = new URLSearchParams({ from, to: nextDay, order_direction: "ASC" });
+        const source = await get(config.instance_url, decrypt(config.encrypted_login_token), `persons/${personId}/absences?${query}`);
+        const preview = readChurchToolsAbsencePreview(source, personId, from, through);
+        return reply.header("Cache-Control", "private, no-store").send(preview);
+      } catch (error) {
+        const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools absences." });
+      }
     });
 
     type VolunteerResponseBody = { eventId: string; reviewHash?: string; sourceIds?: string[] };
