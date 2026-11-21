@@ -1,3 +1,4 @@
+import { TypedRosterColumns, type RosterMember } from "./TypedRosterColumns";
 import { useCallback, useEffect, useState, type FormEvent, type ChangeEvent } from "react";
 
 const fieldTypes = { text: "Text", number: "Number", boolean: "Yes / no", date: "Date", select: "Single choice" } as const;
@@ -34,8 +35,8 @@ function MemberFieldInput({ field, label = field.label, value, disabled, onValue
   </label>;
 }
 
-function BulkMemberFieldChange({ base, fields, selectedContactIds, request }: {
-  base: string; fields: Field[]; selectedContactIds: string[]; request: FieldRequest;
+function BulkMemberFieldChange({ base, fields, selectedContactIds, request, onValuesChange }: {
+  base: string; fields: Field[]; selectedContactIds: string[]; request: FieldRequest; onValuesChange?: () => void;
 }) {
   const [fieldId, setFieldId] = useState("");
   const [operation, setOperation] = useState<"set" | "clear">("set");
@@ -76,6 +77,7 @@ function BulkMemberFieldChange({ base, fields, selectedContactIds, request }: {
       const result = await request<{ updated: number }>(base + "/bulk-changes", {
         method: "PUT", body: JSON.stringify({ fieldId, fieldRevision, value, members }),
       });
+      onValuesChange?.();
       setMessage(result.updated + (result.updated === 1 ? " membership updated." : " memberships updated."));
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update the selected memberships."); }
     finally { setPrepared(null); setBusy(false); }
@@ -105,8 +107,9 @@ function BulkMemberFieldChange({ base, fields, selectedContactIds, request }: {
   </section>;
 }
 
-export function GroupMembershipFields({ groupId, contactId, departmentId, csrfToken, selectedContactIds }: {
+export function GroupMembershipFields({ groupId, contactId, departmentId, csrfToken, selectedContactIds, rosterMembers, rosterRevision, onValuesChange }: {
   groupId: string; contactId?: string; departmentId: string; csrfToken: string; selectedContactIds?: string[];
+  rosterMembers?: RosterMember[]; rosterRevision?: number; onValuesChange?: () => void;
 }) {
   const base = "/api/modules/group-hierarchy/groups/" + groupId + "/member-fields";
   const [fields, setFields] = useState<Field[] | null>(null);
@@ -239,6 +242,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     try {
       await request(base + "/" + contactId, { method: "PUT", body: JSON.stringify({ values, revision: answers.revision }) });
       setReload(current => current + 1);
+      onValuesChange?.();
       setMessage("Membership fields saved.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save membership fields."); }
     finally { setSaving(false); }
@@ -287,7 +291,8 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
         <button disabled={saving || !newLabel.trim()}>Add member field</button>
       </form>}
     </>}
-    {!contactId && selectedContactIds && activeFields.length > 0 && <BulkMemberFieldChange base={base} fields={activeFields} selectedContactIds={selectedContactIds} request={request}/>}
+    {!contactId && selectedContactIds && activeFields.length > 0 && <BulkMemberFieldChange base={base} fields={activeFields} selectedContactIds={selectedContactIds} request={request} onValuesChange={onValuesChange}/>}
+    {!contactId && rosterMembers && activeFields.length > 0 && <TypedRosterColumns base={base} fields={activeFields} members={rosterMembers} revision={rosterRevision ?? 0} request={request}/>}
     {contactId && answers && activeFields.length > 0 && <form onSubmit={saveAnswers}>
       {activeFields.map(field => {
         const value = draft[field.id] ?? (answers.values[field.id] === undefined ? "" : String(answers.values[field.id]));

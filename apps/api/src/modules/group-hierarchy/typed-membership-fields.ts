@@ -252,6 +252,49 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     return { updated: changed.rowCount };
   }, 200));
 
+  const rosterColumnParams = {
+    type: "object", additionalProperties: false, required: ["fieldId", "contactId"],
+    properties: {
+      fieldId: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: uuid },
+      contactId: { type: "array", minItems: 1, maxItems: 25, uniqueItems: true, items: uuid },
+    },
+  } as const;
+
+  app.get<{ Params: { groupId: string }; Querystring: { fieldId: string[]; contactId: string[] } }>(`${base}/roster-values`, {
+    schema: { params: groupParams, querystring: rosterColumnParams },
+  }, async (request, reply) => {
+    const location = await scope(request, reply);
+    if (!location || !await checkGroup(request, reply, location, pool!)) return reply;
+    const fieldIds = request.query.fieldId.map(id => id.toLowerCase());
+    const contactIds = request.query.contactId.map(id => id.toLowerCase());
+    if (new Set(fieldIds).size !== fieldIds.length || new Set(contactIds).size !== contactIds.length) {
+      return reply.code(400).send({ error: "Select each roster field and member only once." });
+    }
+    const result = await pool!.query<{ activeFieldIds: string[]; members: unknown[] }>(
+      `WITH selected_fields AS (
+         SELECT id,default_value FROM group_member_field_definitions
+          WHERE department_id=$1 AND group_id=$2 AND archived_at IS NULL AND id=ANY($3::uuid[])
+       ), member_values AS (
+         SELECT member.contact_id AS "contactId",
+                COALESCE((
+                  SELECT jsonb_object_agg(field.id,COALESCE(NULLIF(answer.field_values->(field.id::text),'null'::jsonb),field.default_value))
+                    FROM selected_fields field
+                ),'{}'::jsonb) AS values
+           FROM group_members member JOIN contacts person ON person.id=member.contact_id AND person.department_id=$1
+           LEFT JOIN group_member_field_answers answer ON answer.department_id=$1 AND answer.group_id=$2 AND answer.contact_id=member.contact_id
+          WHERE member.group_id=$2 AND member.contact_id=ANY($4::uuid[]) AND person.archived_at IS NULL
+       )
+       SELECT ARRAY(SELECT id FROM selected_fields) AS "activeFieldIds",
+              COALESCE((SELECT jsonb_agg(member_values) FROM member_values),'[]'::jsonb) AS members`,
+      [location.departmentId, location.groupId, fieldIds, contactIds],
+    );
+    const data = result.rows[0];
+    if (data.activeFieldIds.length !== fieldIds.length) {
+      return reply.code(409).send({ error: "A selected field is no longer active in this group. Reload the fields and try again." });
+    }
+    return reply.header("cache-control", "private, no-store").send({ members: data.members });
+  });
+
   const exportLimit = 2000;
   app.get<{ Params: { groupId: string } }>(`${base}/export.csv`, { schema: { params: groupParams } }, async (request, reply) => {
     const location = await scope(request, reply);
