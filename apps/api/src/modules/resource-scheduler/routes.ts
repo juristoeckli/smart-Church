@@ -331,12 +331,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units), calendarRequired: resourceResult.rows[0].calendar_required === true, managerBookingOnly: resourceResult.rows[0].manager_booking_only === true, visibilityGroupId: resourceResult.rows[0].visibility_group_id as string | null };
   }
 
-  app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string; search?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
+  const resourceCategories = ["room", "vehicle", "equipment", "other"] as const;
+
+  app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string; search?: string; category?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
     const from = request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : new Date().toISOString().slice(0, 10);
     const to = request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
     const search = typeof request.query.search === "string" ? request.query.search.trim().slice(0, 100) : "";
+    const category = request.query.category || null;
+    if (category && !resourceCategories.some((value) => value === category)) return reply.code(400).send({ error: "Choose a valid resource type." });
     const canManage = isManager(request);
     const [department, resources, bookings, responsiblePeople, visibilityGroups] = await Promise.all([
       context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
@@ -364,11 +368,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
         WHERE booking.department_id=$1 AND booking.ends_at >= ($2::date::timestamptz - interval '1 day') AND booking.starts_at < ($3::date::timestamptz + interval '1 day')
           AND ($4::text IS NULL OR booking.status=$4) AND ($5::uuid IS NULL OR booking.resource_id=$5)
+          AND ($10::text IS NULL OR resource.category=$10)
           AND (NOT $8::boolean OR EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=booking.department_id AND mark.resource_id=booking.resource_id AND mark.user_id=$6))
           AND ($7::boolean OR resource.active=true)
           AND (booking.requested_by=$6 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$6,$7))
           AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
-        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search]),
+        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search, category]),
       canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
       canManage ? context.pool!.query<{ id: string; name: string }>(
         "SELECT id,name FROM church_groups groups WHERE department_id=$1 AND (to_jsonb(groups)->>'status')='active' ORDER BY lower(name),id", [departmentId],
@@ -377,16 +382,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, visibilityGroups, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
   });
 
-  type BookedDayQuery = { from: string; through: string; resourceId?: string; markedOnly?: boolean };
+  type BookedDayQuery = { from: string; through: string; resourceId?: string; markedOnly?: boolean; category?: string };
   app.get<{ Querystring: BookedDayQuery }>("/api/modules/resource-scheduler/booked-days", {
     schema: { querystring: { type: "object", additionalProperties: false, required: ["from", "through"], properties: {
       from: { type: "string", format: "date" }, through: { type: "string", format: "date" },
       resourceId: { type: "string", format: "uuid" }, markedOnly: { type: "boolean" },
+      category: { type: "string", enum: resourceCategories },
     } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
-    const { from, through, resourceId, markedOnly } = request.query;
+    const { from, through, resourceId, markedOnly, category } = request.query;
     if (!isoDate(from) || !isoDate(through) || from < "0001-01-01" || through >= "9999-12-31" || from > through) {
       return reply.code(400).send({ error: "Choose a valid start and end date." });
     }
@@ -395,7 +401,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const department = await context.pool!.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
     const timeZone = canonicalTimeZone(department.rows[0]?.time_zone) ?? "UTC";
     const report = await context.pool!.query(resourceBookedDayReport,
-      [departmentId, isManager(request), request.authenticatedUser!.id, from, through, timeZone, resourceId ?? null, markedOnly ?? false]);
+      [departmentId, isManager(request), request.authenticatedUser!.id, from, through, timeZone, resourceId ?? null, markedOnly ?? false, category ?? null]);
     return reply.header("Cache-Control", "private, no-store").send({ from, through, timeZone, calendarDays, resources: report.rows });
   });
 

@@ -5,6 +5,7 @@ export const resourceBookedDayReport = `
     WHERE resource.department_id=$1 AND ($2::boolean OR resource.active)
       AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3::uuid,$2::boolean)
       AND ($7::uuid IS NULL OR resource.id=$7::uuid)
+      AND ($9::text IS NULL OR resource.category=$9)
       AND (NOT $8::boolean OR EXISTS (
         SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=resource.department_id
           AND mark.resource_id=resource.id AND mark.user_id=$3::uuid

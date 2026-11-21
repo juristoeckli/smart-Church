@@ -21,10 +21,11 @@ function addDays(day: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
-export function ResourceBookedDays({ departmentId, timeZone, resourceId, markedOnly, refreshVersion }: {
+export function ResourceBookedDays({ departmentId, timeZone, resourceId, category, markedOnly, refreshVersion }: {
   departmentId: string;
   timeZone: string;
   resourceId?: string;
+  category?: string;
   markedOnly: boolean;
   refreshVersion: number;
 }) {
@@ -34,7 +35,7 @@ export function ResourceBookedDays({ departmentId, timeZone, resourceId, markedO
   const [requestVersion, setRequestVersion] = useState(0);
   const [report, setReport] = useState<{ scope: string; data: Report } | null>(null);
   const [failure, setFailure] = useState<{ scope: string; message: string } | null>(null);
-  const query = new URLSearchParams({ ...range, ...(resourceId ? { resourceId } : {}), markedOnly: String(markedOnly) }).toString();
+  const query = new URLSearchParams({ ...range, ...(resourceId ? { resourceId } : {}), ...(category ? { category } : {}), markedOnly: String(markedOnly) }).toString();
   const scope = `${departmentId}|${query}|${refreshVersion}|${requestVersion}`;
 
   useEffect(() => {
