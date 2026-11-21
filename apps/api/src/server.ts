@@ -2135,6 +2135,7 @@ registerAccountSetupInvitations(app, {
     return !mutate || validModuleMutation(request, reply) ? actor.id : null;
   },
   hashPassword,
+  resolveSiteAdminLocation: (request, reply) => activeDepartmentId(request, reply, true),
   lockDepartment: lockDepartmentForWrite,
   writeLock: locationAccessWriteLock,
 });

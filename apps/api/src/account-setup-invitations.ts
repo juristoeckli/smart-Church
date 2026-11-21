@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
+import { lockLocationAccessAdministrator, readLocationAccessGrants, recordLocationAccessChanges } from "./location-access-audit.js";
 
 type Account = {
   id: string;
@@ -19,6 +20,8 @@ const accounts = `SELECT id, username, email, password_hash,
    AND must_change_password AND last_active_at IS NULL AND cardinality(server_permissions) = 0
    AND api_key_hash IS NULL
    AND NOT EXISTS (SELECT 1 FROM auth_sessions WHERE user_id = app_users.id)
+   AND NOT EXISTS (SELECT 1 FROM department_memberships m JOIN contacts c ON c.id = m.contact_id
+                   WHERE m.user_id = app_users.id AND c.archived_at IS NOT NULL)
    AND EXISTS (SELECT 1 FROM department_memberships WHERE user_id = app_users.id)) AS eligible
   FROM app_users`;
 const userParams = { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } as const;
@@ -37,6 +40,7 @@ const accountDigest = (account: Account) => digest(JSON.stringify([account.usern
 export function registerAccountSetupInvitations(app: FastifyInstance, dependencies: {
   pool: () => Pool | null;
   authorize: (request: FastifyRequest, reply: FastifyReply, mutate: boolean) => string | null;
+  resolveSiteAdminLocation: (request: FastifyRequest, reply: FastifyReply) => Promise<string | null>;
   hashPassword: (password: string) => string;
   lockDepartment: (client: PoolClient, departmentId: string) => Promise<boolean>;
   writeLock: string;
@@ -45,6 +49,10 @@ export function registerAccountSetupInvitations(app: FastifyInstance, dependenci
     await client.query(dependencies.writeLock);
     // Re-read after locking so eligibility reflects concurrent account edits.
     await client.query("SELECT id FROM app_users WHERE id = $1 FOR UPDATE", [userId]);
+    await client.query(
+      `SELECT c.id FROM contacts c JOIN department_memberships m ON m.contact_id = c.id
+       WHERE m.user_id = $1 ORDER BY c.id FOR SHARE OF c`, [userId],
+    );
     return (await client.query<Account>(`${accounts} WHERE id = $1`, [userId])).rows[0];
   }
 
@@ -55,12 +63,101 @@ export function registerAccountSetupInvitations(app: FastifyInstance, dependenci
   }
 
   async function isCurrentAdministrator(client: PoolClient, userId: string) {
-    const { rowCount } = await client.query(
-      "SELECT id FROM app_users WHERE id = $1 AND role = 'server_admin' AND is_enabled AND NOT is_service_user",
+    const { rows } = await client.query<{ id: string; displayName: string }>(
+      `SELECT id, display_name AS "displayName" FROM app_users WHERE id = $1 AND role = 'server_admin' AND is_enabled AND NOT is_service_user`,
       [userId],
     );
-    return Boolean(rowCount);
+    return rows[0];
   }
+
+  async function issueInvitation(client: PoolClient, account: Account, actor: string) {
+    const setupCode = randomBytes(32).toString("base64url");
+    await client.query(
+      `UPDATE account_setup_invitations SET revoked_at = now(), revoked_by = $2
+       WHERE user_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
+      [account.id, actor],
+    );
+    const { rows: [invitation] } = await client.query<{ issuedAt: Date; expiresAt: Date }>(
+      `INSERT INTO account_setup_invitations (id, user_id, issued_by, token_digest, credential_digest, issued_at, expires_at)
+       VALUES ($1, $2, $3, $4, $5, statement_timestamp(), statement_timestamp() + interval '14 days')
+       RETURNING issued_at AS "issuedAt", expires_at AS "expiresAt"`,
+      [randomUUID(), account.id, actor, digest(setupCode), accountDigest(account)],
+    );
+    return { ...invitation, status: "pending" as const, setupCode };
+  }
+
+  app.post<{ Params: { id: string }; Body: { username: string; role: "member" } }>("/api/contacts/:id/onboard-account", {
+    schema: {
+      ...userParams,
+      body: {
+        type: "object", required: ["username", "role"], additionalProperties: false,
+        properties: {
+          username: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{2,31}$" },
+          role: { type: "string", enum: ["member"] },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const actorId = dependencies.authorize(request, reply, true);
+    if (!actorId) return reply;
+    const pool = dependencies.pool();
+    if (!pool) return reply.code(503).send({ error: "The account database is unavailable." });
+    const departmentId = await dependencies.resolveSiteAdminLocation(request, reply);
+    if (!departmentId) return reply;
+    const username = request.body.username.toLowerCase();
+    reply.header("Cache-Control", "private, no-store");
+
+    try {
+      const outcome = await transaction(pool, async (client) => {
+        await client.query(dependencies.writeLock);
+        const actor = await isCurrentAdministrator(client, actorId);
+        if (!actor || !await lockLocationAccessAdministrator(client, departmentId, actorId)) return "denied";
+        if (!await dependencies.lockDepartment(client, departmentId)) return "standby";
+
+        const { rows: [person] } = await client.query<{ first_name: string; last_name: string }>(
+          "SELECT first_name, last_name FROM contacts WHERE id = $1 AND department_id = $2 AND archived_at IS NULL FOR UPDATE",
+          [request.params.id, departmentId],
+        );
+        if (!person) return "missing";
+        const linked = await client.query("SELECT 1 FROM department_memberships WHERE department_id = $1 AND contact_id = $2",
+          [departmentId, request.params.id]);
+        if (linked.rowCount) return "linked";
+        const loginConflict = await client.query("SELECT 1 FROM app_users WHERE lower(username) = $1 OR lower(email) = $1", [username]);
+        if (loginConflict.rowCount) return "username";
+
+        const id = randomUUID();
+        const { rows: [target] } = await client.query<{ id: string; displayName: string }>(
+          `INSERT INTO app_users (id, username, display_name, first_name, last_name, password_hash, role, must_change_password)
+           VALUES ($1, $2, left(concat_ws(' ', $3::text, $4::text), 100), $3, $4, $5, 'user', true)
+           RETURNING id, display_name AS "displayName"`,
+          [id, username, person.first_name, person.last_name, dependencies.hashPassword(randomBytes(32).toString("base64url"))],
+        );
+        await client.query(
+          `INSERT INTO department_memberships (user_id, department_id, role, contact_id, permissions, video_permissions, presenter_permissions, module_permissions)
+           VALUES ($1, $2, 'member', $3, '{}', '{}', '{}', '{}'::jsonb)`,
+          [id, departmentId, request.params.id],
+        );
+        const { rows: [account] } = await client.query<Account>(`${accounts} WHERE id = $1`, [id]);
+        if (!account?.eligible) throw new Error("The new linked account is not eligible for setup.");
+        const invitation = await issueInvitation(client, account, actorId);
+        await recordLocationAccessChanges(client, actor, target, "server_accounts", [], await readLocationAccessGrants(client, id, departmentId));
+        return { id, username, invitation };
+      });
+
+      if (outcome === "denied") return reply.code(403).send({ error: "Server and site administrator access are required." });
+      if (outcome === "standby") return reply.code(423).send({ error: "This location is read-only." });
+      if (outcome === "missing") return reply.code(404).send({ error: "This active person could not be found in the selected location." });
+      if (outcome === "linked") return reply.code(409).send({ error: "This person already has a linked account at this location." });
+      if (outcome === "username") return reply.code(409).send({ error: "Choose a username that is not already used for sign-in." });
+      return reply.code(201).send(outcome);
+    } catch (error) {
+      const constraint = (error as { code?: string; constraint?: string })?.constraint;
+      if ((error as { code?: string })?.code === "23505" && constraint === "app_users_username_lower_idx") {
+        return reply.code(409).send({ error: "Choose a username that is not already used for sign-in." });
+      }
+      throw error;
+    }
+  });
 
   async function transaction<T>(pool: Pool, operation: (client: PoolClient) => Promise<T>) {
     const client = await pool.connect();
@@ -106,19 +203,7 @@ export function registerAccountSetupInvitations(app: FastifyInstance, dependenci
       if (!await isCurrentAdministrator(client, actor)) return "denied";
       if (!account?.eligible) return null;
       if (!await lockMembershipLocations(client, account.id)) return false;
-      const setupCode = randomBytes(32).toString("base64url");
-      await client.query(
-        `UPDATE account_setup_invitations SET revoked_at = now(), revoked_by = $2
-         WHERE user_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
-        [account.id, actor],
-      );
-      const { rows: [invitation] } = await client.query(
-        `INSERT INTO account_setup_invitations (id, user_id, issued_by, token_digest, credential_digest, issued_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, statement_timestamp(), statement_timestamp() + interval '14 days')
-         RETURNING issued_at AS "issuedAt", expires_at AS "expiresAt"`,
-        [randomUUID(), account.id, actor, digest(setupCode), accountDigest(account)],
-      );
-      return { ...invitation, status: "pending", setupCode };
+      return issueInvitation(client, account, actor);
     });
     reply.header("Cache-Control", "private, no-store");
     if (outcome === "denied") return reply.code(403).send({ error: "A Server Administrator session is required." });

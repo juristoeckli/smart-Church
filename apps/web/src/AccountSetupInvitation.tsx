@@ -79,6 +79,75 @@ export function AccountSetupInvitation({ userId, refreshCsrfToken }: { userId: s
   </section>;
 }
 
+export function PersonAccountOnboarding({ personId, departmentId, locationName, refreshCsrfToken }: {
+  personId: string;
+  departmentId: string;
+  locationName: string;
+  refreshCsrfToken: () => Promise<string>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{ username: string; invitation: Invitation & { setupCode: string } }>();
+  const [copied, setCopied] = useState(false);
+  const link = result ? `${window.location.origin}/account-setup#${result.invitation.setupCode}` : "";
+
+  async function create(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving || result) return;
+    const username = String(new FormData(event.currentTarget).get("username") ?? "");
+    setError("");
+    setSaving(true);
+    try {
+      const csrf = await refreshCsrfToken();
+      const response = await fetch(`/api/contacts/${personId}/onboard-account`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-csrf-token": csrf, "x-department-id": departmentId },
+        body: JSON.stringify({ username, role: "member" }),
+      });
+      if (!response.ok) throw new Error(await errorMessage(response, "Could not create the linked account."));
+      setResult(await response.json());
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not create the linked account.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopied(true);
+      setError("");
+    } catch {
+      setError("Select the setup link and copy it manually.");
+    }
+  }
+
+  return <section className="password-reset-panel" aria-label="Smart-Church access">
+    {!open && <button type="button" className="button button-secondary" onClick={() => setOpen(true)}>Create linked account</button>}
+    {open && !result && <form onSubmit={(event) => void create(event)} className="auth-form">
+      <div className="password-reset-heading"><strong>Review account access</strong></div>
+      <p>Location: {locationName}. Role: Member. Additional permissions: None.</p>
+      <p>The person will sign in with the username below after choosing a password. Share the setup link directly with them.</p>
+      <label>Username<input name="username" autoComplete="off" minLength={3} maxLength={32} pattern="[A-Za-z0-9][A-Za-z0-9._\-]{2,31}" required /></label>
+      <div className="password-reset-actions">
+        <button className="button button-primary" disabled={saving}>{saving ? "Creating…" : "Create account and setup link"}</button>
+        <button className="button button-secondary" type="button" disabled={saving} onClick={() => { setError(""); setOpen(false); }}>Cancel</button>
+      </div>
+    </form>}
+    {result && <>
+      <p role="status">Linked account {result.username} created. The setup link expires on {new Date(result.invitation.expiresAt).toLocaleDateString()}.</p>
+      <label>Setup link<div className="generated-password-row">
+        <input value={link} readOnly spellCheck={false} onFocus={(event) => event.currentTarget.select()} />
+        <button type="button" className="button button-secondary" onClick={() => void copyLink()}>Copy link</button>
+      </div></label>
+      {copied && <p role="status">Setup link copied.</p>}
+    </>}
+    {error && <p role="alert">{error}</p>}
+  </section>;
+}
+
 export function AccountSetupPage() {
   const [setupCode] = useState(() => window.location.hash.slice(1));
   const [busy, setBusy] = useState(false);

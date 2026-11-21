@@ -53,6 +53,7 @@ These routes include server-wide administration. Most writes require a Server Ad
 | `PUT`, `DELETE` | `/api/users/:id` | Edit or delete an account. |
 | `POST` | `/api/users/:id/reset-password` | Set a temporary password and optionally require a change at next login. |
 | `GET`, `POST`, `DELETE` | `/api/users/:id/setup-invitation` | Server Administrator browser sessions can read setup status, issue or replace a 14-day link, and revoke it. Only enabled person accounts with an initial password and no previous activity or installation grants qualify. The setup code is returned once on issue and is shared directly by the administrator. Changing the account's sign-in details or location grants invalidates the link. |
+| `POST` | `/api/contacts/:id/onboard-account` | A Server Administrator who also administers the selected location can create an account for an active local person. Pass `username` and `role: "member"`. Creates the account, the linked location membership with no additional rights, the access history entry and the one-time setup invitation together. The account uses the chosen username to sign in. |
 | `GET`, `POST` | `/api/departments` | List locations or create one. |
 | `GET`, `PUT` | `/api/department` | Read/update the selected location profile. |
 | `GET`, `PUT`, `DELETE` | `/api/location-access`, `/api/location-access/:userId` | List, grant, edit, or revoke a user's membership in the selected location. |
