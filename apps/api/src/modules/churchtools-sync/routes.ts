@@ -15,6 +15,7 @@ import { buildChurchToolsFinanceJournalDryRun, isTwoDecimalFinanceCurrency, sele
 import { createFinanceDraftBatch, createReviewedJournalDrafts, journalDraftBatchId, planReviewedJournalDrafts, readJournalDraftReceipt } from "./finance-journal-drafts.js";
 import { planReviewedSplitDrafts, readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
 import { reconcileChurchToolsSpecialJournal } from "./finance-special-review.js";
+import { readChurchToolsCancellationReadiness } from "./finance-cancellation-readiness.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -1934,9 +1935,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const period = periods.find((item) => item.periodId === scope.periodId);
         if (!period) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
         const rows = await readScopedJournalRows(config.instance_url, token, scope, period, new Map(), new Map());
+        const reconciliation = reconcileChurchToolsSpecialJournal(rows);
+        const cancellations = await readChurchToolsCancellationReadiness(pool!, {
+          departmentId: dept, instanceUrl: config.instance_url, periodId: scope.periodId, sourceCurrency: scope.sourceCurrency,
+          fullPeriodAccess: period.fullPeriodAccess, targetWritable: !reconciliation.cancellations.length || await deps.isDepartmentWritable(dept),
+        }, reconciliation.cancellations);
         return reply.header("Cache-Control", "private, no-store").send({
-          formatVersion: 1, sourceInstance: config.instance_url, period,
-          scope, ...reconcileChurchToolsSpecialJournal(rows),
+          formatVersion: 2, sourceInstance: config.instance_url, period,
+          scope, ...reconciliation, cancellations,
         });
       } catch (error) {
         const status = error instanceof ChurchToolsFinanceRangeError ? 413

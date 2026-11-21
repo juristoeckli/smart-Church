@@ -46,7 +46,9 @@ function compareCancellation(base: SourceRow, cancellation: SourceRow) {
   if (base.splitParentId || cancellation.splitParentId || base.flags.tax || cancellation.flags.tax
     || base.costCenterId || cancellation.costCenterId
     || base.flags.transfer || cancellation.flags.transfer || base.flags.invalidCostCenter || cancellation.flags.invalidCostCenter
-    || base.flags.discount || cancellation.flags.discount) return "additional_postings_require_review";
+    || base.flags.discount || cancellation.flags.discount || base.flags.donation || cancellation.flags.donation) {
+    return "additional_postings_require_review";
+  }
   if (!base.debitAccountId || !base.creditAccountId || !cancellation.debitAccountId || !cancellation.creditAccountId
     || !base.amount || !cancellation.amount) return "incomplete_posting_evidence";
   const sameSides = base.debitAccountId === cancellation.debitAccountId && base.creditAccountId === cancellation.creditAccountId;
