@@ -27,6 +27,7 @@ import { applyChurchToolsVolunteerResponses, readChurchToolsVolunteerResponses, 
 
 import { validVolunteerAbsenceRange } from "../../event-volunteer-absences.js";
 import { readChurchToolsAbsencePreview } from "./absence-preview.js";
+import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -2083,34 +2084,89 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       } finally { db.release(); }
     });
 
-    routes.get<{ Querystring: { personId: string; from: string; through: string } }>("/api/modules/sync/churchtools/absence-preview", {
-      schema: { querystring: { type: "object", additionalProperties: false, required: ["personId", "from", "through"], properties: {
-        personId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, from: { type: "string", format: "date" },
-        through: { type: "string", format: "date" },
-      } } },
+    type AbsenceReviewFields = { personId: string; from: string; through: string };
+    type AbsenceImportBody = AbsenceReviewFields & { reviewHash: string; sourceIds: string[] };
+    const absenceReviewProperties = {
+      personId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, from: { type: "string", format: "date" },
+      through: { type: "string", format: "date" },
+    } as const;
+    function validAbsenceImportQuery({ from, through }: AbsenceReviewFields) {
+      return validVolunteerAbsenceRange({ startsOn: from, endsOn: through }) && through !== "9999-12-31";
+    }
+    async function churchToolsAbsenceSource(config: Settings, { personId, from, through }: AbsenceReviewFields) {
+      const nextDay = new Date(Date.parse(through) + 86_400_000).toISOString().slice(0, 10);
+      const query = new URLSearchParams({ from, to: nextDay, order_direction: "ASC" });
+      const source = await get(config.instance_url, decrypt(config.encrypted_login_token), `persons/${personId}/absences?${query}`);
+      return readChurchToolsAbsencePreview(source, personId, from, through);
+    }
+    function absenceSourceError(error: unknown, reply: FastifyReply) {
+      const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
+      return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools absences." });
+    }
+    routes.get<{ Querystring: AbsenceReviewFields }>("/api/modules/sync/churchtools/absence-preview", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["personId", "from", "through"],
+        properties: absenceReviewProperties,
+      } },
     }, async (request, reply) => {
       const dept = await department(request, reply, true);
       if (!dept) return reply;
       const config = await settings(dept);
       if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing absences." });
-      const { personId, from, through } = request.query;
-      if (!validVolunteerAbsenceRange({ startsOn: from, endsOn: through }) || through === "9999-12-31") {
-        return reply.code(400).send({ error: "Choose a date range of up to 366 calendar days." });
-      }
-      const verified = await pool!.query(`SELECT 1 FROM churchtools_migration_person_provenance proof
-        JOIN contacts person ON person.department_id=proof.department_id AND person.id=proof.contact_id AND person.archived_at IS NULL
-        WHERE proof.department_id=$1 AND proof.instance_url=$2 AND proof.source_person_id=$3`, [dept, config.instance_url, personId]);
-      if (!verified.rowCount) return reply.code(404).send({ error: "Verify this person through a fresh ChurchTools People migration first." });
+      if (!validAbsenceImportQuery(request.query)) return reply.code(400).send({ error: "Choose a date range of up to 366 calendar days." });
+      const scope = { departmentId: dept, instanceUrl: config.instance_url, ...request.query };
+      const contact = await verifiedAbsenceContact(pool!, scope);
+      if (!contact) return reply.code(404).send({ error: "Verify this person through a fresh ChurchTools People migration first." });
+      let source: Awaited<ReturnType<typeof churchToolsAbsenceSource>>;
+      try { source = await churchToolsAbsenceSource(config, scope); }
+      catch (error) { return absenceSourceError(error, reply); }
+      const preview = await reviewChurchToolsAbsenceImport(pool!, scope, contact, source);
+      return reply.header("Cache-Control", "private, no-store").send(preview);
+    });
+    routes.post<{ Body: AbsenceImportBody }>("/api/modules/sync/churchtools/absence-import", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["personId", "from", "through", "reviewHash", "sourceIds"], properties: {
+        ...absenceReviewProperties, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        sourceIds: { type: "array", minItems: 1, maxItems: 25, uniqueItems: true,
+          items: { type: "string", pattern: "^[1-9][0-9]{0,15}$" } },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before importing absences." });
+      const { reviewHash, sourceIds, personId, from, through } = request.body;
+      const scope = { departmentId: dept, instanceUrl: config.instance_url, personId, from, through };
+      if (!validAbsenceImportQuery(scope)) return reply.code(400).send({ error: "Choose a date range of up to 366 calendar days." });
+      const contact = await verifiedAbsenceContact(pool!, scope);
+      if (!contact) return reply.code(404).send({ error: "Verify this person through a fresh ChurchTools People migration first." });
+      let source: Awaited<ReturnType<typeof churchToolsAbsenceSource>>;
+      try { source = await churchToolsAbsenceSource(config, scope); }
+      catch (error) { return absenceSourceError(error, reply); }
+      const db = await pool!.connect();
       try {
-        const nextDay = new Date(Date.parse(through) + 86_400_000).toISOString().slice(0, 10);
-        const query = new URLSearchParams({ from, to: nextDay, order_direction: "ASC" });
-        const source = await get(config.instance_url, decrypt(config.encrypted_login_token), `persons/${personId}/absences?${query}`);
-        const preview = readChurchToolsAbsencePreview(source, personId, from, through);
-        return reply.header("Cache-Control", "private, no-store").send(preview);
+        await db.query("BEGIN");
+        await db.query("SET LOCAL lock_timeout = '5s'");
+        if (!await deps.lockDepartmentForWrite(db, dept)) {
+          await db.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const current = await db.query(`SELECT 1 FROM churchtools_sync_settings
+          WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE`,
+        [dept, config.instance_url, config.encrypted_login_token]);
+        if (!current.rowCount || await verifiedAbsenceContact(db, scope, true) !== contact) {
+          throw new AbsenceImportReviewError("The verified person or ChurchTools connection changed.");
+        }
+        const review = await reviewChurchToolsAbsenceImport(db, scope, contact, source, true);
+        const result = await applyChurchToolsAbsenceImport(db, scope, contact, review, reviewHash, sourceIds);
+        await db.query("COMMIT");
+        return reply.header("Cache-Control", "private, no-store").send(result);
       } catch (error) {
-        const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
-        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools absences." });
-      }
+        await db.query("ROLLBACK");
+        if (error instanceof AbsenceImportReviewError) return reply.code(409).send({ error: error.message });
+        if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
+          return reply.code(409).send({ error: "Availability is busy. Open a fresh review." });
+        }
+        throw error;
+      } finally { db.release(); }
     });
 
     type VolunteerResponseBody = { eventId: string; reviewHash?: string; sourceIds?: string[] };

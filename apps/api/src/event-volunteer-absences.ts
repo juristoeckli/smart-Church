@@ -85,6 +85,68 @@ export function registerEventVolunteerAbsenceRoutes(app: FastifyInstance, deps: 
   app.put<{ Params: { id: string }; Body: Range }>(`${path}/:id`, { schema: { params, body } }, (request, reply) => mutate(request, reply, request.params.id, request.body));
   app.delete<{ Params: { id: string } }>(`${path}/:id`, { schema: { params } }, (request, reply) => mutate(request, reply, request.params.id, undefined));
 
+  const consentPath = `${path}/churchtools-consent`;
+  const importIdentity = `SELECT config.instance_url AS "instanceUrl",proof.source_person_id AS "sourcePersonId"
+    FROM churchtools_sync_settings config
+    JOIN churchtools_migration_person_provenance proof ON proof.department_id=config.department_id AND proof.instance_url=config.instance_url
+    WHERE config.department_id=$1 AND proof.contact_id=$2`;
+  app.get(consentPath, async (request, reply) => {
+    const departmentId = await scope(request, reply);
+    if (!departmentId) return reply;
+    const actor = request.authenticatedUser!.id;
+    const { rows: [result] } = await pool!.query<{ startsOn: string | null; endsOn: string | null }>(`SELECT
+      consent.starts_on::text AS "startsOn",consent.ends_on::text AS "endsOn"
+      FROM (${localPerson}) person
+      JOIN churchtools_migration_person_provenance proof ON proof.department_id=$1 AND proof.contact_id=person.id
+      JOIN churchtools_sync_settings config ON config.department_id=proof.department_id AND config.instance_url=proof.instance_url
+      LEFT JOIN event_volunteer_absence_import_consents consent ON consent.department_id=$1 AND consent.contact_id=person.id
+        AND consent.actor_user_id=$2 AND consent.instance_url=proof.instance_url AND consent.source_person_id=proof.source_person_id`, [departmentId, actor]);
+    return reply.header("Cache-Control", "private, no-store").send({
+      available: !!result, range: result?.startsOn && result.endsOn ? { startsOn: result.startsOn, endsOn: result.endsOn } : null,
+    });
+  });
+  async function mutateConsent(request: FastifyRequest, reply: FastifyReply, range?: Range) {
+    const departmentId = await scope(request, reply);
+    if (!departmentId || !deps.validateMutation(request, reply)) return reply;
+    if (range && !validVolunteerAbsenceRange(range)) return reply.code(400).send({ error: "Choose a date range of up to 366 calendar days." });
+    const actor = request.authenticatedUser!.id;
+    const db = await pool!.connect();
+    try {
+      await db.query("BEGIN");
+      if (!await deps.lockDepartmentForWrite(db, departmentId)) {
+        await db.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const { rows: [person] } = await db.query<{ id: string }>(localPerson + " FOR SHARE OF m,c", [departmentId, actor]);
+      if (!person) {
+        await db.query("ROLLBACK");
+        return reply.code(403).send({ error: "Link your account to a People record at this location first." });
+      }
+      if (range) {
+        const { rows: [verified] } = await db.query<{ instanceUrl: string; sourcePersonId: string }>(
+          importIdentity + " FOR SHARE OF config,proof", [departmentId, person.id]);
+        if (!verified) {
+          await db.query("ROLLBACK");
+          return reply.code(409).send({ error: "This People record needs a verified ChurchTools connection." });
+        }
+        await db.query(`INSERT INTO event_volunteer_absence_import_consents
+          (department_id,contact_id,actor_user_id,instance_url,source_person_id,starts_on,ends_on)
+          VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(department_id,contact_id) DO UPDATE SET
+          actor_user_id=EXCLUDED.actor_user_id,instance_url=EXCLUDED.instance_url,source_person_id=EXCLUDED.source_person_id,
+          starts_on=EXCLUDED.starts_on,ends_on=EXCLUDED.ends_on,consented_at=now()`,
+        [departmentId, person.id, actor, verified.instanceUrl, verified.sourcePersonId, range.startsOn, range.endsOn]);
+      } else {
+        await db.query("DELETE FROM event_volunteer_absence_import_consents WHERE department_id=$1 AND contact_id=$2 AND actor_user_id=$3",
+          [departmentId, person.id, actor]);
+      }
+      await db.query("COMMIT");
+      return reply.header("Cache-Control", "private, no-store").send({ range: range ?? null });
+    } catch (error) { await db.query("ROLLBACK"); throw error; }
+    finally { db.release(); }
+  }
+  app.put<{ Body: Range }>(consentPath, { schema: { body } }, (request, reply) => mutateConsent(request, reply, request.body));
+  app.delete(consentPath, (request, reply) => mutateConsent(request, reply));
+
   app.get<{ Params: { id: string } }>("/api/events/:id/volunteer-conflicts", { schema: { params } }, async (request, reply) => {
     const departmentId = await scope(request, reply, true);
     if (!departmentId) return reply;

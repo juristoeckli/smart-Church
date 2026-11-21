@@ -6,6 +6,65 @@ type Translate = (message: string) => string;
 const endpoint = "/api/events/volunteer-absences";
 const empty = { startsOn: "", endsOn: "" };
 
+function ChurchToolsAbsenceConsent({ departmentId, csrfToken, t }: { departmentId: string; csrfToken: string; t: Translate }) {
+  const consentEndpoint = `${endpoint}/churchtools-consent`;
+  const [available, setAvailable] = useState(false);
+  const [current, setCurrent] = useState<Range | null>(null);
+  const [draft, setDraft] = useState<Range>(empty);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(consentEndpoint, { signal: controller.signal, headers: { "x-department-id": departmentId } }).then(async (response) => {
+      const result = await response.json() as { available: boolean; range: Range | null; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not load ChurchTools import permission.");
+      if (controller.signal.aborted) return;
+      setAvailable(result.available);
+      setCurrent(result.range);
+      setDraft(result.range ?? empty);
+    }).catch((failure: unknown) => {
+      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Could not load ChurchTools import permission.");
+    });
+    return () => controller.abort();
+  }, [consentEndpoint, departmentId]);
+
+  async function update(grant: boolean) {
+    setBusy(true);
+    setError("");
+    try {
+      const response = await fetch(consentEndpoint, {
+        method: grant ? "PUT" : "DELETE", headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken,
+          ...(grant ? { "Content-Type": "application/json" } : {}) },
+        ...(grant ? { body: JSON.stringify(draft) } : {}),
+      });
+      const result = await response.json() as { range: Range | null; error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Could not save ChurchTools import permission.");
+      setCurrent(result.range);
+      setDraft(result.range ?? empty);
+    } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not save ChurchTools import permission."); }
+    finally { setBusy(false); }
+  }
+  if (!available) return error ? <p role="alert">{t(error)}</p> : null;
+  return <section>
+    <h3>{t("ChurchTools absence import permission")}</h3>
+    <p>{t("Allow a site administrator to copy your all-day ChurchTools absence dates for this range. You can edit or remove imported dates in Events.")}</p>
+    {current && <p role="status">{t("Permission active")} · {current.startsOn} – {current.endsOn}</p>}
+    <form onSubmit={(event) => { event.preventDefault(); void update(true); }}>
+      <fieldset disabled={busy}>
+        <div className="form-row">
+          <label>{t("First allowed day")}<input type="date" required value={draft.startsOn} max={draft.endsOn || undefined}
+            onChange={(event) => setDraft({ ...draft, startsOn: event.target.value })} /></label>
+          <label>{t("Last allowed day")}<input type="date" required value={draft.endsOn} min={draft.startsOn || undefined}
+            onChange={(event) => setDraft({ ...draft, endsOn: event.target.value })} /></label>
+        </div>
+        <button type="submit" className="button button-secondary">{t("Allow date import")}</button>
+        {current && <button type="button" className="button button-secondary" onClick={() => void update(false)}>{t("Revoke permission")}</button>}
+      </fieldset>
+    </form>
+    {error && <p role="alert">{t(error)}</p>}
+  </section>;
+}
+
 export function VolunteerAvailability({ departmentId, csrfToken, t }: {
   departmentId: string; csrfToken: string; t: Translate;
 }) {
@@ -77,6 +136,7 @@ export function VolunteerAvailability({ departmentId, csrfToken, t }: {
             {editing && <button type="button" className="button button-secondary" onClick={stopEditing}>{t("Cancel editing")}</button>}
           </fieldset>
         </form>
+        <ChurchToolsAbsenceConsent departmentId={departmentId} csrfToken={csrfToken} t={t} />
       </>}
       {error && <p role="alert">{t(error)}</p>}
     </>}
