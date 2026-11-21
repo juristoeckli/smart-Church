@@ -39,3 +39,5 @@ Read APIs require `people_view_private` or `people_manage` at the resolved locat
 - Anniversary reports cover only the next 30 days and do not schedule notifications. Birthday exports intentionally omit age.
 
 The directory and CSV export can filter by active membership in a specific active group or any active group of a selected type at the current location. When both filters are set, the same group must match both. Saved directory views retain the filters. If a saved group or type becomes unavailable, the filter continues to apply until cleared.
+
+Directory, saved views, and CSV support an exact group membership role filter (case-insensitive). When group, group type and role are combined, all filters apply to the same active membership.
