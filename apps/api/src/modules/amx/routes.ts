@@ -6,18 +6,20 @@ import { readIcspDeviceLevels, pulseIcspChannel } from "./icsp.js";
 
 type AmxAction = { id: string; name: string; command: string };
 type AmxSettings = { host: string; actions: AmxAction[] };
+// Keep Smart-Church input events separate from the physical touch panel.
+const CONTROL_DEVICE = 34001;
 const roomActions: AmxAction[] = [
-  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[10001:1:1,11]" },
-  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[10001:1:1,16]" },
-  { id: "conference-1", name: "Konferenzsaal 1", command: "ICSP[10001:1:1,13]" },
-  { id: "library", name: "Bibliothek", command: "ICSP[10001:1:1,12]" },
-  { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[10001:1:1,15]" },
-  { id: "conference-large", name: "Konferenz gross", command: "ICSP[10001:1:1,14]" },
+  { id: "hall-crosswise", name: "Gemeindesaal quer", command: `ICSP[${CONTROL_DEVICE}:1:1,11]` },
+  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: `ICSP[${CONTROL_DEVICE}:1:1,16]` },
+  { id: "conference-1", name: "Konferenzsaal 1", command: `ICSP[${CONTROL_DEVICE}:1:1,13]` },
+  { id: "library", name: "Bibliothek", command: `ICSP[${CONTROL_DEVICE}:1:1,12]` },
+  { id: "all-autonomous", name: "Alle Räume Autonom", command: `ICSP[${CONTROL_DEVICE}:1:1,15]` },
+  { id: "conference-large", name: "Konferenz gross", command: `ICSP[${CONTROL_DEVICE}:1:1,14]` },
 ];
 const audioActions: AmxAction[] = amxAudioActions.map((item) => ({
   id: item.id,
   name: item.name,
-  command: `ICSP[10001:${item.port ?? 2}:1,${item.channel}]`,
+  command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 2}:1,${item.channel}]`,
 }));
 const defaultSettings: AmxSettings = { host: "", actions: roomActions };
 
@@ -145,15 +147,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const storedSettings = result.rows[0];
     const settings = storedSettings ?? defaultSettings;
     if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
-    const systemActions: AmxAction[] = amxSystemActions.map((item) => ({ id: item.id, name: item.name, command: `ICSP[10001:${item.port ?? 1}:1,${item.channel}]` }));
+    const systemActions: AmxAction[] = amxSystemActions.map((item) => ({ id: item.id, name: item.name, command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 1}:1,${item.channel}]` }));
     const action = [...roomActions, ...systemActions, ...audioActions].find((item) => item.id === request.body.actionId);
     if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });
     try {
-      const match = action.command.match(/^ICSP\[10001:(\d+):1,(\d+)\]$/);
+      const match = action.command.match(new RegExp(`^ICSP\\[${CONTROL_DEVICE}:(\\d+):1,(\\d+)\\]$`));
       const port = Number(match?.[1]);
       const channel = Number(match?.[2]);
       if (!Number.isInteger(port) || !Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed ICSP mapping is invalid." });
-      await pulseIcspChannel(settings.host, { device: 10001, port, system: 1 }, channel);
+      await pulseIcspChannel(settings.host, { device: CONTROL_DEVICE, port, system: 1 }, channel);
       return { sent: true, actionId: action.id };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not send the AMX command." });

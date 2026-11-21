@@ -6,12 +6,12 @@ import "./amx.css";
 type Action = { id: string; name: string; command: string };
 type Settings = { host: string; actions: Action[] };
 const roomActions: Action[] = [
-  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[10001:1:1,11]" },
-  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[10001:1:1,16]" },
-  { id: "conference-1", name: "Konferenzsaal 1", command: "ICSP[10001:1:1,13]" },
-  { id: "library", name: "Bibliothek", command: "ICSP[10001:1:1,12]" },
-  { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[10001:1:1,15]" },
-  { id: "conference-large", name: "Konferenz gross", command: "ICSP[10001:1:1,14]" },
+  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[34001:1:1,11]" },
+  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[34001:1:1,16]" },
+  { id: "conference-1", name: "Konferenzsaal 1", command: "ICSP[34001:1:1,13]" },
+  { id: "library", name: "Bibliothek", command: "ICSP[34001:1:1,12]" },
+  { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[34001:1:1,15]" },
+  { id: "conference-large", name: "Konferenz gross", command: "ICSP[34001:1:1,14]" },
 ];
 const initialSettings: Settings = { host: "", actions: roomActions };
 
@@ -53,7 +53,7 @@ export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) 
   }
 
   return <section className="amx-panel" aria-labelledby="amx-settings-title">
-    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Controls and live level feedback use ICSP. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
+    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Control pulses target NetLinx device 34001; the physical touchpanel is 10001. The NetLinx program must handle device 34001. Level feedback reads device 10001 only. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
     {loading ? <p>Loading AMX settings…</p> : <form className="amx-form" onSubmit={(event) => void save(event)}>
       <label>NetLinx master IP address or hostname<input value={settings.host} onChange={(event) => setSettings((current) => ({ ...current, host: event.target.value }))} placeholder="Enter the controller IP address or hostname" required maxLength={253} /></label>
       <p>Connection uses ICSP on TCP 1319. No NetLinx username or password is required.</p>
