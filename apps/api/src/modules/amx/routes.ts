@@ -135,12 +135,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const host = result.rows[0]?.host;
     if (!host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
     try {
-      const channelsByPort: Record<string, number[]> = Object.fromEntries(await Promise.all(
-        panelFeedbackPorts.map(async (port) => [
-          String(port),
-          await readIcspDeviceChannels(host, { device: 10001, port, system: 1 }),
-        ] as const),
-      ));
+      // The NetLinx master can reset overlapping temporary ICSP registrations
+      // from the same client. Read feedback ports one at a time to keep the
+      // controller-state poll reliable alongside the separate level poll.
+      const channelsByPort: Record<string, number[]> = {};
+      for (const port of panelFeedbackPorts) {
+        channelsByPort[String(port)] = await readIcspDeviceChannels(host, { device: 10001, port, system: 1 });
+      }
       const portOneChannels = channelsByPort["1"] ?? [];
       const activeRooms = roomStatusChannels.filter(([channel]) => portOneChannels.includes(channel)).map(([, name]) => name);
       return {
