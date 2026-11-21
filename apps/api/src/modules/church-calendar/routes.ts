@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
+import { calendarReminderOccurrence } from "../../calendar-reminders.js";
 import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
 import { addDays, calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, occurrenceStarts, startOfDay, wallDate, type Recurrence } from "../../calendar-occurrences.js";
 
@@ -410,6 +411,52 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.code(201).send(result.rows[0]);
   });
 
+  const reminderParams = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
+  const reminderOccurrenceSchema = { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$" } as const;
+  app.put<{ Params: { id: string }; Body: { occurrenceStartAt: string; minutesBefore: number } }>("/api/modules/church-calendar/appointments/:id/reminder", {
+    schema: { params: reminderParams, body: { type: "object", additionalProperties: false, required: ["occurrenceStartAt", "minutesBefore"],
+      properties: { occurrenceStartAt: reminderOccurrenceSchema, minutesBefore: { type: "integer", enum: [5,15,30,60,1440] } } } },
+  }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    if (!isServerModuleEnabled("notifications")) return responseError(reply, 409, "Enable Notifications to schedule Calendar reminders.");
+    const original = cleanLocalDateTime(request.body.occurrenceStartAt);
+    if (!original) return responseError(reply, 400, "Choose a valid saved occurrence.");
+    const user = userId(request);
+    const reminder = await calendarReminderOccurrence(context.pool, departmentId, user, request.params.id, original);
+    if (!reminder) return responseError(reply, 404, "This timed occurrence is unavailable.");
+    const preference = await context.pool.query<{ event_reminders_enabled: boolean }>(
+      "SELECT event_reminders_enabled FROM module_notification_preferences WHERE department_id=$1 AND user_id=$2", [departmentId, user],
+    );
+    if (preference.rows[0]?.event_reminders_enabled === false) return responseError(reply, 409, "Enable event reminders in Notifications first.");
+    const due = reminder.startsAt - request.body.minutesBefore * 60_000;
+    if (due <= Date.now()) return responseError(reply, 400, "Choose a reminder time that has not passed.");
+    await context.pool.query(
+      `INSERT INTO church_calendar_reminders(appointment_id,department_id,user_id,original_start,minutes_before,next_check_at)
+       VALUES($1,$2,$3,$4::timestamp,$5,$6)
+       ON CONFLICT(appointment_id,user_id,original_start) DO UPDATE SET minutes_before=EXCLUDED.minutes_before,next_check_at=EXCLUDED.next_check_at,delivered_at=NULL`,
+      [request.params.id, departmentId, user, original, request.body.minutesBefore, new Date(due)],
+    );
+    return { minutesBefore: request.body.minutesBefore, delivered: false };
+  });
+  app.delete<{ Params: { id: string }; Querystring: { occurrenceStartAt: string } }>("/api/modules/church-calendar/appointments/:id/reminder", {
+    schema: { params: reminderParams, querystring: { type: "object", additionalProperties: false, required: ["occurrenceStartAt"], properties: { occurrenceStartAt: reminderOccurrenceSchema } } },
+  }, async (request, reply) => {
+    if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
+    if (!context.validateMutation(request, reply)) return reply;
+    const departmentId = await context.resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const original = cleanLocalDateTime(request.query.occurrenceStartAt);
+    if (!original) return responseError(reply, 400, "Choose a valid saved occurrence.");
+    await context.pool.query(
+      "DELETE FROM church_calendar_reminders WHERE appointment_id=$1 AND department_id=$2 AND user_id=$3 AND original_start=$4::timestamp",
+      [request.params.id, departmentId, userId(request), original],
+    );
+    return { removed: true };
+  });
+
   app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
@@ -465,6 +512,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const appointments = result.rows;
     if (!appointments.length) return [];
     const ids = appointments.map((row) => row.id);
+    const reminders = new Map((await context.pool.query<{ appointment_id: string; original: string; minutes_before: number; delivered: boolean }>(
+      `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original,minutes_before,delivered_at IS NOT NULL AS delivered
+         FROM church_calendar_reminders WHERE department_id=$1 AND user_id=$2 AND appointment_id=ANY($3::uuid[])`, [departmentId, userId(request), ids],
+    )).rows.map((reminder) => [`${reminder.appointment_id}:${reminder.original}`, { minutesBefore: reminder.minutes_before, delivered: reminder.delivered }]));
     const exceptions = await context.pool.query<{ appointment_id: string; original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
       `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides
          FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids],
@@ -588,6 +639,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         output.push({
           appointmentId: row.id, occurrenceStartAt: startAt, occurrenceEndAt: endAt, originalOccurrenceStartAt: original, seriesTimeZone, timeZone,
           ...(projected ? { viewStartsAt, viewTimeZone } : {}),
+          reminder: reminders.get(`${row.id}:${original}`) ?? null,
           startsAtUtc: instants?.startsAtUtc ?? null, endsAtUtc: instants?.endsAtUtc ?? null, timeShifted: instants?.shifted ?? false, seriesStartsAt: row.starts_at, calendarId: row.calendar_id,
           calendarName: row.calendar_name, calendarScope: row.calendar_scope, groupId: row.group_id,
           title: override.title ?? row.title, subtitle: override.subtitle ?? row.subtitle, description: override.description ?? row.description,

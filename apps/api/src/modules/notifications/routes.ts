@@ -2,7 +2,8 @@ import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { Readable } from "node:stream";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { UserLanguage } from "@smart-church/contracts";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
+import { deliverCalendarReminders } from "../../calendar-reminders.js";
 import type { PoolClient } from "pg";
 import { renderNotificationEmail, type NotificationEmailTemplate } from "./email-templates.js";
 
@@ -420,6 +421,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     reminderJobRunning = true;
     try {
       await createUpcomingReminders();
+      if (pool && isServerModuleEnabled("church-calendar")) {
+        try {
+          await deliverCalendarReminders(pool, await writableDepartmentIds(), context.lockDepartmentForWrite);
+        } catch (error) { app.log.error({ err: error }, "Could not deliver Calendar reminders."); }
+      }
       await deliverPendingEmails();
       await processPendingWebhookEvents();
     } finally {
