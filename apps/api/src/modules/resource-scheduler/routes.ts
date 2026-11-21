@@ -322,11 +322,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return calendarBookingWindow(startsAt, endsAt, (overrides.allDay ?? appointment.all_day) === true, timeZone);
   }
 
-  async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: { query: (sql: string, values?: unknown[]) => Promise<any> }) {
+  async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: { query: (sql: string, values?: unknown[]) => Promise<any> }, apply = false) {
     const seriesResult = await queryable.query("SELECT * FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [seriesId, departmentId]);
     const series = seriesResult.rows[0];
     if (!series) return { error: "Booking series not found in this location." } as const;
-    if (series.all_day_date) return { error: "To change a full-day schedule, cancel the affected bookings and create a new request." } as const;
     const startsAt = new Date(input.startsAt); const endsAt = new Date(input.endsAt);
     if (!isoDate(input.fromDate) || !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) return { error: "Choose a valid date range and start/end time." } as const;
     if (occurrenceDateKey(startsAt, series.time_zone ?? null) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
@@ -338,7 +337,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const dates = await queryable.query("SELECT occurrence_date::text AS date,date_type FROM resource_booking_series_dates WHERE series_id=$1", [seriesId]);
     const extras = dates.rows.filter((row: { date_type: string }) => row.date_type === "extra").map((row: { date: string }) => row.date);
     const excluded = dates.rows.filter((row: { date_type: string }) => row.date_type === "excluded").map((row: { date: string }) => row.date);
-    const proposed = seriesDates(startsAt, endsAt, input.recurrence, extras, excluded, series.time_zone ?? null).filter((item) => item.localDate >= input.fromDate);
+    let proposed: ReturnType<typeof seriesDates>;
+    if (series.all_day_date) {
+      try {
+        const window = fullDayBounds(input.fromDate, series.time_zone);
+        if (+window.startsAt !== +startsAt || +window.endsAt !== +endsAt) {
+          return { error: "Full-day bookings must match the full calendar day in the series time zone." } as const;
+        }
+        proposed = seriesDatesInTimeZone(startsAt, endsAt, input.recurrence, extras, excluded, series.time_zone, true);
+      } catch {
+        return { error: "A full-day booking date could not be resolved in the series time zone." } as const;
+      }
+    } else {
+      proposed = seriesDates(startsAt, endsAt, input.recurrence, extras, excluded, series.time_zone ?? null);
+    }
+    proposed = proposed.filter((item) => item.localDate >= input.fromDate);
     if (!proposed.length) return { error: "This repeat rule has no future occurrences from the selected date." } as const;
     const current = await queryable.query(`SELECT occurrence.resource_booking_id AS id,occurrence.occurrence_starts_at AS "occurrenceStartsAt",occurrence.is_extra_date AS "isExtraDate",booking.status,
         to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
@@ -346,7 +359,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       FROM resource_booking_series_occurrences occurrence JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=occurrence.department_id
       JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
       WHERE occurrence.department_id=$1 AND occurrence.series_id=$2 AND booking.starts_at>=now()
-        AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date >= $3::date ORDER BY occurrence.occurrence_starts_at`, [departmentId, seriesId, input.fromDate]);
+        AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date >= $3::date ORDER BY occurrence.occurrence_starts_at${apply && series.all_day_date ? " FOR UPDATE OF booking" : ""}`, [departmentId, seriesId, input.fromDate]);
     const approved = current.rows.filter((row: { status: string }) => row.status === "approved");
     const requested = current.rows.filter((row: { status: string }) => row.status === "requested");
     const requestedDates = new Set(requested.map((row: { occurrenceDate: string }) => row.occurrenceDate));
@@ -873,7 +886,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const locked = await client.query("SELECT id,requested_by FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE", [request.params.seriesId, departmentId]);
       if (!locked.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking series not found in this location." }); }
       if (locked.rows[0].requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can edit future occurrences." }); }
-      const plan = await calculateFutureEdit(departmentId, request.params.seriesId, request.body, client);
+      const plan = await calculateFutureEdit(departmentId, request.params.seriesId, request.body, client, true);
       if ("error" in plan) { await client.query("ROLLBACK"); return reply.code(400).send({ error: plan.error }); }
       if (plan.approvedCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `${plan.approvedCount} future occurrence(s) are already approved. No changes were made; handle those bookings individually before editing the series.` }); }
       if (plan.addedCount > 0 && plan.series.linked_appointment_id) {
@@ -1051,8 +1064,41 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const series = found.rows[0];
       if (!series) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking series not found." }); }
       if (!isManager(request) && series.requested_by !== request.authenticatedUser!.id) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You can only edit your own booking series." }); }
-      if (series.all_day_date) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Extra dates are unavailable for this full-day booking." }); }
+      if (series.all_day_date && series.recurrence?.frequency === "once") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Choose a recurring full-day booking to add an extra date." }); }
       if (request.body.date < occurrenceDateKey(new Date(), series.time_zone ?? null)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a future date." }); }
+      let window: ReturnType<typeof occurrenceAtDate>;
+      try {
+        window = series.all_day_date
+          ? fullDayBounds(request.body.date, series.time_zone)
+          : occurrenceAtDate(new Date(series.starts_at), new Date(series.ends_at), request.body.date, series.time_zone ?? null);
+      } catch (error) {
+        if (!series.all_day_date) throw error;
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "This date could not be resolved in the series time zone." });
+      }
+      const { startsAt, endsAt } = window;
+      if (series.all_day_date && (endsAt <= startsAt || startsAt.getTime() > Date.now() + 366 * DAY_MS)) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose a valid full day within the next twelve months." });
+      }
+      const existingFullDay = series.all_day_date ? await client.query<{ id: string }>(
+        `SELECT booking.id FROM resource_booking_series_occurrences occurrence
+           JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
+          WHERE occurrence.series_id=$1 AND occurrence.department_id=$2 AND occurrence.occurrence_starts_at=$3
+            AND booking.status IN ('requested','approved') FOR UPDATE OF booking`,
+        [series.id, departmentId, startsAt],
+      ) : null;
+      if (series.all_day_date && series.linked_appointment_id && !existingFullDay?.rowCount) {
+        if (!isManager(request)) {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "Resource managers are required to link bookings to shared appointments." });
+        }
+        if (!await calendarLinkingAvailable(client, departmentId, false) ||
+            !await lockLinkableAppointment(client, request, departmentId, series.linked_appointment_id)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The linked appointment is no longer available." });
+        }
+      }
       const policy = await lockResourceBookingPolicy(client, departmentId, series.resource_id);
       if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
       if (!await canViewResource(client, departmentId, policy.visibility_group_id, request.authenticatedUser!.id, isManager(request))) {
@@ -1064,23 +1110,36 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(403).send({ error: resourceManagerRequired });
       }
       if (policy.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
-      const { startsAt, endsAt } = occurrenceAtDate(new Date(series.starts_at), new Date(series.ends_at), request.body.date, series.time_zone ?? null);
       await client.query("DELETE FROM resource_booking_series_dates WHERE series_id=$1 AND occurrence_date=$2 AND date_type='excluded'", [series.id, request.body.date]);
       await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [series.id, request.body.date, request.authenticatedUser!.id]);
       const bookingId = randomUUID();
-      const status = series.initial_status ?? "requested";
-      await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
+      const status = series.all_day_date ? (policy.requires_approval && !isManager(request) ? "requested" : "approved") : series.initial_status ?? "requested";
+      const existingBookingId = existingFullDay?.rows[0]?.id;
+      if (!existingBookingId) await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        ON CONFLICT DO NOTHING`, [bookingId, departmentId, series.resource_id, series.requested_by, series.purpose, startsAt, endsAt, status, series.quantity, series.lead_in_minutes, series.cleanup_minutes]);
-      const actual = await client.query("SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND starts_at=$3", [departmentId, series.resource_id, startsAt]);
-      const finalBookingId = actual.rows[0]?.id;
+        ${series.all_day_date ? "" : "ON CONFLICT DO NOTHING"}`, [bookingId, departmentId, series.resource_id, series.requested_by, series.purpose, startsAt, endsAt, status, series.quantity, series.lead_in_minutes, series.cleanup_minutes]);
+      const finalBookingId = series.all_day_date ? existingBookingId ?? bookingId : (await client.query(
+        "SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND starts_at=$3",
+        [departmentId, series.resource_id, startsAt],
+      )).rows[0]?.id;
       if (!finalBookingId) throw new Error("The extra occurrence could not be created.");
-      await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,true) ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET is_extra_date=true", [randomUUID(), departmentId, series.id, finalBookingId, startsAt]);
+      await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,true) ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET is_extra_date=true,resource_booking_id=CASE WHEN $6 THEN EXCLUDED.resource_booking_id ELSE resource_booking_series_occurrences.resource_booking_id END", [randomUUID(), departmentId, series.id, finalBookingId, startsAt, Boolean(series.all_day_date)]);
+      if (series.all_day_date && !existingBookingId && series.linked_appointment_id) {
+        await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+          [series.linked_appointment_id, finalBookingId, request.authenticatedUser!.id]);
+      }
+      if (series.all_day_date && !existingBookingId && status === "requested") await recordPendingResourceBookingRequest(client, departmentId, series.requested_by, [finalBookingId]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'extra_date_added',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.id, finalBookingId, JSON.stringify({ date: request.body.date })]);
       await client.query("COMMIT");
       context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
       return reply.code(201).send({ bookingId: finalBookingId, startsAt, endsAt });
-    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) {
+        return reply.code(409).send({ error: "The extra occurrence conflicts with resource availability. No changes were made." });
+      }
+      throw error;
+    }
     finally { client.release(); }
   });
 
