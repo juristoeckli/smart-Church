@@ -1,5 +1,6 @@
 import { captureSignupAnswers, prepareSignupQuestions, signupAnswerFields, signupQuestionsSchema, type SignupQuestion, type SignupQuestionDraft } from "./modules/community/signup-form.js";
 import { isResourceBookingManager } from "./resource-booking-policy.js";
+import { registerSharedEventAgenda } from "./event-shared-agenda.js";
 import { registerLiveRunSheetRoutes } from "./event-live-run-sheet.js";
 import { registerServiceEventFactsRoutes } from "./service-event-facts.js";
 import { registerServiceEventFilesRoutes } from "./service-event-files.js";
@@ -561,6 +562,7 @@ type ServiceEventRow = {
   asset_ids: string[];
   positions: CreateServiceEvent["positions"];
   time_plan: CreateServiceEvent["timePlan"];
+  shared_agenda_source_id?: string | null;
   attendance_adults?: number;
   attendance_children?: number;
   attendance_recorded_at?: string | null;
@@ -652,6 +654,7 @@ function mapServiceEvent(row: ServiceEventRow): ServiceEvent {
     assetIds: row.asset_ids ?? [],
     positions: row.positions ?? [],
     timePlan: row.time_plan ?? [],
+    ...(row.shared_agenda_source_id ? { sharedAgendaSourceId: row.shared_agenda_source_id } : {}),
     attendanceAdults: row.attendance_adults ?? 0,
     attendanceChildren: row.attendance_children ?? 0,
     registrationEnabled: row.registration_enabled ?? false,
@@ -2734,7 +2737,7 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   const result = await pool.query<ServiceEventRow>(
     `SELECT id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-            location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
+            location, description, room, asset_ids, positions, time_plan, shared_agenda_source_id, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
              registration_enabled, registration_capacity, registration_token, responsible_contact_id, cancelled_at, cancellation_reason,
             (SELECT display_name FROM app_users WHERE id=service_events.cancelled_by) AS cancelled_by_name,
             (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count
@@ -2960,22 +2963,30 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
               JOIN bookable_resources resource ON resource.id=saved.asset_id AND resource.department_id=$2
               WHERE NOT (saved.asset_id=ANY($12::uuid[]))
                 AND NOT can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$20,$21)
-            ), positions = $13::jsonb, time_plan = $14::jsonb,
+            ), positions = $13::jsonb, time_plan = CASE WHEN shared_agenda_source_id IS NULL THEN $14::jsonb ELSE time_plan END,
             registration_enabled = $15, registration_capacity = $16,
             registration_token = CASE WHEN $15 THEN COALESCE(registration_token, $17::uuid) ELSE NULL END,
             responsible_contact_id = CASE WHEN $19::boolean THEN $18::uuid ELSE responsible_contact_id END, updated_at = now()
       WHERE id = $1 AND department_id = $2
       RETURNING id, title, kind, event_date::text, is_all_day, to_char(start_time, 'HH24:MI') AS start_time,
                 CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time, 'HH24:MI') END AS end_time,
-                location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
+                location, description, room, asset_ids, positions, time_plan, shared_agenda_source_id, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
                  registration_enabled, registration_capacity, registration_token, responsible_contact_id, cancelled_at, cancellation_reason,
                 (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
     [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null, event.responsibleContactId ?? null, event.responsibleContactId !== undefined, request.authenticatedUser!.id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))],
   );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     await syncEventPositionResponses(client, request.params.id, event.positions, previousPositionsResult.rows[0].positions);
+    const updatedEvent = result.rows[0];
+    if (updatedEvent.shared_agenda_source_id) {
+      const { rows: [agenda] } = await client.query<{ shared_agenda_source_id: string | null }>(
+        "SELECT shared_agenda_source_id FROM service_events WHERE id=$1 AND department_id=$2",
+        [request.params.id, selectedDepartmentId],
+      );
+      updatedEvent.shared_agenda_source_id = agenda.shared_agenda_source_id;
+    }
     await client.query("COMMIT");
-    return mapServiceEvent({ ...result.rows[0], asset_ids: event.assetIds ?? [] });
+    return mapServiceEvent({ ...updatedEvent, asset_ids: event.assetIds ?? [] });
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
@@ -3684,6 +3695,10 @@ registerServiceEventFilesRoutes(app, { pool: pool ?? null, available: () => data
   validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 registerServiceEventFactsRoutes(app, { pool: pool ?? null, available: () => databaseReady,
+  resolveScope: (request, reply) => activeDepartmentId(request, reply, false, false, "events_manage"),
+  validateMutation: validModuleMutation, lockDepartmentForWrite });
+
+registerSharedEventAgenda(app, { pool: pool ?? null, available: () => databaseReady,
   resolveScope: (request, reply) => activeDepartmentId(request, reply, false, false, "events_manage"),
   validateMutation: validModuleMutation, lockDepartmentForWrite });
 

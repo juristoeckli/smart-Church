@@ -135,6 +135,7 @@ export interface ServiceEvent {
   assetIds?: string[];
   positions?: ServicePosition[];
   timePlan?: ServicePlanItem[];
+  sharedAgendaSourceId?: string;
   attendanceAdults?: number;
   attendanceChildren?: number;
   attendanceRecordedAt?: string;
