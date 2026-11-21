@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
-import { isResourceBookingManager } from "../../resource-booking-policy.js";
+import { canBookForOthers, isResourceBookingManager } from "../../resource-booking-policy.js";
 
 const statuses = ["requested", "approved", "declined", "cancelled"] as const;
 const periods = ["upcoming", "past"] as const;
@@ -55,10 +55,13 @@ export function registerMyResourceBookings(app: FastifyInstance, context: Module
       context.pool!.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query<{ id: string; cursorStart: string }>(
         `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,booking.subtitle,booking.description,booking.quantity,
+                CASE WHEN beneficiary.id IS NOT NULL THEN concat_ws(' ',beneficiary.first_name,beneficiary.last_name) END AS "beneficiaryName",
                 booking.status,CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
                 to_char(booking.starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorStart"
            FROM resource_bookings booking JOIN bookable_resources resource
              ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+           LEFT JOIN contacts beneficiary ON $9::boolean AND beneficiary.id=booking.beneficiary_contact_id
+             AND beneficiary.department_id=booking.department_id AND beneficiary.archived_at IS NULL
            LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
            LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
            LEFT JOIN resource_booking_series_occurrence_overrides day_override
@@ -70,7 +73,7 @@ export function registerMyResourceBookings(app: FastifyInstance, context: Module
             AND booking.ends_at ${dateFilter} $5::timestamptz
             AND ($6::timestamptz IS NULL OR (booking.starts_at,booking.id) ${position} ($6::timestamptz,$7::uuid))
           ORDER BY booking.starts_at ${ordering},booking.id ${ordering} LIMIT $8`,
-        [departmentId, userId, isResourceBookingManager(request), status, anchor, cursor?.start ?? null, cursor?.id ?? null, pageSize + 1],
+        [departmentId, userId, isResourceBookingManager(request), status, anchor, cursor?.start ?? null, cursor?.id ?? null, pageSize + 1, canBookForOthers(request)],
       ),
     ]);
     const page = bookings.rows.slice(0, pageSize);

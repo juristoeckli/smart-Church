@@ -1,5 +1,6 @@
 import type { FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
+import { canReadPrivateContactDetails } from "./location-grants.js";
 
 export const resourceCalendarRequired = "This resource must be booked from a saved Calendar occurrence.";
 
@@ -9,6 +10,11 @@ export function isResourceBookingManager(request: FastifyRequest, allowScheduler
   return request.activeDepartmentRole === "site_admin"
     || (request.activeDepartmentPermissions ?? []).includes("resources_manage")
     || (allowSchedulerGrant && (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage"));
+}
+
+export function canBookForOthers(request: FastifyRequest) {
+  return isResourceBookingManager(request)
+    && canReadPrivateContactDetails(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null);
 }
 
 export async function canViewResource(client: Pick<PoolClient, "query">, departmentId: string, groupId: string | null, userId: string, canManage: boolean) {

@@ -1,7 +1,7 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
 import { registerMyResourceBookings } from "./my-resource-bookings.js";
 import { resourceBookedDayReport } from "./booked-day-report.js";
-import { canViewResource, isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
+import { canBookForOthers, canViewResource, isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
@@ -15,6 +15,7 @@ type SeriesInput = {
   resourceId: string; purpose: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; quantity?: number;
   leadInMinutes?: number; cleanupMinutes?: number; recurrence?: RepeatRule;
   allDayDate?: string;
+  beneficiaryContactId?: string;
   extraDates?: string[]; excludedDates?: string[]; linkedAppointmentId?: string | null; linkedOccurrenceStartAt?: string;
 };
 type ResourceSelection = { resourceId: string; quantity: number; leadInMinutes: number; cleanupMinutes: number };
@@ -243,25 +244,26 @@ async function calendarLinkingAvailable(client: Pick<PoolClient, "query">, depar
 async function insertBookingSeries(client: PoolClient, options: ResourceSelection & {
   departmentId: string; userId: string; purpose: string; subtitle?: string; description?: string; startsAt: Date; endsAt: Date; timeZone: string;
   allDayDate?: string;
+  beneficiaryContactId?: string;
   repeat: RepeatRule; extraDates: string[]; excludedDates: string[];
   instances: { startsAt: Date; endsAt: Date; localDate: string }[];
   status: "requested" | "approved"; appointmentId: string | null; occurrenceStart: string | null;
 }) {
   const {
     departmentId, resourceId, userId, purpose, subtitle = "", description = "", startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
-    instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart, allDayDate,
+    instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart, allDayDate, beneficiaryContactId,
   } = options;
   const seriesId = randomUUID();
   const bookingIds: string[] = [];
-  await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id,all_day_date,subtitle,description)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15::date,$16,$17)`, [seriesId, departmentId, resourceId, userId, purpose, startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, occurrenceStart ? null : appointmentId, allDayDate ?? null, subtitle, description]);
+  await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id,all_day_date,subtitle,description,beneficiary_contact_id)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14,$15::date,$16,$17,$18)`, [seriesId, departmentId, resourceId, userId, purpose, startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, occurrenceStart ? null : appointmentId, allDayDate ?? null, subtitle, description, beneficiaryContactId ?? null]);
   for (const day of new Set(extraDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [seriesId, day, userId]);
   for (const day of new Set(excludedDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [seriesId, day, userId]);
   for (const occurrence of instances) {
     const bookingId = randomUUID();
     bookingIds.push(bookingId);
-    await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description)
-      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`, [bookingId, departmentId, resourceId, userId, purpose, occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes, subtitle, description]);
+    await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, [bookingId, departmentId, resourceId, userId, purpose, occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes, subtitle, description, beneficiaryContactId ?? null]);
     await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.localDate)]);
     if (appointmentId) {
       await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by,occurrence_start) VALUES($1,$2,$3,$4::timestamp) ON CONFLICT DO NOTHING", [appointmentId, bookingId, userId, occurrenceStart]);
@@ -369,6 +371,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   const resourceCategories = ["room", "vehicle", "equipment", "other"] as const;
 
+  app.get<{ Querystring: { q?: string } }>("/api/modules/resource-scheduler/booking-beneficiaries", {
+    schema: { querystring: { type: "object", additionalProperties: false, properties: { q: { type: "string", maxLength: 80 } } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    if (!canBookForOthers(request)) return reply.code(403).send({ error: "Resource management and private People access are required." });
+    reply.header("Cache-Control", "private, no-store");
+    const query = request.query.q?.trim() ?? "";
+    if (query.length < 2) return [];
+    return (await context.pool!.query<{ id: string; name: string }>(
+      `SELECT id,concat_ws(' ',first_name,last_name) AS name
+         FROM contacts WHERE department_id=$1 AND archived_at IS NULL
+          AND strpos(lower(concat_ws(' ',first_name,last_name)),lower($2))>0
+        ORDER BY lower(last_name),lower(first_name),id LIMIT 30`,
+      [departmentId, query],
+    )).rows;
+  });
+
   app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string; search?: string; category?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
@@ -391,6 +411,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3,$2) ORDER BY resource.location,resource.category,resource.name`, [departmentId, isManager(request), request.authenticatedUser!.id, search]),
       context.pool!.query(`SELECT booking.id,booking.resource_id AS "resourceId",resource.name AS "resourceName",resource.location,
           booking.requested_by AS "requestedBy",requester.display_name AS "requesterName",booking.purpose,booking.subtitle,booking.description,
+          CASE WHEN beneficiary.id IS NOT NULL THEN concat_ws(' ',beneficiary.first_name,beneficiary.last_name) END AS "beneficiaryName",
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",occurrence.is_extra_date AS "isExtraDate",
@@ -400,6 +421,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.created_at AS "createdAt",booking.updated_at AS "updatedAt"
         FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
         JOIN app_users requester ON requester.id=booking.requested_by
+        LEFT JOIN contacts beneficiary ON $11::boolean AND beneficiary.id=booking.beneficiary_contact_id
+          AND beneficiary.department_id=booking.department_id AND beneficiary.archived_at IS NULL
         LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
         LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
         LEFT JOIN resource_booking_series_occurrence_overrides day_override
@@ -412,13 +435,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($7::boolean OR resource.active=true)
           AND (booking.requested_by=$6 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$6,$7))
           AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(booking.subtitle),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
-        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search, category]),
+        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search, category, canBookForOthers(request)]),
       canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
       canManage ? context.pool!.query<{ id: string; name: string }>(
         "SELECT id,name FROM church_groups groups WHERE department_id=$1 AND (to_jsonb(groups)->>'status')='active' ORDER BY lower(name),id", [departmentId],
       ).then((result) => result.rows) : Promise.resolve([]),
     ]);
-    return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, visibilityGroups, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
+    return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, visibilityGroups, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to, canBookForOthers: canBookForOthers(request) };
   });
 
   type BookedDayQuery = { from: string; through: string; resourceId?: string; markedOnly?: boolean; category?: string };
@@ -727,6 +750,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       recurrence: { type: "object", additionalProperties: false, properties: { frequency: { type: "string", enum: ["once", "daily", "weekly", "monthly", "yearly"] }, interval: { type: "integer", minimum: 1, maximum: 366 }, endsOn: { type: "string", format: "date" }, count: { type: "integer", minimum: 1, maximum: 500 }, weekdays: { type: "array", maxItems: 7, items: { type: "integer", minimum: 0, maximum: 6 } } } },
       extraDates: { type: "array", maxItems: 100, items: { type: "string", format: "date" } }, excludedDates: { type: "array", maxItems: 100, items: { type: "string", format: "date" } }, linkedAppointmentId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] },
       allDayDate: { type: "string", format: "date" },
+      beneficiaryContactId: { type: "string", format: "uuid" },
       subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 2000 },
       linkedOccurrenceStartAt: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$" },
     } } },
@@ -765,7 +789,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const zoneResult = await context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
     const timeZone = zoneResult.rows[0]?.time_zone ?? "UTC";
     if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
-    const { allDayDate } = request.body;
+    const { allDayDate, beneficiaryContactId } = request.body;
+    if (beneficiaryContactId && !canBookForOthers(request)) {
+      return reply.code(403).send({ error: "Resource management and private People access are required to book for someone else." });
+    }
     if (allDayDate !== undefined) {
       if (!isoDate(allDayDate) || occurrenceStart || (repeat.frequency === "once" && (repeat.endsOn || repeat.count || repeat.weekdays?.length || extraDates.length || excludedDates.length))) {
         return reply.code(400).send({ error: "Choose a valid start date and repeat rule for the full-day booking." });
@@ -833,11 +860,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: resourceCalendarRequired });
       }
+      if (beneficiaryContactId) {
+        const beneficiary = await client.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR SHARE",
+          [beneficiaryContactId, departmentId]);
+        if (!beneficiary.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Choose an active People record from this location." });
+        }
+      }
       status = policy.requires_approval && !isManager(request) ? "requested" : "approved";
       created = await insertBookingSeries(client, {
         departmentId, resourceId: policy.id, userId: request.authenticatedUser!.id,
         purpose: request.body.purpose.trim(), subtitle: request.body.subtitle?.trim(), description: request.body.description?.trim(), startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
-        instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart, allDayDate,
+        instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart, allDayDate, beneficiaryContactId,
       });
       if (status === "requested") await recordPendingResourceBookingRequest(client, departmentId, request.authenticatedUser!.id, created.bookingIds);
       await client.query("COMMIT");
@@ -948,8 +983,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         } else {
           await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND occurrence_date=$2::date", [request.params.seriesId, date]);
           const bookingId = randomUUID();
-          await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description)
-            VALUES($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9,$10,$11,$12)`, [bookingId, departmentId, plan.series.resource_id, plan.series.requested_by, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes, subtitle, description]);
+          await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9,$10,$11,$12,
+              (SELECT id FROM contacts WHERE id=$13 AND department_id=$2 AND archived_at IS NULL))`, [bookingId, departmentId, plan.series.resource_id, plan.series.requested_by, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes, subtitle, description, plan.series.beneficiary_contact_id]);
           await client.query(`INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)
             ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,is_extra_date=EXCLUDED.is_extra_date`, [randomUUID(), departmentId, request.params.seriesId, bookingId, occurrence.startsAt, extras.has(date)]);
           if (plan.series.linked_appointment_id) {
@@ -1136,9 +1172,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const bookingId = randomUUID();
       const status = series.all_day_date ? (policy.requires_approval && !isManager(request) ? "requested" : "approved") : series.initial_status ?? "requested";
       const existingBookingId = existingFullDay?.rows[0]?.id;
-      if (!existingBookingId) await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-        ${series.all_day_date ? "" : "ON CONFLICT DO NOTHING"}`, [bookingId, departmentId, series.resource_id, series.requested_by, series.purpose, startsAt, endsAt, status, series.quantity, series.lead_in_minutes, series.cleanup_minutes, series.subtitle, series.description]);
+      if (!existingBookingId) await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+          (SELECT id FROM contacts WHERE id=$14 AND department_id=$2 AND archived_at IS NULL))
+        ${series.all_day_date ? "" : "ON CONFLICT DO NOTHING"}`, [bookingId, departmentId, series.resource_id, series.requested_by, series.purpose, startsAt, endsAt, status, series.quantity, series.lead_in_minutes, series.cleanup_minutes, series.subtitle, series.description, series.beneficiary_contact_id]);
       const finalBookingId = series.all_day_date ? existingBookingId ?? bookingId : (await client.query(
         "SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND starts_at=$3",
         [departmentId, series.resource_id, startsAt],
