@@ -8,4 +8,4 @@ The API uses ICSP (TCP `1319`) for control and current level feedback. For each 
 
 Set the NetLinx master IP address under AMX settings. The ICSP service uses fixed TCP port `1319`; no Telnet credentials are needed.
 
-For the Steffisburg master, the touchpanel is device `10001` and the Smart-Church control target is device `34001`, both on system `1`. Home mode buttons use channels `11`–`16`. Channel and audio mappings are fixed module data sourced from the TP4 project.
+For the Steffisburg master, the touchpanel is device `10001` and the Smart-Church control target is device `34001`, both on system `1`. Home mode buttons use channels `11`–`16`. The four DSP status lamps read panel channels `21`–`24` from their TP4-mapped ports `1`–`4`. Channel and audio mappings are fixed module data sourced from the TP4 project.
