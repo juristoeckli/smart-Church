@@ -33,6 +33,8 @@
 .amx-status-bar time{min-width:3.2em;text-align:right;font-size:clamp(.9rem,1.5vw,1.3rem)}
 .amx-toast{position:absolute;left:2%;bottom:9%;margin:0;padding:8px 12px;border:1px solid #8d8b70;border-radius:4px;background:#f5f1dc;color:#30482c;font-size:clamp(.75rem,1.2vw,1rem);box-shadow:0 3px 8px #0003}
 .amx-toast-error{color:#8b2924;border-color:#a4534b}
+.amx-toast-stack{position:absolute;left:2%;bottom:9%;z-index:1200;display:grid;gap:4px;max-width:90%;overflow-wrap:anywhere}
+.amx-toast-stack .amx-toast{position:static;max-width:100%}
 .amx-setup-note{margin:.6rem 0 0;color:var(--muted);font-size:.85rem}
 .amx-form{display:grid;gap:.85rem;max-width:860px;margin-top:1rem}
 .amx-form-grid{display:grid;grid-template-columns:minmax(0,1fr) 130px;gap:.75rem}
