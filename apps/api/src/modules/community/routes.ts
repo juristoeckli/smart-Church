@@ -444,9 +444,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return result.rows;
     });
 
-    routes.put<{ Params: { id: string; requestId: string }; Body: { decision: "approved" | "declined"; contactId?: string } }>("/api/groups/:id/join-requests/:requestId", { schema: {
+    routes.put<{ Params: { id: string; requestId: string }; Body: { decision: "approved" | "declined" | "waitlisted"; contactId?: string } }>("/api/groups/:id/join-requests/:requestId", { schema: {
       params: { type: "object", required: ["id", "requestId"], properties: { id: { type: "string", format: "uuid" }, requestId: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["decision"], properties: { decision: { type: "string", enum: ["approved", "declined"] }, contactId: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["decision"], properties: { decision: { type: "string", enum: ["approved", "declined", "waitlisted"] }, contactId: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
@@ -463,14 +463,15 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         );
         if (!joinRequest.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This join request is no longer pending." }); }
         let contactId: string | null = null;
-        if (request.body.decision === "approved") {
+        const { decision } = request.body;
+        if (decision !== "declined") {
           if (request.body.contactId) {
             const selected = await client.query<{ id: string }>("SELECT id FROM contacts WHERE id=$1 AND department_id=$2 AND lower(email)=lower($3)", [request.body.contactId, departmentId, joinRequest.rows[0].email]);
             if (!selected.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a directory person with the same email address, or leave this blank to create a visitor record." }); }
             contactId = selected.rows[0].id;
           } else {
             const matching = await client.query<{ id: string }>("SELECT id FROM contacts WHERE department_id=$1 AND lower(email)=lower($2) ORDER BY id LIMIT 2", [departmentId, joinRequest.rows[0].email]);
-            if (matching.rows.length > 1) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "More than one person uses this email. Select the matching person explicitly before approving." }); }
+            if (matching.rows.length > 1) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "More than one person uses this email. Select the matching person explicitly before reviewing this application." }); }
             contactId = matching.rows[0]?.id ?? null;
             if (!contactId) {
               const created = await client.query<{ id: string }>(
@@ -480,7 +481,23 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
               contactId = created.rows[0].id;
             }
           }
-          await client.query("INSERT INTO group_members (group_id,contact_id,role,status,joined_on) VALUES ($1,$2,'Member','active',CURRENT_DATE) ON CONFLICT (group_id,contact_id) DO NOTHING", [request.params.id, contactId]);
+          const waitlisted = decision === "waitlisted";
+          await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
+          const inserted = await client.query(
+            `INSERT INTO group_members (group_id,contact_id,role,status,joined_on,waitlisted_at)
+             VALUES($1,$2,'Member',$3,CASE WHEN $3='active' THEN CURRENT_DATE END,CASE WHEN $3='waitlist' THEN statement_timestamp() END)
+             ON CONFLICT (group_id,contact_id) DO NOTHING RETURNING contact_id`,
+            [request.params.id, contactId, waitlisted ? "waitlist" : "active"],
+          );
+          if (waitlisted && !inserted.rowCount) {
+            const membership = await client.query<{ status: string }>(
+              "SELECT status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [request.params.id, contactId],
+            );
+            if (membership.rows[0]?.status !== "waitlist") {
+              await client.query("ROLLBACK");
+              return reply.code(409).send({ error: "This person already has a group membership. Review that membership before waitlisting the application." });
+            }
+          }
         }
         await client.query(
           "UPDATE group_join_requests SET status=$3,contact_id=$4,reviewed_at=now(),reviewed_by=$5 WHERE id=$1 AND department_id=$2",
@@ -528,10 +545,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         if (existing.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A request from this email is already waiting for review." }); }
         const member = await client.query(
           `SELECT 1 FROM group_members membership JOIN contacts person ON person.id=membership.contact_id
-            WHERE membership.group_id=$1 AND lower(person.email)=lower($2) AND membership.status='active'`,
-          [groupId, email],
+            WHERE membership.group_id=$1 AND person.department_id=$3 AND lower(person.email)=lower($2) AND membership.status IN ('active','waitlist')`,
+          [groupId, email, groupDepartmentId],
         );
-        if (member.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email is already connected to an active group member." }); }
+        if (member.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A registration for this email is already on file." }); }
         await client.query(
           "INSERT INTO group_join_requests (id,department_id,group_id,first_name,last_name,email) VALUES ($1,$2,$3,$4,$5,$6)",
           [randomUUID(), groupDepartmentId, groupId, firstName, lastName, email],

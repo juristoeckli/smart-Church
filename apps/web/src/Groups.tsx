@@ -426,23 +426,23 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     finally { setSignupSaving(false); }
   }
 
-  async function reviewJoinRequest(joinRequest: GroupJoinRequest, decision: "approved" | "declined") {
-    if (!selected) return;
+  async function reviewJoinRequest(joinRequest: GroupJoinRequest, decision: "approved" | "declined" | "waitlisted") {
+    if (!selected || waitlistPending || memberListChanged) return;
     const matches = contacts.filter((person) => person.email?.trim().toLocaleLowerCase() === joinRequest.email.toLocaleLowerCase());
     const contactId = requestContactIds[joinRequest.id] || (matches.length === 1 ? matches[0].id : undefined);
-    if (decision === "approved" && matches.length > 1 && !contactId) { setError("Choose which existing person matches this request."); return; }
+    if (decision !== "declined" && matches.length > 1 && !contactId) { setError("Choose which existing person matches this request."); return; }
     setSaving(true); setError("");
     try {
       const response = await fetch(`/api/groups/${selected.id}/join-requests/${joinRequest.id}`, {
-        method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId },
-        body: JSON.stringify({ decision, ...(decision === "approved" && contactId ? { contactId } : {}) }),
+        method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ decision, ...(decision !== "declined" && contactId ? { contactId } : {}) }),
       });
       const result = await response.json() as { status?: string; error?: string };
       if (!response.ok || result.status !== decision) throw new Error(result.error ?? "Could not update the join request.");
       setJoinRequests((current) => current.filter((item) => item.id !== joinRequest.id));
-      if (decision === "approved") {
+      if (decision !== "declined") {
         await loadGroups();
-        setFeedback(translate("groups.approvedFeedback"));
+        setFeedback(decision === "waitlisted" ? "Application added to the membership waitlist." : translate("groups.approvedFeedback"));
       }
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update the join request."); }
     finally { setSaving(false); }
@@ -642,7 +642,9 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
           {canManage && !selected.importedFrom && loadedDepartmentId === departmentId && <GroupTypeHistory key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} groupType={selected.groupType} />}
           {canManage && !selected.importedFrom && <section className="group-join-requests"><div className="community-members-heading"><div><h3>{translate("groups.joinRequests")}</h3><p>{translate("groups.waitingReview").replace("{count}", String(joinRequests.length))}</p></div></div>{joinRequests.length ? <div className="group-join-request-list">{joinRequests.map((joinRequest) => {
             const matches = contacts.filter((person) => person.email?.trim().toLocaleLowerCase() === joinRequest.email.toLocaleLowerCase());
-            return <article className="group-join-request" key={joinRequest.id}><div><strong>{joinRequest.firstName} {joinRequest.lastName}</strong><small>{joinRequest.email} · {formatUserDate(joinRequest.createdAt, true)}</small></div>{matches.length > 1 && <label>{translate("groups.matchPerson")}<select value={requestContactIds[joinRequest.id] ?? ""} onChange={(event) => setRequestContactIds((current) => ({ ...current, [joinRequest.id]: event.target.value }))}><option value="">{translate("groups.choosePerson")}</option>{matches.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select></label>}{matches.length === 0 && <small>{translate("groups.approvalCreatesVisitor")}</small>}<div className="group-join-request-actions"><button className="button button-secondary" type="button" disabled={saving} onClick={() => void reviewJoinRequest(joinRequest, "declined")}>{translate("groups.decline")}</button><button className="button button-primary" type="button" disabled={saving || matches.length > 1 && !requestContactIds[joinRequest.id]} onClick={() => void reviewJoinRequest(joinRequest, "approved")}><Check size={14} />{translate("groups.approve")}</button></div></article>;
+            return <article className="group-join-request" key={joinRequest.id}><div><strong>{joinRequest.firstName} {joinRequest.lastName}</strong><small>{joinRequest.email} · {formatUserDate(joinRequest.createdAt, true)}</small></div>{matches.length > 1 && <label>{translate("groups.matchPerson")}<select value={requestContactIds[joinRequest.id] ?? ""} onChange={(event) => setRequestContactIds((current) => ({ ...current, [joinRequest.id]: event.target.value }))}><option value="">{translate("groups.choosePerson")}</option>{matches.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select></label>}{matches.length === 0 && <small>Approving or waitlisting creates a visitor record if no existing person matches.</small>}<div className="group-join-request-actions"><button className="button button-secondary" type="button" disabled={saving || waitlistPending || memberListChanged} onClick={() => void reviewJoinRequest(joinRequest, "declined")}>{translate("groups.decline")}</button><button className="button button-secondary" type="button"
+              disabled={saving || waitlistPending || memberListChanged || (matches.length > 1 && !requestContactIds[joinRequest.id])}
+              onClick={() => void reviewJoinRequest(joinRequest, "waitlisted")}>Add to waitlist</button><button className="button button-primary" type="button" disabled={saving || waitlistPending || memberListChanged || (matches.length > 1 && !requestContactIds[joinRequest.id])} onClick={() => void reviewJoinRequest(joinRequest, "approved")}><Check size={14} />{translate("groups.approve")}</button></div></article>;
           })}</div> : <p className="community-empty">{translate("groups.noJoinRequests")}</p>}</section>}
           <div className="community-members-heading"><div><h3>{translate("groups.members")}</h3><p>{translate("groups.personCount").replace("{count}", String(selected.memberCount))}{selected.importedFrom ? translate("groups.managedInChurchTools") : ""}</p></div>{canManage && !selected.importedFrom && <button className="button button-primary" type="button" disabled={saving || waitlistPending || !memberListChanged} onClick={() => void saveMembers()}><Check size={15} />{translate("groups.saveMembers")}</button>}</div>
           {canManage && !selected.importedFrom && <label className="search-field community-member-search"><Search size={15} /><input aria-label={translate("groups.searchPeople")} placeholder={translate("groups.searchPeople")} value={query} onChange={(event) => setQuery(event.target.value)} /></label>}
