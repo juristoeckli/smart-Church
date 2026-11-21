@@ -1,7 +1,7 @@
 import { financeRows, financeSourceId, isChurchToolsMappingCodeSupported, readChurchToolsFinanceCodes } from "./finance-preview.js";
 
 type RecordData = Record<string, unknown>;
-type LocalCode = { code: string; name: string; active: boolean };
+type LocalCode = { id?: string; code: string; name: string; active: boolean };
 type LocalAccount = LocalCode & { accountType: "asset" | "liability" | "equity" | "income" | "expense" };
 const object = (value: unknown): RecordData => value && typeof value === "object" && !Array.isArray(value) ? value as RecordData : {};
 const name = (value: unknown) => typeof value === "string" ? value.trim().slice(0, 250) : "";

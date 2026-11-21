@@ -11,6 +11,7 @@ import { importChurchToolsMemberships, readChurchToolsGroupMemberships, readChur
 import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCustomValue } from "./group-membership-custom-fields.js";
 import { ChurchToolsFinanceRangeError, compareChurchToolsFinanceCodes, financeDay, readChurchToolsFinanceCodes, readChurchToolsFinanceJournal, readChurchToolsFinancePeriods } from "./finance-preview.js";
 import { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
+import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -814,6 +815,42 @@ async function listChurchToolsFinancePeriods(base: string, token: string) {
   const [periods, clients] = await Promise.all([get(base, token, "finance/accountingperiods"), get(base, token, "finance/clients")]);
   return readChurchToolsFinancePeriods(periods, clients);
 }
+async function readFinanceMappingSource(config: Settings, periodId: string) {
+  const token = decrypt(config.encrypted_login_token);
+  const periods = await listChurchToolsFinancePeriods(config.instance_url, token);
+  const period = periods.find((item) => item.periodId === periodId);
+  if (!period) return null;
+  const query = new URLSearchParams({ accounting_period_id: periodId });
+  const [accounts, costCenters, groups, classes, types] = await Promise.all([
+    get(config.instance_url, token, `finance/accounts?${query}&calculate_balance=false`),
+    get(config.instance_url, token, `finance/costcenters?${query}`),
+    get(config.instance_url, token, "finance/accountgroups"),
+    get(config.instance_url, token, "finance/accountclasses"),
+    get(config.instance_url, token, "finance/accounttypes"),
+  ]);
+  return { period, chart: { accounts, costCenters, groups, classes, types } };
+}
+
+async function reviewFinanceMapping(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, source: NonNullable<Awaited<ReturnType<typeof readFinanceMappingSource>>>) {
+  const financeTables = await db.query<{ installed: boolean; can_apply: boolean }>(`SELECT to_regclass('public.finance_accounts') IS NOT NULL
+    AND to_regclass('public.finance_cost_centers') IS NOT NULL AS installed,to_regclass('public.finance_audit') IS NOT NULL
+    AND EXISTS(SELECT 1 FROM departments d JOIN installation_modules m ON m.installation_id=d.installation_id
+              WHERE d.id=$1 AND m.module_id='finance' AND m.enabled) AS can_apply`, [departmentId]);
+  type Chart = NonNullable<Parameters<typeof buildChurchToolsFinanceMapping>[2]>;
+  let local: Chart | null = null;
+  if (financeTables.rows[0]?.installed) {
+    const [accounts, costCenters] = await Promise.all([
+      db.query<Chart["accounts"][number]>(`SELECT id,code,name,active,account_type AS "accountType"
+        FROM finance_accounts WHERE department_id=$1`, [departmentId]),
+      db.query<Chart["costCenters"][number]>("SELECT id,code,name,active FROM finance_cost_centers WHERE department_id=$1", [departmentId]),
+    ]);
+    local = { accounts: accounts.rows, costCenters: costCenters.rows };
+  }
+  const mapping = buildChurchToolsFinanceMapping(source.period.periodId, source.chart, local);
+  const review = { formatVersion: 1, sourceInstance: instanceUrl, period: source.period, targetFinanceAvailable: local !== null,
+    canApply: local !== null && financeTables.rows[0]?.can_apply === true, ...mapping };
+  return { ...review, reviewHash: financeMappingHash(review) };
+}
 async function listChurchToolsBookingHistory(config: Settings, token: string, resources: JsonObject[], startDate: string, endDate: string) {
   const ids = [...new Set(resources.map((resource) => bookingSourceId(idOf(resource))))];
   if (ids.includes(null)) throw new Error("ChurchTools returned an invalid bookable resource ID.");
@@ -1593,38 +1630,71 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
       const { periodId } = request.query;
       try {
-        const token = decrypt(config.encrypted_login_token);
-        const periods = await listChurchToolsFinancePeriods(config.instance_url, token);
-        const period = periods.find((item) => item.periodId === periodId);
-        if (!period) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
-        const query = new URLSearchParams({ accounting_period_id: periodId });
-        const [accounts, costCenters, groups, classes, types, financeTables] = await Promise.all([
-          get(config.instance_url, token, `finance/accounts?${query}&calculate_balance=false`),
-          get(config.instance_url, token, `finance/costcenters?${query}`),
-          get(config.instance_url, token, "finance/accountgroups"),
-          get(config.instance_url, token, "finance/accountclasses"),
-          get(config.instance_url, token, "finance/accounttypes"),
-          pool!.query<{ installed: boolean }>(`SELECT to_regclass('public.finance_accounts') IS NOT NULL
-            AND to_regclass('public.finance_cost_centers') IS NOT NULL AS installed`),
-        ]);
-        type LocalFinanceChart = NonNullable<Parameters<typeof buildChurchToolsFinanceMapping>[2]>;
-        let local: LocalFinanceChart | null = null;
-        if (financeTables.rows[0]?.installed) {
-          const [targetAccounts, targetCostCenters] = await Promise.all([
-            pool!.query<LocalFinanceChart["accounts"][number]>(`SELECT code,name,active,account_type AS "accountType"
-              FROM finance_accounts WHERE department_id=$1`, [dept]),
-            pool!.query<{ code: string; name: string; active: boolean }>("SELECT code,name,active FROM finance_cost_centers WHERE department_id=$1", [dept]),
-          ]);
-          local = { accounts: targetAccounts.rows, costCenters: targetCostCenters.rows };
-        }
-        const mapping = buildChurchToolsFinanceMapping(periodId, { accounts, costCenters, groups, classes, types }, local);
+        const source = await readFinanceMappingSource(config, periodId);
+        if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        const mapping = await reviewFinanceMapping(pool!, dept, config.instance_url, source);
         return reply.header("Cache-Control", "private, no-store")
           .header("X-Content-Type-Options", "nosniff")
           .header("Content-Disposition", `attachment; filename="churchtools-finance-mapping-period-${periodId}.json"`)
-          .send({ formatVersion: 1, sourceInstance: config.instance_url, period, targetFinanceAvailable: local !== null, ...mapping });
+          .send(mapping);
       } catch (error) {
         const status = error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare ChurchTools finance mapping." });
+      }
+    });
+    routes.post<{ Body: { periodId: string; reviewHash: string; selections: FinanceSelection[] } }>("/api/modules/sync/churchtools/finance/mapping", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["periodId", "reviewHash", "selections"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        selections: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false,
+          required: ["kind", "sourceId", "action"], properties: { kind: { type: "string", enum: ["account", "cost_center"] },
+            sourceId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, action: { type: "string", enum: ["link", "create"] },
+            accountType: { type: "string", enum: ["asset", "liability", "equity", "income", "expense"] },
+          } },
+        },
+      } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+      if (!deps.validateMutation(request, reply)) return reply;
+      const config = await settings(departmentId);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const { periodId, reviewHash, selections } = request.body;
+      const scope = { departmentId, instanceUrl: config.instance_url, periodId };
+      const batchId = financeBatchId(reviewHash, selections);
+      try {
+        const previous = await readChurchToolsFinanceReceipt(pool!, scope, batchId);
+        if (previous) return reply.header("Cache-Control", "private, no-store").send({ ...previous, replayed: true });
+        const source = await readFinanceMappingSource(config, periodId);
+        if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        const db = await pool!.connect();
+        try {
+          await db.query("BEGIN");
+          await db.query("SELECT id FROM departments WHERE id=$1 FOR NO KEY UPDATE", [departmentId]);
+          if (!await deps.lockDepartmentForWrite(db, departmentId)) {
+            await db.query("ROLLBACK");
+            return reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
+          }
+          const currentSettings = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE",
+            [departmentId, config.instance_url, config.encrypted_login_token]);
+          if (!currentSettings.rowCount) throw new ChurchToolsFinanceReviewError("The ChurchTools connection changed. Load a fresh review.");
+          const replay = await readChurchToolsFinanceReceipt(db, scope, batchId);
+          let result = replay;
+          if (!result) {
+            const review = await reviewFinanceMapping(db, departmentId, config.instance_url, source);
+            if (!review.canApply) throw new ChurchToolsFinanceReviewError("Enable the local Finance module before applying a mapping.");
+            if (review.reviewHash !== reviewHash) throw new ChurchToolsFinanceReviewError("The finance chart changed after review. Load a fresh review.");
+            const plan = planChurchToolsFinanceMasterData(review, selections);
+            result = await applyChurchToolsFinanceMasterData(db, scope, request.authenticatedUser?.id ?? null, batchId, plan);
+          }
+          await db.query("COMMIT");
+          return reply.header("Cache-Control", "private, no-store").send({ ...result, replayed: Boolean(replay) });
+        } catch (error) {
+          await db.query("ROLLBACK");
+          throw error;
+        } finally { db.release(); }
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceReviewError ? 409
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not apply the reviewed ChurchTools finance mapping." });
       }
     });
     routes.get<{ Querystring: { periodId: string; startDate: string; endDate: string } }>("/api/modules/sync/churchtools/finance/preview", {

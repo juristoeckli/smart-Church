@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { FinanceMappingReview } from "./FinanceMappingReview";
 
 type Period = {
   periodId: string; clientId: string; clientName: string | null; startDate: string; endDate: string;
@@ -111,6 +112,7 @@ export function FinancePreview({ departmentId, t }: { departmentId: string; t: (
         <button type="button" className="button button-secondary" disabled={busy} onClick={() => void downloadMapping()}>{t("Download account and cost-center mapping")}</button>
       </div>
     </form>}
+    {period && <FinanceMappingReview key={period.periodId} departmentId={departmentId} periodId={period.periodId} t={t} />}
     {busy && <p role="status">{t("Reading ChurchTools finance data…")}</p>}
     {error && <p role="alert">{t(error)}</p>}
     {preview && <section aria-live="polite">
