@@ -345,7 +345,21 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   async function renameCategory(category: Category) {
     const name = window.prompt("Category name", category.name)?.trim();
     if (!name || name === category.name) return;
-    await run(async () => { await api(`/api/modules/wiki/categories/${category.id}`, "PUT", { name, parentId: category.parentId, position: category.position }); await refresh(); }, "Category saved.");
+    await run(async () => { await api(`/api/modules/wiki/categories/${category.id}`, "PUT", { name, parentId: category.parentId }); await refresh(); }, "Category saved.");
+  }
+  async function setCategoryPosition(category: Category) {
+    const input = window.prompt("Order among sibling categories. Lower numbers appear first. Equal positions sort by name.", String(category.position));
+    if (input === null) return;
+    const position = Number(input);
+    if (!input.trim() || !Number.isInteger(position) || position < -100000 || position > 100000) {
+      setError("Enter a whole number from −100,000 to 100,000.");
+      return;
+    }
+    if (position === category.position) return;
+    await run(async () => {
+      await api(`/api/modules/wiki/categories/${category.id}/position`, "PUT", { position });
+      await refresh();
+    }, "Category order saved.");
   }
   async function archiveCategory(category: Category) {
     if (!window.confirm(`Archive category “${category.name}”? It must have no active pages or child categories.`)) return;
@@ -418,7 +432,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   }
 
   function renderCategory(category: Category, depth: number) {
-    return <div className="wiki-category-row" key={category.id}><button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} style={{ paddingLeft: `${.6 + Math.min(depth, 6) * .8}rem` }} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
+    return <div className="wiki-category-row" key={category.id}><button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} style={{ paddingLeft: `${.6 + Math.min(depth, 6) * .8}rem` }} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" disabled={busy} onClick={() => void setCategoryPosition(category)}>Set sort order</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
   }
 
   return <div className={`wiki-page ${pageLayout !== "list" ? "wiki-page-gallery-layout" : ""}`}>

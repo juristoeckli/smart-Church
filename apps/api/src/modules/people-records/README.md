@@ -43,3 +43,5 @@ The directory and CSV export can filter by active membership in a specific activ
 Directory, saved views, and CSV support an exact group membership role filter (case-insensitive). When group, group type and role are combined, all filters apply to the same active membership.
 
 People managers can archive or restore a person from their profile. The archive list and its CSV export honor the same filters. Archiving keeps the location contact, linked records, and audit history. Default directory and global search results exclude archived people. Imports continue checking all contacts for duplicates, including archived records.
+
+The directory statistics panel counts all matching active or archived contacts before the 500-row display limit. It reports totals, member and visitor counts, and how many people have email and phone details. It uses the same location and filters as the displayed directory.

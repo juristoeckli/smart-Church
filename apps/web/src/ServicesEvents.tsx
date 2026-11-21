@@ -332,7 +332,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const [loadError, setLoadError] = useState("");
   const [filter, setFilter] = useState<EventFilter>("upcoming");
   const [roleCategoryFilter, setRoleCategoryFilter] = useState("");
-  const [unfilledOnly, setUnfilledOnly] = useState(false);
+  const [staffingFilter, setStaffingFilter] = useState<"all" | "mine" | "requested" | "unfilled">("all");
   const [scheduleView, setScheduleView] = useState<ScheduleView>("list");
   const [calendarMonth, setCalendarMonth] = useState(() => departmentDateString(departmentTimeZone).slice(0, 7));
   const [detailsEvent, setDetailsEvent] = useState<ServiceEvent | null>(null);
@@ -451,11 +451,15 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
   const hasUncategorizedRoles = useMemo(() => events.some((event) => (event.positions ?? []).some((position) => !position.category?.trim())), [events]);
   const roleCategoryMatches = (position: ServicePosition) => roleCategoryFilter === ""
     || (roleCategoryFilter === UNCATEGORIZED_ROLE_FILTER ? !position.category?.trim() : position.category?.trim().toLocaleLowerCase() === roleCategoryFilter.toLocaleLowerCase());
-  const showUnfilledRoles = canManage && unfilledOnly;
+  const showUnfilledRoles = canManage && staffingFilter === "unfilled";
+  const showMyDuties = staffingFilter === "mine" || staffingFilter === "requested";
+  const showMyRequests = staffingFilter === "requested";
   const dutyPositionMatches = (position: ServicePosition) =>
-    roleCategoryMatches(position) && (!showUnfilledRoles || !position.contactId);
-  const dutyRosterEvents = roleCategoryFilter || showUnfilledRoles
-    ? filteredEvents.filter((event) => (!showUnfilledRoles || !event.cancelledAt) && event.positions?.some(dutyPositionMatches))
+    roleCategoryMatches(position) && (!showUnfilledRoles || !position.contactId)
+    && (!showMyDuties || Boolean(position.canRespond))
+    && (!showMyRequests || (position.responseStatus ?? "pending") === "pending");
+  const dutyRosterEvents = roleCategoryFilter || showUnfilledRoles || showMyDuties
+    ? filteredEvents.filter((event) => (!(showUnfilledRoles || showMyRequests) || !event.cancelledAt) && event.positions?.some(dutyPositionMatches))
     : filteredEvents;
   const attendanceEvents = useMemo(() => filteredEvents.filter((event) => event.attendanceRecordedAt), [filteredEvents]);
   const attendanceTotal = attendanceEvents.reduce((total, event) => total + (event.attendanceAdults ?? 0) + (event.attendanceChildren ?? 0), 0);
@@ -719,7 +723,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     popup.document.open();
     popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Event staffing roster</title><style>
       @page{size:auto;margin:14mm}body{font:12px/1.4 Arial,sans-serif;color:#17211a;margin:0}h1{font-size:21px;margin:0 0 4px}p{margin:0 0 16px;color:#526057;font-size:11px}table{width:100%;border-collapse:collapse}thead{display:table-header-group}tr{break-inside:avoid}th,td{padding:7px 6px;border:1px solid #cfd6d0;text-align:left;vertical-align:top}th{background:#edf2ed;font-weight:700}.cancelled{color:#a32626;font-size:10px}.print-actions{margin:0 0 14px}@media print{.print-actions{display:none}}
-      </style></head><body><div class="print-actions"><button type="button" onclick="window.print()">Print roster</button></div><h1>Event staffing roster</h1><p>${printHtml(roleCategoryFilter ? roleCategoryFilter === UNCATEGORIZED_ROLE_FILTER ? "Uncategorized roles" : roleCategoryFilter : "All role categories")}${showUnfilledRoles ? " · Unfilled roles only" : ""} · ${printHtml(new Date().toLocaleString())}</p><table><thead><tr><th>Date</th><th>Event</th><th>Start</th><th>Location</th><th>Role category</th><th>Role</th><th>Assigned person</th><th>Response</th></tr></thead><tbody>${rows.join("")}</tbody></table><script>window.addEventListener("load",()=>window.print(),{once:true});</script></body></html>`);
+      </style></head><body><div class="print-actions"><button type="button" onclick="window.print()">Print roster</button></div><h1>Event staffing roster</h1><p>${printHtml(roleCategoryFilter ? roleCategoryFilter === UNCATEGORIZED_ROLE_FILTER ? "Uncategorized roles" : roleCategoryFilter : "All role categories")}${showUnfilledRoles ? " · Unfilled roles only" : showMyRequests ? " · My pending requests" : showMyDuties ? " · My assignments" : ""} · ${printHtml(new Date().toLocaleString())}</p><table><thead><tr><th>Date</th><th>Event</th><th>Start</th><th>Location</th><th>Role category</th><th>Role</th><th>Assigned person</th><th>Response</th></tr></thead><tbody>${rows.join("")}</tbody></table><script>window.addEventListener("load",()=>window.print(),{once:true});</script></body></html>`);
     popup.document.close();
   }
 
@@ -909,7 +913,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
             <button className={scheduleView === "attendance" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "attendance"} onClick={() => { setFilter("all"); setScheduleView("attendance"); }}>{translate("events.attendanceReport")}</button>
             {canManage && <button className={scheduleView === "workload" ? "is-active" : ""} type="button" aria-pressed={scheduleView === "workload"} onClick={() => setScheduleView("workload")}>Workload</button>}
           </div>
-          {canManage && scheduleView === "list" && <label className="event-role-category-filter">Staffing<select value={unfilledOnly ? "unfilled" : "all"} onChange={(event) => setUnfilledOnly(event.target.value === "unfilled")}><option value="all">All roles</option><option value="unfilled">Unfilled roles only</option></select></label>}
+          {scheduleView === "list" && <label className="event-role-category-filter">Staffing<select value={!canManage && staffingFilter === "unfilled" ? "all" : staffingFilter} onChange={(event) => setStaffingFilter(event.target.value as typeof staffingFilter)}><option value="all">All roles</option><option value="mine">My assignments</option><option value="requested">My pending requests</option>{canManage && <option value="unfilled">Unfilled roles only</option>}</select></label>}
           {canManage && scheduleView === "list" && <><button className="button button-secondary" type="button" onClick={downloadStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(dutyPositionMatches))}><Download size={15} />Export staffing</button><button className="button button-secondary" type="button" onClick={printStaffingReport} disabled={!dutyRosterEvents.some((event) => (event.positions ?? []).some(dutyPositionMatches))}><Printer size={15} />Print staffing</button></>}
         </div>
 

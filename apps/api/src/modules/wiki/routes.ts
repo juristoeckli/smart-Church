@@ -200,6 +200,26 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.code(201).send(categoryDto(result.rows[0]));
   });
 
+  app.put<{ Params: { id: string }; Body: { position: number } }>("/api/modules/wiki/categories/:id/position", {
+    schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["position"], properties: { position: { type: "integer", minimum: -100000, maximum: 100000 } } },
+    },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await site(request, reply, true);
+    if (!departmentId) return reply;
+    const result = await pool!.query<WikiCategoryRow>(
+      `UPDATE wiki_categories SET position=$3,updated_by=$4,updated_at=now()
+       WHERE id=$1 AND department_id=$2 AND archived_at IS NULL
+       RETURNING id,name,parent_id,position,archived_at,created_at,updated_at`,
+      [request.params.id, departmentId, request.body.position, request.authenticatedUser!.id],
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Category not found." });
+    changed(departmentId, { action: "category-updated", categoryId: request.params.id });
+    return categoryDto(result.rows[0]);
+  });
+
   app.put<{ Params: { id: string }; Body: { name: string; parentId?: string | null; position?: number } }>("/api/modules/wiki/categories/:id", async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await site(request, reply, true);
@@ -214,7 +234,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const cycle = await pool!.query("WITH RECURSIVE descendants(id) AS (SELECT id FROM wiki_categories WHERE parent_id=$1 AND department_id=$2 UNION ALL SELECT child.id FROM wiki_categories child JOIN descendants parent ON child.parent_id=parent.id WHERE child.department_id=$2) SELECT 1 FROM descendants WHERE id=$3 LIMIT 1", [request.params.id, departmentId, parentId]);
       if (cycle.rowCount) return reply.code(400).send({ error: "A category cannot be moved under one of its descendants." });
     }
-    const result = await pool!.query<WikiCategoryRow>("UPDATE wiki_categories SET name=$3,parent_id=$4,position=$5,updated_by=$6,updated_at=now() WHERE id=$1 AND department_id=$2 AND archived_at IS NULL RETURNING id,name,parent_id,position,archived_at,created_at,updated_at", [request.params.id, departmentId, name, parentId, request.body.position ?? 0, request.authenticatedUser!.id]);
+    const result = await pool!.query<WikiCategoryRow>("UPDATE wiki_categories SET name=$3,parent_id=$4,position=COALESCE($5,position),updated_by=$6,updated_at=now() WHERE id=$1 AND department_id=$2 AND archived_at IS NULL RETURNING id,name,parent_id,position,archived_at,created_at,updated_at", [request.params.id, departmentId, name, parentId, request.body.position ?? null, request.authenticatedUser!.id]);
     if (!result.rowCount) return reply.code(404).send({ error: "Category not found." });
     changed(departmentId, { action: "category-updated", categoryId: request.params.id });
     return categoryDto(result.rows[0]);

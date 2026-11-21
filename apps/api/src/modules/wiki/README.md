@@ -15,6 +15,8 @@ This optional location-scoped module provides category and page management, rich
 - Every record query is scoped to the active location. Wiki content is sanitized on the server before storage and HTML/PDF export.
 - The audience group selector offers active groups only. New pages must use an active group; editing an existing page may retain its already assigned inactive group, so historical group-only content keeps its saved audience and remains readable under the existing membership rules.
 
+Managers can set the category sort position from its action menu. Siblings with lower positions appear first, and equal positions sort by name. A sort change records the updating manager and time.
+
 ## API
 
 Routes are rooted at `/api/modules/wiki` and registered by the module loader from `manifest.json`. The web bundle is discovered from the sibling `apps/web/src/modules/wiki/module.tsx` entry.
