@@ -1,3 +1,4 @@
+import { groupFromPeopleNavigation } from "../../people-group-navigation";
 import { PersonServiceWorkload } from "./PersonServiceWorkload";
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Download, RefreshCw, UserRoundPlus } from "lucide-react";
@@ -93,7 +94,7 @@ function PersonGroupMemberships({ contactId, request, onNavigateEntity }: {
   </details>;
 }
 
-export function PeopleRecordsModule({departmentId,csrfToken,department,canManageSite,state,onNavigateEntity}:ModuleContext){
+export function PeopleRecordsModule({departmentId,csrfToken,department,canManageSite,state,onStateChange,onNavigateEntity}:ModuleContext){
   const canManage=canManageSite||department.role==="site_admin"||(department.permissions??[]).includes("people_manage")||(department.modulePermissions?.["people-records"]??[]).includes("manage");
   const [directoryPeople,setPeople]=useState<Person[]>([]),[fields,setFields]=useState<Field[]>([]),[selected,setSelected]=useState<Person|null>(null),[extras,setExtras]=useState<Extra[]>([]),[detailsSection,setDetailsSection]=useState("history"),[duplicates,setDuplicates]=useState<Candidate[]>([]),[filter,setFilter]=useState(""),[status,setStatus]=useState(""),[customFilters,setCustomFilters]=useState<DirectoryFieldFilter[]>([]),[relationshipFilters,setRelationshipFilters]=useState<RelationshipFilter[]>([]),[columns,setColumns]=useState<string[]>(defaultDirectoryColumns),[tab,setTab]=useState("directory"),[label,setLabel]=useState(""),[key,setKey]=useState(""),[fieldType,setFieldType]=useState<Field["type"]>("text"),[options,setOptions]=useState(""),[consentPurpose,setConsentPurpose]=useState(""),[consentStatus,setConsentStatus]=useState("granted"),[relatedId,setRelatedId]=useState(""),[relationshipTypeId,setRelationshipTypeId]=useState(""),[relationshipTypes,setRelationshipTypes]=useState<RelationshipType[]>([]),[legacyRelationshipLabels,setLegacyRelationshipLabels]=useState<string[]>([]),[newRelationshipLabel,setNewRelationshipLabel]=useState(""),[newRelationshipReverseLabel,setNewRelationshipReverseLabel]=useState(""),[preview,setPreview]=useState<ImportPreview|null>(null),[selectedRows,setSelectedRows]=useState<number[]>([]),[importResult,setImportResult]=useState<unknown>(null),[dates,setDates]=useState<{birthDate:string|null;weddingAnniversary:string|null}>({birthDate:null,weddingAnniversary:null}),[error,setError]=useState(""),[message,setMessage]=useState(""),[mergePreview,setMergePreview]=useState<MergePreview|null>(null),[mergeConflictsConfirmed,setMergeConflictsConfirmed]=useState(false);
   const [fieldVisibility, setFieldVisibility] = useState<FieldVisibility>("private_people");
@@ -121,12 +122,35 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   const request=useCallback(async<T,>(url:string,init:RequestInit={}):Promise<T>=>{const r=await fetch(url,{...init,headers:{"x-department-id":departmentId,...(init.body?{"content-type":"application/json"}:{}),...((init.body||init.method?.toUpperCase()==="DELETE")?{"x-csrf-token":csrfToken}:{}),...init.headers},cache:"no-store"});const data=await r.json();if(!r.ok)throw new Error(data.error??"Request failed.");return data as T},[departmentId,csrfToken]);
   useEffect(()=>{void request<SavedView[]>("/api/people-records/saved-views").then(setSavedViews).catch(e=>setError(e instanceof Error?e.message:"Could not load saved views."))},[request]);
   const [directoryGroups, setDirectoryGroups] = useState<DirectoryGroup[]>([]);
-  const [groupId, setGroupId] = useState("");
+  const [groupId, setGroupId] = useState(() => groupFromPeopleNavigation(state) ?? "");
   const [groupType, setGroupType] = useState("");
   const [groupRole, setGroupRole] = useState("");
   const [sort, setSort] = useState<DirectorySort>("lastName");
   const groupTypes = [...new Set(directoryGroups.flatMap(group => group.groupType ? [group.groupType] : []))].sort((a,b) => a.localeCompare(b));
-  useEffect(() => { setGroupId(""); }, [departmentId]);
+  const previousGroupFilterDepartment = useRef(departmentId);
+  useEffect(() => {
+    if (previousGroupFilterDepartment.current !== departmentId) {
+      previousGroupFilterDepartment.current = departmentId;
+      setGroupId("");
+    }
+  }, [departmentId]);
+  useEffect(() => {
+    const group = groupFromPeopleNavigation(state);
+    if (!group) return;
+    setTab("directory");
+    setSelected(null);
+    setSelectedPeople([]);
+    setFilter("");
+    setStatus("");
+    setCustomFilters([]);
+    setRelationshipFilters([]);
+    setGroupType("");
+    setGroupRole("");
+    setShowArchived(false);
+    setActiveSavedView("");
+    setGroupId(group);
+    onStateChange("");
+  }, [state, onStateChange]);
   useEffect(() => {
     let active = true;
     setDirectoryGroups([]);

@@ -3,7 +3,7 @@ import type { ModuleContext } from "../../module-registry";
 import { GroupMembershipFields } from "./GroupMembershipFields";
 import "./styles.css";
 
-type Group = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean };
+type Group = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean; status: string };
 type Member = { contactId: string; firstName: string; lastName: string; email: string | null; role: string; status: "active" | "paused" | "waitlist"; joinedOn: string | null; customFields: Record<string, string | number | boolean | null> };
 type History = { id: string; entityKind: string; entityId: string; action: string; beforeData: unknown; afterData: unknown; createdAt: string; actorName: string };
 type Leader = { groupId: string; groupName: string; groupDescription: string; parentGroupName: string | null; contactId: string; firstName: string; lastName: string; email: string | null; role: string; joinedOn: string | null };
@@ -30,7 +30,7 @@ function membershipChanges(entry: History) {
   return fields.filter((field) => (field.before ?? null) !== (field.after ?? null));
 }
 
-export function GroupHierarchyModule({ departmentId, csrfToken, language }: ModuleContext) {
+export function GroupHierarchyModule({ departmentId, csrfToken, language, onOpenGroupPeople }: ModuleContext) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
@@ -214,6 +214,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
           <button disabled={selected.imported} onClick={() => void saveParent()}>Save hierarchy</button>
         </div>
         <div className="gh-panel"><h2>{text.members} <small>({visibleMembers.length}/{currentRoster.length})</small></h2>
+          {onOpenGroupPeople && selected.status === "active" && rosterScope === groupScope && <button type="button"
+            onClick={() => onOpenGroupPeople(selected.id)}>Open active members in People</button>}
           <div className="gh-actions">
             <label>Search members<input type="search" value={memberQuery} onChange={(event) => { setMemberQuery(event.target.value); setBulkSelection({ scope: "", ids: [] }); }} /></label>
             <label>Filter by role<select value={memberRole} onChange={(event) => { setMemberRole(event.target.value); setBulkSelection({ scope: "", ids: [] }); }}>

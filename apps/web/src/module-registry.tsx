@@ -27,6 +27,7 @@ export interface ModuleContext {
   onActiveChatChange?: (conversationId: string | null) => void;
   refreshCsrfToken?: () => Promise<string>;
   directorySearch?: DirectorySearchNavigation;
+  onOpenGroupPeople?: (groupId: string) => void;
   onNavigateEntity?: (type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking", id: string) => void;
 }
 

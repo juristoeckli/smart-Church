@@ -6,7 +6,7 @@ import { isSafeGroupParent, lockGroupHierarchy } from "../../group-hierarchy-par
 
 import { registerTypedMembershipFields } from "./typed-membership-fields.js";
 
-type TreeRow = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean };
+type TreeRow = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean; status: string };
 
 function cleanObject(value: unknown): Record<string, string | number | boolean | null> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -83,6 +83,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               count(member.contact_id)::int AS "memberCount",
               count(member.contact_id) FILTER (WHERE member.status='active')::int AS "activeCount",
               (SELECT count(*)::int FROM church_groups child WHERE child.parent_group_id=g.id AND child.department_id=g.department_id) AS "subgroupCount",
+              COALESCE(to_jsonb(g)->>'status','active') AS status,
               (g.source_system IN ('churchtools','elvanto')) AS imported
          FROM church_groups g LEFT JOIN group_members member ON member.group_id=g.id
         WHERE g.department_id=$1 GROUP BY g.id ORDER BY g.parent_group_id NULLS FIRST,lower(g.name),g.id`,
