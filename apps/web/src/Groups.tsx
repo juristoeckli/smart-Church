@@ -15,7 +15,7 @@ function csvCell(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
 }
 
-export function Groups({ departmentId, contacts, canManage, csrfToken }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string }) {
+export function Groups({ departmentId, contacts, canManage, csrfToken, navigationTarget, onNavigationHandled }: { departmentId: string; contacts: Contact[]; canManage: boolean; csrfToken: string; navigationTarget?: { id: string; requestId: number } | null; onNavigationHandled?: (requestId: number) => void }) {
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [directorySearch, setDirectorySearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<GroupStatusFilter>("all");
@@ -97,6 +97,18 @@ export function Groups({ departmentId, contacts, canManage, csrfToken }: { depar
   useEffect(() => {
     if (selectedId && !visibleGroups.some((group) => group.id === selectedId)) setSelectedId(visibleGroups[0]?.id ?? "");
   }, [selectedId, visibleGroups]);
+
+  useEffect(() => {
+    if (!navigationTarget || loading) return;
+    const group = groups.find((item) => item.id === navigationTarget.id);
+    if (group) {
+      setDirectorySearch("");
+      setStatusFilter("all");
+      setSelectedId(group.id);
+      setDetailsGroup(group);
+    }
+    onNavigationHandled?.(navigationTarget.requestId);
+  }, [navigationTarget, groups, loading, onNavigationHandled]);
 
   async function saveDirectoryView() {
     if (!savedViewName.trim()) { setError("Enter a name for this saved view."); return; }

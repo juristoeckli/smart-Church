@@ -28,6 +28,7 @@ export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 
 export interface ServicePosition {
   name: string;
+  category?: string;
   contactId?: string;
   qualificationIds?: string[];
   responseStatus?: "pending" | "accepted" | "declined";
@@ -67,7 +68,7 @@ export interface ServicePlanTemplate {
   id: string;
   name: string;
   description?: string;
-  positions: Array<{ name: string }>;
+  positions: Array<{ name: string; category?: string; qualificationIds?: string[] }>;
   items: ServicePlanItem[];
   active: boolean;
 }

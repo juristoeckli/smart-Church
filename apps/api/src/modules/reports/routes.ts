@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerReportDesigner } from "./designer.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string };
@@ -16,6 +16,8 @@ const catalog = [
   { key: "upcoming-anniversaries" as const, title: "Upcoming wedding anniversaries", description: "People with wedding anniversaries in the next 30 days.", permission: "people" as const },
   { key: "group-summary" as const, title: "Group summary", description: "Group membership counts by active, paused and waitlist status.", permission: "groups" as const },
   { key: "group-roster" as const, title: "Group roster", description: "Members, roles and membership dates for one group.", permission: "groups" as const },
+  { key: "group-leaders" as const, title: "Group leaders", description: "Current active leaders, co-leaders, owners, and managers for active groups.", permission: "groups" as const },
+  { key: "group-hierarchy" as const, title: "Group hierarchy", description: "Active groups with parent and child group names, lifecycle status, and date range.", permission: "groups" as const },
   { key: "group-meeting-attendance" as const, title: "Group meeting attendance", description: "Present, absent and excused totals by group meeting.", permission: "groups" as const },
   { key: "group-meeting-feedback" as const, title: "Group meeting feedback", description: "Leader and attendee answers by group meeting; respondent identities are omitted.", permission: "groups" as const },
   { key: "group-lifecycle" as const, title: "Group lifecycle history", description: "Group creation, edits, and deletion history with prior and updated names, descriptions, and parent links.", permission: "groups" as const },
@@ -100,7 +102,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return id;
   }
   async function installedReports(request: FastifyRequest) {
-    const present = await pool!.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
+    const present = await pool!.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
       `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
               to_regclass('public.finance_budgets') IS NOT NULL AS "financeBudgets",
               to_regclass('public.finance_donors') IS NOT NULL AS "financeDonors",
@@ -109,6 +111,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               to_regclass('public.group_meetings') IS NOT NULL AND to_regclass('public.group_meeting_attendance') IS NOT NULL AS "groupAttendance",
               to_regclass('public.group_meetings') IS NOT NULL AND to_regclass('public.group_meeting_feedback_templates') IS NOT NULL AND to_regclass('public.group_meeting_feedback_responses') IS NOT NULL AND to_regclass('public.group_meeting_feedback_attendee_submissions') IS NOT NULL AS "groupFeedback",
               to_regclass('public.group_hierarchy_history') IS NOT NULL AS "groupLifecycle",
+              (SELECT count(*)=4 FROM information_schema.columns WHERE table_schema='public' AND table_name='church_groups' AND column_name=ANY(ARRAY['parent_group_id','status','starts_on','ends_on'])) AS "groupHierarchy",
               to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.worship_songs') IS NOT NULL AS "eventServicePlan",
               to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.event_registrations') IS NOT NULL AS "eventRegistrations",
               to_regclass('public.worship_songs') IS NOT NULL AND to_regclass('public.service_events') IS NOT NULL AS worship,
@@ -126,6 +129,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "group-meeting-attendance" || state.groupAttendance)
       && (item.key !== "group-meeting-feedback" || state.groupFeedback)
       && (item.key !== "group-lifecycle" || state.groupLifecycle)
+      && (item.key !== "group-hierarchy" || state.groupHierarchy)
       && (item.key !== "event-service-plan" || state.eventServicePlan)
       && (!item.key.startsWith("event-registration-") || state.eventRegistrations)
       && (item.key !== "worship-song-usage" || state.worship)
@@ -201,6 +205,37 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!filters.groupId) throw new Error("Choose a group to run this report.");
       columns = [{ key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "role", label: "Role" }, { key: "status", label: "Membership status" }, { key: "joinedOn", label: "Joined on" }, { key: "email", label: "Email" }, { key: "phone", label: "Phone" }];
       const result = await pool!.query("SELECT contact.first_name AS \"firstName\",contact.last_name AS \"lastName\",group_member.role,group_member.status,group_member.joined_on::text AS \"joinedOn\",COALESCE(contact.email,'') AS email,COALESCE(contact.phone,'') AS phone FROM group_members group_member JOIN contacts contact ON contact.id=group_member.contact_id JOIN church_groups church_group ON church_group.id=group_member.group_id WHERE church_group.department_id=$1 AND church_group.id=$2 AND contact.department_id=$1 ORDER BY contact.last_name,contact.first_name LIMIT 5000", [departmentId, filters.groupId]);
+      rows = result.rows;
+    } else if (reportKey === "group-leaders") {
+      columns = [{ key: "groupName", label: "Group" }, { key: "firstName", label: "First name" }, { key: "lastName", label: "Last name" }, { key: "role", label: "Role" }, { key: "joinedOn", label: "Membership start" }];
+      const result = await pool!.query(
+        `SELECT church_group.name AS "groupName",contact.first_name AS "firstName",contact.last_name AS "lastName",group_member.role,group_member.joined_on::text AS "joinedOn"
+           FROM church_groups church_group
+           JOIN group_members group_member ON group_member.group_id=church_group.id AND group_member.status='active'
+           JOIN contacts contact ON contact.id=group_member.contact_id AND contact.department_id=church_group.department_id
+          WHERE church_group.department_id=$1 AND church_group.status='active'
+            AND ($2::uuid IS NULL OR church_group.id=$2)
+            AND lower(regexp_replace(group_member.role,'[^a-z]','','g')) IN ('leader','coleader','groupowner','groupmanager')
+          ORDER BY church_group.name,lower(regexp_replace(group_member.role,'[^a-z]','','g')),contact.last_name,contact.first_name
+          LIMIT 5000`,
+        [departmentId, filters.groupId ?? null],
+      );
+      rows = result.rows;
+    } else if (reportKey === "group-hierarchy") {
+      columns = [{ key: "groupName", label: "Group" }, { key: "parentGroupName", label: "Parent group" }, { key: "childGroupNames", label: "Active child groups" }, { key: "status", label: "Status" }, { key: "startsOn", label: "Starts on" }, { key: "endsOn", label: "Ends on" }];
+      const result = await pool!.query(
+        `SELECT church_group.name AS "groupName",parent.name AS "parentGroupName",
+                COALESCE(string_agg(child.name,', ' ORDER BY child.name),'') AS "childGroupNames",
+                church_group.status,church_group.starts_on::text AS "startsOn",church_group.ends_on::text AS "endsOn"
+           FROM church_groups church_group
+           LEFT JOIN church_groups parent ON parent.id=church_group.parent_group_id AND parent.department_id=church_group.department_id
+           LEFT JOIN church_groups child ON child.parent_group_id=church_group.id AND child.department_id=church_group.department_id AND child.status='active'
+          WHERE church_group.department_id=$1 AND church_group.status='active'
+            AND ($2::uuid IS NULL OR church_group.id=$2)
+          GROUP BY church_group.id,parent.name
+          ORDER BY church_group.name LIMIT 5000`,
+        [departmentId, filters.groupId ?? null],
+      );
       rows = result.rows;
     } else if (reportKey === "group-meeting-attendance") {
       columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "present", label: "Present" }, { key: "absent", label: "Absent" }, { key: "excused", label: "Excused" }];

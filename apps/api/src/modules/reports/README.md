@@ -10,6 +10,8 @@ The optional Reports module combines a fixed catalog with a bounded ad-hoc desig
 - **Upcoming birthdays and wedding anniversaries** — private People data for the next 30 days; access requires private People permission and birthday exports omit age.
 - **Group summary** — per-group membership totals for active, paused and waitlist members.
 - **Group roster** — member names, role, membership status, join date and contact details for a selected group.
+- **Group leaders** — names, current leader/co-leader/owner/manager roles, and membership start dates for active members of active groups; an optional group filter is available. Reports/Groups permissions are required. Email and phone are not included; results are capped at 5,000 rows.
+- **Group hierarchy** — active groups with parent group, active child group names, lifecycle status, and start/end dates; an optional group filter is available. It requires Reports/Groups permissions and is listed only when the hierarchy and lifecycle columns are installed. The current `church_groups` schema has no group-type field, so type is not included.
 - **Group meeting attendance** — present, absent and excused counts by meeting and group, with optional group and date filters.
 - **Group meeting feedback** — leader and attendee answers by meeting, question and response type, with optional group and meeting-date filters. Respondent identities and contact details are omitted; access requires Reports view plus Groups management permission, and results stay within the active location. Answers are free text and may contain sensitive information. If a feedback prompt was later removed or changed, its prior answer is labeled `Removed or renamed question`. The report is listed only when the group feedback, attendee response and meeting schemas are installed.
 - **Group lifecycle history** — dated group creation, updates, and deletion with selected before/after group metadata and actor; membership rows are omitted to avoid leaking private person records.
@@ -40,7 +42,7 @@ This is an initial reporting slice, not feature parity with ChurchTools reportin
 
 - Full ChurchTools ad-hoc report designer: arbitrary joins, calculated expressions, multiple grouping levels, report templates, shared layouts, and organization-wide designer definitions. Custom person and membership fields are exposed in their respective datasets only.
 - People reports for membership/entry/exit changes, addresses/geographic distribution, tags/categories, relationships/families, teams, archive, and duplicates. Custom person fields are available in the ad-hoc People dataset, but there are no dedicated custom-field reports.
-- Group reports for leaders, group hierarchy and group metadata/custom fields. The fixed lifecycle report covers only group records, not member-level lifecycle changes.
+- Group reports for group-type classifications and group metadata/custom fields. The fixed lifecycle report covers only group records, not member-level lifecycle changes.
 - Event reports for cancellations beyond registration status totals, and per-event attendance trends beyond the current summaries. The service plan report lists ordered item details but does not report role assignees or attachments.
 - Additional Finance-specific reports not yet in this catalog: donation-receipt issuance/eligibility, tax reports, and bank reconciliation summaries. The Finance module has its own ledger statements and budget workflows.
 - CCLI reports; communication delivery, process/flow, check-in, and module-specific operational reports.

@@ -567,7 +567,7 @@ const serviceEventProperties = {
   description: { type: "string", maxLength: 2000 },
   room: { type: "string", maxLength: 160 },
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
-  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } },
+  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, contactId: { type: "string", format: "uuid" }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } },
   timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" }, position: { type: "string", maxLength: 80 } } } },
   registrationEnabled: { type: "boolean" },
   registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
@@ -576,7 +576,7 @@ const serviceEventProperties = {
 
 const songArrangementSchema = { type: "object", additionalProperties: false, required: ["name"], properties: { id: { type: "string", format: "uuid" }, name: { type: "string", minLength: 1, maxLength: 160 }, key: { type: "string", maxLength: 16 }, chartUrl: { type: "string", maxLength: 2048 }, audioUrl: { type: "string", maxLength: 2048 }, active: { type: "boolean" } } };
 const worshipSongBodySchema = { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 200 }, authors: { type: "string", maxLength: 500 }, defaultKey: { type: "string", maxLength: 16 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, arrangements: { type: "array", maxItems: 40, items: songArrangementSchema } } };
-const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
+const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
 const serviceEventBodySchema = {
   type: "object",
   additionalProperties: false,
@@ -585,7 +585,7 @@ const serviceEventBodySchema = {
 };
 
 type WorshipSongInput = { title: string; authors?: string; defaultKey?: string; notes?: string; arrangements?: Array<{ id?: string; name: string; key?: string; chartUrl?: string; audioUrl?: string }> };
-type ServicePlanTemplateInput = { name: string; description?: string; positions?: Array<{ name: string }>; items?: NonNullable<CreateServiceEvent["timePlan"]> };
+type ServicePlanTemplateInput = { name: string; description?: string; positions?: Array<{ name: string; category?: string; qualificationIds?: string[] }>; items?: NonNullable<CreateServiceEvent["timePlan"]> };
 
 function validHttpsLink(value: string | undefined) {
   if (!value?.trim()) return true;
@@ -610,6 +610,7 @@ function validateServicePlanTemplateInput(input: ServicePlanTemplateInput) {
   if (!input.name.trim()) return "Enter a service-plan template name.";
   if ((input.positions ?? []).some((position) => !position.name.trim())) return "Enter a name for each volunteer position.";
   if ((input.items ?? []).some((item) => !item.title.trim())) return "Enter a title for each service-plan item.";
+  if ((input.positions ?? []).some((position) => (position.qualificationIds?.length ?? 0) > 20 || new Set(position.qualificationIds ?? []).size !== (position.qualificationIds?.length ?? 0))) return "Each template role can use up to 20 unique volunteer qualifications.";
   const positions = new Set((input.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
   if ((input.items ?? []).some((item) => item.position && !positions.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   return null;
@@ -844,6 +845,8 @@ async function listServicePlanTemplates(departmentId: string): Promise<ServicePl
 async function persistServicePlanTemplate(departmentId: string, id: string, input: ServicePlanTemplateInput) {
   const inputError = validateServicePlanTemplateInput(input);
   if (inputError) return { error: inputError };
+  const qualificationError = await validatePositionQualifications(departmentId, input.positions ?? []);
+  if (qualificationError) return { error: qualificationError };
   const validationError = await validateServicePlanSongs(departmentId, input.items ?? []);
   if (validationError) return { error: validationError };
   if (id) {
@@ -2934,7 +2937,13 @@ app.put<{ Params: { id: string }; Body: { name: string; category: string; active
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(event.positions,'[]'::jsonb)) AS pos
          WHERE event.department_id=$1 AND event.event_date>=CURRENT_DATE AND pos->'qualificationIds' ? $2 LIMIT 1`, [selectedDepartmentId, request.params.id],
       );
-      if (used.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Remove this qualification from service roles before deactivating it." }); }
+      const usedByTemplate = await client.query(
+        `SELECT 1 FROM service_plan_templates template
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(template.positions,'[]'::jsonb)) AS position
+         WHERE template.department_id=$1 AND template.active=true AND position->'qualificationIds' ? $2 LIMIT 1`,
+        [selectedDepartmentId, request.params.id],
+      );
+      if (used.rowCount || usedByTemplate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Remove this qualification from service roles and active templates before deactivating it." }); }
     }
     await client.query("UPDATE service_volunteer_qualifications SET name=$3,category=$4,active=$5,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId, request.body.name.trim(), request.body.category.trim(), request.body.active]);
     await client.query("COMMIT");
