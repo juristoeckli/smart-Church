@@ -9,10 +9,12 @@ type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance" | "
 type Field = { key: string; label: string; type: FieldType };
 type Filter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string | number };
 type ChartType = "table" | "column" | "line";
-type Definition = { dataset: DatasetKey; columns: string[]; filters: Filter[]; sortBy: string; direction: "asc" | "desc"; groupBy?: string; pivotBy?: string; chartType?: ChartType; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
+type Axis = string | string[];
+type Definition = { dataset: DatasetKey; columns: string[]; filters: Filter[]; sortBy: string; direction: "asc" | "desc"; groupBy?: Axis; pivotBy?: Axis; chartType?: ChartType; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
 type DataSet = { key: DatasetKey; title: string; permission: "people" | "groups" | "events" | "finance" | "resources"; description: string; fields: Field[]; sql: string };
 const MAX_ROWS = 5000;
 const MAX_PREVIEW = 500;
+const MAX_AXIS_FIELDS = 3;
 const datasetDefinitions: DataSet[] = [
   { key: "people", title: "People", permission: "people", description: "Private contact directory fields.", fields: [
     { key: "firstName", label: "First name", type: "text" }, { key: "lastName", label: "Last name", type: "text" }, { key: "email", label: "Email", type: "text" }, { key: "phone", label: "Phone", type: "text" }, { key: "status", label: "Status", type: "text" }, { key: "createdDate", label: "Created date", type: "date" },
@@ -62,6 +64,18 @@ function permitted(request: DesignerAccess, permission: DataSet["permission"]) {
   const finance = request.activeDepartmentModulePermissions?.finance ?? [];
   return finance.includes("view") || finance.includes("manage");
 }
+
+function axisKeys(axis?: Axis) {
+  return typeof axis === "string" ? [axis] : axis ?? [];
+}
+
+function cleanAxis(value: unknown, fields: Map<string, Field>): string[] | null {
+  if (value === undefined || value === "") return [];
+  const keys = Array.isArray(value) ? value : [value];
+  if (keys.length > MAX_AXIS_FIELDS || new Set(keys).size !== keys.length || keys.some((key) => typeof key !== "string" || !fields.has(key))) return null;
+  return keys;
+}
+
 function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return "Choose a report definition.";
   const value = input as Record<string, unknown>;
@@ -96,10 +110,12 @@ function cleanDefinition(input: unknown, fields: Field[]): Definition | string {
   if (value.direction !== undefined && value.direction !== "asc" && value.direction !== "desc") return "Choose ascending or descending sort order.";
   const sortBy = typeof value.sortBy === "string" ? value.sortBy : String(value.columns[0]);
   const direction = value.direction === "desc" ? "desc" : "asc";
-  if (value.groupBy !== undefined && value.groupBy !== "" && (typeof value.groupBy !== "string" || !fieldByKey.has(value.groupBy))) return "Choose an available grouping field.";
-  const groupBy = typeof value.groupBy === "string" && value.groupBy ? value.groupBy : undefined;
-  if (value.pivotBy !== undefined && value.pivotBy !== "" && (typeof value.pivotBy !== "string" || !groupBy || value.pivotBy === groupBy || !fieldByKey.has(value.pivotBy))) return "Choose a different available field for the pivot columns.";
-  const pivotBy = typeof value.pivotBy === "string" && value.pivotBy ? value.pivotBy : undefined;
+  const rowKeys = cleanAxis(value.groupBy, fieldByKey);
+  if (!rowKeys) return `Choose up to ${MAX_AXIS_FIELDS} distinct row fields.`;
+  const columnKeys = cleanAxis(value.pivotBy, fieldByKey);
+  if (!columnKeys || (columnKeys.length > 0 && !rowKeys.length) || columnKeys.some((key) => rowKeys.includes(key))) return `Choose up to ${MAX_AXIS_FIELDS} distinct pivot column fields that are not used on the row axis.`;
+  const groupBy = rowKeys.length > 1 ? rowKeys : rowKeys[0];
+  const pivotBy = columnKeys.length > 1 ? columnKeys : columnKeys[0];
   const chartType = value.chartType;
   if (chartType !== undefined && chartType !== "table" && chartType !== "column" && chartType !== "line") return "Choose a supported report presentation.";
   if (!groupBy && (chartType === "column" || chartType === "line")) return "Group report rows to use a chart.";
@@ -127,7 +143,7 @@ function compare(a: unknown, b: unknown, type: FieldType) {
 
 const MAX_PIVOT_COLUMNS = 24;
 class PivotWidthError extends Error {
-  constructor() { super(`Pivot columns have more than ${MAX_PIVOT_COLUMNS} values. Add a filter or choose another column field.`); }
+  constructor() { super(`Pivot columns have more than ${MAX_PIVOT_COLUMNS} distinct combinations. Add a filter or change the column fields.`); }
 }
 
 function aggregateRecords(records: Array<Record<string, unknown>>, operation: NonNullable<Definition["aggregate"]>["operation"], field: Field | undefined) {
@@ -144,35 +160,58 @@ function aggregateLabel(operation: NonNullable<Definition["aggregate"]>["operati
   return operation === "count" ? "Count" : `${operation === "sum" ? "Sum" : "Average"} of ${field?.label ?? "value"}`;
 }
 
-function pivotReport(rows: Array<Record<string, unknown>>, definition: Definition, rowField: Field, columnField: Field, valueField: Field | undefined, maxOutputRows: number) {
-  const categories = new Set<string>();
-  const rowGroups = new Map<string, Map<string, Array<Record<string, unknown>>>>();
+function groupRows(rows: Array<Record<string, unknown>>, fields: Field[]) {
+  const groups = new Map<string, { values: string[]; records: Array<Record<string, unknown>> }>();
   for (const row of rows) {
-    const rowValue = String(row[rowField.key] ?? "");
-    const columnValue = String(row[columnField.key] ?? "");
-    categories.add(columnValue);
-    if (categories.size > MAX_PIVOT_COLUMNS) throw new PivotWidthError();
-    const cells = rowGroups.get(rowValue) ?? new Map<string, Array<Record<string, unknown>>>();
-    const records = cells.get(columnValue) ?? [];
-    records.push(row);
-    cells.set(columnValue, records);
-    rowGroups.set(rowValue, cells);
+    const values = fields.map(({ key }) => String(row[key] ?? ""));
+    const key = JSON.stringify(values);
+    const existing = groups.get(key);
+    if (existing) existing.records.push(row);
+    else groups.set(key, { values, records: [row] });
   }
-  const compareColumns = (left: string, right: string) => compare(left, right, columnField.type);
-  const categoriesByColumn = [...categories].sort(compareColumns).map((value, index) => ({ value, key: `pivot_${index}`, label: value || "(Blank)" }));
-  const rowDirection = definition.direction === "desc" ? -1 : 1;
-  const rowKeys = [...rowGroups.keys()].sort((left, right) => compare(left, right, rowField.type) * rowDirection);
-  const operation = definition.aggregate!.operation;
+  return groups;
+}
+
+function compareAxis(left: string[], right: string[], fields: Field[]) {
+  for (const [index, field] of fields.entries()) {
+    const order = compare(left[index], right[index], field.type);
+    if (order) return order;
+  }
+  return 0;
+}
+
+function groupedReport(rows: Array<Record<string, unknown>>, definition: Definition, rowFields: Field[], columnFields: Field[], valueField: Field | undefined, maxOutputRows: number) {
+  const direction = definition.direction === "desc" ? -1 : 1;
+  const groups = [...groupRows(rows, rowFields).values()].sort((left, right) => compareAxis(left.values, right.values, rowFields) * direction);
+  const { operation } = definition.aggregate!;
+  const valueLabel = aggregateLabel(operation, valueField);
+  const rowColumns = rowFields.map(({ key, label }) => ({ key, label }));
+  const visible = groups.slice(0, maxOutputRows);
+  const rowValues = (values: string[]) => rowFields.map(({ key }, index) => [key, values[index]] as const);
+  if (!columnFields.length) return {
+    columns: [...rowColumns, { key: "aggregate", label: valueLabel }],
+    rows: visible.map(({ values, records }) => Object.fromEntries([...rowValues(values), ["aggregate", aggregateRecords(records, operation, valueField)]])),
+    totalRows: groups.length,
+  };
+
+  const categories = groupRows(rows, columnFields);
+  if (categories.size > MAX_PIVOT_COLUMNS) throw new PivotWidthError();
+  const legacyLayout = rowFields.length === 1 && columnFields.length === 1;
+  if (legacyLayout) rowColumns[0].label = `${rowFields[0].label} / ${columnFields[0].label} (${valueLabel})`;
+  const pivotColumns = [...categories.entries()].sort((left, right) => compareAxis(left[1].values, right[1].values, columnFields)).map(([categoryKey, { values }], index) => {
+    const tuple = columnFields.map(({ label }, position) => `${label}: ${values[position] ? JSON.stringify(values[position]) : "(Blank)"}`).join(" › ");
+    return { categoryKey, key: `pivot_${index}`, label: legacyLayout ? values[0] || "(Blank)" : `${tuple} (${valueLabel})` };
+  });
   return {
-    columns: [{ key: rowField.key, label: `${rowField.label} / ${columnField.label} (${aggregateLabel(operation, valueField)})` }, ...categoriesByColumn.map(({ key, label }) => ({ key, label }))],
-    rows: rowKeys.slice(0, maxOutputRows).map((key) => {
-      const cells = rowGroups.get(key)!;
-      return Object.fromEntries([[rowField.key, key], ...categoriesByColumn.map(({ key: columnKey, value }) => {
-        const records = cells.get(value);
-        return [columnKey, records ? aggregateRecords(records, operation, valueField) : null];
+    columns: [...rowColumns, ...pivotColumns.map(({ key, label }) => ({ key, label }))],
+    rows: visible.map(({ values, records }) => {
+      const cells = groupRows(records, columnFields);
+      return Object.fromEntries([...rowValues(values), ...pivotColumns.map(({ key, categoryKey }) => {
+        const cell = cells.get(categoryKey);
+        return [key, cell ? aggregateRecords(cell.records, operation, valueField) : null];
       })]);
     }),
-    totalRows: rowKeys.length,
+    totalRows: groups.length,
   };
 }
 
@@ -188,16 +227,12 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
   }));
   const sortField = byKey.get(definition.sortBy)!;
   if (definition.groupBy && definition.aggregate) {
-    const groupField = byKey.get(definition.groupBy)!;
-    const aggregateField = definition.aggregate.field ? byKey.get(definition.aggregate.field) : undefined;
+    const rowKeys = axisKeys(definition.groupBy);
+    const rowFields = rowKeys.map((key) => byKey.get(key)!);
+    const columnFields = axisKeys(definition.pivotBy).map((key) => byKey.get(key)!);
+    const valueField = definition.aggregate.field ? byKey.get(definition.aggregate.field) : undefined;
     const chartType = definition.chartType ?? "table";
-    if (definition.pivotBy) return { ...pivotReport(filtered, definition, groupField, byKey.get(definition.pivotBy)!, aggregateField, maxOutputRows), capped: inputRows.length === MAX_ROWS, chartType };
-    const groups = new Map<string, Array<Record<string, unknown>>>();
-    for (const row of filtered) { const value = row[definition.groupBy] ?? ""; const key = String(value); const items = groups.get(key) ?? []; items.push(row); groups.set(key, items); }
-    const grouped = [...groups.entries()].map(([key, records]) => ({ [groupField.key]: key, aggregate: aggregateRecords(records, definition.aggregate!.operation, aggregateField) }));
-    grouped.sort((a, b) => compare(a[definition.groupBy!], b[definition.groupBy!], groupField.type) * (definition.direction === "desc" ? -1 : 1));
-    const columns = [{ key: groupField.key, label: groupField.label }, { key: "aggregate", label: aggregateLabel(definition.aggregate.operation, aggregateField) }];
-    return { columns, rows: grouped.slice(0, maxOutputRows), totalRows: grouped.length, capped: inputRows.length === MAX_ROWS, chartType };
+    return { ...groupedReport(filtered, definition, rowFields, columnFields, valueField, maxOutputRows), capped: inputRows.length === MAX_ROWS, chartType, chartCategoryKeys: rowKeys };
   }
   filtered.sort((a, b) => compare(a[definition.sortBy], b[definition.sortBy], sortField.type) * (definition.direction === "desc" ? -1 : 1));
   const columns = definition.columns.map((key) => ({ key, label: byKey.get(key)!.label }));
@@ -386,7 +421,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       return reply.code(404).send({ error: "No scheduled result is available." });
     }
     if (request.query.format === "xlsx") return sendReportWorkbook(reply, saved.scheduled_result, "ad-hoc-" + dataset.key);
-    const report = definition.groupBy ? { ...saved.scheduled_result, chartType: definition.chartType ?? "table" } : saved.scheduled_result;
+    const report = definition.groupBy ? { ...saved.scheduled_result, chartType: definition.chartType ?? "table", chartCategoryKeys: axisKeys(definition.groupBy) } : saved.scheduled_result;
     return reply.header("cache-control", "private, no-store").send(report);
   });
   return { runSavedDesign };

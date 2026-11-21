@@ -19,10 +19,10 @@ export function DesignerChart({ report, defaultType }: { report: ChartReport; de
 }
 
 function ChartPlot({ report, chartType, chartId }: { report: ChartReport; chartType: Exclude<ReportChartType, "table">; chartId: string }) {
-  const { categories, series, min, max, hasValues, omittedValues } = prepareReportChart(report);
+  const { categories, series, totalSeries, min, max, hasValues, omittedValues } = prepareReportChart(report);
   const limits = [
     report.totalRows > categories.length ? `First ${categories.length} of ${report.totalRows} rows.` : "",
-    report.columns.length - 1 > series.length ? `First ${series.length} of ${report.columns.length - 1} series.` : "",
+    totalSeries > series.length ? `First ${series.length} of ${totalSeries} series.` : "",
     omittedValues ? "Values outside the supported chart range are omitted." : "",
   ].filter(Boolean).join(" ");
   if (!hasValues) return <p className="reports-description" role="status">No values can be plotted. {limits && `${limits} `}Exact results are in the table.</p>;

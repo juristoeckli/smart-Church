@@ -6,17 +6,22 @@ export const reportChartTypes = [
 
 export type ReportChartType = typeof reportChartTypes[number]["value"];
 type ChartCell = string | number | boolean | null | undefined;
-export type ChartReport = { columns: Array<{ key: string; label: string }>; rows: Array<Record<string, ChartCell>>; totalRows: number };
+export type ChartReport = { columns: Array<{ key: string; label: string }>; rows: Array<Record<string, ChartCell>>; totalRows: number; chartCategoryKeys?: string[] };
 
-export function prepareReportChart({ columns, rows }: ChartReport) {
-  const categoryField = columns[0];
+export function prepareReportChart({ columns, rows, chartCategoryKeys }: ChartReport) {
+  const categoryKeys = chartCategoryKeys ?? columns.slice(0, 1).map(({ key }) => key);
+  const seriesColumns = columns.filter(({ key }) => !categoryKeys.includes(key));
   const visibleRows = rows.slice(0, 20);
-  const categories = categoryField ? visibleRows.map((row) => String(row[categoryField.key] ?? "") || "(Blank)") : [];
+  const categories = categoryKeys.length ? visibleRows.map((row) => categoryKeys.map((key) => {
+    const value = String(row[key] ?? "");
+    if (categoryKeys.length > 1 && (value.includes("›") || value.startsWith('"') || value === "(Blank)")) return JSON.stringify(value);
+    return value || "(Blank)";
+  }).join(" › ")) : [];
   let min = 0;
   let max = 0;
   let hasValues = false;
   let omittedValues = false;
-  const series = columns.slice(1, 9).map((column) => ({
+  const series = seriesColumns.slice(0, 8).map((column) => ({
     ...column,
     values: visibleRows.map((row) => {
       const raw = row[column.key];
@@ -32,5 +37,5 @@ export function prepareReportChart({ columns, rows }: ChartReport) {
       return value;
     }),
   }));
-  return { categories, series, min, max: min === max ? 1 : max, hasValues, omittedValues };
+  return { categories, series, totalSeries: seriesColumns.length, min, max: min === max ? 1 : max, hasValues, omittedValues };
 }

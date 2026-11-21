@@ -38,6 +38,10 @@
 .reports-chart-scroll text { fill: var(--foreground); font-size: 11px; }
 .reports-chart-grid { stroke: var(--border); }
 .reports-chart-axis { stroke: var(--muted-foreground); }
+.reports-axis-fields { display: grid; gap: 0.55rem; min-width: 0; padding: 0.65rem; border: 1px solid var(--border); border-radius: 8px; }
+.reports-axis-fields legend { padding: 0 0.25rem; font-weight: 600; }
+.reports-axis-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 0.45rem; }
+.reports-axis-fields > button { justify-self: start; }
 .reports-message { margin: 0; padding: 0.8rem 1rem; border-radius: 9px; }
 .reports-error { color: #8f2626; background: #fff1f1; }
 .reports-success { color: #17683e; background: #edf8f0; }
