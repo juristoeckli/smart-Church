@@ -10,9 +10,14 @@ export function PublicEventRegistration({ token }: { token: string }) {
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
   const [submitted, setSubmitted] = useState<"registered" | "waitlisted" | null>(null);
+  const [cancellationToken, setCancellationToken] = useState("");
+  const [linkToken] = useState(() => /^#cancel=([0-9a-f]{64})$/.exec(window.location.hash)?.[1] ?? "");
+  const [cancelled, setCancelled] = useState(false);
+  const [confirmed, setConfirmed] = useState(false);
 
   useEffect(() => {
     document.documentElement.lang = language;
+    if (linkToken) return;
     let active = true;
     fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`)
       .then(async (response) => {
@@ -23,7 +28,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
       .catch((reason) => { if (active) setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not load this event.")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [token, language]);
+  }, [token, language, linkToken]);
 
   async function register(formEvent: FormEvent<HTMLFormElement>) {
     formEvent.preventDefault();
@@ -36,12 +41,43 @@ export function PublicEventRegistration({ token }: { token: string }) {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim() }),
       });
-      const result = await response.json() as { status?: "registered" | "waitlisted"; error?: string };
+      const result = await response.json() as { status?: "registered" | "waitlisted"; cancellationToken?: string; error?: string };
       if (!response.ok || !result.status) throw new Error(publicErrorText(language, result.error ?? "Could not submit your registration."));
       setSubmitted(result.status);
+      setCancellationToken(result.cancellationToken ?? "");
     } catch (reason) { setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not submit your registration.")); }
     finally { setSending(false); }
   }
+
+  async function cancelRegistration() {
+    setSending(true);
+    setError("");
+    try {
+      const response = await fetch("/api/public/event-registrations/cancel", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cancellationToken: linkToken }),
+      });
+      if (!response.ok) throw new Error();
+      setCancelled(true);
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    } catch {
+      setError(publicText(language, "cancelFailed"));
+    } finally {
+      setSending(false);
+    }
+  }
+
+  if (linkToken) return <main className="public-registration-page"><section className="public-registration-card">
+    <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
+    <h1>{publicText(language, cancelled ? "cancelledRegistration" : "cancelRegistration")}</h1>
+    {!cancelled && <form className="public-registration-form" onSubmit={(submission) => { submission.preventDefault(); if (confirmed && !sending) void cancelRegistration(); }}>
+      <label><input type="checkbox" checked={confirmed} onChange={(change) => setConfirmed(change.target.checked)} /> {publicText(language, "confirmCancel")}</label>
+      {error && <p className="public-registration-error" role="alert">{error}</p>}
+      <button className="button button-danger" disabled={!confirmed || sending}>{publicText(language, "cancelRegistration")}</button>
+    </form>}
+    <footer>{publicText(language, "smartChurch")}</footer>
+  </section></main>;
 
   const date = event ? new Intl.DateTimeFormat(language, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${event.eventDate}T12:00:00Z`)) : "";
   return <main className="public-registration-page"><section className="public-registration-card">
@@ -63,6 +99,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
             </form>
           </>}
     </>}
+    {cancellationToken && <p><a href={window.location.pathname + "#cancel=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a> · {publicText(language, "saveCancelLink")}</p>}
     <footer>{publicText(language, "smartChurch")}</footer>
   </section></main>;
 }

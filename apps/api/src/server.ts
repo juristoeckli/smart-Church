@@ -3478,7 +3478,7 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
       firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" },
     } },
   },
-}, async (request, reply): Promise<{ status: "registered" | "waitlisted" } | { error: string }> => {
+}, async (request, reply): Promise<{ status: "registered" | "waitlisted"; cancellationToken: string } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
   const firstName = request.body.firstName.trim();
   const lastName = request.body.lastName.trim();
@@ -3496,12 +3496,52 @@ app.post<{ Params: { token: string }; Body: { firstName: string; lastName: strin
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
     const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [event.rows[0].id]);
     const status = event.rows[0].registration_capacity !== null && registered.rows[0].count >= event.rows[0].registration_capacity ? "waitlisted" : "registered";
+    const cancellationToken = randomBytes(32).toString("hex");
     await client.query(
-      "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status) VALUES ($1,$2,$3,$4,$5,$6)",
-      [randomUUID(), event.rows[0].id, firstName, lastName, email, status],
+      "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      [randomUUID(), event.rows[0].id, firstName, lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex")],
     );
     await client.query("COMMIT");
-    return reply.code(201).send({ status });
+    return reply.header("Cache-Control", "no-store").code(201).send({ status, cancellationToken });
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registrations/cancel", {
+  schema: {
+    body: { type: "object", additionalProperties: false, required: ["cancellationToken"], properties: { cancellationToken: { type: "string", pattern: "^[0-9a-f]{64}$" } } },
+  },
+}, async (request, reply) => {
+  reply.header("Cache-Control", "no-store");
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
+  const hash = createHash("sha256").update(request.body.cancellationToken).digest("hex");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query<{ id: string; department_id: string; status: string; checked_in_at: string | null; can_cancel: boolean }>(
+      `SELECT registration.id, gathering.department_id, registration.status, registration.checked_in_at,
+              gathering.event_date >= (now() AT TIME ZONE department.time_zone)::date AS can_cancel
+         FROM event_registrations registration
+         JOIN service_events gathering ON gathering.id=registration.event_id
+         JOIN departments department ON department.id=gathering.department_id
+        WHERE registration.cancellation_token_hash=$1
+        FOR UPDATE OF gathering, registration`,
+      [hash],
+    );
+    const registration = result.rows[0];
+    if (!registration) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This cancellation link is unavailable." }); }
+    if (registration.status === "cancelled") { await client.query("COMMIT"); return { status: "cancelled" }; }
+    if (registration.checked_in_at || !registration.can_cancel) {
+      await client.query("ROLLBACK");
+      return reply.code(409).send({ error: "This registration can no longer be cancelled online." });
+    }
+    if (!await lockDepartmentForWrite(client, registration.department_id)) {
+      await client.query("ROLLBACK");
+      return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." });
+    }
+    await client.query("UPDATE event_registrations SET status='cancelled',cancelled_at=now(),cancelled_by=NULL WHERE id=$1", [registration.id]);
+    await client.query("COMMIT");
+    return { status: "cancelled" };
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });

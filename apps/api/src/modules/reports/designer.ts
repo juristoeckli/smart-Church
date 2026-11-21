@@ -1,3 +1,4 @@
+import type { Pool, PoolClient } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
@@ -29,7 +30,9 @@ const datasetDefinitions: DataSet[] = [
 ];
 const uuid = { type: "string", format: "uuid" };
 
-function permitted(request: FastifyRequest, permission: DataSet["permission"]) {
+type DesignerAccess = Pick<FastifyRequest, "activeDepartmentRole" | "activeDepartmentPermissions" | "activeDepartmentModulePermissions">;
+
+function permitted(request: DesignerAccess, permission: DataSet["permission"]) {
   if (request.activeDepartmentRole === "site_admin") return true;
   const grants = request.activeDepartmentPermissions ?? [];
   if (permission === "people") return grants.includes("people_view_private") || grants.includes("people_manage");
@@ -95,7 +98,7 @@ function compare(a: unknown, b: unknown, type: FieldType) {
   }
   return String(a ?? "").localeCompare(String(b ?? ""), undefined, { numeric: type === "date", sensitivity: "base" });
 }
-function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: Definition, dataset: DataSet) {
+function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: Definition, dataset: DataSet, maxOutputRows = MAX_PREVIEW) {
   const byKey = new Map(dataset.fields.map((field) => [field.key, field]));
   const filtered = inputRows.filter((row) => definition.filters.every((filter) => {
     const field = byKey.get(filter.field)!;
@@ -123,11 +126,11 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
     });
     grouped.sort((a, b) => compare(a[definition.groupBy!], b[definition.groupBy!], groupField.type) * (definition.direction === "desc" ? -1 : 1));
     const columns = [{ key: groupField.key, label: groupField.label }, { key: "aggregate", label: definition.aggregate.operation === "count" ? "Count" : `${definition.aggregate.operation === "sum" ? "Sum" : "Average"} of ${aggregateField?.label ?? "value"}` }];
-    return { columns, rows: grouped.slice(0, MAX_PREVIEW), totalRows: grouped.length, capped: inputRows.length === MAX_ROWS };
+    return { columns, rows: grouped.slice(0, maxOutputRows), totalRows: grouped.length, capped: inputRows.length === MAX_ROWS };
   }
   filtered.sort((a, b) => compare(a[definition.sortBy], b[definition.sortBy], sortField.type) * (definition.direction === "desc" ? -1 : 1));
   const columns = definition.columns.map((key) => ({ key, label: byKey.get(key)!.label }));
-  return { columns, rows: filtered.slice(0, MAX_PREVIEW).map((row) => Object.fromEntries(definition.columns.map((key) => [key, row[key] as string | number | boolean | null]))), totalRows: filtered.length, capped: inputRows.length === MAX_ROWS };
+  return { columns, rows: filtered.slice(0, maxOutputRows).map((row) => Object.fromEntries(definition.columns.map((key) => [key, row[key] as string | number | boolean | null]))), totalRows: filtered.length, capped: inputRows.length === MAX_ROWS };
 }
 
 export function registerReportDesigner(app: FastifyInstance, context: ModuleServerContext) {
@@ -140,18 +143,23 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     if (!canViewReports(request)) { reply.code(403).send({ error: "Reports view access is required." }); return null; }
     return departmentId;
   }
-  async function datasets(request: FastifyRequest, departmentId: string): Promise<DataSet[]> {
-    const present = await pool!.query<{ finance: boolean }>("SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance");
-    const customFields = permitted(request, "people")
-      ? await pool!.query<{ id: string; label: string; field_type: string }>(
+  async function datasets(request: DesignerAccess, departmentId: string, database: Pool | PoolClient = pool!): Promise<DataSet[]> {
+    const presence = await database.query<{ finance: boolean; people: boolean; memberships: boolean }>(
+      `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
+              to_regclass('public.people_record_fields') IS NOT NULL AS people,
+              to_regclass('public.group_membership_custom_fields') IS NOT NULL AS memberships`,
+    );
+    const present = presence.rows[0];
+    const customFields = permitted(request, "people") && present?.people
+      ? await database.query<{ id: string; label: string; field_type: string }>(
         "SELECT id::text,label,field_type FROM people_record_fields WHERE department_id=$1 AND active=true ORDER BY position,label LIMIT 40", [departmentId],
-      ).catch(() => ({ rows: [] as Array<{ id: string; label: string; field_type: string }> }))
-      : { rows: [] as Array<{ id: string; label: string; field_type: string }> };
-    const membershipCustomKeys = permitted(request, "people")
-      ? await pool!.query<{ key: string }>(
+      )
+      : { rows: [] };
+    const membershipCustomKeys = permitted(request, "people") && present?.memberships
+      ? await database.query<{ key: string }>(
         "SELECT DISTINCT jsonb_object_keys(custom_fields) AS key FROM group_membership_custom_fields WHERE department_id=$1 ORDER BY key LIMIT 40", [departmentId],
-      ).catch(() => ({ rows: [] as Array<{ key: string }> }))
-      : { rows: [] as Array<{ key: string }> };
+      )
+      : { rows: [] };
     const definitions = datasetDefinitions.map((item) => {
       if (item.key === "memberships" && membershipCustomKeys.rows.length) {
         const additions = membershipCustomKeys.rows.map(({ key }) => ({ key: `memberCustom_${createHash("sha256").update(key).digest("hex").slice(0, 16)}`, label: `Membership custom: ${key.slice(0, 100)}`, type: "text" as const }));
@@ -169,8 +177,16 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       return { ...item, fields: [...item.fields, ...additions], sql: item.sql.replace(" FROM contacts", `,${expressions.join(",")} FROM contacts`) };
     });
     return definitions.filter((item) => permitted(request, item.permission)
-      && (item.key !== "finance" || present.rows[0]?.finance)
+      && (item.key !== "finance" || present?.finance)
       && (item.key !== "memberships" || permitted(request, "people")));
+  }
+  async function runSavedDesign(access: DesignerAccess, departmentId: string, input: Record<string, unknown>, database: PoolClient) {
+    const dataset = (await datasets(access, departmentId, database)).find((item) => item.key === input?.dataset);
+    if (!dataset) return null;
+    const definition = cleanDefinition(input, dataset.fields);
+    if (typeof definition === "string") return null;
+    const raw = await database.query<Record<string, unknown>>(dataset.sql, [departmentId]);
+    return { dataset: dataset.key, title: `${dataset.title} report`, generatedAt: new Date().toISOString(), ...applyDefinition(raw.rows, definition, dataset, MAX_ROWS) };
   }
   app.get("/api/modules/reports/designer/catalog", async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
@@ -194,7 +210,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   app.get("/api/modules/reports/designer/saved", async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     const keys = (await datasets(request, departmentId)).map((item) => item.key);
-    const result = await pool!.query("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
+    const result = await pool!.query("SELECT id,name,definition,share_scope AS \"shareScope\",owner_user_id=$2 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\", CASE WHEN owner_user_id=$2 THEN schedule_days END AS \"scheduleDays\", CASE WHEN owner_user_id=$2 THEN next_run_at END AS \"nextRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_at END AS \"lastRunAt\", CASE WHEN owner_user_id=$2 THEN last_run_status END AS \"lastRunStatus\" FROM saved_designer_reports WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') AND definition->>'dataset'=ANY($3::text[]) ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, keys]);
     return result.rows;
   });
   app.post<{ Body: { name: string; definition: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/designer/saved", { schema: { body: { type: "object", additionalProperties: false, required: ["name", "definition"], properties: { name: { type: "string", minLength: 1, maxLength: 120 }, definition: { type: "object", additionalProperties: true }, shareScope: { type: "string", enum: ["private", "department"] } } } } }, async (request, reply) => {
@@ -225,7 +241,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     const name = request.body.name.trim().replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120);
     if (!name) return reply.code(400).send({ error: "Enter a name for this report." });
     try {
-      const result = await pool!.query("UPDATE saved_designer_reports SET name=$4,definition=$5::jsonb,share_scope=COALESCE($6,share_scope),updated_at=now() WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [request.params.id, departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? null]);
+      const result = await pool!.query("UPDATE saved_designer_reports SET name=$4,definition=$5::jsonb,share_scope=COALESCE($6,share_scope),updated_at=now(), scheduled_result=NULL, last_run_status=NULL, last_run_at=NULL, next_run_at=CASE WHEN schedule_days IS NOT NULL THEN now() END WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 RETURNING id,name,definition,share_scope AS \"shareScope\",owner_user_id=$3 AS \"canEdit\",created_at AS \"createdAt\",updated_at AS \"updatedAt\"", [request.params.id, departmentId, request.authenticatedUser!.id, name, JSON.stringify(definition), request.body.shareScope ?? null]);
       if (!result.rowCount) return reply.code(404).send({ error: "Personal report not found." });
       return result.rows[0];
     } catch { return reply.code(409).send({ error: "A personal report with that name already exists." }); }
@@ -244,4 +260,53 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     if (!result.rowCount) return reply.code(404).send({ error: "Personal report not found." });
     return { deleted: true };
   });
+  const savedIdSchema = { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } as const;
+  const schedulePath = "/api/modules/reports/designer/saved/:id";
+  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null } }>(`${schedulePath}/schedule`, {
+    schema: { params: savedIdSchema, body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { enum: [1, 7, null] } } } },
+  }, async (request, reply) => {
+    const departmentId = await scope(request, reply); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    if (request.activeDepartmentRole !== "site_admin" && !request.activeDepartmentModulePermissions?.reports?.includes("manage")) {
+      return reply.code(403).send({ error: "Reports management access is required." });
+    }
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
+      const keys = (await datasets(request, departmentId, client)).map(({ key }) => key);
+      const updated = await client.query(
+        `UPDATE saved_designer_reports SET schedule_days=$4, next_run_at=CASE WHEN $4::int IS NULL THEN NULL ELSE now() END,
+          scheduled_result=NULL, last_run_at=NULL, last_run_status=NULL
+         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND definition->>'dataset'=ANY($5::text[])`,
+        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys],
+      );
+      await client.query("COMMIT");
+      if (!updated.rowCount) return reply.code(404).send({ error: "Personal report not found." });
+      return { scheduled: request.body.days !== null };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  });
+  app.get<{ Params: { id: string } }>(`${schedulePath}/scheduled-result`, { schema: { params: savedIdSchema } }, async (request, reply) => {
+    const departmentId = await scope(request, reply); if (!departmentId) return reply;
+    const available = await datasets(request, departmentId);
+    const query = await pool!.query<{ definition: Record<string, unknown>; scheduled_result: unknown }>(
+      "SELECT definition,scheduled_result FROM saved_designer_reports WHERE id=$1 AND department_id=$2 AND owner_user_id=$3",
+      [request.params.id, departmentId, request.authenticatedUser!.id],
+    );
+    const saved = query.rows[0];
+    const dataset = available.find(({ key }) => key === saved?.definition?.dataset);
+    if (!saved?.scheduled_result || !dataset || typeof cleanDefinition(saved.definition, dataset.fields) === "string") {
+      return reply.code(404).send({ error: "No scheduled result is available." });
+    }
+    return reply.header("cache-control", "private, no-store").send(saved.scheduled_result);
+  });
+  return { runSavedDesign };
 }

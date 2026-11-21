@@ -9,13 +9,14 @@ type ReportColumn = { key: string; label: string };
 type ReportResult = { reportKey: ReportKey; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>> };
 type GroupOption = { id: string; name: string };
 type Filters = { from?: string; to?: string; groupId?: string; status?: string; followUpStatus?: string; accountingYear?: string };
-type SavedReport = { id: string; reportKey: ReportKey; name: string; filters: Filters; ownerId: string; shareScope: "private" | "department"; canEdit: boolean; scheduleDays?: 1 | 7 | null; nextRunAt?: string | null; lastRunAt?: string | null; lastRunStatus?: "ready" | "unavailable" | "failed" | "too_large" | null };
+type ScheduleFields = { scheduleDays?: 1 | 7 | null; nextRunAt?: string | null; lastRunAt?: string | null; lastRunStatus?: "ready" | "unavailable" | "failed" | "too_large" | null };
+type SavedReport = { id: string; reportKey: ReportKey; name: string; filters: Filters; ownerId: string; shareScope: "private" | "department"; canEdit: boolean } & ScheduleFields;
 type DesignerField = { key: string; label: string; type: "text" | "number" | "date" };
 type DesignerDataset = { key: "people" | "groups" | "memberships" | "events" | "finance"; title: string; description: string; fields: DesignerField[] };
 type DesignerFilter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string };
 type DesignerDefinition = { dataset: DesignerDataset["key"]; columns: string[]; filters: Array<{ field: string; operator: DesignerFilter["operator"]; value: string | number }>; sortBy: string; direction: "asc" | "desc"; groupBy?: string; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
 type DesignerResult = { dataset: DesignerDataset["key"]; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>>; totalRows: number; capped: boolean };
-type SavedDesignerReport = { id: string; name: string; definition: DesignerDefinition; shareScope: "private" | "department"; canEdit: boolean; createdAt: string; updatedAt: string };
+type SavedDesignerReport = { id: string; name: string; definition: DesignerDefinition; shareScope: "private" | "department"; canEdit: boolean; createdAt: string; updatedAt: string } & ScheduleFields;
 
 function csvCell(value: unknown) {
   const text = String(value ?? "");
@@ -220,6 +221,26 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not change report sharing."); }
   }
 
+  async function refreshDesignerRunStatus() {
+    try { setSavedDesigner(await request<SavedDesignerReport[]>("/api/modules/reports/designer/saved")); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not refresh report schedules."); }
+  }
+
+  async function changeDesignerSchedule(item: SavedDesignerReport, days: 1 | 7 | null) {
+    setError("");
+    try {
+      await request(`/api/modules/reports/designer/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days }) });
+      await refreshDesignerRunStatus();
+      setMessage(days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not change the report schedule."); }
+  }
+
+  async function openScheduledDesignerResult(item: SavedDesignerReport) {
+    setError("");
+    try { setDesignerResult(await request<DesignerResult>(`/api/modules/reports/designer/saved/${item.id}/scheduled-result`)); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not open the scheduled result."); }
+  }
+
   function loadDesigner(savedReport: SavedDesignerReport) {
     const definition = savedReport.definition;
     datasetKeyRef.current = definition.dataset; setDatasetKey(definition.dataset); setDesignerColumns(definition.columns); setDesignerFilters(definition.filters.map((filter) => ({ ...filter, value: String(filter.value) })));
@@ -258,7 +279,7 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
             <div className="reports-designer-actions"><button className="button button-primary" type="button" onClick={() => void previewDesigner()} disabled={designerRunning || designerColumns.length === 0}><Play size={16} />{designerRunning ? "Running…" : "Preview report"}</button><input aria-label="Report name" maxLength={120} value={designerReportName} onChange={(event) => setDesignerReportName(event.target.value)} placeholder="Name this report" /><label className="reports-share-option"><input type="checkbox" checked={shareDesignerReport} onChange={(event) => setShareDesignerReport(event.target.checked)} />Share with users authorized for this dataset</label><button className="button button-secondary" type="button" onClick={() => void saveDesigner()} disabled={!designerReportName.trim() || !designerColumns.length}><Save size={15} />{selectedDesignerId ? "Update" : "Save"}</button>{selectedDesignerId && <button className="button button-secondary" type="button" onClick={() => { setSelectedDesignerId(""); setDesignerReportName(""); }}>Save as new</button>}</div>
           </>}
         </section>
-        <aside className="reports-panel reports-saved"><h2>Saved designs</h2>{savedDesigner.length ? <ul>{savedDesigner.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => loadDesigner(item)}>{item.name}<small>{designerCatalog.find((dataset) => dataset.key === item.definition.dataset)?.title ?? item.definition.dataset} · {item.shareScope === "department" ? "Shared with dataset-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDesignerSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void removeDesigner(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved designs are private to your account unless you choose to share them.</p>}</aside>
+        <aside className="reports-panel reports-saved"><h2>Saved designs</h2>{savedDesigner.length ? <ul>{savedDesigner.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => loadDesigner(item)}>{item.name}<small>{designerCatalog.find((dataset) => dataset.key === item.definition.dataset)?.title ?? item.definition.dataset} · {item.shareScope === "department" ? "Shared with dataset-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDesignerSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void removeDesigner(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved designs are private to your account unless you choose to share them.</p>}<ScheduleList items={savedDesigner.filter((item) => item.canEdit && (canManageReports || item.scheduleDays))} canManage={canManageReports} onRefresh={refreshDesignerRunStatus} onChange={changeDesignerSchedule} onOpen={openScheduledDesignerResult} /></aside>
       </div>}
       {designerResult && <section className="reports-results"><div className="reports-results-heading"><div><h2>{designerResult.title}</h2><p>{designerResult.totalRows} rows · previewing {designerResult.rows.length} · generated {new Date(designerResult.generatedAt).toLocaleString()}{designerResult.capped ? " · dataset capped at 5,000 source rows" : ""}</p></div><button className="button button-secondary" type="button" onClick={downloadDesignerCsv}><Download size={16} />Export preview CSV</button></div>{designerResult.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{designerResult.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{designerResult.rows.map((row, index) => <tr key={index}>{designerResult.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match this report.</p>}</section>}
     </> : definitions.length === 0 ? <p className="reports-empty">No reports are available for your permissions. Ask an administrator for Reports access and the relevant People, Groups, Events or Finance permissions.</p> : <div className="reports-layout">
@@ -274,23 +295,34 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
         <button className="button button-primary" type="button" onClick={() => void runReport()} disabled={running || !reportKey || (reportKey === "event-absence-conflicts" && (!filters.from || !filters.to || filters.to < filters.from || Date.parse(`${filters.to}T00:00:00Z`) - Date.parse(`${filters.from}T00:00:00Z`) > 366 * 86_400_000))}><Play size={16} />{running ? "Running…" : "Run report"}</button>
         {canManageReports && reportKey && <form className="reports-save-form" onSubmit={(event) => void saveDefinition(event)}><label>Save this definition<input maxLength={120} value={savedName} onChange={(event) => setSavedName(event.target.value)} placeholder="e.g. Monthly visitor follow-up" /></label><label className="reports-share-option"><input type="checkbox" checked={shareSavedReport} onChange={(event) => setShareSavedReport(event.target.checked)} />Share with users authorized for this report</label><button className="button button-secondary" type="submit" disabled={!savedName.trim()}><Save size={15} />Save</button></form>}
       </section>
-      <aside className="reports-panel reports-saved"><h2>Saved reports</h2>{saved.length ? <ul>{saved.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => { setReportKey(item.reportKey); setFilters(item.filters ?? {}); setResult(null); }}>{item.name}<small>{definitions.find((definition) => definition.key === item.reportKey)?.title} · {item.shareScope === "department" ? "Shared with report-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDefinitionSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void deleteDefinition(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved report definitions will appear here.</p>}{saved.some((item) => item.scheduleDays !== undefined) && <section className="reports-schedules">
+      <aside className="reports-panel reports-saved"><h2>Saved reports</h2>{saved.length ? <ul>{saved.map((item) => <li key={item.id}><button type="button" className="reports-saved-open" onClick={() => { setReportKey(item.reportKey); setFilters(item.filters ?? {}); setResult(null); }}>{item.name}<small>{definitions.find((definition) => definition.key === item.reportKey)?.title} · {item.shareScope === "department" ? "Shared with report-authorized users" : "Private"}</small></button>{item.canEdit && <button className="reports-sharing-button" type="button" aria-label={item.shareScope === "department" ? `Make ${item.name} private` : `Share ${item.name}`} onClick={() => void setDefinitionSharing(item)}>{item.shareScope === "department" ? "Make private" : "Share"}</button>}{item.canEdit && <button className="reports-delete" type="button" aria-label={`Delete ${item.name}`} onClick={() => void deleteDefinition(item)}><Trash2 size={15} /></button>}</li>)}</ul> : <p className="reports-description">Saved report definitions will appear here.</p>}<ScheduleList items={saved.filter((item) => item.scheduleDays !== undefined && (canManageReports || item.scheduleDays))} canManage={canManageReports} onRefresh={refreshRunStatus} onChange={changeSchedule} onOpen={openScheduledResult} /></aside>
+    </div>}
+    {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
+  </main>;
+}
+
+
+function ScheduleList<T extends ScheduleFields & { id: string; name: string }>({ items, canManage, onRefresh, onChange, onOpen }: {
+  items: T[];
+  canManage: boolean;
+  onRefresh: () => Promise<void>;
+  onChange: (item: T, days: 1 | 7 | null) => Promise<void>;
+  onOpen: (item: T) => Promise<void>;
+}) {
+  return <>{items.length > 0 && <section className="reports-schedules">
         <h3>Report schedules</h3>
-        <button className="button button-secondary" type="button" onClick={() => void refreshRunStatus()}>Refresh run status</button>
-        {saved.filter((item) => item.scheduleDays !== undefined && (canManageReports || item.scheduleDays)).map((item) => <div key={item.id}>
+        <button className="button button-secondary" type="button" onClick={() => void onRefresh()}>Refresh run status</button>
+        {items.map((item) => <div key={item.id}>
           <strong>{item.name}</strong>
-          {canManageReports && <label>Repeat<select value={item.scheduleDays ?? ""} onChange={(event) => {
+          {canManage && <label>Repeat<select value={item.scheduleDays ?? ""} onChange={(event) => {
             const days = event.target.value;
-            void changeSchedule(item, days === "1" ? 1 : days === "7" ? 7 : null);
+            void onChange(item, days === "1" ? 1 : days === "7" ? 7 : null);
           }}>
             <option value="">Off</option><option value="1">Every 24 hours</option><option value="7">Every 7 days</option>
           </select></label>}
           {item.nextRunAt && <small>Next run {new Date(item.nextRunAt).toLocaleString()}</small>}
           {item.lastRunAt && <small>Last attempt {new Date(item.lastRunAt).toLocaleString()} · {item.lastRunStatus === "ready" ? "Ready" : item.lastRunStatus === "too_large" ? "Result too large" : item.lastRunStatus === "unavailable" ? "Report unavailable" : "Failed"}</small>}
-          {item.lastRunStatus === "ready" && <button className="button button-secondary" type="button" onClick={() => void openScheduledResult(item)}>Open scheduled result</button>}
+          {item.lastRunStatus === "ready" && <button className="button button-secondary" type="button" onClick={() => void onOpen(item)}>Open scheduled result</button>}
         </div>)}
-      </section>}</aside>
-    </div>}
-    {result && <section className="reports-results"><div className="reports-results-heading"><div><h2>{result.title}</h2><p>{result.rows.length} rows · generated {new Date(result.generatedAt).toLocaleString()}</p></div><button className="button button-secondary" type="button" onClick={downloadCsv}><Download size={16} />Export CSV</button></div>{result.rows.length ? <div className="reports-table-wrap"><table><thead><tr>{result.columns.map((column) => <th key={column.key}>{column.label}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column.key}>{row[column.key] === null || row[column.key] === undefined ? "—" : String(row[column.key])}</td>)}</tr>)}</tbody></table></div> : <p className="reports-empty">No rows match these filters.</p>}</section>}
-  </main>;
+      </section>}</>;
 }

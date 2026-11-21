@@ -627,6 +627,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.header("cache-control", "private, no-store").send(report);
   });
 
+  const designer = registerReportDesigner(app, context);
   let scheduleRunning = false;
   async function runDueReports() {
     if (!pool || !isDatabaseReady() || !context.activation.isEnabled() || scheduleRunning) return;
@@ -636,13 +637,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const primaryOnly = redundancy.rows[0]?.ready
         ? "AND EXISTS (SELECT 1 FROM sync_site_redundancy state WHERE state.department_id=saved.department_id AND state.role='primary')"
         : "";
-      const candidates = await pool.query<{ id: string; department_id: string }>(
-        `SELECT saved.id, saved.department_id FROM saved_report_definitions saved
-         JOIN departments location ON location.id=saved.department_id
-         WHERE saved.next_run_at <= now() AND 'reports'=ANY(location.enabled_modules) ${primaryOnly}
-         ORDER BY saved.next_run_at LIMIT 50`,
+      const candidates = await pool.query<{ id: string; department_id: string; kind: "catalog" | "designer" }>(
+        `SELECT id, department_id, kind FROM (
+           SELECT saved.id, saved.department_id, saved.next_run_at, 'catalog' AS kind
+           FROM saved_report_definitions saved JOIN departments location ON location.id=saved.department_id
+           WHERE saved.next_run_at <= now() AND 'reports'=ANY(location.enabled_modules) ${primaryOnly}
+           UNION ALL
+           SELECT saved.id, saved.department_id, saved.next_run_at, 'designer' AS kind
+           FROM saved_designer_reports saved JOIN departments location ON location.id=saved.department_id
+           WHERE saved.next_run_at <= now() AND 'reports'=ANY(location.enabled_modules) ${primaryOnly}
+         ) due ORDER BY next_run_at, id, kind LIMIT 50`,
       );
       for (const candidate of candidates.rows) {
+        const table = candidate.kind === "designer" ? "saved_designer_reports" : "saved_report_definitions";
         if (!await context.isDepartmentWritable(candidate.department_id)) continue;
         const client = await pool.connect();
         try {
@@ -651,8 +658,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             await client.query("ROLLBACK");
             continue;
           }
-          const due = await client.query<SavedReport>(
-            `SELECT saved.* FROM saved_report_definitions saved JOIN departments location ON location.id=saved.department_id
+          const due = await client.query<SavedReport & { definition: Record<string, unknown> }>(
+            `SELECT saved.* FROM ${table} saved JOIN departments location ON location.id=saved.department_id
              WHERE saved.id=$1 AND saved.department_id=$2 AND saved.next_run_at<=now() AND 'reports'=ANY(location.enabled_modules)
              FOR UPDATE OF saved SKIP LOCKED`,
             [candidate.id, candidate.department_id],
@@ -674,21 +681,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           };
           let status = "unavailable";
           let output: string | null = null;
-          if (access && canModule(access, "manage") && (await installedReports(access, client)).some((entry) => entry.key === saved.report_key)) {
+          if (access && canModule(access, "manage")) {
             await client.query("SAVEPOINT generate_report");
             try {
-              const document = JSON.stringify(await runReport(candidate.department_id, saved.report_key, saved.filters, client));
-              if (Buffer.byteLength(document) <= 2_000_000) {
-                output = document;
-                status = "ready";
-              } else status = "too_large";
+              const report = candidate.kind === "designer"
+                ? await designer.runSavedDesign(access, candidate.department_id, saved.definition, client)
+                : (await installedReports(access, client)).some((entry) => entry.key === saved.report_key)
+                  ? await runReport(candidate.department_id, saved.report_key, saved.filters, client)
+                  : null;
+              if (report) {
+                const document = JSON.stringify(report);
+                if (Buffer.byteLength(document) <= 2_000_000) {
+                  output = document;
+                  status = "ready";
+                } else status = "too_large";
+              }
             } catch {
               await client.query("ROLLBACK TO SAVEPOINT generate_report");
               status = "failed";
             }
           }
           await client.query(
-            `UPDATE saved_report_definitions SET last_run_at=now(), last_run_status=$2, scheduled_result=$3::jsonb,
+            `UPDATE ${table} SET last_run_at=now(), last_run_status=$2, scheduled_result=$3::jsonb,
               next_run_at=now()+schedule_days*interval '24 hours' WHERE id=$1`,
             [saved.id, status, output],
           );
@@ -710,5 +724,4 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   scheduleTimer.unref();
   app.addHook("onClose", async () => clearInterval(scheduleTimer));
 
-  registerReportDesigner(app, context);
 }
