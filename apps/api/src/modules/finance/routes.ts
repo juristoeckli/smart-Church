@@ -158,6 +158,11 @@ const periodTurnoverSql = `SELECT to_char(date_trunc($3::text,t.booking_date::ti
  WHERE t.department_id=$1 AND t.accounting_year=$2 AND t.status='posted'
    AND ($4::text IS NULL OR a.account_type=$4)
  GROUP BY "periodStart",a.id ORDER BY "periodStart",a.account_type,a.code,a.id LIMIT $5 OFFSET $6`;
+function exactStatementCents(cents: string | bigint) {
+  const numeric = Number(cents);
+  return Number.isSafeInteger(numeric) ? numeric : String(cents);
+}
+
 function turnoverCell(cents: string) {
   const numeric = Number(cents);
   return Number.isSafeInteger(numeric) && Math.abs(numeric) < 1e15 ? numeric : cents;
@@ -783,8 +788,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.code(400).send({ error: "Choose valid report dates. Balance Sheet and Trial Balance use only an as-of date." });
     }
     const result = await pool!.query(`SELECT a.id,a.code,a.name,a.account_type AS "accountType",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents ELSE 0 END),0)::text AS "debitCents",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.credit_cents ELSE 0 END),0)::text AS "creditCents",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents-l.credit_cents ELSE 0 END),0)::text AS "netCents" FROM finance_accounts a LEFT JOIN finance_transaction_lines l ON l.department_id=a.department_id AND l.account_id=a.id LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2 ${financialReportDateCondition} WHERE a.department_id=$1 GROUP BY a.id ORDER BY a.code`, [departmentId, year, dateQuery.from ?? null, dateQuery.to ?? null]);
-    const accounts = result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents), netCents: asMoney(row.netCents) }));
-    return { accountingYear: year, accounts, totals: { debitCents: accounts.reduce((sum, row) => sum + row.debitCents, 0), creditCents: accounts.reduce((sum, row) => sum + row.creditCents, 0) } };
+    const accounts = result.rows.map((row) => ({ ...row,
+      debitCents: exactStatementCents(row.debitCents), creditCents: exactStatementCents(row.creditCents),
+      netCents: exactStatementCents(row.netCents),
+    }));
+    const totals = result.rows.reduce((sum, row) => ({
+      debit: sum.debit + BigInt(row.debitCents), credit: sum.credit + BigInt(row.creditCents),
+    }), { debit: 0n, credit: 0n });
+    return { accountingYear: year, accounts, totals: { debitCents: exactStatementCents(totals.debit), creditCents: exactStatementCents(totals.credit) } };
   });
 
   app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement", async (request, reply) => {
@@ -898,7 +909,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const header = ["accounting_year", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
     const filename = "finance-turnover-" + report + "-" + year + (from ? "-from-" + from : "")
       + (to ? (report === "profit-loss" ? "-through-" : "-as-of-") + to : "") + (excluded.length ? "-filtered" : "");
-    return sendFinanceExport(request, reply, filename, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
+    return sendFinanceExport(request, reply, filename, header, rows.map((row) => [year, row.code, row.name, row.account_type,
+      turnoverCell(row.debit_cents), turnoverCell(row.credit_cents), turnoverCell(row.net_cents)]), [4, 5, 6]);
   });
 
   app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; donorId?: string; accountId?: string; costCenterId?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {

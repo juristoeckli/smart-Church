@@ -7,7 +7,7 @@ type TurnoverPage = { page: number; hasNext: boolean; rows: TurnoverRow[] };
 const path = "/api/modules/finance/reports/period-turnover";
 const accountTypes = ["asset", "liability", "equity", "income", "expense"] as const;
 
-function formatLedgerCents(cents: string, formatter: Intl.NumberFormat) {
+export function formatLedgerCents(cents: string | number, formatter: Intl.NumberFormat) {
   const amount = BigInt(cents);
   const absolute = amount < 0n ? -amount : amount;
   const whole = absolute / 100n;
