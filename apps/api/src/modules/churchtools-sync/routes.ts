@@ -6,6 +6,7 @@ import { registerChurchToolsSyncReplication } from "./replication.js";
 import { parseChurchToolsEventDateTime } from "./event-time.js";
 import { bookingSourceId, normalizeChurchToolsBookingHistory, type ChurchToolsBookingHistory } from "./booking-history.js";
 import { churchToolsSongCrosswalkId, importChurchToolsSong, readChurchToolsSongCatalog, type ChurchToolsSong } from "./song-catalog.js";
+import { churchToolsAgendaSourceId, normalizeChurchToolsAgenda, resolveChurchToolsAgendaSongs } from "./event-agenda.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -787,14 +788,21 @@ function normalizeUrl(value: string) {
   url.pathname = url.pathname.replace(/\/+$/, ""); url.search = ""; url.hash = "";
   return url.toString().replace(/\/$/, "");
 }
+class ChurchToolsReadError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
 async function get(base: string, token: string, path: string): Promise<JsonObject> {
   const response = await fetch(base.replace(/\/+$/, "") + "/api/" + path.replace(/^\/+/, ""), {
     headers: { Authorization: "Login " + token, Accept: "application/json" },
     signal: AbortSignal.timeout(20_000), redirect: "error",
   });
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) throw new Error("ChurchTools rejected the token or does not grant read access to " + path.split("?")[0] + ".");
-    throw new Error("ChurchTools returned HTTP " + response.status + " for " + path.split("?")[0] + ".");
+    if (response.status === 401 || response.status === 403) throw new ChurchToolsReadError(response.status, "ChurchTools rejected the token or does not grant read access to " + path.split("?")[0] + ".");
+    throw new ChurchToolsReadError(response.status, "ChurchTools returned HTTP " + response.status + " for " + path.split("?")[0] + ".");
   }
   return await response.json() as JsonObject;
 }
@@ -949,6 +957,22 @@ async function listComplete(base: string, token: string, endpoint: string) {
   }
   return { items, complete: false };
 }
+async function listChurchToolsAgendaEvents(config: Settings, token: string, startDate: string, endDate: string) {
+  const dayAfter = new Date(`${endDate}T00:00:00Z`);
+  dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
+  const upperBound = dayAfter.toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(upperBound)) throw new Error("Choose an earlier end date for ChurchTools event agendas.");
+  const query = new URLSearchParams({ from: startDate, to: upperBound, include: "event_services" });
+  const payload = await get(config.instance_url, token, `events?${query}`);
+  if (!Array.isArray(payload.data)) throw new Error("ChurchTools returned an invalid event list.");
+  const ids = new Set<string>();
+  for (const event of payload.data) {
+    const id = churchToolsAgendaSourceId(event?.id);
+    if (!id || ids.has(id)) throw new Error("ChurchTools returned an invalid or duplicate event ID.");
+    ids.add(id);
+  }
+  return { items: payload.data as JsonObject[], complete: ids.size <= 20_000 };
+}
 async function testLogin(base: string, token: string) {
   if (!token.trim()) throw new Error("Enter a ChurchTools login token.");
   await get(base, token.trim(), "whoami");
@@ -959,7 +983,7 @@ function mapEvents(events: JsonObject[], timeZone = "Europe/Zurich") {
     const start = parseChurchToolsEventDateTime(row.startDate ?? row.start ?? row.startDateTime ?? row.date, row.date, row.startTime, timeZone);
     if (!sourceId || !start) return [];
     const end = parseChurchToolsEventDateTime(row.endDate ?? row.end ?? row.endDateTime, start.date, row.endTime, timeZone);
-    const assignments: JsonObject[] = Array.isArray(row.services) ? row.services : Array.isArray(row.eventServices) ? row.eventServices : [];
+    const assignments: JsonObject[] = Array.isArray(row.event_services) ? row.event_services : Array.isArray(row.services) ? row.services : Array.isArray(row.eventServices) ? row.eventServices : [];
     const agenda: JsonObject[] = Array.isArray(row.agenda?.items) ? row.agenda.items : Array.isArray(row.agendaItems) ? row.agendaItems : [];
     const supportedPlanFields = new Set(["name", "title", "label", "startDateTime", "start", "time", "startTime", "durationMinutes", "duration", "description", "note", "notes", "song"]);
     const unmappedFields = [...new Set(agenda.flatMap((item) => {
@@ -1166,7 +1190,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     }
 
     if (integration === "churchtools") {
-    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" } } } } }, async (request, reply) => {
+    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean; includeEventAgendas?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" }, includeEventAgendas: { type: "boolean" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
       const config = await settings(dept); if (!config) return reply.code(404).send({ error: "Configure ChurchTools before preparing a migration." });
@@ -1176,7 +1200,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const token = decrypt(config.encrypted_login_token);
         const [peopleResult, groupsResult, resourcesResult, eventsResult, relationshipsPayload, songCatalog] = await Promise.all([
           listComplete(config.instance_url, token, "persons"), listComplete(config.instance_url, token, "groups"), listComplete(config.instance_url, token, "resources"),
-          listComplete(config.instance_url, token, `events?from=${encodeURIComponent(request.body.startDate)}&to=${encodeURIComponent(request.body.endDate)}`),
+          request.body.includeEventAgendas
+            ? listChurchToolsAgendaEvents(config, token, request.body.startDate, request.body.endDate)
+            : listComplete(config.instance_url, token, `events?from=${encodeURIComponent(request.body.startDate)}&to=${encodeURIComponent(request.body.endDate)}`),
           get(config.instance_url, token, "persons/relationships"),
           request.body.includeSongCatalog ? readChurchToolsSongCatalog((page, limit) => {
             const query = new URLSearchParams({ "include[]": "arrangements", page: String(page), limit: String(limit) });
@@ -1213,7 +1239,33 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (memberResults.some((result) => !result.complete)) return reply.code(413).send({ error: "At least one ChurchTools group has more than 20,000 members. No migration preview was saved." });
         const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result.members]));
         const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
-        const mappedEvents = mapEvents(eventsResult.items, departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich");
+        const timeZone = departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich";
+        const events = mapEvents(eventsResult.items, timeZone);
+        const mappedEvents = request.body.includeEventAgendas
+          ? events.filter((event) => event.date >= request.body.startDate && event.date <= request.body.endDate)
+          : events;
+        if (request.body.includeEventAgendas && mappedEvents.length > 500) return reply.code(413).send({ error: "Narrow the migration date range to 500 events or fewer to review individual ChurchTools agendas." });
+        const detailedAgendas = request.body.includeEventAgendas ? await mapConcurrent(mappedEvents, 6, async (event) => {
+          try {
+            const payload = await get(config.instance_url, token, `events/${encodeURIComponent(event.sourceId)}/agenda`);
+            const agenda = normalizeChurchToolsAgenda(payload, event.sourceId, timeZone, event.positions.map((position) => position.name));
+            if (agenda.items.length > 100) return { state: "oversized" as const, agenda: null };
+            if (agenda.unsupported > 0 && agenda.items.length === 0) return { state: "unsupported" as const, agenda: null };
+            return { state: "available" as const, agenda };
+          } catch (error) {
+            if (error instanceof ChurchToolsReadError && error.status === 404) return { state: "missing" as const, agenda: null };
+            if (error instanceof ChurchToolsReadError && error.status === 403) return { state: "forbidden" as const, agenda: null };
+            throw error;
+          }
+        }) : null;
+        const eventRecords = mappedEvents.map((event, index) => {
+          const detail = detailedAgendas?.[index];
+          return detail ? {
+            area: "event", ...event, agendaState: detail.state, agendaItems: detail.agenda?.items,
+            agendaInstanceUrl: config.instance_url,
+            unmappedFields: detail.agenda ? [...detail.agenda.unmappedFields, ...(detail.agenda.unsupported ? ["agenda.unsupportedItems"] : [])] : event.unmappedFields,
+          } : { area: "event", ...event };
+        });
         const resourceRows = resourcesResult.items.map((resource) => {
           const capacityValue = Number(resource.capacity ?? resource.maxPersons ?? resource.max_persons);
           const approvalValue = resource.requiresApproval ?? resource.requires_approval ?? resource.approvalRequired ?? resource.mustBeConfirmed;
@@ -1230,9 +1282,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
             return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), groupType: churchToolsGroupType(group), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
           }),
-          ...mappedEvents.map((event) => ({ area: "event", ...event })),
-          ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
           ...(songCatalog ?? []).map((song) => ({ area: "song", sourceId: song.sourceId, title: song.title, song, instanceUrl: config.instance_url })),
+          ...eventRecords,
+          ...resourceRows.map((resource) => ({ area: "resource", ...resource })),
           ...(bookingHistory ?? []).map((booking) => ({
             area: "booking", sourceId: booking.sourceId, title: booking.title ?? "Private booking",
             date: booking.occurrences[0].startDate,
@@ -1295,7 +1347,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           WHERE churchtools_migration_snapshots.migration_running=FALSE OR churchtools_migration_snapshots.migration_started_at < now()-interval '15 minutes'`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
         if (!saved.rowCount) return reply.code(409).send({ error: "Another migration batch is already running for this location." });
         reply.header("Cache-Control", "private, no-store");
-        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, songCatalog: songCatalog && { songs: songCatalog.length, arrangements: songCatalog.reduce((total, song) => total + song.arrangements.length, 0), conflicts: records.filter((record) => record.action === "review_song_conflict").length }, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
+        const eventAgendas = detailedAgendas && {
+          available: detailedAgendas.filter((detail) => detail.state === "available").length,
+          missing: detailedAgendas.filter((detail) => detail.state === "missing").length,
+          forbidden: detailedAgendas.filter((detail) => detail.state === "forbidden").length,
+          skipped: detailedAgendas.filter((detail) => detail.state === "oversized" || detail.state === "unsupported").length,
+          songSelections: detailedAgendas.reduce((total, detail) => total + (detail.agenda?.items.filter((item) => item.sourceSongId).length ?? 0), 0),
+        };
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, eventAgendas, songCatalog: songCatalog && { songs: songCatalog.length, arrangements: songCatalog.reduce((total, song) => total + song.arrangements.length, 0), conflicts: records.filter((record) => record.action === "review_song_conflict").length }, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
     });
@@ -1389,9 +1448,16 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 UNION SELECT source_id,id::text FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=ANY($2::text[])`, [dept, sourcePersonIds]) : { rows: [] as Array<{ source_id: string; id: string }> };
               const contactsBySource = new Map(linkedPositionContacts.rows.map((contact) => [contact.source_id, contact.id]));
               const positions = sourcePositions.map((position) => ({ name: position.name, ...(position.personId && contactsBySource.has(String(position.personId)) ? { contactId: contactsBySource.get(String(position.personId)) } : {}) }));
-              const values = [dept, record.title, record.date, record.isAllDay === true, record.start, record.end, record.location || "ChurchTools", record.description ?? null, record.room ?? "", JSON.stringify(positions), JSON.stringify(record.timePlan ?? []), sourceId];
+              if (record.agendaState) {
+                const configured = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, record.agendaInstanceUrl]);
+                if (!configured.rowCount) throw new Error("ChurchTools connection changed after preview.");
+              }
+              const timePlan = record.agendaState === "available"
+                ? JSON.stringify(await resolveChurchToolsAgendaSongs(db, dept, record.agendaInstanceUrl, record.agendaItems))
+                : record.agendaState && linked.rowCount ? null : JSON.stringify(record.timePlan ?? []);
+              const values = [dept, record.title, record.date, record.isAllDay === true, record.start, record.end, record.location || "ChurchTools", record.description ?? null, record.room ?? "", timePlan === null ? null : JSON.stringify(positions), timePlan, sourceId];
               if (linked.rowCount) {
-                await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=$11::jsonb,time_plan=$12::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(1, 11)]);
+                await db.query("UPDATE service_events SET title=$3,kind='service',event_date=$4,is_all_day=$5,start_time=$6,end_time=$7,location=$8,description=$9,room=$10,positions=COALESCE($11::jsonb,positions),time_plan=COALESCE($12::jsonb,time_plan),updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, ...values.slice(0, 11)]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'event',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
                 batchUpdated += 1;
               } else {
