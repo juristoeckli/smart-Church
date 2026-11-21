@@ -13,6 +13,11 @@ type SeriesInput = {
   leadInMinutes?: number; cleanupMinutes?: number; recurrence?: RepeatRule;
   extraDates?: string[]; excludedDates?: string[]; linkedAppointmentId?: string | null; linkedOccurrenceStartAt?: string;
 };
+type ResourceSelection = { resourceId: string; quantity: number; leadInMinutes: number; cleanupMinutes: number };
+type OccurrenceResourceRequest = {
+  linkedAppointmentId: string; linkedOccurrenceStartAt: string; purpose: string;
+  startsAt: string; endsAt: string; resources: ResourceSelection[];
+};
 type FutureEditInput = { fromDate: string; purpose: string; startsAt: string; endsAt: string; quantity: number; leadInMinutes: number; cleanupMinutes: number; recurrence: RepeatRule };
 
 function isManager(request: FastifyRequest) {
@@ -194,6 +199,47 @@ function isoDate(value: string) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const parsed = new Date(`${value}T00:00:00Z`);
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+async function calendarLinkStorageAvailable(client: Pick<PoolClient, "query">, occurrence: boolean) {
+  const result = await client.query<{ available: boolean }>(
+    `SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL
+       AND to_regclass('public.church_calendar_calendars') IS NOT NULL
+       AND to_regclass('public.church_calendar_resource_links') IS NOT NULL
+       AND (NOT $1::boolean OR (to_regclass('public.church_calendar_appointment_exceptions') IS NOT NULL
+           AND to_regclass('public.church_calendar_extra_dates') IS NOT NULL)) AS available`, [occurrence],
+  );
+  return Boolean(result.rows[0]?.available);
+}
+
+async function insertBookingSeries(client: PoolClient, options: ResourceSelection & {
+  departmentId: string; userId: string; purpose: string; startsAt: Date; endsAt: Date; timeZone: string;
+  repeat: RepeatRule; extraDates: string[]; excludedDates: string[];
+  instances: { startsAt: Date; endsAt: Date; localDate: string }[];
+  status: "requested" | "approved"; appointmentId: string | null; occurrenceStart: string | null;
+}) {
+  const {
+    departmentId, resourceId, userId, purpose, startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
+    instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart,
+  } = options;
+  const seriesId = randomUUID();
+  const bookingIds: string[] = [];
+  await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, resourceId, userId, purpose, startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, occurrenceStart ? null : appointmentId]);
+  for (const day of new Set(extraDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [seriesId, day, userId]);
+  for (const day of new Set(excludedDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [seriesId, day, userId]);
+  for (const occurrence of instances) {
+    const bookingId = randomUUID();
+    bookingIds.push(bookingId);
+    await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [bookingId, departmentId, resourceId, userId, purpose, occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes]);
+    await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.localDate)]);
+    if (appointmentId) {
+      await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by,occurrence_start) VALUES($1,$2,$3,$4::timestamp) ON CONFLICT DO NOTHING", [appointmentId, bookingId, userId, occurrenceStart]);
+    }
+  }
+  await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_created',$4,$5::jsonb)", [randomUUID(), departmentId, userId, seriesId, JSON.stringify({ occurrenceCount: instances.length, status, quantity, leadInMinutes, cleanupMinutes })]);
+  return { seriesId, bookingIds };
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
@@ -413,6 +459,101 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } finally { client.release(); }
   });
 
+  app.post<{ Body: OccurrenceResourceRequest }>("/api/modules/resource-scheduler/occurrence-bookings", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["linkedAppointmentId", "linkedOccurrenceStartAt", "purpose", "startsAt", "endsAt", "resources"], properties: {
+      linkedAppointmentId: { type: "string", format: "uuid" },
+      linkedOccurrenceStartAt: { type: "string", pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$" },
+      purpose: { type: "string", minLength: 1, maxLength: 240 },
+      startsAt: { type: "string", format: "date-time" },
+      endsAt: { type: "string", format: "date-time" },
+      resources: { type: "array", minItems: 1, maxItems: 20, items: {
+        type: "object", additionalProperties: false, required: ["resourceId", "quantity", "leadInMinutes", "cleanupMinutes"], properties: {
+          resourceId: { type: "string", format: "uuid" },
+          quantity: { type: "integer", minimum: 1, maximum: 10000 },
+          leadInMinutes: { type: "integer", minimum: 0, maximum: 10080 },
+          cleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 },
+        },
+      } },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply, true);
+    if (!departmentId) return reply;
+    if (!context.validateMutation(request, reply)) return reply;
+    const { linkedAppointmentId: appointmentId } = request.body;
+    const occurrenceStart = cleanLocalDateTime(request.body.linkedOccurrenceStartAt);
+    const purpose = request.body.purpose.trim();
+    const startsAt = new Date(request.body.startsAt);
+    const endsAt = new Date(request.body.endsAt);
+    const now = Date.now();
+    if (!purpose || !occurrenceStart || !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) {
+      return reply.code(400).send({ error: "Choose a valid purpose and saved Calendar occurrence." });
+    }
+    if (startsAt.getTime() < now - 60_000 || startsAt.getTime() > now + 366 * 86_400_000) {
+      return reply.code(400).send({ error: "Choose a start within the next twelve months." });
+    }
+    const selections = request.body.resources.map((resource) => ({ ...resource, resourceId: resource.resourceId.toLowerCase() }));
+    if (new Set(selections.map((resource) => resource.resourceId)).size !== selections.length) {
+      return reply.code(400).send({ error: "Select each resource once. Use quantity to request multiple units." });
+    }
+    // Every batch locks the occurrence first and takes resource locks in the same order.
+    selections.sort((left, right) => left.resourceId.localeCompare(right.resourceId));
+    const client = await context.pool!.connect();
+    const created: Array<{ resourceId: string; seriesId: string; bookingId: string }> = [];
+    let resourceName = "";
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
+      const site = (await client.query<{ time_zone: string; calendar_enabled: boolean }>(
+        "SELECT time_zone,'church-calendar'=ANY(enabled_modules) AS calendar_enabled FROM departments WHERE id=$1", [departmentId],
+      )).rows[0];
+      if (!isServerModuleEnabled("church-calendar") || !site?.calendar_enabled || !await calendarLinkStorageAvailable(client, true)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
+      }
+      if (!isValidTimeZone(site.time_zone)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Configure a valid location time zone before booking." });
+      }
+      const window = await lockOccurrenceWindow(client, request, departmentId, appointmentId, occurrenceStart, site.time_zone);
+      if (!window) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Shared calendar occurrence not found in this location." });
+      }
+      if (Date.parse(window.startsAtUtc) !== startsAt.getTime() || Date.parse(window.endsAtUtc) !== endsAt.getTime()) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The appointment time changed. Refresh Calendar before booking." });
+      }
+      const instances = [{ startsAt, endsAt, localDate: occurrenceDateKey(startsAt, site.time_zone) }];
+      for (const selection of selections) {
+        const policy = await lockResourceBookingPolicy(client, departmentId, selection.resourceId);
+        if (!policy?.active) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "One of the selected resources is no longer active in this location." });
+        }
+        resourceName = policy.name;
+        const booking = await insertBookingSeries(client, {
+          ...selection, departmentId, userId: request.authenticatedUser!.id, purpose, startsAt, endsAt,
+          timeZone: site.time_zone, repeat: { frequency: "once" }, extraDates: [], excludedDates: [],
+          instances, status: "approved", appointmentId, occurrenceStart,
+        });
+        created.push({ resourceId: selection.resourceId, seriesId: booking.seriesId, bookingId: booking.bookingIds[0] });
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) {
+        return reply.code(409).send({ error: `${resourceName} conflicts with an existing reservation or exceeds available units. No resources were booked.` });
+      }
+      throw error;
+    } finally { client.release(); }
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesIds: created.map((booking) => booking.seriesId), action: "series-created" });
+    context.realtime.publish("module:church-calendar:changed", departmentId, { appointmentId, action: "resource-linked" });
+    return reply.code(201).send({ bookings: created });
+  });
+
   app.post<{ Body: SeriesInput }>("/api/modules/resource-scheduler/series", {
     schema: { body: { type: "object", additionalProperties: false, required: ["resourceId", "purpose", "startsAt", "endsAt"], properties: {
       resourceId: { type: "string", format: "uuid" }, purpose: { type: "string", minLength: 1, maxLength: 240 }, startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
@@ -447,8 +588,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     if (appointmentId) {
       if (!isManager(request)) return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
-      const exists = await context.pool!.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AND to_regclass('public.church_calendar_calendars') IS NOT NULL AND (NOT $1::boolean OR (to_regclass('public.church_calendar_appointment_exceptions') IS NOT NULL AND to_regclass('public.church_calendar_extra_dates') IS NOT NULL)) AS available", [Boolean(occurrenceStart)]);
-      if (!exists.rows[0]?.available) return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
+      if (!await calendarLinkStorageAvailable(context.pool!, Boolean(occurrenceStart))) return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
     }
     const quantity = request.body.quantity ?? 1;
     if (quantity > resource.total_units) return reply.code(400).send({ error: "Quantity exceeds this resource's available units." });
@@ -461,7 +601,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ? [{ startsAt, endsAt, localDate: occurrenceDateKey(startsAt, timeZone) }]
       : seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
-    const seriesId = randomUUID(); const client = await context.pool!.connect(); const bookingIds: string[] = [];
+    const client = await context.pool!.connect();
+    let created: Awaited<ReturnType<typeof insertBookingSeries>>;
     let status: "requested" | "approved";
     try {
       await client.query("BEGIN");
@@ -490,30 +631,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(409).send({ error: resourceCalendarRequired });
       }
       status = policy.requires_approval && !isManager(request) ? "requested" : "approved";
-      await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, occurrenceStart ? null : appointmentId]);
-      for (const day of new Set(extraDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
-      for (const day of new Set(excludedDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'excluded',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
-      for (const occurrence of instances) {
-        const bookingId = randomUUID();
-        bookingIds.push(bookingId);
-        await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [bookingId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), occurrence.startsAt, occurrence.endsAt, status, quantity, leadInMinutes, cleanupMinutes]);
-        await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, seriesId, bookingId, occurrence.startsAt, extraDates.includes(occurrence.localDate)]);
-        if (appointmentId) {
-          await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by,occurrence_start) VALUES($1,$2,$3,$4::timestamp) ON CONFLICT DO NOTHING", [appointmentId, bookingId, request.authenticatedUser!.id, occurrenceStart]);
-        }
-      }
-      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_created',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, seriesId, JSON.stringify({ occurrenceCount: instances.length, status, quantity, leadInMinutes, cleanupMinutes })]);
+      created = await insertBookingSeries(client, {
+        departmentId, resourceId: policy.id, userId: request.authenticatedUser!.id,
+        purpose: request.body.purpose.trim(), startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
+        instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart,
+      });
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
       if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) return reply.code(409).send({ error: error instanceof Error ? error.message : "A booking conflicts with resource availability." });
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId, action: "series-created" });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: created.seriesId, action: "series-created" });
     if (appointmentId) context.realtime.publish("module:church-calendar:changed", departmentId, { appointmentId, action: "resource-linked" });
-    return reply.code(201).send({ seriesId, occurrenceCount: instances.length, status, bookingIds });
+    return reply.code(201).send({ ...created, occurrenceCount: instances.length, status });
   });
 
   const futureEditSchema = { type: "object", additionalProperties: false, required: ["fromDate", "purpose", "startsAt", "endsAt", "quantity", "leadInMinutes", "cleanupMinutes", "recurrence"], properties: {
