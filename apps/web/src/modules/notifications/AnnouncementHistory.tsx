@@ -23,6 +23,7 @@ type HistoryPage = { page: number; hasNext: boolean; batches: Batch[] };
 
 export function AnnouncementHistory({ departmentId, refresh }: { departmentId: string; refresh: number }) {
   const [audience, setAudience] = useState<Audience>("");
+  const [mine, setMine] = useState(false);
   const [disposition, setDisposition] = useState("");
   const [searchDraft, setSearchDraft] = useState("");
   const [search, setSearch] = useState("");
@@ -35,6 +36,7 @@ export function AnnouncementHistory({ departmentId, refresh }: { departmentId: s
     const controller = new AbortController();
     const query = new URLSearchParams({ page: String(page) });
     if (audience) query.set("audience", audience);
+    if (mine) query.set("mine", "true");
     if (disposition) query.set("disposition", disposition);
     if (search) query.set("q", search);
     setResult(undefined);
@@ -51,7 +53,7 @@ export function AnnouncementHistory({ departmentId, refresh }: { departmentId: s
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load announcement history.");
     });
     return () => controller.abort();
-  }, [departmentId, audience, disposition, page, reload, refresh, search]);
+  }, [departmentId, audience, disposition, mine, page, reload, refresh, search]);
 
   return <section className="directory-card notification-compose-card" aria-label="Announcement history">
     <div className="directory-heading"><div><h2>Announcement history</h2><p>Review announcements and email delivery counts at this location.</p></div></div>
@@ -66,6 +68,9 @@ export function AnnouncementHistory({ departmentId, refresh }: { departmentId: s
         }}>Clear search</button>}
       </form>
       <div className="module-toolbar">
+        <label>Sender<select value={mine ? "mine" : "all"} onChange={(event) => { setPage(1); setMine(event.target.value === "mine"); }}>
+          <option value="all">All announcements</option><option value="mine">My announcements</option>
+        </select></label>
         <label>Audience<select value={audience} onChange={(event) => { setPage(1); setAudience(event.target.value as Audience); }}>
           <option value="">All audiences</option><option value="location">Entire location</option><option value="groups">Selected groups</option><option value="people">Selected people · email</option>
         </select></label>
@@ -77,6 +82,7 @@ export function AnnouncementHistory({ departmentId, refresh }: { departmentId: s
         </select></label>
         <button className="button button-secondary" type="button" onClick={() => setReload((value) => value + 1)}>Refresh history</button>
       </div>
+      {mine && <p>Older announcements without an attributed account remain in All announcements.</p>}
       {error && <p role="alert">{error}</p>}
       {!result && !error && <p role="status">Loading announcement history…</p>}
       {result?.batches.length === 0 && <p role="status">No recorded announcements match these filters.</p>}

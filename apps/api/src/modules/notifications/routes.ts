@@ -106,7 +106,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   context.replication.register({
-    schemaVersion: "11",
+    schemaVersion: "12",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Notifications database is unavailable."], recordCount: 0 };
       try {
@@ -138,14 +138,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const suppressions = await client.query("SELECT email,reason,provider_event_id,created_at FROM module_notification_email_suppressions ORDER BY email");
       const webhookEvents = await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId]);
       const emailTemplates = await client.query("SELECT kind,subject_template,body_template,updated_by,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId]);
-      const announcementBatches = await client.query("SELECT id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count FROM module_notification_announcement_batches WHERE department_id=$1 ORDER BY sent_at,id", [departmentId]);
+      const announcementBatches = await client.query("SELECT id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count,sender_user_id FROM module_notification_announcement_batches WHERE department_id=$1 ORDER BY sent_at,id", [departmentId]);
       const homeWelcome = await client.query("SELECT heading,subtitle FROM overview_location_welcome WHERE department_id=$1", [departmentId]);
       const homeLayout = await client.query("SELECT widget_order,visible_widgets FROM overview_location_layouts WHERE department_id=$1", [departmentId]);
-      return { version: 10, homeLayout: homeLayout.rows, homeWelcome: homeWelcome.rows, announcementBatches: announcementBatches.rows, notifications: notifications.rows, preferences: preferences.rows, homeWidgetPreferences: homeWidgetPreferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows, emailTemplates: emailTemplates.rows };
+      return { version: 11, homeLayout: homeLayout.rows, homeWelcome: homeWelcome.rows, announcementBatches: announcementBatches.rows, notifications: notifications.rows, preferences: preferences.rows, homeWidgetPreferences: homeWidgetPreferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows, emailTemplates: emailTemplates.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>>; announcementBatches?: Array<Record<string, unknown>>; homeWelcome?: Array<Record<string, unknown>>; homeLayout?: Array<Record<string, unknown>> };
-      if (!snapshot || ![2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || (Number(snapshot.version) >= 4 && (!Array.isArray(snapshot.homeWidgetPreferences) || snapshot.homeWidgetPreferences.length > 250000)) || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000 || (Number(snapshot.version) >= 5 && (!Array.isArray(snapshot.emailTemplates) || snapshot.emailTemplates.length > 100)) || (Number(snapshot.version) >= 6 && (!Array.isArray(snapshot.announcementBatches) || snapshot.announcementBatches.length > 250000)) || (Number(snapshot.version) >= 7 && (!Array.isArray(snapshot.homeWelcome) || snapshot.homeWelcome.length > 1)) || (Number(snapshot.version) >= 8 && (!Array.isArray(snapshot.homeLayout) || snapshot.homeLayout.length > 1))) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
+      if (!snapshot || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || (Number(snapshot.version) >= 4 && (!Array.isArray(snapshot.homeWidgetPreferences) || snapshot.homeWidgetPreferences.length > 250000)) || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000 || (Number(snapshot.version) >= 5 && (!Array.isArray(snapshot.emailTemplates) || snapshot.emailTemplates.length > 100)) || (Number(snapshot.version) >= 6 && (!Array.isArray(snapshot.announcementBatches) || snapshot.announcementBatches.length > 250000)) || (Number(snapshot.version) >= 7 && (!Array.isArray(snapshot.homeWelcome) || snapshot.homeWelcome.length > 1)) || (Number(snapshot.version) >= 8 && (!Array.isArray(snapshot.homeLayout) || snapshot.homeLayout.length > 1))) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
       await client.query("DELETE FROM module_notification_webhook_events WHERE provider_email_id IN (SELECT d.provider_email_id FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 AND d.provider_email_id IS NOT NULL)", [departmentId]);
       await client.query("DELETE FROM module_notification_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM overview_widget_preferences WHERE department_id=$1", [departmentId]);
@@ -161,8 +161,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("DELETE FROM module_notifications WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM module_notification_announcement_batches WHERE department_id=$1", [departmentId]);
       for (const batch of snapshot.announcementBatches ?? []) {
-        await client.query(`INSERT INTO module_notification_announcement_batches (department_id,id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, [departmentId,batch.id,batch.sent_at,batch.sender_name,batch.title,batch.audience,batch.group_names,batch.recipient_count,batch.email_queued_count]);
+        const senderId = batch.sender_user_id == null ? null : restoreContext.userIdMap.get(String(batch.sender_user_id)) ?? null;
+        await client.query(`INSERT INTO module_notification_announcement_batches (department_id,id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count,sender_user_id)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, [departmentId,batch.id,batch.sent_at,batch.sender_name,batch.title,batch.audience,batch.group_names,batch.recipient_count,batch.email_queued_count,senderId]);
       }
       for (const row of snapshot.notifications) {
         const recipientId = restoreContext.userIdMap.get(String(row.recipient_user_id));
@@ -196,14 +197,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; homeWidgetPreferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>>; emailTemplates?: Array<Record<string, unknown>>; announcementBatches?: Array<Record<string, unknown>>; homeWelcome?: Array<Record<string, unknown>>; homeLayout?: Array<Record<string, unknown>> };
-      if (!snapshot || ![2, 3, 4, 5, 6, 7, 8, 9, 10].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || (Number(snapshot.version) >= 4 && !Array.isArray(snapshot.homeWidgetPreferences)) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents) || (Number(snapshot.version) >= 5 && !Array.isArray(snapshot.emailTemplates)) || (Number(snapshot.version) >= 6 && !Array.isArray(snapshot.announcementBatches)) || (Number(snapshot.version) >= 7 && (!Array.isArray(snapshot.homeWelcome) || snapshot.homeWelcome.length > 1)) || (Number(snapshot.version) >= 8 && (!Array.isArray(snapshot.homeLayout) || snapshot.homeLayout.length > 1))) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
+      if (!snapshot || ![2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || (Number(snapshot.version) >= 4 && !Array.isArray(snapshot.homeWidgetPreferences)) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents) || (Number(snapshot.version) >= 5 && !Array.isArray(snapshot.emailTemplates)) || (Number(snapshot.version) >= 6 && !Array.isArray(snapshot.announcementBatches)) || (Number(snapshot.version) >= 7 && (!Array.isArray(snapshot.homeWelcome) || snapshot.homeWelcome.length > 1)) || (Number(snapshot.version) >= 8 && (!Array.isArray(snapshot.homeLayout) || snapshot.homeLayout.length > 1))) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
       const actualNotifications = (await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at,announcement_batch_id,related_swap_id,swap_notice_state,resource_request_booking_ids FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualPreferences = (await client.query("SELECT user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at FROM module_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualHomeWidgetPreferences = (await client.query("SELECT user_id,widget_order,visible_widgets,updated_at FROM overview_widget_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualEmailTemplates = (await client.query("SELECT kind,subject_template,body_template,updated_by,updated_at FROM module_notification_email_templates WHERE department_id=$1 ORDER BY kind", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualDeliveries = (await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualWebhookEvents = (await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId])).rows as Array<Record<string, unknown>>;
-      const actualAnnouncementBatches = (await client.query("SELECT id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count FROM module_notification_announcement_batches WHERE department_id=$1 ORDER BY sent_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
+      const actualAnnouncementBatches = (await client.query("SELECT id,sent_at,sender_name,title,audience,group_names,recipient_count,email_queued_count,sender_user_id FROM module_notification_announcement_batches WHERE department_id=$1 ORDER BY sent_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualHomeWelcome = (await client.query("SELECT heading,subtitle FROM overview_location_welcome WHERE department_id=$1", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualHomeLayout = (await client.query("SELECT widget_order,visible_widgets FROM overview_location_layouts WHERE department_id=$1", [departmentId])).rows as Array<Record<string, unknown>>;
       const mapping = restoreContext?.userIdMap ?? new Map<string, string>();
@@ -220,8 +221,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (Number(snapshot.version) < 3) for (const row of snapshot.notifications) { row.in_app_enabled ??= true; row.email_enabled ??= true; }
       const expectedNotifications = remap(snapshot.notifications, ["recipient_user_id", "sender_user_id"])
         .map((row) => ({ ...row, announcement_batch_id: row.announcement_batch_id ?? null, related_swap_id: row.related_swap_id ?? null, swap_notice_state: row.swap_notice_state ?? null, resource_request_booking_ids: row.resource_request_booking_ids ?? null }));
+      const expectedBatches = remap(snapshot.announcementBatches ?? [], ["sender_user_id"])
+        .map((row) => ({ ...row, sender_user_id: row.sender_user_id ?? null }));
       if (!same(expectedNotifications, actualNotifications)
-        || !same(snapshot.announcementBatches ?? [], actualAnnouncementBatches)
+        || !same(expectedBatches, actualAnnouncementBatches)
         || !same(snapshot.homeWelcome ?? [], actualHomeWelcome)
         || !same(snapshot.homeLayout ?? [], actualHomeLayout)
         || !same(remap(snapshot.preferences, ["user_id"]), actualPreferences)
@@ -905,11 +908,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       });
     });
 
-    routes.get<{ Querystring: { audience?: AnnouncementAudience; disposition?: string; q?: string; page?: number } }>("/api/modules/notifications/announcements/history", {
+    routes.get<{ Querystring: { audience?: AnnouncementAudience; disposition?: string; mine?: boolean; q?: string; page?: number } }>("/api/modules/notifications/announcements/history", {
       schema: { querystring: { type: "object", additionalProperties: false, properties: {
         audience: { type: "string", enum: ["location", "groups", "people"] }, page: { type: "integer", minimum: 1, maximum: 2000 },
         disposition: { type: "string", enum: ["failed", "pending", "sent", "delayed", "delivered", "suppressed", "skipped"] },
-        q: { type: "string", maxLength: 120 },
+        q: { type: "string", maxLength: 120 }, mine: { type: "boolean" },
       } } },
     }, async (request, reply) => {
       const departmentId = await department(request, reply);
@@ -927,6 +930,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            SELECT id, department_id, sent_at, sender_name, title, audience, group_names, recipient_count, email_queued_count
              FROM module_notification_announcement_batches batch
             WHERE batch.department_id=$1 AND ($2::text IS NULL OR batch.audience=$2)
+              AND (NOT $8::boolean OR batch.sender_user_id=$3)
               AND ($6::text='' OR strpos(lower(batch.title),lower($6))>0 OR strpos(lower(batch.sender_name),lower($6))>0)
               AND ($7::text[] IS NULL OR EXISTS (
                 SELECT 1 FROM module_notifications n
@@ -953,7 +957,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   ) totals
                 ), '{}'::jsonb) AS "emailStatuses"
            FROM history ORDER BY history.sent_at DESC, history.id DESC`,
-        [departmentId, request.query.audience ?? null, request.authenticatedUser!.id, pageSize + 1, (page - 1) * pageSize, search, statuses],
+        [departmentId, request.query.audience ?? null, request.authenticatedUser!.id, pageSize + 1, (page - 1) * pageSize, search, statuses, request.query.mine === true],
       );
       return reply.header("Cache-Control", "private, no-store").send({ page, hasNext: rows.length > pageSize && page < 2000, batches: rows.slice(0, pageSize) });
     });
@@ -996,9 +1000,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(409).send({ error: "None of the selected people can currently receive this email." });
         }
         await client.query(
-          `INSERT INTO module_notification_announcement_batches (id, department_id, sender_name, title, audience, group_names, recipient_count)
-           VALUES ($1, $2, $3, $4, $5, ARRAY(SELECT name FROM church_groups WHERE department_id=$2 AND id=ANY($6::uuid[]) ORDER BY lower(name), id), $7)`,
-          [batchId, departmentId, request.authenticatedUser!.displayName, title, audience, groupIds, recipientCount],
+          `INSERT INTO module_notification_announcement_batches (id, department_id, sender_name, title, audience, group_names, recipient_count, sender_user_id)
+           VALUES ($1, $2, $3, $4, $5, ARRAY(SELECT name FROM church_groups WHERE department_id=$2 AND id=ANY($6::uuid[]) ORDER BY lower(name), id), $7, $8)`,
+          [batchId, departmentId, request.authenticatedUser!.displayName, title, audience, groupIds, recipientCount, request.authenticatedUser!.id],
         );
         await client.query(
           `INSERT INTO module_notifications (id, department_id, recipient_user_id, sender_user_id, kind, title, body, announcement_batch_id, in_app_enabled, related_contact_id)
