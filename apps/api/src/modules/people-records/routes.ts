@@ -232,6 +232,44 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0))", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
       changed(d); return reply.code(201).send({ id });
     });
+    const profileFieldPresets = {
+      first_contact_date: { label: "First contact date", type: "date", options: [] },
+      nationality: { label: "Nationality", type: "text", options: [] },
+      marital_status: { label: "Marital status", type: "select", options: ["Single", "Married", "Registered partnership", "Separated", "Divorced", "Widowed", "Other"] },
+    } as const;
+    routes.post<{ Body: { key: keyof typeof profileFieldPresets } }>("/api/people-records/fields/preset", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["key"], properties: {
+        key: { type: "string", enum: Object.keys(profileFieldPresets) },
+      } } },
+    }, async (request, reply) => {
+      const d = await department(request, reply, true); if (!d) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const { key } = request.body;
+      const preset = profileFieldPresets[key];
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, d)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This location cannot be changed on this installation." });
+        }
+        const created = await client.query<{ id: string }>(
+          `INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,position)
+           VALUES($1,$2,$3,$4,$5,$6::jsonb,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0))
+           ON CONFLICT(department_id,field_key) DO NOTHING RETURNING id`,
+          [randomUUID(), d, preset.label, key, preset.type, JSON.stringify(preset.options)],
+        );
+        await client.query("COMMIT");
+        if (!created.rows[0]) return reply.code(409).send({ error: "That field key is already in use at this location." });
+        changed(d);
+        return reply.code(201).send(created.rows[0]);
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    });
     routes.patch<{ Params: { id: string }; Body: { label?: string; options?: string[]; required?: boolean; active?: boolean } }>("/api/people-records/fields/:id", { schema: { params: { type:"object", required:["id"], properties:{id:uuid} } } }, async (request, reply) => {
       const d=await department(request,reply,true); if(!d)return reply; if(!validateMutation(request,reply))return reply;
       const r=await pool!.query("UPDATE people_record_fields SET label=COALESCE($3,label),options=COALESCE($4::jsonb,options),required=COALESCE($5,required),active=COALESCE($6,active),updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id",[d,request.params.id,request.body.label?.trim()||null,request.body.options===undefined?null:JSON.stringify(request.body.options),request.body.required??null,request.body.active??null]); if(!r.rowCount)return reply.code(404).send({error:"Custom field not found."}); changed(d); return {ok:true};

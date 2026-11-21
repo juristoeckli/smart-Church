@@ -51,3 +51,5 @@ People managers can also archive or restore up to 500 visible selected contacts 
 People can update a saved view with the current filters, sort, and columns, or rename the view without changing its stored criteria. Views remain private to their owner and location.
 
 The directory shows 100 people per page. Changing location, archive mode, filters, or sort returns to the first page. Bulk actions apply to selected rows on the current page. API clients may supply `page` (one-based) and `pageSize` (1–500); callers that omit both keep the first 500 rows and the same response format. CSV still exports up to 5,000 matching people independently of page navigation.
+
+People managers can add optional first contact date, nationality, and marital status fields from the Fields tab. These presets use the same private profile, directory filters, saved views, CSV mapping, and audit behavior as custom fields. Adding a preset does not replace a field that already uses the same key.

@@ -92,6 +92,36 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return reply.code(200).send(result.rows[0]);
     });
 
+    routes.patch<{ Params: { id: string }; Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus; groupTypeFilter?: string; sortOrder?: string; displayMode?: string; visibleColumns?: string[] } }>("/api/groups/views/:id", { schema: {
+      params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] }, displayMode: { type: "string", enum: ["list", "table"] }, visibleColumns: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["type", "status", "members", "start", "end"] } } } },
+    } }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const { searchText, statusFilter, groupTypeFilter, sortOrder, displayMode, visibleColumns } = request.body;
+      const name = request.body.name.trim();
+      if (!name) return reply.code(400).send({ error: "Enter a name for this saved view." });
+      try {
+        const updated = await pool!.query(
+          `UPDATE group_directory_views
+              SET name=$4,search_text=COALESCE($5,search_text),status_filter=COALESCE($6,status_filter),
+                  group_type_filter=COALESCE($7,group_type_filter),sort_order=COALESCE($8,sort_order),
+                  display_mode=COALESCE($9,display_mode),visible_columns=COALESCE($10,visible_columns),updated_at=now()
+            WHERE id=$1 AND department_id=$2 AND user_id=$3
+            RETURNING id,name,search_text AS "searchText",status_filter AS "statusFilter",group_type_filter AS "groupTypeFilter",
+                      sort_order AS "sortOrder",display_mode AS "displayMode",visible_columns AS "visibleColumns",
+                      created_at AS "createdAt",updated_at AS "updatedAt"`,
+          [request.params.id, departmentId, request.authenticatedUser!.id, name, searchText?.trim() ?? null,
+            statusFilter ?? null, groupTypeFilter?.trim() ?? null, sortOrder ?? null, displayMode ?? null, visibleColumns ?? null],
+        );
+        if (!updated.rowCount) return reply.code(404).send({ error: "Saved group view not found." });
+        return updated.rows[0];
+      } catch (error) {
+        if ((error as { code?: string }).code === "23505") return reply.code(409).send({ error: "A saved view already uses this name." });
+        throw error;
+      }
+    });
     routes.delete<{ Params: { id: string } }>("/api/groups/views/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);
