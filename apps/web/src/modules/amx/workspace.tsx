@@ -61,7 +61,8 @@ function labelFor(object: PanelObject) {
   const state = stateFor(object);
   if (typeof state?.text === "string") return state.text;
   if (state?.bitmap || (object.type === "general" && typeof object.channel === "number")) return "";
-  return object.label ?? object.name;
+  const label = object.label ?? object.name;
+  return object.type === "general" && /^Button \d+$/.test(label.trim()) ? "" : label;
 }
 
 export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
