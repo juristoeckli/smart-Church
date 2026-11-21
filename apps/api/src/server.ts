@@ -18,6 +18,7 @@ import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { followRuntimeLogFile, recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 import { createEmailConnector } from "./modules/email-worker/service.js";
 import { allServerPermissions, hasServerPermission as userHasServerPermission, serverPermissionsForUser } from "./server-permissions.js";
+import { locationAccessWriteLock, lockLocationAccessAdministrator, readLocationAccessGrants, recordLocationAccessChanges, registerLocationAccessHistory } from "./location-access-audit.js";
 
 if (process.env.SMART_CHURCH_VIDEO_STEFFISBURG_ENABLED === "0") {
   delete process.env.STREAMING_CONFIG_FILE;
@@ -1461,6 +1462,8 @@ const locationAccessBodySchema = {
   },
 };
 
+registerLocationAccessHistory(app, () => databaseReady ? pool : null, (request, reply) => activeDepartmentId(request, reply, true));
+
 app.get("/api/location-access", async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, true);
@@ -1498,21 +1501,24 @@ app.put<{ Params: { userId: string }; Body: { role: "site_admin" | "member"; per
   if (!validModuleMutation(request, reply)) return reply;
   const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
-  if (request.params.userId === request.authenticatedUser!.id && request.body.role !== "site_admin") {
+  if (request.params.userId.toLowerCase() === request.authenticatedUser!.id.toLowerCase() && request.body.role !== "site_admin") {
     return reply.code(400).send({ error: "You cannot remove your own site administrator access." });
   }
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(1196571730, 4)");
-    await client.query("SELECT id FROM departments WHERE id = $1 FOR UPDATE", [selectedDepartmentId]);
-    const target = await client.query("SELECT id FROM app_users WHERE id = $1", [request.params.userId]);
+    await client.query(locationAccessWriteLock);
+    if (!await lockLocationAccessAdministrator(client, selectedDepartmentId, request.authenticatedUser!.id)) {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Site administrator access is required for this action." });
+    }
+    const target = await client.query<{ id: string; display_name: string }>("SELECT id,display_name FROM app_users WHERE id = $1", [request.params.userId]);
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This account could not be found on this server." });
     }
-    const current = await client.query("SELECT role FROM department_memberships WHERE department_id = $1 AND user_id = $2 FOR UPDATE", [selectedDepartmentId, request.params.userId]);
-    if (current.rows[0]?.role === "site_admin" && request.body.role !== "site_admin") {
+    const current = await readLocationAccessGrants(client, request.params.userId, selectedDepartmentId);
+    if (current[0]?.role === "site_admin" && request.body.role !== "site_admin") {
       const administrators = await client.query("SELECT count(*)::int AS total FROM department_memberships WHERE department_id = $1 AND role = 'site_admin'", [selectedDepartmentId]);
       if (administrators.rows[0].total <= 1) {
         await client.query("ROLLBACK");
@@ -1532,6 +1538,8 @@ app.put<{ Params: { userId: string }; Body: { role: "site_admin" | "member"; per
              module_permissions = EXCLUDED.module_permissions`,
       [request.params.userId, selectedDepartmentId, request.body.role, permissions, videoPermissions, presenterPermissions, JSON.stringify(modulePermissions)],
     );
+    await recordLocationAccessChanges(client, request.authenticatedUser!, { id: target.rows[0].id, displayName: target.rows[0].display_name },
+      "location_access", current, await readLocationAccessGrants(client, request.params.userId, selectedDepartmentId));
     await client.query("COMMIT");
     const user = await pool.query("SELECT id, display_name, username FROM app_users WHERE id = $1", [request.params.userId]);
     if (!user.rows[0]) return reply.code(404).send({ error: "This account could not be found on this server." });
@@ -1549,25 +1557,31 @@ app.delete<{ Params: { userId: string } }>("/api/location-access/:userId", {
   if (!validModuleMutation(request, reply)) return reply;
   const selectedDepartmentId = await activeDepartmentId(request, reply, true);
   if (!selectedDepartmentId) return reply;
-  if (request.params.userId === request.authenticatedUser!.id) return reply.code(400).send({ error: "Ask another site administrator to remove your location access." });
+  if (request.params.userId.toLowerCase() === request.authenticatedUser!.id.toLowerCase()) return reply.code(400).send({ error: "Ask another site administrator to remove your location access." });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(1196571730, 4)");
-    await client.query("SELECT id FROM departments WHERE id = $1 FOR UPDATE", [selectedDepartmentId]);
-    const member = await client.query("SELECT role FROM department_memberships WHERE department_id = $1 AND user_id = $2 FOR UPDATE", [selectedDepartmentId, request.params.userId]);
-    if (!member.rowCount) {
+    await client.query(locationAccessWriteLock);
+    if (!await lockLocationAccessAdministrator(client, selectedDepartmentId, request.authenticatedUser!.id)) {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ error: "Site administrator access is required for this action." });
+    }
+    const before = await readLocationAccessGrants(client, request.params.userId, selectedDepartmentId);
+    if (!before.length) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This user does not have access to this location." });
     }
-    if (member.rows[0].role === "site_admin") {
+    if (before[0].role === "site_admin") {
       const administrators = await client.query("SELECT count(*)::int AS total FROM department_memberships WHERE department_id = $1 AND role = 'site_admin'", [selectedDepartmentId]);
       if (administrators.rows[0].total <= 1) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "Keep at least one site administrator for this location." });
       }
     }
+    const target = await client.query<{ display_name: string }>("SELECT display_name FROM app_users WHERE id=$1", [request.params.userId]);
     await client.query("DELETE FROM department_memberships WHERE department_id = $1 AND user_id = $2", [selectedDepartmentId, request.params.userId]);
+    await recordLocationAccessChanges(client, request.authenticatedUser!, { id: request.params.userId, displayName: target.rows[0]?.display_name ?? "Deleted account" },
+      "location_access", before, []);
     await client.query("COMMIT");
     return { id: request.params.userId };
   } catch (error) {
@@ -1808,6 +1822,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
   try {
     await client.query("BEGIN");
     if (accountRole === "server_admin") await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
+    await client.query(locationAccessWriteLock);
     if (serviceUserOwnerId) {
       const owner = await client.query("SELECT id FROM app_users WHERE id=$1 AND is_service_user=false", [serviceUserOwnerId]);
       if (!owner.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose an existing non-service user as the owner." }); }
@@ -1839,6 +1854,7 @@ app.post<{ Body: CreateSiteUser }>("/api/users", {
       await client.query("ROLLBACK");
       return reply.code(400).send({ error: relationshipError });
     }
+    await recordLocationAccessChanges(client, request.authenticatedUser!, { id, displayName }, "server_accounts", [], await readLocationAccessGrants(client, id));
     await client.query("COMMIT");
     const row = user.rows[0];
     return reply.code(201).send({ id: row.id, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: isServiceUser ? [] : await readUserRelationships(client, id), accountRole, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: false, serviceUserOwnerId: row.service_user_owner_id, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships });
@@ -1917,6 +1933,7 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
+    await client.query(locationAccessWriteLock);
     const current = await client.query("SELECT role, is_service_user, server_permissions, service_user_owner_id, is_enabled, can_change_password, email, username, display_name, first_name, last_name FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!current.rowCount) {
       await client.query("ROLLBACK");
@@ -2007,8 +2024,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
     }
-    const previousModulePermissions = await client.query("SELECT department_id, module_permissions FROM department_memberships WHERE user_id = $1", [request.params.id]);
-    const modulePermissionsByDepartment = new Map(previousModulePermissions.rows.map((membership) => [membership.department_id, membership.module_permissions ?? {}]));
+    const previousAccess = await readLocationAccessGrants(client, request.params.id);
+    const modulePermissionsByDepartment = new Map(previousAccess.map((membership) => [membership.department_id, membership.module_permissions ?? {}]));
     await client.query("DELETE FROM department_memberships WHERE user_id = $1", [request.params.id]);
     await client.query("DELETE FROM user_phone_numbers WHERE user_id = $1", [request.params.id]);
     await insertUserPhoneNumbers(client, request.params.id, phoneNumbers);
@@ -2034,6 +2051,8 @@ app.put<{ Params: { id: string }; Body: Pick<CreateSiteUser, "email" | "username
       );
     }
     if (updated.rows[0].is_service_user || !updated.rows[0].is_enabled) await client.query("DELETE FROM auth_sessions WHERE user_id=$1", [request.params.id]);
+    await recordLocationAccessChanges(client, request.authenticatedUser!, { id: request.params.id, displayName }, "server_accounts", previousAccess,
+      await readLocationAccessGrants(client, request.params.id));
     await client.query("COMMIT");
     const row = updated.rows[0];
     return { id: row.id, lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null, ...(!row.is_service_user && row.email ? { email: row.email } : {}), ...(!row.is_service_user ? { username: row.username } : {}), displayName: row.display_name, ...(row.first_name ? { firstName: row.first_name } : {}), ...(row.last_name ? { lastName: row.last_name } : {}), ...(row.birthday ? { birthday: row.birthday } : {}), ...(row.street ? { street: row.street } : {}), ...(row.street_number ? { streetNumber: row.street_number } : {}), ...(row.postal_code ? { postalCode: row.postal_code } : {}), ...(row.city ? { city: row.city } : {}), phoneNumbers, relationships: row.is_service_user ? [] : await readUserRelationships(client, request.params.id), accountRole: row.role, serverPermissions: row.server_permissions ?? [], isServiceUser: row.is_service_user, apiKeyEnabled: row.api_key_enabled, serviceUserOwnerId: row.service_user_owner_id ?? undefined, adminNote: row.admin_note ?? "", isEnabled: row.is_enabled, canChangePassword: row.can_change_password, memberships };
@@ -2062,7 +2081,8 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
   try {
     await client.query("BEGIN");
     await client.query("SELECT pg_advisory_xact_lock(1196571730, 2)");
-    const target = await client.query("SELECT id, role, is_service_user FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
+    await client.query(locationAccessWriteLock);
+    const target = await client.query("SELECT id, role, is_service_user, display_name FROM app_users WHERE id = $1 FOR UPDATE", [request.params.id]);
     if (!target.rowCount) {
       await client.query("ROLLBACK");
       return reply.code(404).send({ error: "This local user could not be found." });
@@ -2082,7 +2102,9 @@ app.delete<{ Params: { id: string } }>("/api/users/:id", {
         return reply.code(409).send({ error: "The last Server Administrator account cannot be deleted." });
       }
     }
+    const previousAccess = await readLocationAccessGrants(client, request.params.id);
     await client.query("DELETE FROM app_users WHERE id = $1", [request.params.id]);
+    await recordLocationAccessChanges(client, request.authenticatedUser!, { id: request.params.id, displayName: target.rows[0].display_name }, "server_accounts", previousAccess, []);
     await client.query("COMMIT");
     return { id: request.params.id };
   } catch (error) {

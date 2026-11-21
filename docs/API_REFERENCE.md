@@ -53,7 +53,8 @@ These routes include server-wide administration. Most writes require a Server Ad
 | `POST` | `/api/users/:id/reset-password` | Set a temporary password and optionally require a change at next login. |
 | `GET`, `POST` | `/api/departments` | List locations or create one. |
 | `GET`, `PUT` | `/api/department` | Read/update the selected location profile. |
-| `GET`, `PUT` | `/api/location-access`, `/api/location-access/:userId` | List, grant, edit, or revoke a user's membership in the selected location. |
+| `GET`, `PUT`, `DELETE` | `/api/location-access`, `/api/location-access/:userId` | List, grant, edit, or revoke a user's membership in the selected location. |
+| `GET` | `/api/location-access/history` | Site administrators can review the latest 100 committed membership changes at the selected location. Optional `q` matches account or actor name, and `action` can be `granted`, `changed`, or `revoked`. |
 | `GET` | `/api/people-options` | People choices used by account/access forms; fields are permission-filtered. |
 | `GET`, `PUT` | `/api/branding` | Read or update installation branding. |
 

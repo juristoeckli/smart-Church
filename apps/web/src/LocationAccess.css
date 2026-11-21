@@ -21,4 +21,12 @@
 .location-access-embedded-panel{width:100%;max-height:none;overflow:visible;padding:0;border:0;background:transparent;box-shadow:none}
 .location-access-embedded .location-access-layout{grid-template-columns:minmax(180px,.72fr) minmax(0,1.5fr);max-height:62vh}
 .location-access-embedded .location-access-list,.location-access-embedded .location-access-form{max-height:60vh}
+.location-access-history{min-height:0;max-height:65vh;overflow:auto;padding:10px 4px 10px 0}
+.location-access-history .module-toolbar label{display:grid;gap:4px}
+.location-access-history-list{display:grid;gap:8px;margin:12px 0 0;padding:0;list-style:none}
+.location-access-history-list>li{padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--panel)}
+.location-access-history-list h3,.location-access-history-list h4,.location-access-history-list p{margin:0 0 5px}
+.location-access-history-list summary{cursor:pointer}
+.location-access-history-states{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:7px}
+.location-access-history-states ul{margin:0;padding-inline-start:18px}
 @media(max-width:760px){.location-access-embedded .location-access-layout{grid-template-columns:1fr;max-height:none;overflow:visible}.location-access-embedded .location-access-list,.location-access-embedded .location-access-form{max-height:none}}
