@@ -441,7 +441,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT m.id, m.meeting_date, m.title, m.created_at,
+        `SELECT m.id, m.meeting_date::text AS meeting_date, m.title, m.created_at,
                 count(a.contact_id)::int AS attendee_count,
                 count(a.contact_id) FILTER (WHERE a.status='present')::int AS present_count
            FROM group_meetings m LEFT JOIN group_meeting_attendance a ON a.meeting_id=m.id
@@ -501,27 +501,46 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return result.rows.map((row) => ({ contactId: row.contact_id, firstName: row.first_name, lastName: row.last_name, status: row.status }));
     });
 
-    routes.put<{ Params: { id: string }; Body: { attendance: { contactId: string; status: "present" | "absent" | "excused" }[] } }>("/api/group-meetings/:id/attendance", { schema: {
+    const groupAttendanceStatuses = ["present", "absent", "excused"] as const;
+    type GroupAttendanceStatus = typeof groupAttendanceStatuses[number];
+    routes.put<{ Params: { id: string }; Body: { attendance: { contactId: string; status: GroupAttendanceStatus; expectedStatus?: GroupAttendanceStatus }[] } }>("/api/group-meetings/:id/attendance", { schema: {
       params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["attendance"], properties: { attendance: { type: "array", maxItems: 2000, items: { type: "object", additionalProperties: false, required: ["contactId", "status"], properties: { contactId: { type: "string", format: "uuid" }, status: { type: "string", enum: ["present", "absent", "excused"] } } } } } },
+      body: { type: "object", additionalProperties: false, required: ["attendance"], properties: { attendance: { type: "array", maxItems: 2000, items: { type: "object", additionalProperties: false, required: ["contactId", "status"], properties: { contactId: { type: "string", format: "uuid" }, status: { type: "string", enum: groupAttendanceStatuses }, expectedStatus: { type: "string", enum: groupAttendanceStatuses } } } } } },
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const meeting = await client.query("SELECT id FROM group_meetings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        const meeting = await client.query<{ source_system: string | null; group_id: string }>(
+          `SELECT g.source_system, m.group_id FROM group_meetings m JOIN church_groups g ON g.id=m.group_id
+            WHERE m.id=$1 AND m.department_id=$2 AND g.department_id=$2 FOR UPDATE OF m`,
+          [request.params.id, departmentId],
+        );
         if (!meeting.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group meeting not found." }); }
+        if (meeting.rows[0].source_system === "churchtools" || meeting.rows[0].source_system === "elvanto") {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "Imported group attendance is managed in the source system." });
+        }
         const contactIds = request.body.attendance.map((item) => item.contactId);
         if (new Set(contactIds).size !== contactIds.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Each person can only appear once." }); }
         for (const item of request.body.attendance) {
           const saved = await client.query(
-            `UPDATE group_meeting_attendance SET status=$3,updated_at=now() WHERE meeting_id=$1 AND contact_id=$2
-             RETURNING contact_id`, [request.params.id, item.contactId, item.status],
+            `UPDATE group_meeting_attendance a SET status=$3,updated_at=now()
+               FROM contacts c
+              WHERE a.meeting_id=$1 AND a.contact_id=$2 AND c.id=a.contact_id AND c.department_id=$5
+                AND ($4::text IS NULL OR a.status=$4)
+              RETURNING a.contact_id`,
+            [request.params.id, item.contactId, item.status, item.expectedStatus ?? null, departmentId],
           );
-          if (!saved.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Attendance includes someone who was not on this meeting's group roster." }); }
+          if (!saved.rowCount) {
+            await client.query("ROLLBACK");
+            if (item.expectedStatus) return reply.code(409).send({ error: "Attendance changed while you were editing. Reload attendance and try again." });
+            return reply.code(400).send({ error: "Attendance includes someone who was not on this meeting's group roster." });
+          }
         }
         await client.query("COMMIT");
+        if (contactIds.length) realtime.publish("core:groups:changed", departmentId, { groupId: meeting.rows[0].group_id, meetingId: request.params.id, action: "meeting-attendance-updated" });
         return { saved: true };
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }

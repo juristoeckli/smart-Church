@@ -1,0 +1,152 @@
+import { useEffect, useState } from "react";
+import { Search } from "lucide-react";
+import { groupAttendanceChanges, type GroupAttendanceEntry, type GroupAttendanceStatus } from "../../group-attendance";
+
+type Group = { id: string; name: string; importedFrom?: string };
+type Meeting = { id: string; date: string; title: string };
+const statuses = { present: "Present", absent: "Absent", excused: "Excused" } as const;
+const statusKeys = Object.keys(statuses) as GroupAttendanceStatus[];
+
+function useList<T>(path: string, departmentId: string, label: string) {
+  const [result, setResult] = useState<{ path: string; rows: T[]; error?: string }>();
+  const [version, setVersion] = useState(0);
+  useEffect(() => {
+    if (!path) return;
+    const controller = new AbortController();
+    const fallback = "Could not load " + label + ".";
+    void fetch(path, { headers: { "x-department-id": departmentId }, signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(fallback);
+        const rows = await response.json() as T[];
+        if (!controller.signal.aborted) setResult({ path, rows });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setResult({ path, rows: [], error: fallback });
+      });
+    return () => controller.abort();
+  }, [path, departmentId, label, version]);
+  return {
+    rows: path && result?.path === path ? result.rows : [],
+    error: path && result?.path === path ? result.error : undefined,
+    pending: Boolean(path && result?.path !== path),
+    reload: () => { setResult(undefined); setVersion((current) => current + 1); },
+  };
+}
+
+export function GroupMeetingAttendance({ departmentId, csrfToken, onBack }: {
+  departmentId: string;
+  csrfToken: string;
+  onBack: () => void;
+}) {
+  const [groupId, selectGroup] = useState("");
+  const groups = useList<Group>("/api/groups", departmentId, "groups");
+  const localGroups = groups.rows.filter((group) => !group.importedFrom);
+  const group = localGroups.find((value) => value.id === groupId);
+  const meetings = useList<Meeting>(group ? "/api/groups/" + group.id + "/meetings" : "", departmentId, "group meetings");
+  const [meetingId, selectMeeting] = useState("");
+  const meeting = meetings.rows.find((value) => value.id === meetingId);
+  const roster = useList<GroupAttendanceEntry>(meeting ? "/api/group-meetings/" + meeting.id + "/attendance" : "", departmentId, "attendance");
+  const [draft, setDraft] = useState<Record<string, GroupAttendanceStatus>>({});
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<GroupAttendanceStatus | "">("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const rows = roster.rows.map((row) => ({ ...row, status: draft[row.contactId] ?? row.status }));
+  const changes = groupAttendanceChanges(roster.rows, rows);
+  const busy = saving || changes.length > 0;
+  const term = query.trim().toLocaleLowerCase();
+  const shown = rows.filter((row) => (!filter || row.status === filter) && (row.firstName + " " + row.lastName).toLocaleLowerCase().includes(term));
+  const loadError = groups.error ?? meetings.error ?? roster.error;
+  const pending = groups.pending || meetings.pending || roster.pending;
+
+  function resetDraft() {
+    setDraft({});
+    setError("");
+    setNotice("");
+  }
+
+  async function saveAttendance() {
+    if (!meeting || roster.pending || saving || !changes.length) return;
+    setSaving(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/group-meetings/" + meeting.id + "/attendance", {
+        method: "PUT",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ attendance: changes }),
+      });
+      const result = await response.json() as { saved?: boolean; error?: string };
+      if (!response.ok || !result.saved) throw new Error(result.error ?? "Could not save attendance.");
+      setDraft({});
+      setNotice("Attendance saved.");
+      roster.reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save attendance.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <main className="checkin-module">
+    <header className="checkin-heading">
+      <div><h1>Group meeting attendance</h1></div>
+      <button className="checkin-print" disabled={busy} type="button" onClick={onBack}>Back to service check-in</button>
+    </header>
+    <section className="checkin-setup">
+      <label>Group<select value={groupId} disabled={busy || groups.pending} onChange={(event) => {
+        selectGroup(event.target.value);
+        selectMeeting("");
+        meetings.reload();
+        roster.reload();
+        resetDraft();
+      }}>
+        <option value="">Select a group…</option>
+        {localGroups.map((value) => <option key={value.id} value={value.id}>{value.name}</option>)}
+      </select></label>
+      <label>Group meeting<select value={meetingId} disabled={busy || !group || meetings.pending} onChange={(event) => {
+        selectMeeting(event.target.value);
+        roster.reload();
+        setQuery("");
+        setFilter("");
+        resetDraft();
+      }}>
+        <option value="">Select a group meeting…</option>
+        {meetings.rows.map((value) => <option key={value.id} value={value.id}>{value.date}{value.title ? " · " + value.title : ""}</option>)}
+      </select></label>
+    </section>
+    {(error || loadError) && <p className="checkin-error" role="alert">{error || loadError}</p>}
+    {notice && <p role="status">{notice}</p>}
+    {loadError && <button className="checkin-print" type="button" onClick={groups.error ? groups.reload : meetings.error ? meetings.reload : roster.reload}>Retry</button>}
+    {pending && <p className="checkin-empty" role="status">Loading…</p>}
+    {!pending && !loadError && group && !meetings.rows.length && <p className="checkin-empty">Create a meeting in Groups to record its attendance here.</p>}
+    {!pending && !loadError && meeting && <>
+      <section className="checkin-toolbar">
+        <strong>{statusKeys.map((status) => rows.filter((row) => row.status === status).length + " " + statuses[status].toLowerCase()).join(" · ")}</strong>
+        <label className="checkin-search"><Search size={17}/><span className="sr-only">Find attendee</span><input type="search" placeholder="Find attendee" value={query} onChange={(event) => setQuery(event.target.value)}/></label>
+        <label className="checkin-sort">Status<select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
+          <option value="">All</option>
+          {statusKeys.map((status) => <option key={status} value={status}>{statuses[status]}</option>)}
+        </select></label>
+        <button className="checkin-print" type="button" disabled={saving} onClick={() => { resetDraft(); roster.reload(); }}>
+          {changes.length ? "Discard changes and reload" : "Reload attendance"}
+        </button>
+        <button className="checkin-print" type="button" disabled={saving || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
+      </section>
+      <div className="checkin-roster">
+        {shown.map((row) => <article className={"checkin-person" + (row.status === "present" ? " is-present" : "")} key={row.contactId}>
+          <div className="checkin-person-info"><strong>{row.firstName} {row.lastName}</strong></div>
+          <select aria-label={"Attendance for " + row.firstName + " " + row.lastName} value={row.status} disabled={saving} onChange={(event) => {
+            const status = event.target.value as GroupAttendanceStatus;
+            setDraft((current) => ({ ...current, [row.contactId]: status }));
+            setNotice("");
+          }}>
+            {statusKeys.map((status) => <option key={status} value={status}>{statuses[status]}</option>)}
+          </select>
+        </article>)}
+        {!shown.length && <p className="checkin-empty">{rows.length ? "No attendees match this view." : "This meeting has no saved roster."}</p>}
+      </div>
+    </>}
+  </main>;
+}
