@@ -1,6 +1,7 @@
+import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import { registerAppointmentTemplates } from "./appointment-templates.js";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
@@ -95,11 +96,7 @@ function responseError(reply: { code: (status: number) => { send: (body: object)
   return reply.code(status).send({ error: message });
 }
 
-function icsEscape(value: string) {
-  return value.replace(/\\/g, "\\\\").replace(/\r\n|\r|\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;");
-}
 function icsDateTime(value: string) { return value.replace(/[-:]/g, "").replace(/\.\d+$/, ""); }
-function hashFeedToken(value: string) { return createHash("sha256").update(value).digest("hex"); }
 
 const calendarSubscriptionAudience = `(
   (calendar.scope='personal' AND calendar.owner_user_id=membership.user_id)
@@ -113,23 +110,6 @@ const calendarSubscriptionAudience = `(
                   AND member.contact_id=membership.contact_id AND member.status='active')
   ))
 )`;
-
-function foldIcsLine(value: string) {
-  const fragments: string[] = [];
-  let line = "";
-  let bytes = 0;
-  for (const character of value) {
-    const width = Buffer.byteLength(character);
-    if (bytes + width > 75) {
-      fragments.push(line);
-      line = " ";
-      bytes = 1;
-    }
-    line += character;
-    bytes += width;
-  }
-  return [...fragments, line].join("\r\n");
-}
 
 async function registrationFormTemplatesInstalled(db: Pick<PoolClient, "query">) {
   const result = await db.query<{ installed: boolean }>(

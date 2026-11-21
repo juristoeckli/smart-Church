@@ -1,3 +1,4 @@
+import { ResourceCalendarSubscription } from "./ResourceCalendarSubscription";
 import { useEffect, useState } from "react";
 
 type Period = "upcoming" | "past";
@@ -5,8 +6,9 @@ type Status = "requested" | "approved" | "declined" | "cancelled";
 type Booking = { id: string; resourceName: string; location: string; purpose: string; subtitle?: string; description?: string; beneficiaryName?: string | null; quantity: number; status: Status; allDayDate?: string | null; startsAt: string; endsAt: string };
 type BookingPage = { bookings: Booking[]; nextCursor: string | null; timeZone: string };
 
-export function MyResourceBookings({ departmentId, refreshVersion, statusLabels, onHistory }: {
+export function MyResourceBookings({ departmentId, csrfToken, refreshVersion, statusLabels, onHistory }: {
   departmentId: string;
+  csrfToken: string;
   refreshVersion: number;
   statusLabels: Record<Status, string>;
   onHistory: (id: string, name: string) => void;
@@ -46,6 +48,7 @@ export function MyResourceBookings({ departmentId, refreshVersion, statusLabels,
   const formatter = page ? new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short", timeZone: page.timeZone }) : null;
   return <section className="resource-scheduler-booked-days" aria-labelledby="resource-my-bookings">
     <h2 id="resource-my-bookings">My bookings</h2>
+    <ResourceCalendarSubscription key={departmentId} departmentId={departmentId} csrfToken={csrfToken} />
     <div className="resource-scheduler-filters">
       <label>Time period<select value={period} onChange={event => { setPeriod(event.target.value as Period); setCursors([null]); }}>
         <option value="upcoming">Upcoming and in progress</option>

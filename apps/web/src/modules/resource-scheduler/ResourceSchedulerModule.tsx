@@ -399,7 +399,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage }: 
       <button className="button button-secondary" type="button" aria-pressed={!showMyBookings} onClick={() => setShowMyBookings(false)}>Schedule</button>
       <button className="button button-secondary" type="button" aria-pressed={showMyBookings} onClick={() => setShowMyBookings(true)}>My bookings</button>
     </nav>
-    {showMyBookings ? <MyResourceBookings key={departmentId} departmentId={departmentId} refreshVersion={bookedDaysRevision}
+    {showMyBookings ? <MyResourceBookings key={departmentId} departmentId={departmentId} csrfToken={csrfToken} refreshVersion={bookedDaysRevision}
       statusLabels={statusLabels} onHistory={(bookingId, title) => setBookingHistory({ departmentId, bookingId, title })} /> : <>
     <section className="resource-scheduler-toolbar"><div className="resource-scheduler-week"><button className="icon-button" type="button" aria-label="Previous week" onClick={() => setWeek(addDays(week, -7))}><ChevronLeft size={18} /></button><strong>{formatDay(from)} — {formatDay(to)}</strong><button className="icon-button" type="button" aria-label="Next week" onClick={() => setWeek(addDays(week, 7))}><ChevronRight size={18} /></button><button className="button button-secondary" type="button" onClick={() => setWeek(monday(localInputInZone(new Date(), loadedDepartment === departmentId ? data.timeZone : "UTC").slice(0, 10)))}>This week</button>
       <label>Week of<input type="date" value={week} min="0001-01-07" max="9999-12-25" onChange={(event) => {

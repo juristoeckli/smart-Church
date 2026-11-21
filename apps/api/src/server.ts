@@ -486,7 +486,8 @@ app.addHook("preHandler", async (request, reply) => {
     }
   }
   const calendarSubscriptionRequest = (request.method === "GET" || request.method === "HEAD")
-    && new URL(request.url, "http://localhost").pathname === "/api/public/church-calendar/subscription.ics";
+    && ["/api/public/church-calendar/subscription.ics", "/api/public/resource-scheduler/subscription.ics"]
+      .includes(new URL(request.url, "http://localhost").pathname);
   const publicCalendarSyncRequest = request.method === "GET" && (
     /^\/api\/public\/calendar-sync\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)
     || /^\/api\/public\/church-calendar\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)

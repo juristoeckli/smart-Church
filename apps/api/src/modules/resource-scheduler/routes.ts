@@ -1,4 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
+import { registerResourceCalendarSubscriptions } from "./booking-calendar-subscriptions.js";
 import { registerMyResourceBookings } from "./my-resource-bookings.js";
 import { resourceBookedDayReport } from "./booked-day-report.js";
 import { canBookForOthers, canViewResource, isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
@@ -468,6 +469,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   registerMyResourceBookings(app, context, location);
+  registerResourceCalendarSubscriptions(app, context, location);
 
   app.get("/api/modules/resource-scheduler/home-bookings", async (request, reply) => {
     const departmentId = await location(request, reply);

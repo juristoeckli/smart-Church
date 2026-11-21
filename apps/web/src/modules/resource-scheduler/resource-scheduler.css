@@ -59,3 +59,7 @@
 
 .resource-booking-description summary { cursor: pointer; }
 .resource-booking-description p { margin: .2rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.resource-calendar-subscription { margin: .5rem 0 1rem; }
+.resource-calendar-subscription summary { cursor: pointer; }
+.resource-calendar-subscription label { display: grid; max-width: 32rem; gap: .25rem; margin-top: .5rem; }
