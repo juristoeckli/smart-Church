@@ -4,6 +4,7 @@ import { formatUserDate } from "../../date-format";
 import { getActiveLanguage } from "../../i18n";
 import { translateModuleMessage } from "../translations";
 import { BookingHistory } from "./BookingHistory";
+import { CalendarSeriesImport } from "./CalendarSeriesImport";
 import { MembershipDetails } from "./MembershipDetails";
 import { FinancePreview } from "./FinancePreview";
 import "../sync/federation.css";
@@ -26,7 +27,7 @@ function shiftUtcYear(years: number) {
   const date = new Date(); date.setUTCFullYear(date.getUTCFullYear() + years); return date.toISOString().slice(0, 10);
 }
 
-export function SyncModule({ departmentId, settingsPanel = false }: { departmentId: string; settingsPanel?: boolean }) {
+export function SyncModule({ departmentId, csrfToken, settingsPanel = false }: { departmentId: string; csrfToken: string; settingsPanel?: boolean }) {
   const t = (message: string) => translateModuleMessage("sync", getActiveLanguage(), message);
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [instanceUrl, setInstanceUrl] = useState("");
@@ -157,6 +158,7 @@ export function SyncModule({ departmentId, settingsPanel = false }: { department
       {status.migration && <div className="sync-feedback" aria-live="polite"><strong>{t("Migration progress")}</strong><span>{status.migration.complete ? t("Complete") : <>{status.migration.page} {t("of")} {status.migration.total} <span>{t("records processed")}</span></>} · {status.migration.created} <span>{t("created")}</span> · {status.migration.updated} <span>{t("updated")}</span> · {status.migration.skipped} <span>{t("skipped")}</span> · {status.migration.failed ?? 0} <span>{t("failed")}</span></span>{!status.migration.complete && status.migration.previewAt && <button className="button button-secondary" type="button" onClick={() => void importMigration()} disabled={busy}>{t("Continue migration")}</button>}{Boolean(status.migration.failed) && <><small><span>{t("Failed source records:")}</span> {(status.migration.failedRecords ?? []).map((record) => `${t(record.area)} ${record.sourceId}`).join(", ")}</small><button className="button button-secondary" type="button" onClick={() => void importMigration(true)} disabled={busy}>{t("Retry migration")}</button></>}</div>}
     </section>}
     {settingsPanel && status?.configured && <BookingHistory key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} revision={`${status.migration?.previewAt ?? ""}|${status.migration?.page ?? 0}`} t={t} />}
+    {settingsPanel && status?.configured && <CalendarSeriesImport key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} csrfToken={csrfToken} t={t} />}
     {settingsPanel && status?.configured && <MembershipDetails key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} revision={`${status.migration?.previewAt ?? ""}|${status.migration?.page ?? 0}`} t={t} />}
     {settingsPanel && status?.configured && <FinancePreview key={`${departmentId}|${status.instanceUrl}`} departmentId={departmentId} t={t} />}
     {status?.configured && <section className="directory-card sync-controls-card"><div><h2>{t("Module controls")}</h2><p>{t("Pause scheduled sync and keep the imported records, or remove the connection and delete its imported records from this site.")}</p></div><div className="community-inline-actions"><button className="button button-secondary" type="button" onClick={() => void toggle()} disabled={busy}>{status.enabled ? t("Pause sync") : t("Enable sync")}</button><button className="button button-danger" type="button" onClick={() => void remove()} disabled={busy || totalImported === 0 && !status.configured}><Trash2 size={14} />{t("Remove sync and imported data")}</button></div></section>}

@@ -16,6 +16,7 @@ import { createFinanceDraftBatch, createReviewedJournalDrafts, journalDraftBatch
 import { planReviewedSplitDrafts, readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
 import { reconcileChurchToolsSpecialJournal } from "./finance-special-review.js";
 import { readChurchToolsCancellationReadiness } from "./finance-cancellation-readiness.js";
+import { reviewChurchToolsCalendarSeries } from "./calendar-series.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -1894,6 +1895,113 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not preview ChurchTools finance data." });
       }
+    });
+    type CalendarSeriesScope = { calendarId: string; seriesId: string; timeZone: string; targetCalendarId: string; reviewHash?: string };
+    const calendarSeriesSchema = { type: "object", additionalProperties: false,
+      required: ["calendarId", "seriesId", "timeZone", "targetCalendarId"], properties: {
+        calendarId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+        seriesId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+        timeZone: { type: "string", minLength: 1, maxLength: 80 }, targetCalendarId: { type: "string", format: "uuid" },
+        reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+      } } as const;
+    async function calendarSeriesAvailable(dept: string) {
+      const { rows } = await pool!.query<{ available: boolean }>(`SELECT to_regclass('public.church_calendar_calendars') IS NOT NULL
+        AND to_regclass('public.church_calendar_appointments') IS NOT NULL
+        AND to_regclass('public.churchtools_migration_calendar_series') IS NOT NULL
+        AND EXISTS (SELECT 1 FROM departments d JOIN installation_modules m ON m.installation_id=d.installation_id
+          WHERE d.id=$1 AND m.module_id='church-calendar' AND m.enabled) AS available`, [dept]);
+      return rows[0]?.available === true;
+    }
+    const selectPersonalCalendars = `SELECT id,name FROM church_calendar_calendars
+      WHERE department_id=$1 AND owner_user_id=$2 AND scope='personal' AND archived_at IS NULL`;
+    const selectCalendarSeriesLink = `SELECT link.source_hash,link.appointment_id,
+      a.calendar_id,a.archived_at FROM churchtools_migration_calendar_series link
+      LEFT JOIN church_calendar_appointments a ON a.department_id=link.department_id AND a.id=link.appointment_id
+      WHERE link.department_id=$1 AND link.instance_url=$2 AND link.source_calendar_id=$3 AND link.source_series_id=$4`;
+    type CalendarSeriesLink = { source_hash: string; appointment_id: string | null; calendar_id: string | null; archived_at: Date | null };
+    function calendarSeriesAction(link: CalendarSeriesLink | undefined, sourceHash: string, targetCalendarId: string) {
+      if (!link) return "create";
+      if (link.calendar_id !== targetCalendarId || link.archived_at || !link.appointment_id) return "already_linked";
+      return link.source_hash === sourceHash ? "already_imported" : "source_changed";
+    }
+    routes.get("/api/modules/sync/churchtools/calendar-series/targets", async (request, reply) => {
+      const dept = await department(request, reply, true);
+      if (!dept) return reply;
+      const actor = request.authenticatedUser?.id;
+      if (!actor) return reply.code(403).send({ error: "Sign in to choose a personal calendar." });
+      const available = await calendarSeriesAvailable(dept);
+      const calendars = available ? (await pool!.query<{ id: string; name: string }>(selectPersonalCalendars + " ORDER BY name,id", [dept, actor])).rows : [];
+      return reply.header("Cache-Control", "private, no-store").send({ available, calendars });
+    });
+    routes.post<{ Body: CalendarSeriesScope }>("/api/modules/sync/churchtools/calendar-series", { schema: { body: calendarSeriesSchema } }, async (request, reply) => {
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      const actor = request.authenticatedUser?.id;
+      if (!actor) return reply.code(403).send({ error: "Sign in to import to your personal calendar." });
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before importing appointments." });
+      if (!await calendarSeriesAvailable(dept)) return reply.code(409).send({ error: "Enable Calendar before importing a series." });
+      const { calendarId, seriesId, timeZone, targetCalendarId, reviewHash } = request.body;
+      const target = await pool!.query(selectPersonalCalendars + " AND id=$3", [dept, actor, targetCalendarId]);
+      if (!target.rowCount) return reply.code(404).send({ error: "Choose an available personal calendar." });
+      let review: ReturnType<typeof reviewChurchToolsCalendarSeries>;
+      try {
+        const path = `calendars/${calendarId}/appointments/${seriesId}?include%5B%5D=event`;
+        review = reviewChurchToolsCalendarSeries(await get(config.instance_url, decrypt(config.encrypted_login_token), path), calendarId, seriesId, timeZone);
+      } catch (error) {
+        const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read the ChurchTools appointment series." });
+      }
+      const args = [dept, config.instance_url, calendarId, seriesId];
+      const expectedReviewHash = createHash("sha256").update(JSON.stringify([...args, actor, targetCalendarId, review.sourceHash])).digest("hex");
+      if (!reviewHash) {
+        const { rows } = await pool!.query<CalendarSeriesLink>(selectCalendarSeriesLink, args);
+        return reply.header("Cache-Control", "private, no-store").send({
+          review, reviewHash: expectedReviewHash, action: calendarSeriesAction(rows[0], review.sourceHash, targetCalendarId),
+        });
+      }
+      if (reviewHash !== expectedReviewHash) return reply.code(409).send({ error: "The source series or destination changed. Review it again before importing." });
+      const db = await pool!.connect();
+      try {
+        await db.query("BEGIN");
+        await db.query("SET LOCAL lock_timeout = '5s'");
+        if (!await deps.lockDepartmentForWrite(db, dept)) {
+          await db.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const liveConfig = await db.query(`SELECT 1 FROM churchtools_sync_settings
+          WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE`, [dept, config.instance_url, config.encrypted_login_token]);
+        const liveCalendar = await db.query(selectPersonalCalendars + " AND id=$3 FOR SHARE", [dept, actor, targetCalendarId]);
+        if (!liveConfig.rowCount || !liveCalendar.rowCount) {
+          await db.query("ROLLBACK");
+          return reply.code(409).send({ error: "The connection or personal calendar changed. Review it again." });
+        }
+        const appointmentId = randomUUID();
+        // Claim the source key before inserting so concurrent retries converge on one local series.
+        const claimed = await db.query(`INSERT INTO churchtools_migration_calendar_series
+          (department_id,instance_url,source_calendar_id,source_series_id,appointment_id,source_hash)
+          VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, [...args, appointmentId, review.sourceHash]);
+        if (!claimed.rowCount) {
+          const { rows } = await db.query<CalendarSeriesLink>(selectCalendarSeriesLink, args);
+          await db.query("ROLLBACK");
+          if (calendarSeriesAction(rows[0], review.sourceHash, targetCalendarId) === "already_imported") {
+            return reply.header("Cache-Control", "private, no-store").send({ action: "already_imported", appointmentId: rows[0].appointment_id });
+          }
+          return reply.code(409).send({ error: "This source series already has a local copy. Review changes in Calendar." });
+        }
+        await db.query(`INSERT INTO church_calendar_appointments
+          (id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,recurrence,internal_only,time_zone,created_by)
+          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9::jsonb,true,$10,$11)`, [
+          appointmentId, dept, targetCalendarId, review.title, review.subtitle, review.description, review.startsAt, review.endsAt,
+          JSON.stringify(review.recurrence), review.zone, actor,
+        ]);
+        await db.query("COMMIT");
+        return reply.code(201).header("Cache-Control", "private, no-store").send({ action: "created", appointmentId });
+      } catch (error) {
+        await db.query("ROLLBACK");
+        if (error && typeof error === "object" && "code" in error && error.code === "55P03") return reply.code(409).send({ error: "The calendar is busy. Retry the reviewed import." });
+        throw error;
+      } finally { db.release(); }
     });
     routes.get<{ Querystring: JournalScope }>("/api/modules/sync/churchtools/finance/journal-dry-run", {
       schema: { querystring: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency"], properties: {
