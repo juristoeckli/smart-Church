@@ -123,7 +123,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
   const [saving, setSaving] = useState(false);
   const [reload, setReload] = useState(0);
   const [exporting, setExporting] = useState(false);
-  const [rename, setRename] = useState<{ field: Field; label: string } | null>(null);
+  const [labelDraft, setLabelDraft] = useState<{ field: Field; label: string; mode: "rename" | "duplicate" } | null>(null);
   const [defaultDraft, setDefaultDraft] = useState<{ field: Field; input: string } | null>(null);
   const activeFields = fields?.filter(field => !field.archivedAt) ?? [];
   const archivedFields = fields?.filter(field => field.archivedAt) ?? [];
@@ -151,7 +151,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
       setFields(definitions);
       setAnswers(currentAnswers);
       setDraft({});
-      setRename(null);
+      setLabelDraft(null);
       setDefaultDraft(null);
     }).catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
@@ -201,19 +201,22 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     finally { setSaving(false); }
   }
 
-  async function changeField(field: Field, change: { label: string } | { archived: boolean } | { defaultValue: Value | null }) {
+  async function changeField(field: Field, change: { label: string } | { archived: boolean } | { defaultValue: Value | null } | { duplicateLabel: string }) {
     if (saving) return;
     setSaving(true);
     setError("");
     setMessage("");
     try {
-      const updated = await request<Field>(base + "/definitions/" + field.id, {
-        method: "PATCH", body: JSON.stringify({ ...change, revision: field.revision }),
-      });
-      setFields(current => current?.map(item => item.id === updated.id ? updated : item) ?? null);
-      setRename(null);
+      const path = base + "/definitions/" + field.id;
+      const updated = "duplicateLabel" in change
+        ? await request<Field>(path + "/duplicate", { method: "POST", body: JSON.stringify({ label: change.duplicateLabel, revision: field.revision }) })
+        : await request<Field>(path, { method: "PATCH", body: JSON.stringify({ ...change, revision: field.revision }) });
+      setFields(current => "duplicateLabel" in change
+        ? [...(current ?? []), updated]
+        : current?.map(item => item.id === updated.id ? updated : item) ?? null);
+      setLabelDraft(null);
       setDefaultDraft(null);
-      setMessage("label" in change ? "Membership field renamed." : "defaultValue" in change
+      setMessage("duplicateLabel" in change ? "Membership field duplicated." : "label" in change ? "Membership field renamed." : "defaultValue" in change
         ? "Membership field default saved." : change.archived ? "Membership field archived." : "Membership field restored.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update the membership field."); }
     finally { setSaving(false); }
@@ -259,10 +262,13 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     {fields && !contactId && <>
       {activeFields.length > 0 && <button type="button" disabled={exporting} onClick={() => void exportFields()}>Export member fields (CSV)</button>}
       {activeFields.length > 0 && <ul>{activeFields.map(field => <li key={field.id}>
-        {rename?.field.id === field.id ? <form onSubmit={event => { event.preventDefault(); void changeField(rename.field, { label: rename.label }); }}>
-          <label>Field label<input required maxLength={80} disabled={saving} value={rename.label} onChange={event => setRename({ field: rename.field, label: event.target.value })}/></label>
-          <button disabled={saving || !rename.label.trim()}>Save field name</button>
-          <button type="button" disabled={saving} onClick={() => setRename(null)}>Cancel</button>
+        {labelDraft?.field.id === field.id ? <form onSubmit={event => {
+          event.preventDefault();
+          void changeField(labelDraft.field, labelDraft.mode === "duplicate" ? { duplicateLabel: labelDraft.label } : { label: labelDraft.label });
+        }}>
+          <label>Field label<input required maxLength={80} disabled={saving} value={labelDraft.label} onChange={event => setLabelDraft({ ...labelDraft, label: event.target.value })}/></label>
+          <button disabled={saving || !labelDraft.label.trim()}>{labelDraft.mode === "duplicate" ? "Create copy" : "Save field name"}</button>
+          <button type="button" disabled={saving} onClick={() => setLabelDraft(null)}>Cancel</button>
         </form> : defaultDraft?.field.id === field.id ? <form onSubmit={event => { event.preventDefault(); saveDefault(); }}>
           <MemberFieldInput field={field} label="Default value" value={defaultDraft.input} disabled={saving}
             onValue={input => setDefaultDraft({ field: defaultDraft.field, input })}/>
@@ -270,9 +276,13 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
           <button type="button" disabled={saving} onClick={() => setDefaultDraft(null)}>Cancel</button>
         </form> : <>
           <span>{field.label} · {fieldTypes[field.type]}{field.defaultValue !== null ? " · Default: " + valueLabel(field.defaultValue) : ""}</span>
-          <button type="button" disabled={saving} onClick={() => { setDefaultDraft(null); setRename({ field, label: field.label }); }}>Rename</button>
+          <button type="button" disabled={saving} onClick={() => { setDefaultDraft(null); setLabelDraft({ field, label: field.label, mode: "rename" }); }}>Rename</button>
+          <button type="button" disabled={saving || fields.length >= 40} onClick={() => {
+            setDefaultDraft(null);
+            setLabelDraft({ field, label: Array.from(field.label).slice(0, 75).join("") + " copy", mode: "duplicate" });
+          }}>Duplicate field</button>
           <button type="button" disabled={saving} onClick={() => {
-            setRename(null);
+            setLabelDraft(null);
             setDefaultDraft({ field, input: field.defaultValue === null ? "" : String(field.defaultValue) });
           }}>{field.defaultValue === null ? "Set default" : "Edit default"}</button>
           <button type="button" disabled={saving} onClick={() => void changeField(field, { archived: true })}>Archive</button>

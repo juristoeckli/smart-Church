@@ -102,6 +102,16 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     return reply.header("cache-control", "private, no-store").send(await definitions(pool!, location));
   });
 
+  async function insertDefinition(client: PoolClient, location: Scope, actorId: string, input: Pick<Field, "label" | "type" | "options" | "defaultValue">): Promise<Field> {
+    const { label, type, options, defaultValue } = input;
+    const id = randomUUID();
+    await client.query(
+      "INSERT INTO group_member_field_definitions(id,department_id,group_id,label,field_type,options,created_by,default_value) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb)",
+      [id, location.departmentId, location.groupId, label, type, JSON.stringify(options), actorId, defaultValue === null ? null : JSON.stringify(defaultValue)],
+    );
+    return { id, ...input, revision: 1, archivedAt: null };
+  }
+
   app.post<{ Params: { groupId: string }; Body: { label: string; type: FieldType; options?: string[]; defaultValue?: unknown } }>(base, {
     schema: { params: groupParams, body: { type: "object", additionalProperties: false, required: ["label", "type"], properties: {
       label: labelSchema,
@@ -123,12 +133,28 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     }
     const defaultValue = normalizedValue({ type, options }, request.body.defaultValue ?? null);
     if (defaultValue === undefined) { reply.code(400).send({ error: "Enter a valid default for this field type." }); return null; }
-    const field = { id: randomUUID(), label, type, options, defaultValue };
-    await client.query(
-      "INSERT INTO group_member_field_definitions(id,department_id,group_id,label,field_type,options,created_by,default_value) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8::jsonb)",
-      [field.id, location.departmentId, location.groupId, label, type, JSON.stringify(options), request.authenticatedUser!.id, defaultValue === null ? null : JSON.stringify(defaultValue)],
-    );
-    return { ...field, revision: 1, archivedAt: null };
+    return insertDefinition(client, location, request.authenticatedUser!.id, { label, type, options, defaultValue });
+  }, 201));
+
+  app.post<{ Params: { groupId: string; fieldId: string }; Body: { label: string; revision: number } }>(`${base}/definitions/:fieldId/duplicate`, {
+    schema: { params: definitionParams, body: {
+      type: "object", additionalProperties: false, required: ["label", "revision"],
+      properties: { label: labelSchema, revision: { type: "integer", minimum: 1, maximum: 2147483646 } },
+    } },
+  }, async (request, reply) => change(request, reply, async (client, location) => {
+    const label = request.body.label.trim();
+    if (!label || label.includes("\u0000")) { reply.code(400).send({ error: "Enter a valid membership field label." }); return null; }
+    const fields = await definitions(client, location);
+    const source = fields.find(field => field.id === request.params.fieldId.toLowerCase());
+    if (!source) { reply.code(404).send({ error: "Membership field not found." }); return null; }
+    if (source.archivedAt || source.revision !== request.body.revision) {
+      reply.code(409).send({ error: "The source field changed or was archived. Reload the fields before duplicating it." }); return null;
+    }
+    if (fields.length >= 40 || fields.some(field => field.label.toLowerCase() === label.toLowerCase())) {
+      reply.code(409).send({ error: "A group can have up to 40 fields with unique labels." }); return null;
+    }
+    return insertDefinition(client, location, request.authenticatedUser!.id,
+      { label, type: source.type, options: source.options, defaultValue: source.defaultValue });
   }, 201));
 
   app.patch<{ Params: { groupId: string; fieldId: string }; Body: { revision: number; label?: string; archived?: boolean; defaultValue?: unknown } }>(`${base}/definitions/:fieldId`, {
