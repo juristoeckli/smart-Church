@@ -1,7 +1,17 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { CalendarDays, Check, Clock3, MapPin } from "lucide-react";
-import type { AuthStatus, PublicRegistrationEvent, PublicRegistrationReceiptStatus } from "@smart-church/contracts";
+import type { AuthStatus, PublicRegistrationEvent, PublicRegistrationReceiptStatus, RegistrationQuestion } from "@smart-church/contracts";
 import { publicErrorText, publicLanguage, publicText } from "./public-translations";
+
+function RegistrationAnswers({ questions, prefix }: { questions: RegistrationQuestion[]; prefix: string }) {
+  return <>{questions.map((question) => <label key={question.id}>
+    {question.label}
+    {question.type === "choice" ? <select name={prefix + question.id} required={question.required}>
+      <option value="">—</option>
+      {question.options?.map((option) => <option key={option} value={option}>{option}</option>)}
+    </select> : <input name={prefix + question.id} maxLength={160} required={question.required} />}
+  </label>)}</>;
+}
 
 export function PublicEventRegistration({ token }: { token: string }) {
   const language = publicLanguage();
@@ -15,7 +25,8 @@ export function PublicEventRegistration({ token }: { token: string }) {
   const [sending, setSending] = useState(false);
   const [submitted, setSubmitted] = useState<"registered" | "waitlisted" | null>(null);
   const [cancellationToken, setCancellationToken] = useState("");
-  const [guests, setGuests] = useState<Array<{ firstName: string; lastName: string }>>([]);
+  const [guests, setGuests] = useState<Array<{ key: number; firstName: string; lastName: string }>>([]);
+  const [nextGuestKey, setNextGuestKey] = useState(1);
   const [attendees, setAttendees] = useState<Array<{ firstName: string; lastName: string; cancellationToken: string }>>([]);
   const [waitlistToken] = useState(() => /^#waitlist=([0-9a-f]{64})$/.exec(window.location.hash)?.[1] ?? "");
   const [waitlistCsrf, setWaitlistCsrf] = useState<string | null>(null);
@@ -90,11 +101,15 @@ export function PublicEventRegistration({ token }: { token: string }) {
     setSending(true);
     setError("");
     const values = new FormData(formEvent.currentTarget);
+    const answers = (prefix: string) => Object.fromEntries((event?.questions ?? []).map((question) => [question.id, String(values.get(prefix + question.id) ?? "")]));
+    const guestSeats = guests.map(({ key, firstName, lastName }) => ({
+      firstName, lastName, ...(event?.formRevision ? { answers: answers("guest-" + key + "-") } : {}),
+    }));
     try {
       const response = await fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim(), ...(guests.length ? { guests } : {}) }),
+        body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim(), ...(guestSeats.length ? { guests: guestSeats } : {}), ...(event?.formRevision ? { formRevision: event.formRevision, answers: answers("primary-") } : {}) }),
       });
       const result = await response.json() as { status?: "registered" | "waitlisted"; cancellationToken?: string; attendees?: typeof attendees; error?: string };
       if (!response.ok || !result.status) throw new Error(publicErrorText(language, result.error ?? "Could not submit your registration."));
@@ -189,16 +204,18 @@ export function PublicEventRegistration({ token }: { token: string }) {
             <form className="public-registration-form" onSubmit={(submitEvent) => void register(submitEvent)}>
               <div className="form-row"><label>{publicText(language, "firstName")}<input name="firstName" autoComplete="given-name" maxLength={80} required /></label><label>{publicText(language, "lastName")}<input name="lastName" autoComplete="family-name" maxLength={80} required /></label></div>
               <label>{publicText(language, "email")}<input type="email" name="email" autoComplete="email" maxLength={254} required /></label>
-              {guests.map((guest, index) => <fieldset key={index} disabled={sending}>
+              <RegistrationAnswers questions={event.questions ?? []} prefix="primary-" />
+              {guests.map((guest, index) => <fieldset key={guest.key} disabled={sending}>
                 <legend>{publicText(language, "additionalAttendee", { count: index + 1 })}</legend>
                 <div className="form-row">
                   <label>{publicText(language, "firstName")}<input value={guest.firstName} required maxLength={80} onChange={(change) => setGuests((current) => current.map((person, position) => position === index ? { ...person, firstName: change.target.value } : person))} /></label>
                   <label>{publicText(language, "lastName")}<input value={guest.lastName} required maxLength={80} onChange={(change) => setGuests((current) => current.map((person, position) => position === index ? { ...person, lastName: change.target.value } : person))} /></label>
                 </div>
+                <RegistrationAnswers questions={event.questions ?? []} prefix={"guest-" + guest.key + "-"} />
                 <button type="button" className="button button-secondary" onClick={() => setGuests((current) => current.filter((_, position) => position !== index))}>{publicText(language, "removeAttendee")}</button>
               </fieldset>)}
-              {guests.length < 9 && <button type="button" className="button button-secondary" disabled={sending} onClick={() => setGuests((current) => [...current, { firstName: "", lastName: "" }])}>{publicText(language, "addAttendee")}</button>}
-              <p className="public-registration-privacy">{publicText(language, "eventPrivacy")}</p>
+              {guests.length < 9 && <button type="button" className="button button-secondary" disabled={sending} onClick={() => { setGuests((current) => [...current, { key: nextGuestKey, firstName: "", lastName: "" }]); setNextGuestKey((key) => key + 1); }}>{publicText(language, "addAttendee")}</button>}
+              <p className="public-registration-privacy">{publicText(language, event.formRevision ? "registrationAnswersPrivacy" : "eventPrivacy")}</p>
               {error && <p className="public-registration-error" role="alert">{error}</p>}
               <button className="button button-primary" type="submit" disabled={sending}>{sending ? publicText(language, "submitting") : publicText(language, "register")}</button>
             </form>

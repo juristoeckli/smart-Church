@@ -2,24 +2,25 @@ import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { defaultSignupPolicy, signupPolicySchema, type SignupPolicyDraft } from "./signup-policy.js";
 
-type QuestionDraft = { label: string; type: "text" | "choice"; required: boolean; options?: string[] };
-export type SignupQuestion = QuestionDraft & { id: string };
+export type SignupQuestionDraft = { label: string; type: "text" | "choice"; required: boolean; options?: string[] };
+export type SignupQuestion = SignupQuestionDraft & { id: string };
 export type SignupForm = { revision: string | null; questions: SignupQuestion[]; policy: SignupPolicyDraft };
-export type SignupSettings = { expectedRevision: string | null; questions: QuestionDraft[]; policy?: SignupPolicyDraft };
+export type SignupSettings = { expectedRevision: string | null; questions: SignupQuestionDraft[]; policy?: SignupPolicyDraft };
 
 const uuid = { type: "string", format: "uuid" } as const;
-export const signupSettingsSchema = {
-  type: "object", additionalProperties: false, required: ["expectedRevision", "questions"], properties: {
-    expectedRevision: { type: ["string", "null"], format: "uuid" },
-    policy: signupPolicySchema,
-    questions: { type: "array", maxItems: 8, items: {
+export const signupQuestionsSchema = { type: "array", maxItems: 8, items: {
       type: "object", additionalProperties: false, required: ["label", "type", "required"], properties: {
         label: { type: "string", minLength: 1, maxLength: 120 },
         type: { type: "string", enum: ["text", "choice"] },
         required: { type: "boolean" },
         options: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 80 } },
       },
-    } },
+    } } as const;
+export const signupSettingsSchema = {
+  type: "object", additionalProperties: false, required: ["expectedRevision", "questions"], properties: {
+    expectedRevision: { type: ["string", "null"], format: "uuid" },
+    policy: signupPolicySchema,
+    questions: signupQuestionsSchema,
   },
 } as const;
 export const signupAnswerFields = {
@@ -27,7 +28,7 @@ export const signupAnswerFields = {
   answers: { type: "object", maxProperties: 8, additionalProperties: { type: "string", maxLength: 160 } },
 } as const;
 
-export function prepareSignupQuestions(drafts: QuestionDraft[]) {
+export function prepareSignupQuestions(drafts: SignupQuestionDraft[]) {
   const questions = drafts.map(({ label, type, required, options }) => ({
     id: randomUUID(), label: label.trim(), type, required,
     ...(type === "choice" ? { options: (options ?? []).map((option) => option.trim()) } : {}),
@@ -56,7 +57,7 @@ export async function readSignupForm(db: Pool | PoolClient, departmentId: string
 }
 
 type SignupAnswer = { questionId: string; label: string; value: string };
-export function captureSignupAnswers(form: SignupForm, revision: string | undefined, answers: Record<string, string> = {}): { error: string; status: 400 | 409 } | { saved: SignupAnswer[] } {
+export function captureSignupAnswers(form: Pick<SignupForm, "revision" | "questions">, revision: string | undefined, answers: Record<string, string> = {}): { error: string; status: 400 | 409 } | { saved: SignupAnswer[] } {
   if ((form.questions.length ? form.revision : null) !== (revision ?? null)) return { error: "The signup questions changed. Reload the form before submitting.", status: 409 } as const;
   const validIds = new Set(form.questions.map((question) => question.id));
   if (Object.keys(answers).some((id) => !validIds.has(id))) return { error: "These answers do not match the signup questions.", status: 400 } as const;

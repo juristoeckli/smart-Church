@@ -1,3 +1,4 @@
+import { captureSignupAnswers, prepareSignupQuestions, signupAnswerFields, signupQuestionsSchema, type SignupQuestion, type SignupQuestionDraft } from "./modules/community/signup-form.js";
 import { isResourceBookingManager } from "./resource-booking-policy.js";
 import { registerServiceEventFactsRoutes } from "./service-event-facts.js";
 import { registerEventVolunteerAbsenceRoutes } from "./event-volunteer-absences.js";
@@ -3543,11 +3544,11 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
   const result = await pool.query<{
     title: string; event_date: string; is_all_day: boolean; start_time: string; end_time: string | null; location: string;
-    description: string | null; registration_capacity: number | null; registered_count: number; waitlist_count: number; registration_open: boolean;
+    description: string | null; registration_capacity: number | null; registered_count: number; waitlist_count: number; registration_open: boolean; registration_form_revision: string | null; registration_questions: SignupQuestion[];
   }>(
     `SELECT title,event_date::text,is_all_day,to_char(start_time,'HH24:MI') AS start_time,
             CASE WHEN end_time IS NULL THEN NULL ELSE to_char(end_time,'HH24:MI') END AS end_time,
-            location,description,registration_capacity,event_date>=CURRENT_DATE AS registration_open,
+            location,description,registration_capacity,registration_form_revision,registration_questions,event_date>=CURRENT_DATE AS registration_open,
             (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='registered') AS registered_count,
             (SELECT count(*)::int FROM event_registrations WHERE event_id=service_events.id AND status='waitlisted') AS waitlist_count
        FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND cancelled_at IS NULL`,
@@ -3555,6 +3556,7 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This registration link is unavailable." });
   const row = result.rows[0];
+  reply.header("Cache-Control", "no-store");
   return {
     title: row.title, eventDate: row.event_date, isAllDay: row.is_all_day, startTime: row.start_time,
     ...(row.end_time ? { endTime: row.end_time } : {}), location: row.location,
@@ -3562,11 +3564,13 @@ app.get<{ Params: { token: string } }>("/api/public/event-registrations/:token",
     ...(row.registration_capacity ? { capacity: row.registration_capacity } : {}),
     registeredCount: row.registered_count, waitlistCount: row.waitlist_count,
     registrationOpen: row.registration_open,
+    ...(row.registration_form_revision ? { formRevision: row.registration_form_revision, questions: row.registration_questions } : {}),
   };
 });
 
 type PublicRegistrationPerson = { firstName: string; lastName: string };
-type PublicRegistrationBody = PublicRegistrationPerson & { email: string; guests?: PublicRegistrationPerson[] };
+type RegistrationSeatInput = PublicRegistrationPerson & { answers?: Record<string, string> };
+type PublicRegistrationBody = RegistrationSeatInput & { email: string; formRevision?: string; guests?: RegistrationSeatInput[] };
 type PublicRegistrationReceipt = PublicRegistrationPerson & { cancellationToken: string };
 
 app.post<{ Params: { token: string }; Body: PublicRegistrationBody }>("/api/public/event-registrations/:token", {
@@ -3574,42 +3578,54 @@ app.post<{ Params: { token: string }; Body: PublicRegistrationBody }>("/api/publ
     params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     body: { type: "object", additionalProperties: false, required: ["firstName", "lastName", "email"], properties: {
       firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 }, email: { type: "string", minLength: 3, maxLength: 254, format: "email" },
+      ...signupAnswerFields,
       guests: { type: "array", maxItems: 9, items: { type: "object", additionalProperties: false, required: ["firstName", "lastName"], properties: {
         firstName: { type: "string", minLength: 1, maxLength: 80 },
         lastName: { type: "string", minLength: 1, maxLength: 80 },
+        answers: signupAnswerFields.answers,
       } } },
     } },
   },
 }, async (request, reply): Promise<{ status: "registered" | "waitlisted"; cancellationToken: string; attendees?: PublicRegistrationReceipt[] } | { error: string }> => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
   const email = request.body.email.trim().toLowerCase();
-  const party = [request.body, ...(request.body.guests ?? [])].map(({ firstName, lastName }) => ({
-    firstName: firstName.trim(), lastName: lastName.trim(),
+  const party = [request.body, ...(request.body.guests ?? [])].map(({ firstName, lastName, answers }) => ({
+    firstName: firstName.trim(), lastName: lastName.trim(), answers,
   }));
   if (!party[0].firstName || !party[0].lastName || !email) return reply.code(400).send({ error: "Enter your name and email address." });
   if (party.some((person) => !person.firstName || !person.lastName)) return reply.code(400).send({ error: "Enter a first and last name for each attendee." });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const event = await client.query<{ id: string; department_id: string; registration_capacity: number | null }>(
-      "SELECT id,department_id,registration_capacity FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND cancelled_at IS NULL AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
+    const event = await client.query<{ id: string; department_id: string; registration_capacity: number | null; registration_form_revision: string | null; registration_questions: SignupQuestion[] }>(
+      "SELECT id,department_id,registration_capacity,registration_form_revision,registration_questions FROM service_events WHERE registration_token=$1 AND registration_enabled=true AND cancelled_at IS NULL AND event_date>=CURRENT_DATE FOR UPDATE", [request.params.token],
     );
     if (!event.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Registration is closed for this event." }); }
     const { id: eventId, department_id: departmentId, registration_capacity: capacity } = event.rows[0];
     if (!await lockDepartmentForWrite(client, departmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This event's location is read-only while it is a redundancy standby or fenced site." }); }
+    const form = { revision: event.rows[0].registration_form_revision, questions: event.rows[0].registration_questions };
+    const registeredSeats = [];
+    for (const seat of party) {
+      const answers = captureSignupAnswers(form, request.body.formRevision?.toLowerCase(), seat.answers);
+      if ("error" in answers) {
+        await client.query("ROLLBACK");
+        return reply.code(answers.status).send({ error: answers.error });
+      }
+      registeredSeats.push({ firstName: seat.firstName, lastName: seat.lastName, answers: answers.saved });
+    }
     const duplicate = await client.query("SELECT 1 FROM event_registrations WHERE event_id=$1 AND lower(email)=lower($2) AND status IN ('registered','waitlisted') LIMIT 1", [eventId, email]);
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
     const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [eventId]);
     const status = capacity !== null && registered.rows[0].count + party.length > capacity ? "waitlisted" : "registered";
     const partyId = party.length > 1 ? randomUUID() : null;
     const attendees: PublicRegistrationReceipt[] = [];
-    for (const [index, person] of party.entries()) {
+    for (const [index, person] of registeredSeats.entries()) {
       const cancellationToken = randomBytes(32).toString("hex");
       await client.query(
-        "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash,additional_attendee,party_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-        [randomUUID(), eventId, person.firstName, person.lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex"), index > 0, partyId],
+        "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash,additional_attendee,party_id,answer_snapshot) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)",
+        [randomUUID(), eventId, person.firstName, person.lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex"), index > 0, partyId, JSON.stringify(person.answers)],
       );
-      attendees.push({ ...person, cancellationToken });
+      attendees.push({ firstName: person.firstName, lastName: person.lastName, cancellationToken });
     }
     await client.query("COMMIT");
     return reply.header("Cache-Control", "no-store").code(201).send({
@@ -3669,6 +3685,77 @@ registerEventVolunteerAbsenceRoutes(app, { pool: pool ?? null, available: () => 
 
 registerRegistrationReceiptRoutes(app, { pool: pool ?? null, isDatabaseReady: () => databaseReady,
   validateMutation: validModuleMutation, lockDepartmentForWrite });
+
+const registrationFormParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
+type EventRegistrationForm = { revision: string | null; questions: SignupQuestion[] };
+
+app.get<{ Params: { id: string } }>("/api/events/:id/registration-form", {
+  schema: { params: registrationFormParams },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const departmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!departmentId) return reply;
+  const result = await pool.query<EventRegistrationForm>(
+    "SELECT registration_form_revision AS revision,registration_questions AS questions FROM service_events WHERE id=$1 AND department_id=$2 AND source_system IS NULL", [request.params.id, departmentId],
+  );
+  if (!result.rows[0]) return reply.code(404).send({ error: "Event not found in this location." });
+  return reply.header("Cache-Control", "private, no-store").send(result.rows[0]);
+});
+
+app.put<{ Params: { id: string }; Body: { expectedRevision: string | null; questions: SignupQuestionDraft[] } }>("/api/events/:id/registration-form", {
+  schema: { params: registrationFormParams, body: { type: "object", additionalProperties: false,
+    required: ["expectedRevision", "questions"], properties: {
+      expectedRevision: { type: ["string", "null"], format: "uuid" }, questions: signupQuestionsSchema,
+    },
+  } },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  if (!validModuleMutation(request, reply)) return reply;
+  const departmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!departmentId) return reply;
+  const questions = prepareSignupQuestions(request.body.questions);
+  if (typeof questions === "string") return reply.code(400).send({ error: questions });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const existing = await client.query<EventRegistrationForm & { cancelled_at: Date | null }>(
+      "SELECT registration_form_revision AS revision,registration_questions AS questions,cancelled_at FROM service_events WHERE id=$1 AND department_id=$2 AND source_system IS NULL FOR UPDATE",
+      [request.params.id, departmentId],
+    );
+    const row = existing.rows[0];
+    if (!row) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Event not found in this location." }); }
+    if (row.cancelled_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Restore the event before changing its registration form." }); }
+    if (!await lockDepartmentForWrite(client, departmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This location is read-only." }); }
+    if (row.revision !== (request.body.expectedRevision?.toLowerCase() ?? null)) {
+      await client.query("ROLLBACK");
+      return reply.code(409).send({ error: "The registration form changed. Reload it before saving." });
+    }
+    const revision = questions.length ? randomUUID() : null;
+    await client.query("UPDATE service_events SET registration_form_revision=$3,registration_questions=$4::jsonb WHERE id=$1 AND department_id=$2",
+      [request.params.id, departmentId, revision, JSON.stringify(questions)]);
+    await client.query("COMMIT");
+    return reply.header("Cache-Control", "private, no-store").send({ revision, questions });
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
+app.get<{ Params: { id: string }; Querystring: { offset?: number } }>("/api/events/:id/registration-form/answers", {
+  schema: { params: registrationFormParams, querystring: { type: "object", properties: { offset: { type: "integer", minimum: 0 } }, additionalProperties: false } },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const departmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!departmentId) return reply;
+  const offset = request.query.offset ?? 0;
+  const rows = await pool.query(
+    `SELECT registration.id,registration.first_name AS "firstName",registration.last_name AS "lastName",
+            registration.status,registration.answer_snapshot AS answers
+       FROM event_registrations registration JOIN service_events event ON event.id=registration.event_id
+      WHERE event.id=$1 AND event.department_id=$2 AND registration.answer_snapshot<>'[]'::jsonb
+      ORDER BY registration.registered_at DESC,registration.id LIMIT 101 OFFSET $3`, [request.params.id, departmentId, offset],
+  );
+  return reply.header("Cache-Control", "private, no-store").send({ attendees: rows.rows.slice(0, 100), nextOffset: rows.rows.length > 100 ? offset + 100 : null });
+});
+
 
 type ManagedEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };
 

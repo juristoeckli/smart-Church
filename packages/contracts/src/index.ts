@@ -176,7 +176,17 @@ export interface EventRegistration {
   checkedInAt?: string;
 }
 
+export interface RegistrationQuestion {
+  id: string;
+  label: string;
+  type: "text" | "choice";
+  required: boolean;
+  options?: string[];
+}
+
 export interface PublicRegistrationEvent {
+  formRevision?: string;
+  questions?: RegistrationQuestion[];
   title: string;
   eventDate: string;
   isAllDay?: boolean;
