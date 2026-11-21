@@ -60,6 +60,7 @@
 .community-feed-notifications>p{margin:.35rem 0 0;color:var(--text-muted,#64748b);font-size:.9rem}
 .community-notification-preferences{margin:.5rem 0 .75rem;padding:.65rem .75rem;border:1px solid var(--border-color,#e2e8f0);border-radius:9px}
 .community-notification-preferences summary{color:var(--text-muted,#64748b);font-size:.85rem;cursor:pointer}
+.community-notification-preference-group{margin-top:.7rem}.community-notification-preference-group>strong{font-size:.85rem}.community-notification-preference-group>p{margin:.3rem 0;color:var(--text-muted,#64748b);font-size:.8rem}
 .community-notification-preference-options{display:flex;align-items:center;flex-wrap:wrap;gap:.75rem 1rem;margin-top:.7rem}
 .community-notification-preference-options label{display:flex;align-items:center;gap:.4rem;font-size:.82rem}
 .community-notification-preference-options input{accent-color:var(--primary,#3765a8)}

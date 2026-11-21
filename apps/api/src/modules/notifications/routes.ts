@@ -18,7 +18,7 @@ type NotificationRow = {
   read_at: Date | string | null;
 };
 
-type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
+type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; title: string; body: string; attempt_count: number };
 type ResendWebhookPayload = { type?: string; data?: { email_id?: string; to?: string[]; [key: string]: unknown } };
 type StoredResendEvent = { provider_event_id: string; event_type: string; provider_email_id: string };
 type StoredWebhookEvent = { provider_event_id: string; event_type: string; provider_email_id: string; received_at: Date | string; processed_at: Date | string | null };
@@ -87,7 +87,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   context.replication.register({
-    schemaVersion: "2",
+    schemaVersion: "3",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Notifications database is unavailable."], recordCount: 0 };
       try {
@@ -107,16 +107,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
     },
     exportSnapshot: async (client: PoolClient, departmentId) => {
-      const notifications = await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
+      const notifications = await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId]);
       const preferences = await client.query("SELECT user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at FROM module_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId]);
       const deliveries = await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId]);
       const suppressions = await client.query("SELECT email,reason,provider_event_id,created_at FROM module_notification_email_suppressions ORDER BY email");
       const webhookEvents = await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId]);
-      return { version: 2, notifications: notifications.rows, preferences: preferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows };
+      return { version: 3, notifications: notifications.rows, preferences: preferences.rows, deliveries: deliveries.rows, suppressions: suppressions.rows, webhookEvents: webhookEvents.rows };
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>> };
-      if (!snapshot || snapshot.version !== 2 || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
+      if (!snapshot || ![2, 3].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || snapshot.notifications.length > 250000 || !Array.isArray(snapshot.preferences) || snapshot.preferences.length > 250000 || !Array.isArray(snapshot.deliveries) || snapshot.deliveries.length > 250000 || !Array.isArray(snapshot.suppressions) || snapshot.suppressions.length > 250000 || !Array.isArray(snapshot.webhookEvents) || snapshot.webhookEvents.length > 250000) throw new Error("The Notifications snapshot is invalid or exceeds supported limits.");
       await client.query("DELETE FROM module_notification_webhook_events WHERE provider_email_id IN (SELECT d.provider_email_id FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 AND d.provider_email_id IS NOT NULL)", [departmentId]);
       await client.query("DELETE FROM module_notification_preferences WHERE department_id=$1", [departmentId]);
       await client.query("DELETE FROM module_notifications WHERE department_id=$1", [departmentId]);
@@ -124,7 +124,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const recipientId = restoreContext.userIdMap.get(String(row.recipient_user_id));
         const senderId = row.sender_user_id == null ? null : restoreContext.userIdMap.get(String(row.sender_user_id)) ?? null;
         if (!recipientId) throw new Error("A notification recipient has no matching account on the standby server.");
-        await client.query("INSERT INTO module_notifications(id,department_id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,created_at,read_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)", [row.id, departmentId, recipientId, senderId, row.kind, row.title, row.body, row.event_id, row.related_event_id, row.related_contact_id, row.created_at, row.read_at]);
+        await client.query("INSERT INTO module_notifications(id,department_id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)", [row.id, departmentId, recipientId, senderId, row.kind, row.title, row.body, row.event_id, row.related_event_id, row.related_contact_id, row.in_app_enabled ?? true, row.email_enabled ?? true, row.created_at, row.read_at]);
       }
       for (const row of snapshot.preferences) {
         const userId = restoreContext.userIdMap.get(String(row.user_id));
@@ -146,8 +146,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       const snapshot = input as { version?: unknown; notifications?: Array<Record<string, unknown>>; preferences?: Array<Record<string, unknown>>; deliveries?: Array<Record<string, unknown>>; suppressions?: Array<Record<string, unknown>>; webhookEvents?: Array<Record<string, unknown>> };
-      if (!snapshot || snapshot.version !== 2 || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents)) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
-      const actualNotifications = (await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
+      if (!snapshot || ![2, 3].includes(Number(snapshot.version)) || !Array.isArray(snapshot.notifications) || !Array.isArray(snapshot.preferences) || !Array.isArray(snapshot.deliveries) || !Array.isArray(snapshot.suppressions) || !Array.isArray(snapshot.webhookEvents)) return { ready: false, blockers: ["No verified Notifications snapshot is available."] };
+      const actualNotifications = (await client.query("SELECT id,recipient_user_id,sender_user_id,kind,title,body,event_id,related_event_id,related_contact_id,in_app_enabled,email_enabled,created_at,read_at FROM module_notifications WHERE department_id=$1 ORDER BY created_at,id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualPreferences = (await client.query("SELECT user_id,event_reminders_enabled,service_requests_enabled,follow_ups_enabled,email_notifications_enabled,updated_at FROM module_notification_preferences WHERE department_id=$1 ORDER BY user_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualDeliveries = (await client.query("SELECT d.notification_id,d.recipient_email,d.provider_email_id,d.status,d.attempt_count,d.next_attempt_at,d.last_error,d.sent_at,d.created_at,d.updated_at FROM module_notification_email_deliveries d JOIN module_notifications n ON n.id=d.notification_id WHERE n.department_id=$1 ORDER BY d.notification_id", [departmentId])).rows as Array<Record<string, unknown>>;
       const actualWebhookEvents = (await client.query("SELECT event.provider_event_id,event.event_type,event.provider_email_id,event.received_at,event.processed_at FROM module_notification_webhook_events event WHERE event.provider_email_id IN (SELECT delivery.provider_email_id FROM module_notification_email_deliveries delivery JOIN module_notifications notification ON notification.id=delivery.notification_id WHERE notification.department_id=$1 AND delivery.provider_email_id IS NOT NULL) ORDER BY event.provider_event_id", [departmentId])).rows as Array<Record<string, unknown>>;
@@ -162,6 +162,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const left = expected.map(canonical).sort(); const right = actual.map(canonical).sort();
         return left.every((row, index) => row === right[index]);
       };
+      if (Number(snapshot.version) < 3) for (const row of snapshot.notifications) { row.in_app_enabled ??= true; row.email_enabled ??= true; }
       if (!same(remap(snapshot.notifications, ["recipient_user_id", "sender_user_id"]), actualNotifications)
         || !same(remap(snapshot.preferences, ["user_id"]), actualPreferences)
         || !same(snapshot.deliveries, actualDeliveries)
@@ -274,6 +275,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const result = await client.query<PendingEmail>(
           `SELECT delivery.notification_id,notification.department_id,notification.recipient_user_id,delivery.recipient_email,account.email AS current_email,account.language AS recipient_language,
                   COALESCE(preference.email_notifications_enabled,false) AS email_enabled,
+                  notification.email_enabled AS notification_email_enabled,
                   (suppressed.email IS NOT NULL) AS email_suppressed,
                   notification.title,notification.body,delivery.attempt_count
              FROM module_notification_email_deliveries delivery
@@ -287,7 +289,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         if (!result.rowCount) { await client.query("COMMIT"); break; }
         const delivery = result.rows[0];
-        if (!delivery.email_enabled || !delivery.current_email || delivery.email_suppressed) {
+        if (!delivery.email_enabled || !delivery.notification_email_enabled || !delivery.current_email || delivery.email_suppressed) {
           await client.query("UPDATE module_notification_email_deliveries SET status='skipped',last_error=CASE WHEN $2 THEN 'Address suppressed after a bounce or complaint.' ELSE NULL END,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.email_suppressed]);
           await client.query("COMMIT");
           continue;
@@ -418,6 +420,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           event_id UUID REFERENCES service_events(id) ON DELETE CASCADE,
           related_event_id UUID REFERENCES service_events(id) ON DELETE CASCADE,
           related_contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE,
+          in_app_enabled BOOLEAN NOT NULL DEFAULT true,
+          email_enabled BOOLEAN NOT NULL DEFAULT true,
           created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
           read_at TIMESTAMPTZ,
           UNIQUE (department_id, recipient_user_id, event_id, kind)
@@ -436,6 +440,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ALTER TABLE module_notifications DROP CONSTRAINT IF EXISTS module_notifications_kind_check;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS related_contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS related_event_id UUID REFERENCES service_events(id) ON DELETE CASCADE;
+        ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS in_app_enabled BOOLEAN NOT NULL DEFAULT true;
+        ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS email_enabled BOOLEAN NOT NULL DEFAULT true;
         ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed'));
         DROP INDEX IF EXISTS module_notifications_follow_up_unique_idx;
         CREATE UNIQUE INDEX IF NOT EXISTS module_notifications_follow_up_unique_idx
@@ -484,7 +490,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           SELECT NEW.id,account.email
             FROM app_users account
             JOIN module_notification_preferences preference ON preference.user_id=account.id AND preference.department_id=NEW.department_id
-           WHERE account.id=NEW.recipient_user_id AND account.email IS NOT NULL AND preference.email_notifications_enabled=true
+           WHERE account.id=NEW.recipient_user_id AND account.email IS NOT NULL AND preference.email_notifications_enabled=true AND NEW.email_enabled=true
              AND NOT EXISTS (SELECT 1 FROM module_notification_email_suppressions suppressed WHERE suppressed.email=lower(trim(account.email)))
           ON CONFLICT (notification_id) DO NOTHING;
           RETURN NEW;
@@ -556,7 +562,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                 notification.related_contact_id,delivery.status AS email_delivery_status,notification.created_at,notification.read_at
            FROM module_notifications notification
            LEFT JOIN module_notification_email_deliveries delivery ON delivery.notification_id=notification.id
-          WHERE notification.department_id = $1 AND notification.recipient_user_id = $2
+          WHERE notification.department_id = $1 AND notification.recipient_user_id = $2 AND notification.in_app_enabled=true
           ORDER BY notification.created_at DESC LIMIT 100`,
         [departmentId, request.authenticatedUser!.id],
       );
@@ -599,7 +605,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       const result = await pool!.query(
         `UPDATE module_notifications SET read_at = COALESCE(read_at, now())
-          WHERE id = $1 AND department_id = $2 AND recipient_user_id = $3 RETURNING id`,
+          WHERE id = $1 AND department_id = $2 AND recipient_user_id = $3 AND in_app_enabled=true RETURNING id`,
         [request.params.id, departmentId, request.authenticatedUser!.id],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "Notification not found." });
@@ -612,7 +618,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       await pool!.query(
         `UPDATE module_notifications SET read_at = now()
-          WHERE department_id = $1 AND recipient_user_id = $2 AND read_at IS NULL`,
+          WHERE department_id = $1 AND recipient_user_id = $2 AND in_app_enabled=true AND read_at IS NULL`,
         [departmentId, request.authenticatedUser!.id],
       );
       return { read: true };

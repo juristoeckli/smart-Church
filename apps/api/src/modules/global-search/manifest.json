@@ -1,0 +1,11 @@
+{
+  "id": "global-search",
+  "name": "Global Search",
+  "version": "1.0.0",
+  "description": "Location-scoped cross-category search for People, Groups, Wiki, and Songs.",
+  "serverEntry": "./routes.ts",
+  "required": true,
+  "enabledByDefault": true,
+  "clientManaged": false,
+  "dependencies": { "required": [], "optional": [] }
+}

@@ -321,6 +321,45 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
     });
+    routes.post<{ Body: { contactIds: string[]; fieldId: string; value: unknown } }>("/api/people-records/bulk-field", { schema: { body: { type: "object", additionalProperties: false, required: ["contactIds", "fieldId", "value"], properties: { contactIds: { type: "array", minItems: 1, maxItems: 500, uniqueItems: true, items: uuid }, fieldId: uuid, value: {} } } } }, async (request, reply) => {
+      const d = await department(request, reply, true); if (!d) return reply;
+      if (!validateMutation(request, reply)) return reply;
+      const client = await pool!.connect();
+      const changedContacts: string[] = [];
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser?.id ?? ""]);
+        const selected = await client.query<{ id: string }>("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[]) FOR UPDATE", [d, request.body.contactIds]);
+        if (selected.rowCount !== request.body.contactIds.length) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "One or more people were not found at this location." }); }
+        const fields = await client.query<{ field_key: string; field_type: string; options: unknown; required: boolean }>("SELECT field_key,field_type,options,required FROM people_record_fields WHERE department_id=$1 AND id=$2 AND active=true FOR UPDATE", [d, request.body.fieldId]);
+        if (!fields.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Active custom field not found at this location." }); }
+        const field = fields.rows[0];
+        const value = request.body.value;
+        if (field.required && (value === null || value === "")) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "This custom field is required and cannot be cleared." }); }
+        if (value !== null) {
+          if (field.field_type === "select" && !((field.options as unknown[] | null) ?? []).includes(value)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose one of the configured field options." }); }
+          if (field.field_type === "boolean" && typeof value !== "boolean") { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Enter a true or false value." }); }
+          if (field.field_type === "text" && (typeof value !== "string" || value.length > 2000)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Enter text up to 2000 characters." }); }
+          if (field.field_type === "date" && (typeof value !== "string" || !/^\\d{4}-\\d{2}-\\d{2}$/.test(value) || Number.isNaN(Date.parse(value)))) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Enter a valid date." }); }
+        }
+        const existing = await client.query<{ contact_id: string; value: unknown }>("SELECT contact_id,value FROM people_record_values WHERE department_id=$1 AND field_id=$2 AND contact_id=ANY($3::uuid[])", [d, request.body.fieldId, request.body.contactIds]);
+        const beforeByContact = new Map(existing.rows.map(row => [row.contact_id, row.value]));
+        const nextJson = value === null ? null : JSON.stringify(value);
+        for (const person of selected.rows) {
+          const before = beforeByContact.get(person.id);
+          if (before === undefined && value === null) continue;
+          if (before !== undefined && JSON.stringify(before) === nextJson) continue;
+          if (value === null) await client.query("DELETE FROM people_record_values WHERE department_id=$1 AND contact_id=$2 AND field_id=$3", [d, person.id, request.body.fieldId]);
+          else await client.query("INSERT INTO people_record_values(department_id,contact_id,field_id,value,updated_by) VALUES($1,$2,$3,$4::jsonb,$5) ON CONFLICT(department_id,contact_id,field_id) DO UPDATE SET value=excluded.value,updated_by=excluded.updated_by,updated_at=now()", [d, person.id, request.body.fieldId, nextJson, request.authenticatedUser?.id ?? null]);
+          await client.query("INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,'field_updated',$5,$6::jsonb,$7::jsonb)", [randomUUID(), d, person.id, request.authenticatedUser?.id ?? null, `bulk:${field.field_key}`, before === undefined ? null : JSON.stringify(before), nextJson]);
+          changedContacts.push(person.id);
+        }
+        await client.query("COMMIT");
+        for (const contactId of changedContacts) changed(d, contactId);
+        return { updated: changedContacts.length, unchanged: selected.rowCount - changedContacts.length };
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
     routes.get<{ Querystring: { q?: string; status?: string; field?: string; value?: string;filters?:string;relationshipFilters?:string;columns?:string } }>("/api/people-records/export.csv",{schema:{querystring:{type:"object",additionalProperties:false,properties:{q:{type:"string",maxLength:120},status:{type:"string",enum:["member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"string",maxLength:3000},columns:{type:"string",maxLength:1200},relationshipFilters:{type:"string",maxLength:2000}}}}}, async (request, reply) => {
       const d=await department(request,reply); if(!d)return reply; const {q="",status,field,value}=request.query;
       let fieldJson:string|null=null;

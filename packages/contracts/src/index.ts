@@ -156,6 +156,7 @@ export interface ChurchGroup {
   id: string;
   name: string;
   description: string;
+  groupType?: string;
   status: GroupLifecycleStatus;
   startsOn: string | null;
   endsOn: string | null;

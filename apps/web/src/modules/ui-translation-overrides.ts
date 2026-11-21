@@ -485,6 +485,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
   "community-feed": {
     de: {
       "CHURCH LIFE": "GEMEINDELEBEN", Community: "Gemeinschaft", "Community posts": "Gemeindebeiträge",
+      "Notification preferences": "Benachrichtigungseinstellungen", "In-app alerts": "In-App-Mitteilungen", "Email alerts": "E-Mail-Mitteilungen",
+      "New post notifications": "Mitteilungen zu neuen Beiträgen", "Reaction notifications": "Mitteilungen zu Reaktionen", "Comment notifications": "Mitteilungen zu Kommentaren",
+      "New post email alerts": "E-Mail-Mitteilungen zu neuen Beiträgen", "Reaction email alerts": "E-Mail-Mitteilungen zu Reaktionen", "Comment email alerts": "E-Mail-Mitteilungen zu Kommentaren",
+      "Email alerts also require Email notifications to be enabled in Notifications for this location.": "E-Mail-Mitteilungen erfordern außerdem, dass E-Mail-Mitteilungen in den Benachrichtigungseinstellungen für diesen Standort aktiviert sind.",
       "Delete post": "Beitrag löschen", "Loading posts…": "Beiträge werden geladen …", "Post comment": "Kommentar veröffentlichen",
       "Post text": "Beitragstext", "Post title": "Beitragstitel", "Share an update": "Aktuelles teilen",
       "Share news, encouragement, and updates with your church.": "Teile Neuigkeiten, Ermutigung und Aktuelles mit deiner Gemeinde.",
@@ -494,6 +498,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     },
     fr: {
       "CHURCH LIFE": "VIE DE L’ÉGLISE", Community: "Communauté", "Community posts": "Publications de la communauté",
+      "Notification preferences": "Préférences de notification", "In-app alerts": "Notifications dans l’application", "Email alerts": "Alertes par e-mail",
+      "New post notifications": "Notifications de nouvelles publications", "Reaction notifications": "Notifications de réactions", "Comment notifications": "Notifications de commentaires",
+      "New post email alerts": "Alertes e-mail de nouvelles publications", "Reaction email alerts": "Alertes e-mail de réactions", "Comment email alerts": "Alertes e-mail de commentaires",
+      "Email alerts also require Email notifications to be enabled in Notifications for this location.": "Les alertes par e-mail nécessitent aussi l’activation des notifications par e-mail dans Notifications pour ce lieu.",
       "Delete post": "Supprimer la publication", "Loading posts…": "Chargement des publications…", "Post comment": "Publier le commentaire",
       "Post text": "Texte de la publication", "Post title": "Titre de la publication", "Share an update": "Partager une actualité",
       "Share news, encouragement, and updates with your church.": "Partagez des nouvelles, des encouragements et des actualités avec votre église.",
@@ -503,6 +511,10 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     },
     it: {
       "CHURCH LIFE": "VITA DELLA CHIESA", Community: "Comunità", "Community posts": "Post della comunità",
+      "Notification preferences": "Preferenze notifiche", "In-app alerts": "Notifiche nell’app", "Email alerts": "Avvisi e-mail",
+      "New post notifications": "Notifiche per i nuovi post", "Reaction notifications": "Notifiche per le reazioni", "Comment notifications": "Notifiche per i commenti",
+      "New post email alerts": "Avvisi e-mail per i nuovi post", "Reaction email alerts": "Avvisi e-mail per le reazioni", "Comment email alerts": "Avvisi e-mail per i commenti",
+      "Email alerts also require Email notifications to be enabled in Notifications for this location.": "Gli avvisi e-mail richiedono anche l’attivazione delle notifiche e-mail in Notifiche per questa sede.",
       "Delete post": "Elimina post", "Loading posts…": "Caricamento post…", "Post comment": "Pubblica commento",
       "Post text": "Testo del post", "Post title": "Titolo del post", "Share an update": "Condividi un aggiornamento",
       "Share news, encouragement, and updates with your church.": "Condividi notizie, incoraggiamenti e aggiornamenti con la tua chiesa.",

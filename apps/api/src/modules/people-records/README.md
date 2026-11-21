@@ -11,6 +11,7 @@ The optional `people-records` module adds location-scoped directory extensions t
 - Export a selected profile as a UTF-8 vCard containing the person's name, email, and phone.
 - Edit first name, last name, email, phone, and member/visitor status with before/after audit history.
 - Select multiple visible directory rows and change member/visitor status in one atomic, location-scoped action. Each changed profile gets an audit entry, and the existing automatic group-membership rules run for the new status.
+- Select up to 500 visible directory rows and set or clear one active custom field in a single location-scoped transaction. Choice, yes/no, date, and text values are validated against the field definition; required fields cannot be cleared, and each changed profile receives an audit entry.
 - Record consent purpose, granted/pending/withdrawn state, optional expiry and notes, with actor and history metadata.
 - Manage a location-scoped relationship-type catalog with forward and reverse labels; add typed relationships from a person profile, display the reverse label from the related person profile, and remove the shared stored relationship from either side. Reciprocal labels are computed at read time, so one typed fact is stored once. Existing free-text rows remain visible and deletable.
 - View a person's audit history for custom field, consent, and relationship changes.
@@ -33,5 +34,5 @@ Read APIs require `people_view_private` or `people_manage` at the resolved locat
 - Change history records module-managed fields, consent and relationship changes, and edits made through this profile editor; other base contact writes are outside its audit trail.
 - Legacy free-text relationship rows remain readable but are not converted into catalog types automatically and cannot be selected by relationship-type filters. Typed relationships use one forward stored row with a computed reverse display; household records and finer-grained relationship privacy rules are not modeled.
 - Consent entries are append-only; withdrawing consent is represented by a new entry, and no retention/export automation is included.
-- No bulk field editing or configurable access partitioning within a location. Filters on distinct fields are supported; selecting the same custom field twice in one view is rejected. The directory keeps the person's name visible as its row identity even when first/last-name columns are unchecked.
+- Bulk edits cover custom fields and member/visitor status; built-in profile attributes such as contact details are not batch editable. Configurable access partitioning within a location is also absent. Filters on distinct fields are supported; selecting the same custom field twice in one view is rejected. The directory keeps the person's name visible as its row identity even when first/last-name columns are unchecked.
 - Anniversary reports cover only the next 30 days and do not schedule notifications. Birthday exports intentionally omit age.
