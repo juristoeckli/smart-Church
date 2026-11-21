@@ -70,7 +70,7 @@
 
 /* TP4 based 800×600 control surface. */
 .amx-page-backdrop{position:absolute;overflow:hidden;background-position:center;background-repeat:no-repeat;background-size:100% 100%;pointer-events:none}
-.amx-workspace{max-width:1040px;padding:clamp(6px,1vw,16px)}
+.amx-workspace{width:100%;max-width:1600px;padding:clamp(6px,1vw,16px)}
 .amx-panel-frame{width:100%;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}
 .amx-panel-screen{position:relative;isolation:isolate;container-type:inline-size;width:100%;aspect-ratio:4/3;overflow:hidden;border:1px solid #55564d;background-color:#fffed3;background-size:100% 100%;font-family:Arial,Helvetica,sans-serif;color:#121311;touch-action:manipulation}
 .amx-panel-object{position:absolute;box-sizing:border-box;overflow:hidden;display:flex;align-items:center;justify-content:center;margin:0;border:0;border-radius:0;padding:0;text-align:center;white-space:pre-line;line-height:1.05;font-family:Arial,Helvetica,sans-serif;font-weight:600;text-shadow:0 1px 1px #fff8}

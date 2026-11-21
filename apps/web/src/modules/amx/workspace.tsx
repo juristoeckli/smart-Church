@@ -301,6 +301,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   }
 
   const renderObject = (page: PanelPage, object: PanelObject, layer: number): ReactNode => {
+    if (page.kind === "subpage" && object.name === "Alle Räume" && !object.channel && !object.pageFlip) return null;
     const activeRoomState = page.name === "Home" && typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
     const activeModeState = page.name === "Modus" && selectedModeChannel === object.channel;
     const state = stateFor(object, activeRoomState || activeModeState);
@@ -322,7 +323,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
     const port = portForObject(page, object);
-    const background = toCssColor(state?.backgroundColor);
+    const background = toCssColor(state?.fontColor) ?? toCssColor(state?.backgroundColor);
     const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
     const bitmap = imageUrl(state?.bitmap);
     const font = panel.fonts?.find((item) => item.id === state?.fontId);
@@ -339,12 +340,12 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       backgroundImage: object.type === "general" && typeof object.channel === "number" && object.channel > 0
         ? activeRoomState || activeModeState
           ? "linear-gradient(180deg,#0a70bd,#004882)"
-          : ["Grey2", "Grey3", "Grey5", "Grey7", "Grey9", "Grey10", "Grey12"].includes(state?.backgroundColor ?? "")
+          : ["Grey2", "Grey3", "Grey5", "Grey7", "Grey9", "Grey10", "Grey12"].includes(state?.fontColor ?? state?.backgroundColor ?? "")
             ? "linear-gradient(180deg,#eeeeea,#c5c5bd)"
-            : state?.backgroundColor === "VeryLightYellow"
+            : (state?.fontColor ?? state?.backgroundColor) === "VeryLightYellow"
               ? "linear-gradient(180deg,#fffbd9,#f2efc9)"
               : undefined
-        : undefined,
+        : button ? "none" : undefined,
     };
     const bitmapSize = state?.bitmap ? bitmapDimensions[state.bitmap] : undefined;
     const bitmapStyle: CSSProperties | undefined = bitmap && bitmapSize ? {
