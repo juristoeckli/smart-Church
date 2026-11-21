@@ -132,6 +132,15 @@ const transactionDonorFilter = "AND ($6::uuid IS NULL OR EXISTS (SELECT 1 FROM f
 const transactionAccountFilter = "AND ($7::uuid IS NULL OR EXISTS (SELECT 1 FROM finance_transaction_lines account_line JOIN finance_accounts account ON account.department_id=account_line.department_id AND account.id=account_line.account_id WHERE account_line.department_id=t.department_id AND account_line.transaction_id=t.id AND account.id=$7))";
 const transactionCostCenterFilter = "AND ($8::uuid IS NULL OR EXISTS (SELECT 1 FROM finance_transaction_lines center_line JOIN finance_cost_centers center ON center.department_id=center_line.department_id AND center.id=center_line.cost_center_id WHERE center_line.department_id=t.department_id AND center_line.transaction_id=t.id AND center.id=$8))";
 const transactionPostedFilter = "AND (NOT $9::boolean OR t.status='posted')";
+type FinancialReportQuery = { year?: string; report?: string; from?: string; to?: string };
+const financialReportTypes = ["trial-balance", "balance-sheet", "profit-loss"];
+const financialReportDateCondition = "AND ($3::date IS NULL OR t.booking_date >= $3) AND ($4::date IS NULL OR t.booking_date <= $4)";
+function validFinancialReportDates({ report = "trial-balance", from, to }: FinancialReportQuery) {
+  return (from === undefined || (report === "profit-loss" && typeof from === "string" && validDateOnly(from)))
+    && (to === undefined || (typeof to === "string" && validDateOnly(to)))
+    && !(from && to && from > to);
+}
+
 type PeriodTurnoverQuery = { year: string; interval: "month" | "quarter"; accountType?: string; page?: number };
 const periodTurnoverProperties = {
   year: { type: "string", pattern: "^[0-9]{4}$" },
@@ -766,10 +775,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     publish(departmentId, "budget-updated", request.params.id); return { id: request.params.id, updated: true };
   });
 
-  app.get<{ Querystring: { year?: string } }>("/api/modules/finance/reports/trial-balance", async (request, reply) => {
+  app.get<{ Querystring: FinancialReportQuery }>("/api/modules/finance/reports/trial-balance", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
-    const result = await pool!.query(`SELECT a.id,a.code,a.name,a.account_type AS "accountType",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents ELSE 0 END),0)::text AS "debitCents",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.credit_cents ELSE 0 END),0)::text AS "creditCents",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents-l.credit_cents ELSE 0 END),0)::text AS "netCents" FROM finance_accounts a LEFT JOIN finance_transaction_lines l ON l.department_id=a.department_id AND l.account_id=a.id LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2 WHERE a.department_id=$1 GROUP BY a.id ORDER BY a.code`, [departmentId, year]);
+    const dateQuery = request.query;
+    if (!financialReportTypes.includes(dateQuery.report ?? "trial-balance") || !validFinancialReportDates(dateQuery)) {
+      return reply.code(400).send({ error: "Choose valid report dates. Balance Sheet and Trial Balance use only an as-of date." });
+    }
+    const result = await pool!.query(`SELECT a.id,a.code,a.name,a.account_type AS "accountType",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents ELSE 0 END),0)::text AS "debitCents",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.credit_cents ELSE 0 END),0)::text AS "creditCents",COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents-l.credit_cents ELSE 0 END),0)::text AS "netCents" FROM finance_accounts a LEFT JOIN finance_transaction_lines l ON l.department_id=a.department_id AND l.account_id=a.id LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2 ${financialReportDateCondition} WHERE a.department_id=$1 GROUP BY a.id ORDER BY a.code`, [departmentId, year, dateQuery.from ?? null, dateQuery.to ?? null]);
     const accounts = result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents), netCents: asMoney(row.netCents) }));
     return { accountingYear: year, accounts, totals: { debitCents: accounts.reduce((sum, row) => sum + row.debitCents, 0), creditCents: accounts.reduce((sum, row) => sum + row.creditCents, 0) } };
   });
@@ -856,12 +869,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply.header("Cache-Control", "private, no-store"), "finance-period-turnover-" + year + "-" + interval, header, rows, [6, 7, 8]);
   });
 
-  app.get<{ Querystring: { year?: string; report?: string; exclude?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
+  app.get<{ Querystring: FinancialReportQuery & { exclude?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
     if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
     const report = request.query.report ?? "trial-balance";
-    if (!["trial-balance", "balance-sheet", "profit-loss"].includes(report)) return reply.code(400).send({ error: "Choose a valid turnover report." });
+    if (!financialReportTypes.includes(report)) return reply.code(400).send({ error: "Choose a valid turnover report." });
+    const { from, to } = request.query;
+    if (!validFinancialReportDates(request.query)) {
+      return reply.code(400).send({ error: "Choose valid report dates. Balance Sheet and Trial Balance use only an as-of date." });
+    }
     const rawExcluded = request.query.exclude;
     if (rawExcluded !== undefined && (typeof rawExcluded !== "string" || rawExcluded.length > 3699)) {
       return reply.code(400).send({ error: "Choose up to 100 valid excluded accounts." });
@@ -875,11 +892,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.credit_cents ELSE 0 END),0) AS credit_cents,
               COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents-l.credit_cents ELSE 0 END),0) AS net_cents
          FROM finance_accounts a LEFT JOIN finance_transaction_lines l ON l.department_id=a.department_id AND l.account_id=a.id
-         LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2
-        WHERE a.department_id=$1 AND NOT (a.id=ANY($3::uuid[])) GROUP BY a.id ORDER BY a.code`, [departmentId, year, excluded]);
+         LEFT JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted' AND t.accounting_year=$2 ${financialReportDateCondition}
+        WHERE a.department_id=$1 AND NOT (a.id=ANY($5::uuid[])) GROUP BY a.id ORDER BY a.code`, [departmentId, year, from ?? null, to ?? null, excluded]);
     const rows = report === "balance-sheet" ? result.rows.filter((row) => ["asset", "liability", "equity"].includes(row.account_type)) : report === "profit-loss" ? result.rows.filter((row) => ["income", "expense"].includes(row.account_type)) : result.rows;
     const header = ["accounting_year", "account_code", "account_name", "account_type", "debit_cents", "credit_cents", "net_cents"];
-    return sendFinanceExport(request, reply, `finance-turnover-${report}-${year}${excluded.length ? "-filtered" : ""}`, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
+    const filename = "finance-turnover-" + report + "-" + year + (from ? "-from-" + from : "")
+      + (to ? (report === "profit-loss" ? "-through-" : "-as-of-") + to : "") + (excluded.length ? "-filtered" : "");
+    return sendFinanceExport(request, reply, filename, header, rows.map((row) => [year, row.code, row.name, row.account_type, row.debit_cents, row.credit_cents, row.net_cents]));
   });
 
   app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; donorId?: string; accountId?: string; costCenterId?: string } & TransactionOrderQuery }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {
