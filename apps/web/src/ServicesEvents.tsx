@@ -15,6 +15,7 @@ import { buildStaffingMatrix, StaffingRosterMatrix } from "./StaffingRosterMatri
 import { csvCell, printHtml } from "./service-exports";
 import { openServicePlanPrint, servicePlanSectionHeading } from "./service-plan-print";
 import { LiveRunSheet } from "./LiveRunSheet";
+import { OwnCalendarDuty } from "./OwnCalendarDuty";
 import { servicePlanLinkUrl } from "./service-plan-link";
 import { buildOwnDutyRows, OwnDutyExports } from "./OwnDutyExports";
 
@@ -1147,7 +1148,9 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
           <div className="schedule-calendar-toolbar"><div><strong>{new Intl.DateTimeFormat(document.documentElement.lang || "en", { month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${calendarMonth}-01T12:00:00Z`))}</strong><span>{translate("events.gatheringCount").replace("{count}", String(filteredEvents.filter((event) => event.eventDate.startsWith(calendarMonth)).length))}</span></div><div><button className="community-row-action" type="button" aria-label={translate("events.previousMonth")} onClick={() => moveCalendarMonth(-1)}><ArrowLeft size={16} /></button><button className="button button-secondary" type="button" onClick={() => { setCalendarMonth(today.slice(0, 7)); }}>{translate("events.today")}</button><button className="community-row-action" type="button" aria-label={translate("events.nextMonth")} onClick={() => moveCalendarMonth(1)}><ArrowRight size={16} /></button></div></div>
           <div className="schedule-calendar-grid" role="grid" aria-label={translate("events.calendarDates")}><div className="schedule-calendar-weekdays" role="row">{["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-06", "2024-01-07"].map((date) => { const day = new Intl.DateTimeFormat(document.documentElement.lang || "en", { weekday: "short", timeZone: "UTC" }).format(new Date(`${date}T12:00:00Z`)); return <span role="columnheader" key={date}>{day}</span>; })}</div><div className="schedule-calendar-days">{calendarDays.map((day) => {
             const dayEvents = filteredEvents.filter((event) => event.eventDate === day.date);
-            return <article className={`schedule-calendar-day${day.inMonth ? "" : " is-outside"}${day.date === today ? " is-today" : ""}`} role="gridcell" key={day.date}><time dateTime={day.date}>{Number(day.date.slice(-2))}</time>{dayEvents.map((event) => <button className={`schedule-calendar-event event-kind-${event.kind}`} type="button" key={event.id} onClick={() => setDetailsEvent(event)} title={`${eventTimeLabel(event)} · ${event.title}`}>{eventTimeLabel(event)} {event.title}</button>)}</article>;
+            return <article className={`schedule-calendar-day${day.inMonth ? "" : " is-outside"}${day.date === today ? " is-today" : ""}`} role="gridcell" key={day.date}><time dateTime={day.date}>{Number(day.date.slice(-2))}</time>{dayEvents.map((event) => <button className={`schedule-calendar-event event-kind-${event.kind}`} type="button" key={event.id} onClick={() => setDetailsEvent(event)} title={`${eventTimeLabel(event)} · ${event.title}`}>{eventTimeLabel(event)} {event.title}
+              {eventsDepartmentId === departmentId && <OwnCalendarDuty event={event} />}
+            </button>)}</article>;
           })}</div></div>
 
           {filteredEvents.filter((event) => event.eventDate.startsWith(calendarMonth)).length === 0 && <p className="empty-state schedule-calendar-empty">{translate("events.emptyMonth")}</p>}
