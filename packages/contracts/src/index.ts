@@ -75,6 +75,7 @@ export interface ServicePlanTemplate {
 }
 
 export interface ServiceEvent {
+  responsibleContactId?: string | null;
   id: string;
   title: string;
   kind: ServiceEventKind;
