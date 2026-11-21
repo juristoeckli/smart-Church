@@ -4,6 +4,7 @@ import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smar
 import { formatUserDate } from "./date-format";
 import { HomeDutyRequests } from "./HomeDutyRequests";
 import { HomeWelcome } from "./HomeWelcome";
+import { HomeCurrentPosts } from "./HomeCurrentPosts";
 import { HomeRecordedEventFacts } from "./HomeRecordedEventFacts";
 import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
 import { translateModuleUiOverrideMessage } from "./modules/ui-translation-overrides";
@@ -15,7 +16,7 @@ type GroupAppointment = { appointmentId: string; occurrenceStartAt: string; occu
 type ResourceBooking = { id: string; resourceName: string; location: string; purpose: string; requesterName: string; startsAt: string; endsAt: string };
 type HomeBookings = { current: ResourceBooking[]; pending: ResourceBooking[] | null };
 type RecentEventFact = { eventDate: string; title: string; adults: number; children: number; checkedIn: number; firstTimeVisitors: number };
-const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests"] as const;
+const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts"] as const;
 type DashboardWidgetId = typeof dashboardWidgetIds[number];
 const defaultDashboardWidgets = { order: [...dashboardWidgetIds], visible: [...dashboardWidgetIds] };
 type WidgetLayout = typeof defaultDashboardWidgets;
@@ -39,6 +40,7 @@ const dashboardWidgetLabels: Record<DashboardWidgetId, TranslationKey> = {
   anniversaries: "overview.widgetAnniversaries", groupAppointments: "overview.widgetGroupAppointments",
   currentBookings: "overview.widgetCurrentBookings", resourceApprovals: "overview.resourceApprovals", recentEventFacts: "overview.widgetRecentEventFacts",
   dutyRequests: "overview.dutyRequests",
+  currentPosts: "overview.currentPosts",
 };
 
 function attendanceSummary(rows: RecentEventFact[]) {
@@ -263,6 +265,7 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
       </div>)}</div> : <p className="community-empty">{translate("overview.noResourceApprovals")}</p>}
       {approvalFeedback && <p className="community-empty" role="status">{approvalFeedback}</p>}
     </section>,
+    currentPosts: <HomeCurrentPosts key={departmentId} departmentId={departmentId} />,
     recentEventFacts: <>{recentEventFacts && <section className="directory-card community-upcoming-card">
       <div className="directory-heading"><div><h2>{translate("overview.recentEventFacts")}</h2><p>{translate("overview.recentEventFactsHelp")}</p></div><button className="button button-secondary" type="button" onClick={() => onNavigate("Services & events")}>{translate("overview.openCalendar")} <ArrowRight size={14} /></button></div>
       {recordedFacts?.length ? <div className="community-upcoming-list">{recordedFacts.map((event, index) => <div className="community-upcoming-item" key={`${event.eventDate}:${event.title}:${index}`}><span className="community-upcoming-date">{formatUserDate(event.eventDate)}</span><div><strong>{event.title}</strong><small>{attendanceSummary([event])}</small></div></div>)}</div> : <p className="community-empty">{translate("overview.noRecentEventFacts")}</p>}

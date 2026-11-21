@@ -112,11 +112,12 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
     try {
       const parameters = new URLSearchParams({ scope: feedScope });
       if (groupFilter) parameters.set("groupId", groupFilter);
+      const sharedPostId = new URLSearchParams(window.location.search).get("communityPost");
+      if (sharedPostId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sharedPostId)) parameters.set("postId", sharedPostId);
       const response = await fetch(`/api/modules/community-feed/posts?${parameters}`, { headers: { "x-department-id": departmentId }, signal });
       const result = await response.json() as FeedPost[] | { error?: string };
       if (!response.ok || !Array.isArray(result)) throw new Error(!Array.isArray(result) ? result.error ?? t("Could not load community posts.") : t("Could not load community posts."));
       setPosts(result);
-      const sharedPostId = new URLSearchParams(window.location.search).get("communityPost");
       const sharedPost = sharedPostId ? result.find((post) => post.id === sharedPostId) : null;
       if (sharedPost) setDetailsPost(sharedPost);
     } catch (reason) {

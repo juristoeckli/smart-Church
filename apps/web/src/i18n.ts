@@ -196,6 +196,7 @@ const english = {
   "overview.widgetGroupAppointments": "Group appointments",
   "overview.widgetCurrentBookings": "Current resource bookings",
   "overview.widgetRecentEventFacts": "Recent event attendance",
+  "overview.currentPosts": "Current posts",
   "overview.dutyRequests": "Open duty requests",
   "overview.editWelcome": "Edit welcome message",
   "overview.welcomeHeading": "Heading",
