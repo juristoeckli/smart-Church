@@ -922,6 +922,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            JOIN pg_attribute remote ON remote.attrelid=con.confrelid AND remote.attnum=pair.remote_att
           WHERE con.contype='f' AND con.confrelid='public.contacts'::regclass AND remote.attname='id' AND ns.nspname='public'
             AND NOT (rel.relname='contacts' AND att.attname='id') ORDER BY rel.relname,att.attname`);
+        // Keep the keeper's portrait when both profiles selected one.
+        await client.query("UPDATE people_record_attachments source SET is_portrait=false WHERE source.department_id=$1 AND source.contact_id=$2 AND source.is_portrait AND EXISTS (SELECT 1 FROM people_record_attachments keeper WHERE keeper.department_id=$1 AND keeper.contact_id=$3 AND keeper.is_portrait)", [d,sourceId,keeperId]);
         const qi=(value:string)=>'"'+value.replaceAll('"','""')+'"';
         for(const ref of refs.rows){
           const table=`${qi(ref.schema_name)}.${qi(ref.table_name)}`,column=qi(ref.column_name);

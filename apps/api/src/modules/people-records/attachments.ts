@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { maxPortraitBytes, isPortraitPng } from "./portrait-png.js";
 
 export const maxPersonAttachments = 50;
 const maxAttachmentBytes = 10 * 1024 * 1024;
 const uploadType = "application/vnd.smart-church.person-attachment";
 const attachmentPath = "/api/people-records/:contactId/attachments";
+const portraitPath = "/api/people-records/:contactId/portrait";
 const uuid = { type: "string", format: "uuid" } as const;
 const contactParams = { type: "object", required: ["contactId"], additionalProperties: false, properties: { contactId: uuid } } as const;
 const fileParams = { type: "object", required: ["contactId", "attachmentId"], additionalProperties: false, properties: { contactId: uuid, attachmentId: uuid } } as const;
@@ -49,6 +51,49 @@ export function registerPersonAttachments(routes: FastifyInstance, context: Modu
     } finally { client.release(); }
   }
 
+  routes.get<{ Params: { contactId: string } }>(portraitPath, { schema: { params: contactParams } }, async (request, reply) => {
+    const departmentId = await department(request, reply);
+    if (!departmentId) return reply;
+    const { rows: [attachment] } = await pool!.query<{ file_data: Buffer }>(
+      "SELECT file_data FROM people_record_attachments WHERE department_id=$1 AND contact_id=$2 AND is_portrait AND file_size<=$3",
+      [departmentId, request.params.contactId, maxPortraitBytes]);
+    reply.header("cache-control", "private, no-store");
+    if (!attachment) return reply.code(404).send({ error: "No portrait is selected." });
+    return reply.type("image/png").header("x-content-type-options", "nosniff")
+      .header("cross-origin-resource-policy", "same-origin").send(attachment.file_data);
+  });
+
+  routes.put<{ Params: { contactId: string }; Body: { attachmentId: string | null } }>(portraitPath, {
+    schema: { params: contactParams, body: { type: "object", required: ["attachmentId"], additionalProperties: false,
+      properties: { attachmentId: { type: ["string", "null"], format: "uuid" } } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true);
+    if (!departmentId || !validateMutation(request, reply)) return reply;
+    const { contactId } = request.params;
+    const { attachmentId } = request.body;
+    return changeAttachment(reply, departmentId, contactId, async (client) => {
+      const { rows: [previous] } = await client.query<{ id: string }>(
+        "SELECT id FROM people_record_attachments WHERE department_id=$1 AND contact_id=$2 AND is_portrait", [departmentId, contactId]);
+      if (attachmentId === (previous?.id ?? null)) return { status: 200, payload: { attachmentId } };
+      if (attachmentId) {
+        const { rows: [attachment] } = await client.query<{ file_data: Buffer | null }>(
+          "SELECT CASE WHEN file_size<=$4 THEN file_data ELSE NULL END file_data FROM people_record_attachments WHERE department_id=$1 AND contact_id=$2 AND id=$3",
+          [departmentId, contactId, attachmentId, maxPortraitBytes]);
+        if (!attachment) return { status: 404, payload: { error: "Attachment not found." } };
+        if (!attachment.file_data || !isPortraitPng(attachment.file_data)) {
+          return { status: 400, payload: { error: "Choose a supported PNG no larger than 2 MiB and 1 million pixels." } };
+        }
+      }
+      await client.query("UPDATE people_record_attachments SET is_portrait=false WHERE department_id=$1 AND contact_id=$2 AND is_portrait", [departmentId, contactId]);
+      if (attachmentId) await client.query("UPDATE people_record_attachments SET is_portrait=true WHERE department_id=$1 AND contact_id=$2 AND id=$3", [departmentId, contactId, attachmentId]);
+      await client.query(
+        "INSERT INTO people_record_history(id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value) VALUES($1,$2,$3,$4,$5,'portrait',$6::jsonb,$7::jsonb)",
+        [randomUUID(), departmentId, contactId, request.authenticatedUser!.id, attachmentId ? "portrait_selected" : "portrait_removed",
+          JSON.stringify(previous ? { attachmentId: previous.id } : null), JSON.stringify(attachmentId ? { attachmentId } : null)]);
+      return { status: 200, payload: { attachmentId } };
+    });
+  });
+
   routes.get<{ Params: { contactId: string } }>(attachmentPath, { schema: { params: contactParams } }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
@@ -56,7 +101,7 @@ export function registerPersonAttachments(routes: FastifyInstance, context: Modu
     const person = await pool!.query("SELECT 1 FROM contacts WHERE department_id=$1 AND id=$2", [departmentId, contactId]);
     if (!person.rowCount) return reply.code(404).send({ error: "Person not found." });
     const result = await pool!.query(
-      `SELECT file.id,file.file_name AS "fileName",file.file_size AS "fileSize",file.created_at AS "uploadedAt",account.display_name AS "uploadedBy"
+      `SELECT file.id,file.file_name AS "fileName",file.file_size AS "fileSize",file.is_portrait AS "isPortrait",file.created_at AS "uploadedAt",account.display_name AS "uploadedBy"
          FROM people_record_attachments file LEFT JOIN app_users account ON account.id=file.uploaded_by
         WHERE file.department_id=$1 AND file.contact_id=$2 ORDER BY file.created_at DESC,file.id`, [departmentId, contactId],
     );
