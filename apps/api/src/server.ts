@@ -14,6 +14,7 @@ import { closeDatabase, departmentId, departmentName, initializeDatabase, instal
 import { VideoWorkerSupervisor } from "./modules/video-steffisburg/worker-supervisor.js";
 import { getRegisteredServerModuleCatalog, getRegisteredServerModuleIds, getRequiredModuleDependencies, getRequiredServerModuleIds, installSiteWriteFenceTriggers, isServerModuleEnabled, onServerModuleActivationChange, registerServerModules, setServerModuleEnabled } from "./modules/module-sdk.js";
 import { registerCoreReplicationAdapter } from "./core-replication.js";
+import { recordDutySwapNotice } from "./modules/notifications/duty-swap-notices.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { registerAccountSetupInvitations } from "./account-setup-invitations.js";
 import { canReadPrivateContactDetails, hasLocationPermission, readLocationGrant, registerLocationAccessPreview } from "./location-grants.js";
@@ -3294,6 +3295,7 @@ app.post<{ Params: { id: string }; Body: { fromPositionIndex: number; toPosition
       [randomUUID(), request.params.id, request.body.fromPositionIndex, request.body.toPositionIndex, contactId, to.contactId],
     );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A matching swap request is already waiting for a response." }); }
+    await recordDutySwapNotice(client, selectedDepartmentId, request.params.id, result.rows[0].id, to.contactId, request.authenticatedUser!.id, "pending");
     await client.query("COMMIT");
     return reply.code(201).send({ id: result.rows[0].id, status: "pending" });
   } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -3350,6 +3352,8 @@ app.put<{ Params: { id: string }; Body: { decision: "accepted" | "declined" | "c
       }
     }
     await client.query("UPDATE event_position_swap_requests SET status=$2,responded_at=now() WHERE id=$1", [request.params.id, request.body.decision]);
+    const recipientContact = request.body.decision === "cancelled" ? row.target_contact_id : row.requester_contact_id;
+    await recordDutySwapNotice(client, selectedDepartmentId, row.event_id, request.params.id, recipientContact, request.authenticatedUser!.id, request.body.decision);
     await client.query("COMMIT");
     return { status: request.body.decision };
   } catch (error) { await client.query("ROLLBACK"); throw error; }

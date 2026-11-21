@@ -83,6 +83,7 @@ Request/response TypeScript contracts, including `Contact`, `ContactProfileData`
 | `PUT`, `DELETE` | `/api/events/:id` | Update or delete a single event. |
 | `PUT`, `DELETE` | `/api/events/:id/series` | Update or remove a recurring series. |
 | `PUT` | `/api/events/:id/positions/:positionIndex/response` | Save an assigned person's pending/accepted/declined response. |
+| `POST`, `PUT` | `/api/events/:id/position-swaps`, `/api/event-position-swaps/:id` | Request or respond to a service swap. The other participant receives a notification if service requests are enabled. Email also requires current email opt-in and the matching swap state. |
 | `GET` | `/api/modules/notifications/home-duty-requests` | Show the current member's upcoming pending assignments and incoming swaps at the selected location. Each list is limited to 20. |
 | `GET`, `PUT` | `/api/modules/notifications/home-welcome` | Members can read the selected location's welcome text. Site administrators can update the plain-text `heading` and `subtitle`. Empty values use the translated defaults. |
 | `GET`, `PUT`, `DELETE` | `/api/modules/notifications/home-widgets` | Read the effective widget layout, save personal `order` and `visible` arrays, or reset personal preferences to the location default. |
