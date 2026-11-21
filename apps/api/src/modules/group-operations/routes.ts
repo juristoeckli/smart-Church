@@ -2,10 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { saveGroupLeaderFeedback } from "../../group-leader-feedback.js";
+import { renderCertificatePdf, renderCertificatePrintView, validCertificateTemplate, type Certificate } from "./certificate-document.js";
 import { registerGroupOperationsReplication } from "./replication.js";
 
 const uuid = { type: "string", format: "uuid" };
 const date = { type: "string", format: "date" };
+function certificateIssueAudience(isManager: string, userId: string) {
+  return `(${isManager} OR EXISTS (
+    SELECT 1 FROM department_memberships membership
+     WHERE membership.department_id=issue.department_id AND membership.user_id=${userId} AND membership.contact_id=issue.contact_id
+  ))`;
+}
 function csvCell(value: unknown): string {
   let text = String(value ?? "");
   if (/^[\s]*[=+@-]/.test(text)) text = `'${text}`;
@@ -457,18 +464,59 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.get("/api/modules/group-operations/certificates", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
+    const manager = canManage(request);
     const [definitions, issues] = await Promise.all([
-      pool!.query(`SELECT cert.id,cert.group_id AS "groupId",g.name AS "groupName",cert.name,cert.description,cert.active FROM group_certificate_definitions cert JOIN church_groups g ON g.id=cert.group_id AND g.department_id=cert.department_id WHERE cert.department_id=$1 ORDER BY lower(g.name),lower(cert.name) LIMIT 2000`, [departmentId]),
-      pool!.query(`SELECT issue.id,issue.certificate_id AS "certificateId",issue.group_id AS "groupId",issue.contact_id AS "contactId",cert.name AS "certificateName",g.name AS "groupName",concat_ws(' ',person.first_name,person.last_name) AS "personName",issue.issued_at::text AS "issuedAt",issue.valid_until::text AS "validUntil",issue.notes,issue.revoked_at AS "revokedAt",issue.revoke_reason AS "revokeReason" FROM group_certificate_issues issue JOIN group_certificate_definitions cert ON cert.id=issue.certificate_id AND cert.department_id=issue.department_id JOIN church_groups g ON g.id=issue.group_id AND g.department_id=issue.department_id JOIN contacts person ON person.id=issue.contact_id AND person.department_id=issue.department_id WHERE issue.department_id=$1 ORDER BY issue.issued_at DESC,person.last_name LIMIT 3000`, [departmentId]),
+      manager ? pool!.query(`SELECT cert.id,cert.group_id AS "groupId",g.name AS "groupName",cert.name,cert.description,cert.active FROM group_certificate_definitions cert JOIN church_groups g ON g.id=cert.group_id AND g.department_id=cert.department_id WHERE cert.department_id=$1 ORDER BY lower(g.name),lower(cert.name) LIMIT 2000`, [departmentId]) : Promise.resolve({ rows: [] }),
+      pool!.query(`SELECT issue.id,issue.certificate_id AS "certificateId",issue.group_id AS "groupId",issue.contact_id AS "contactId",cert.name AS "certificateName",g.name AS "groupName",concat_ws(' ',person.first_name,person.last_name) AS "personName",issue.issued_at::text AS "issuedAt",issue.valid_until::text AS "validUntil",CASE WHEN $2 THEN issue.notes ELSE '' END AS notes,issue.revoked_at AS "revokedAt",CASE WHEN $2 THEN issue.revoke_reason ELSE '' END AS "revokeReason" FROM group_certificate_issues issue JOIN group_certificate_definitions cert ON cert.id=issue.certificate_id AND cert.department_id=issue.department_id JOIN church_groups g ON g.id=issue.group_id AND g.department_id=issue.department_id JOIN contacts person ON person.id=issue.contact_id AND person.department_id=issue.department_id WHERE issue.department_id=$1 AND ${certificateIssueAudience("$2", "$3")} ORDER BY issue.issued_at DESC,person.last_name LIMIT 3000`, [departmentId, manager, request.authenticatedUser?.id ?? null]),
     ]);
+    reply.header("cache-control", "private, no-store");
     return { definitions: definitions.rows, issues: issues.rows };
   });
-  app.post<{ Body: { groupId: string; name: string; description?: string } }>("/api/modules/group-operations/certificates", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "name"], properties: { groupId: uuid, name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 } } } },
+  app.get<{ Params: { id: string }; Querystring: { format?: "pdf" | "print" } }>("/api/modules/group-operations/certificates/issues/:id/document", {
+    schema: {
+      params: { type: "object", required: ["id"], properties: { id: uuid } },
+      querystring: { type: "object", additionalProperties: false, properties: { format: { type: "string", enum: ["pdf", "print"] } } },
+    },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    reply.header("cache-control", "private, no-store");
+    const result = await pool!.query<Certificate & { revokedAt: Date | null }>(
+      `SELECT issue.id, cert.name, cert.document_text AS "documentText", site.name AS "siteName", g.name AS "groupName",
+              concat_ws(' ',person.first_name,person.last_name) AS "personName", issue.issued_at::text AS "issuedAt",
+              issue.valid_until::text AS "validUntil", issue.revoked_at AS "revokedAt"
+         FROM group_certificate_issues issue
+         JOIN group_certificate_definitions cert ON cert.id=issue.certificate_id AND cert.department_id=issue.department_id
+         JOIN church_groups g ON g.id=issue.group_id AND g.department_id=issue.department_id
+         JOIN contacts person ON person.id=issue.contact_id AND person.department_id=issue.department_id
+         JOIN departments site ON site.id=issue.department_id
+        WHERE issue.id=$1 AND issue.department_id=$2 AND ${certificateIssueAudience("$3", "$4")}`,
+      [request.params.id, departmentId, canManage(request), request.authenticatedUser?.id ?? null],
+    );
+    const certificate = result.rows[0];
+    if (!certificate) return reply.code(404).send({ error: "Certificate not found." });
+    if (certificate.revokedAt) return reply.code(410).send({ error: "This certificate has been revoked." });
+    if (request.query.format === "print") {
+      return reply.header("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
+        .type("text/html; charset=utf-8").send(renderCertificatePrintView(certificate));
+    }
+    const document = renderCertificatePdf(certificate);
+    if (!document) return reply.code(422).send({ error: "Use the print view to save this certificate as a PDF with all its text." });
+    return reply.header("content-disposition", 'attachment; filename="group-certificate-' + certificate.id + '.pdf"')
+      .type("application/pdf").send(document);
+  });
+
+
+  app.post<{ Body: { groupId: string; name: string; description?: string; documentText?: string } }>("/api/modules/group-operations/certificates", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "name"], properties: { groupId: uuid, name: { type: "string", minLength: 1, maxLength: 120 }, description: { type: "string", maxLength: 1000 }, documentText: { type: "string", maxLength: 1000 } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
     if (!(await existsInLocation("church_groups", request.body.groupId, departmentId))) return reply.code(404).send({ error: "Group not found in this location." });
-    const id = randomUUID(); await pool!.query("INSERT INTO group_certificate_definitions(id,department_id,group_id,name,description,created_by) VALUES($1,$2,$3,$4,$5,$6)", [id, departmentId, request.body.groupId, request.body.name.trim(), request.body.description?.trim() ?? "", request.authenticatedUser?.id ?? null]);
+    const documentText = request.body.documentText?.trim() ?? "";
+    if (!validCertificateTemplate(documentText)) return reply.code(400).send({ error: "Use a supported placeholder in the certificate document text." });
+    if (!request.body.name.trim()) return reply.code(400).send({ error: "Enter a certificate name." });
+    const id = randomUUID();
+    await pool!.query("INSERT INTO group_certificate_definitions(id,department_id,group_id,name,description,created_by,document_text) VALUES($1,$2,$3,$4,$5,$6,$7)",
+      [id, departmentId, request.body.groupId, request.body.name.trim(), request.body.description?.trim() ?? "", request.authenticatedUser?.id ?? null, documentText]);
     await recordAudit(departmentId, request.body.groupId, request, "certificate_created", id, { name: request.body.name.trim() }); return reply.code(201).send({ id });
   });
   app.post<{ Body: { certificateId: string; contactId: string; issuedAt?: string; validUntil?: string | null; notes?: string } }>("/api/modules/group-operations/certificates/issue", {
