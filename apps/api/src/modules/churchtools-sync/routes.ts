@@ -23,6 +23,8 @@ import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, finan
 
 import { applyChurchToolsServiceTemplates, readChurchToolsServiceTemplates, reviewChurchToolsServiceTemplates, ServiceTemplateReviewError, type ChurchToolsTemplateKind } from "./service-templates.js";
 
+import { applyChurchToolsVolunteerResponses, readChurchToolsVolunteerResponses, reviewChurchToolsVolunteerResponses, VolunteerResponseReviewError } from "./volunteer-responses.js";
+
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
 const elvantoAreas = ["people", "peopleFlows", "groups", "services", "songs", "calendar", "financial"] as const;
@@ -1497,7 +1499,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const sourceId = idOf(person);
             const sourceProfile = sanitizeChurchToolsProfile(person) as JsonObject;
             const relationships = relationshipsByPerson.get(sourceId) ?? [];
-            return { area: "person", sourceId, firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: { ...sourceProfile, relationships }, relationshipsCount: relationships.length, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) };
+            return { area: "person", sourceId, ...(typeof person.id === "number" && Number.isSafeInteger(person.id) && person.id > 0
+              ? { personInstanceUrl: config.instance_url } : {}), firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: { ...sourceProfile, relationships }, relationshipsCount: relationships.length, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) };
           }),
           ...groupsResult.items.map((group) => {
             const memberships = membersByGroup.get(idOf(group));
@@ -1630,8 +1633,27 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             try {
             if (!sourceId || action.startsWith("review_") || action === "invalid") { batchSkipped += 1; page += 1; continue; }
             if (record.area === "person") {
-              let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN contacts local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='person' AND link.source_id=$2", [dept, sourceId]);
-              if (!linked.rowCount) linked = await db.query<{ id: string }>("SELECT id FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              const instanceUrl = typeof record.personInstanceUrl === "string" ? record.personInstanceUrl : null;
+              if (instanceUrl) {
+                const configured = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, instanceUrl]);
+                if (!configured.rowCount) throw new Error("ChurchTools connection changed after preview.");
+              }
+              let linked = await db.query<{ id: string; source_system: string | null }>("SELECT link.local_record_id::text AS id,local.source_system FROM churchtools_migration_links link JOIN contacts local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='person' AND link.source_id=$2 FOR UPDATE OF local", [dept, sourceId]);
+              if (!linked.rowCount) linked = await db.query<{ id: string; source_system: string | null }>("SELECT id,source_system FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id=$2 FOR UPDATE", [dept, sourceId]);
+              if (linked.rowCount) {
+                const prior = await db.query<{ instance_url: string; source_person_id: string }>(
+                  "SELECT instance_url,source_person_id FROM churchtools_migration_person_provenance WHERE contact_id=$1", [linked.rows[0].id]);
+                if (prior.rows[0] && (prior.rows[0].instance_url !== instanceUrl || prior.rows[0].source_person_id !== sourceId)) {
+                  throw new Error("This person already belongs to another verified ChurchTools record.");
+                }
+              }
+              async function recordPersonSource(contactId: string) {
+                if (!instanceUrl || !/^[1-9][0-9]{0,15}$/.test(sourceId)) return;
+                const result = await db.query(`INSERT INTO churchtools_migration_person_provenance(department_id,instance_url,source_person_id,contact_id)
+                  VALUES($1,$2,$3,$4) ON CONFLICT (department_id,instance_url,source_person_id) DO UPDATE SET contact_id=EXCLUDED.contact_id
+                  WHERE churchtools_migration_person_provenance.contact_id=EXCLUDED.contact_id`, [dept, instanceUrl, sourceId, contactId]);
+                if (!result.rowCount) throw new Error("The source person already has a different verified local contact.");
+              }
               if (!linked.rowCount && record.email) {
                 const collision = await db.query("SELECT 1 FROM contacts WHERE department_id=$1 AND lower(email)=lower($2) LIMIT 1", [dept, record.email]);
                 if (collision.rowCount) { batchSkipped += 1; page += 1; continue; }
@@ -1639,10 +1661,15 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               if (linked.rowCount) {
                 await db.query("UPDATE contacts SET first_name=$3,last_name=$4,email=$5,phone=$6,status='member',churchtools_profile=$7::jsonb,updated_at=now() WHERE id=$1 AND department_id=$2", [linked.rows[0].id, dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone, JSON.stringify(record.sourceProfile ?? {})]);
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]);
+                if (linked.rows[0].source_system === null) await recordPersonSource(linked.rows[0].id);
                 batchUpdated += 1;
               } else {
                 const inserted = await db.query<{ id: string }>("INSERT INTO contacts (id,department_id,first_name,last_name,email,phone,status,churchtools_profile) VALUES (gen_random_uuid(),$1,$2,$3,$4,$5,'member',$6::jsonb) ON CONFLICT DO NOTHING RETURNING id", [dept, record.firstName || "ChurchTools", record.lastName || `Person ${sourceId}`, record.email, record.phone, JSON.stringify(record.sourceProfile ?? {})]);
-                if (inserted.rowCount) { await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]); batchCreated += 1; } else batchSkipped += 1;
+                if (inserted.rowCount) {
+                  await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'person',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, inserted.rows[0].id]);
+                  await recordPersonSource(inserted.rows[0].id);
+                  batchCreated += 1;
+                } else batchSkipped += 1;
               }
             } else if (record.area === "group") {
               let linked = await db.query<{ id: string }>("SELECT link.local_record_id::text AS id FROM churchtools_migration_links link JOIN church_groups local ON local.id=link.local_record_id AND local.department_id=link.department_id WHERE link.department_id=$1 AND link.area='group' AND link.source_id=$2", [dept, sourceId]);
@@ -2048,6 +2075,61 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (error instanceof ServiceTemplateReviewError) return reply.code(409).send({ error: error.message });
         if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
           return reply.code(409).send({ error: "Service templates are busy. Open a fresh review." });
+        }
+        throw error;
+      } finally { db.release(); }
+    });
+
+    type VolunteerResponseBody = { eventId: string; reviewHash?: string; sourceIds?: string[] };
+    routes.post<{ Body: VolunteerResponseBody }>("/api/modules/sync/churchtools/volunteer-responses", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["eventId"], properties: {
+        eventId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        sourceIds: { type: "array", minItems: 1, maxItems: 40, uniqueItems: true, items: { type: "string", pattern: "^[1-9][0-9]{0,15}$" } },
+      } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId || !deps.validateMutation(request, reply)) return reply;
+      const config = await settings(departmentId);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing volunteer responses." });
+      const { eventId, reviewHash, sourceIds } = request.body;
+      if (!!reviewHash !== !!sourceIds) return reply.code(400).send({ error: "Select reviewed volunteer responses before importing." });
+      const scope = { departmentId, instanceUrl: config.instance_url, eventId };
+      let source: ReturnType<typeof readChurchToolsVolunteerResponses>;
+      try {
+        source = readChurchToolsVolunteerResponses(await get(config.instance_url, decrypt(config.encrypted_login_token), `events/${eventId}`), eventId);
+      } catch (error) {
+        const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools volunteer responses." });
+      }
+      if (!reviewHash || !sourceIds) {
+        const review = await reviewChurchToolsVolunteerResponses(pool!, scope, source);
+        if (!review) return reply.code(404).send({ error: "Import the matching active event through a fresh ChurchTools migration preview first." });
+        const { title, date } = review.event;
+        return reply.header("Cache-Control", "private, no-store").send({
+          event: { title, date }, counts: review.counts, rows: review.rows, reviewHash: review.reviewHash,
+        });
+      }
+      const db = await pool!.connect();
+      try {
+        await db.query("BEGIN");
+        await db.query("SET LOCAL lock_timeout = '5s'");
+        if (!await deps.lockDepartmentForWrite(db, departmentId)) {
+          await db.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const current = await db.query(`SELECT 1 FROM churchtools_sync_settings
+          WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE`,
+        [departmentId, config.instance_url, config.encrypted_login_token]);
+        const review = current.rowCount ? await reviewChurchToolsVolunteerResponses(db, scope, source, true) : null;
+        if (!review) throw new VolunteerResponseReviewError("The event or ChurchTools connection changed.");
+        const result = await applyChurchToolsVolunteerResponses(db, scope, review, reviewHash, sourceIds);
+        await db.query("COMMIT");
+        return reply.header("Cache-Control", "private, no-store").send(result);
+      } catch (error) {
+        await db.query("ROLLBACK");
+        if (error instanceof VolunteerResponseReviewError) return reply.code(409).send({ error: error.message });
+        if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
+          return reply.code(409).send({ error: "The event is busy. Open a fresh review." });
         }
         throw error;
       } finally { db.release(); }
