@@ -373,7 +373,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, before.id, before.title, before.content_html, request.authenticatedUser!.id]);
       }
       const result = await client.query<WikiPageRow>("UPDATE wiki_pages SET category_id=$3,title=$4,content_html=$5,redirect_page_id=$6,audience=$7,audience_group_id=$8,updated_by=$9,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id,category_id,title,content_html,status,redirect_page_id,is_homepage,audience,audience_group_id,created_at,updated_at,updated_by", [request.params.id, departmentId, request.body.categoryId, title, content, redirectPageId, audience, audienceGroupId, request.authenticatedUser!.id]);
-      await client.query("INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)", [randomUUID(), departmentId, request.params.id, title, content, request.authenticatedUser!.id]);
+      const audienceChange = before.audience !== audience || (before.audience_group_id ?? null) !== audienceGroupId
+        ? { from: { audience: before.audience, groupId: before.audience_group_id }, to: { audience, groupId: audienceGroupId } }
+        : null;
+      const categoryNames = before.category_id !== request.body.categoryId
+        ? await client.query<{ id: string; name: string }>("SELECT id,name FROM wiki_categories WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, [before.category_id, request.body.categoryId]])
+        : null;
+      const categoryChange = categoryNames ? {
+        from: { id: before.category_id, name: categoryNames.rows.find(({ id }) => id === before.category_id)?.name ?? "Previous category" },
+        to: { id: request.body.categoryId, name: categoryNames.rows.find(({ id }) => id === request.body.categoryId)?.name ?? "New category" },
+      } : null;
+      const previousRedirect = before.redirect_page_id ?? null;
+      const redirectChange = previousRedirect !== redirectPageId ? { from: previousRedirect, to: redirectPageId } : null;
+      await client.query(
+        "INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id,audience_change,category_change,redirect_change) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)",
+        [randomUUID(), departmentId, request.params.id, title, content, request.authenticatedUser!.id, audienceChange, categoryChange, redirectChange],
+      );
       await client.query("COMMIT");
       changed(departmentId, { action: "page-updated", pageId: request.params.id });
       return pageDto(result.rows[0]);
@@ -500,11 +515,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/versions", async (request, reply) => {
-    const departmentId = await site(request, reply);
+    const departmentId = await site(request, reply, true);
     if (!departmentId) return reply;
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki page not found." });
-    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\",CASE WHEN $3::boolean THEN version.audience_change END AS \"audienceChange\",CASE WHEN $3::boolean THEN version.category_change END AS \"categoryChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id, isWikiManager(request)]);
-    return Promise.all(result.rows.map(async (version) => ({ ...version, contentHtml: await hideUnreadableWikiEntityLinks(version.contentHtml, request, departmentId) })));
+    reply.header("Cache-Control", "private, no-store");
+    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\",version.audience_change AS \"audienceChange\",version.category_change AS \"categoryChange\",version.redirect_change AS \"redirectChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id]);
+    return Promise.all(result.rows.map(async (version) => ({ ...version, contentHtml: await hideUnreadableWikiEntityLinks(safeHtml(version.contentHtml, request.params.id), request, departmentId) })));
   });
 
   app.get<{ Params: { id: string }; Querystring: { leftVersionId?: string; rightVersionId?: string } }>("/api/modules/wiki/pages/:id/versions/compare", { schema: {

@@ -374,21 +374,54 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         FROM people_record_saved_views WHERE department_id=$1 AND user_id=$2 ORDER BY lower(name),id`,[d,request.authenticatedUser!.id]);
       return rows.rows;
     });
-    routes.post<{Body:{name:string;q?:string;status?:"member"|"visitor"|"";field?:string;value?:string;filters?:FieldFilterInput[];relationshipFilters?:RelationshipFilterInput[];groupRole?:string|null;groupType?:string|null;groupId?:string|null;sort?:DirectorySort;columns?:string[]}}>("/api/people-records/saved-views",{
-      schema:{body:{type:"object",additionalProperties:false,required:["name"],properties:{name:{type:"string",minLength:1,maxLength:80},q:{type:"string",maxLength:120},status:{type:"string",enum:["","member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"array",maxItems:10,items:{type:"object",additionalProperties:false,required:["field","value"],properties:{field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},operator:{type:"string",enum:["equals","contains","before","after","on","last_7_days","last_30_days","last_90_days","next_7_days","next_30_days","next_90_days"]}}}},relationshipFilters:{type:"array",maxItems:10,items:{type:"object",additionalProperties:false,required:["exclude"],properties:{relationshipTypeId:uuid,legacyRelationship:{type:"string",minLength:1,maxLength:60},exclude:{type:"boolean"}},anyOf:[{required:["relationshipTypeId"]},{required:["legacyRelationship"]}]}},groupRole:{anyOf:[{type:"string",minLength:1,maxLength:80},{type:"null"}]},groupType:{anyOf:[{type:"string",minLength:1,maxLength:120},{type:"null"}]},groupId:{anyOf:[uuid,{type:"null"}]},sort:directorySortSchema,columns:{type:"array",minItems:1,maxItems:20,uniqueItems:true,items:{type:"string",maxLength:48}}}}},
-    },async(request,reply)=>{
+    type SavedViewBody={name:string;q?:string;status?:"member"|"visitor"|"";field?:string;value?:string;filters?:FieldFilterInput[];relationshipFilters?:RelationshipFilterInput[];groupRole?:string|null;groupType?:string|null;groupId?:string|null;sort?:DirectorySort;columns?:string[]};
+    const savedViewSchema={body:{type:"object",additionalProperties:false,required:["name"],properties:{name:{type:"string",minLength:1,maxLength:80},q:{type:"string",maxLength:120},status:{type:"string",enum:["","member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"array",maxItems:10,items:{type:"object",additionalProperties:false,required:["field","value"],properties:{field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},operator:{type:"string",enum:["equals","contains","before","after","on","last_7_days","last_30_days","last_90_days","next_7_days","next_30_days","next_90_days"]}}}},relationshipFilters:{type:"array",maxItems:10,items:{type:"object",additionalProperties:false,required:["exclude"],properties:{relationshipTypeId:uuid,legacyRelationship:{type:"string",minLength:1,maxLength:60},exclude:{type:"boolean"}},anyOf:[{required:["relationshipTypeId"]},{required:["legacyRelationship"]}]}},groupRole:{anyOf:[{type:"string",minLength:1,maxLength:80},{type:"null"}]},groupType:{anyOf:[{type:"string",minLength:1,maxLength:120},{type:"null"}]},groupId:{anyOf:[uuid,{type:"null"}]},sort:directorySortSchema,columns:{type:"array",minItems:1,maxItems:20,uniqueItems:true,items:{type:"string",maxLength:48}}}}};
+    async function writeSavedView(request:FastifyRequest<{Body:SavedViewBody}>,reply:FastifyReply,id?:string){
       const d=await department(request,reply); if(!d)return reply;
       if(!validateMutation(request,reply))return reply;
       const name=request.body.name.trim(); if(!name)return reply.code(400).send({error:"Enter a name for this saved view."});
-      let filters:FieldFilterInput[];let relationshipFilters:RelationshipFilterInput[];let columns:string[];
-      try{filters=parseFieldFilters(request.body.filters===undefined?undefined:JSON.stringify(request.body.filters),request.body.field,request.body.value);const normalized=await validateFieldFilters(d,filters);filters=filters.map((item,index)=>({...item,operator:normalized[index].operator}));relationshipFilters=await validateRelationshipFilters(d,request.body.relationshipFilters??[]);columns=await validateDirectoryColumns(d,request.body.columns);if(request.body.groupId){const group=await pool!.query("SELECT id FROM church_groups g WHERE g.department_id=$1 AND g.id=$2 AND "+activeDirectoryGroup,[d,request.body.groupId]);if(!group.rowCount)throw new Error("Choose an active group at this location.")}}catch(error){return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid saved view options."})}
-      try {
-        const result=await pool!.query(`INSERT INTO people_record_saved_views(id,department_id,user_id,name,criteria)
-          VALUES($1,$2,$3,$4,$5::jsonb) RETURNING id,name,criteria->>'q' AS q,criteria->>'status' AS status,criteria->>'field' AS field,criteria->>'value' AS value,criteria->'filters' AS filters,criteria->'relationshipFilters' AS "relationshipFilters",criteria->>'groupId' AS "groupId",criteria->>'groupType' AS "groupType",criteria->>'groupRole' AS "groupRole",criteria->>'sort' AS sort,criteria->'columns' AS columns,created_at AS "createdAt",updated_at AS "updatedAt"`,
-          [randomUUID(),d,request.authenticatedUser!.id,name,JSON.stringify({q:request.body.q?.trim()??"",status:request.body.status??"",field:filters.length===1?filters[0].field:"",value:filters.length===1?filters[0].value:"",filters,relationshipFilters,groupId:request.body.groupId??null,groupType:request.body.groupType??null,groupRole:request.body.groupRole?.trim()||null,sort:request.body.sort??"lastName",columns})]);
-        return reply.code(201).send(result.rows[0]);
-      } catch { return reply.code(409).send({error:"A saved view with that name already exists."}); }
-    });
+      const updating=id!==undefined;
+      const renameOnly=updating&&Object.keys(request.body).length===1;
+      let criteria:string|null=null;
+      if(!renameOnly){
+        const body=request.body;
+        try{
+          let filters=parseFieldFilters(body.filters===undefined?undefined:JSON.stringify(body.filters),body.field,body.value);
+          const normalized=await validateFieldFilters(d,filters);
+          filters=filters.map((item,index)=>({...item,operator:normalized[index].operator}));
+          const relationshipFilters=await validateRelationshipFilters(d,body.relationshipFilters??[]);
+          const columns=await validateDirectoryColumns(d,body.columns);
+          if(body.groupId){
+            const group=await pool!.query("SELECT id FROM church_groups g WHERE g.department_id=$1 AND g.id=$2 AND "+activeDirectoryGroup,[d,body.groupId]);
+            if(!group.rowCount)throw new Error("Choose an active group at this location.");
+          }
+          criteria=JSON.stringify({
+            q:body.q?.trim()??"",status:body.status??"",
+            field:filters.length===1?filters[0].field:"",value:filters.length===1?filters[0].value:"",
+            filters,relationshipFilters,groupId:body.groupId??null,groupType:body.groupType??null,
+            groupRole:body.groupRole?.trim()||null,sort:body.sort??"lastName",columns,
+          });
+        }catch(error){
+          return reply.code(400).send({error:error instanceof Error?error.message:"Choose valid saved view options."});
+        }
+      }
+      try{
+        const values=[id??randomUUID(),d,request.authenticatedUser!.id,name,criteria];
+        const statement=updating
+          ? "UPDATE people_record_saved_views SET name=$4,criteria=COALESCE($5::jsonb,criteria),updated_at=now() WHERE id=$1 AND department_id=$2 AND user_id=$3"
+          : "INSERT INTO people_record_saved_views(id,department_id,user_id,name,criteria) VALUES($1,$2,$3,$4,$5::jsonb)";
+        const result=await pool!.query(`${statement} RETURNING id,name,criteria->>'q' AS q,criteria->>'status' AS status,criteria->>'field' AS field,criteria->>'value' AS value,criteria->'filters' AS filters,criteria->'relationshipFilters' AS "relationshipFilters",criteria->>'groupId' AS "groupId",criteria->>'groupType' AS "groupType",criteria->>'groupRole' AS "groupRole",criteria->>'sort' AS sort,criteria->'columns' AS columns,created_at AS "createdAt",updated_at AS "updatedAt"`,values);
+        if(!result.rowCount)return reply.code(404).send({error:"Saved view not found."});
+        return reply.code(updating?200:201).send(result.rows[0]);
+      } catch(error) {
+        if((error as {code?:string}).code==="23505")return reply.code(409).send({error:"A saved view with that name already exists."});
+        throw error;
+      }
+    }
+    routes.post<{Body:SavedViewBody}>("/api/people-records/saved-views",{schema:savedViewSchema},(request,reply)=>writeSavedView(request,reply));
+    routes.patch<{Params:{id:string};Body:SavedViewBody}>("/api/people-records/saved-views/:id",{
+      schema:{...savedViewSchema,params:{type:"object",additionalProperties:false,required:["id"],properties:{id:uuid}}},
+    },(request,reply)=>writeSavedView(request,reply,request.params.id));
     routes.delete<{Params:{id:string}}>("/api/people-records/saved-views/:id",{schema:{params:{type:"object",additionalProperties:false,required:["id"],properties:{id:uuid}}}},async(request,reply)=>{
       const d=await department(request,reply); if(!d)return reply;
       if(!validateMutation(request,reply))return reply;
