@@ -302,7 +302,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const canSelectPeople = canSeePrivatePeople(request);
     if (!canSelectPeople) return responseError(reply, 403, "Private People access is required to select an appointment contact.");
-    const query = request.query.q.trim().replace(/[\\%_]/g, "").slice(0, 80);
+    const query = (request.query.q ?? "").trim().replace(/[\\%_]/g, "").slice(0, 80);
     if (query.length < 2) return [];
     return (await context.pool.query<{ id: string; name: string }>(
       `SELECT id,concat_ws(' ',first_name,last_name) AS name FROM contacts
@@ -890,7 +890,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           [row.id, occurrenceStart],
         );
         if (existing.rows[0]?.overrides && Object.prototype.hasOwnProperty.call(existing.rows[0].overrides, "responsibleContactId")) {
-          overrides.responsibleContactId = existing.rows[0].overrides.responsibleContactId;
+          const retainedResponsibleContactId = existing.rows[0].overrides.responsibleContactId;
+          overrides.responsibleContactId = typeof retainedResponsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(retainedResponsibleContactId) ? retainedResponsibleContactId : null;
         }
       }
       await context.pool.query(
