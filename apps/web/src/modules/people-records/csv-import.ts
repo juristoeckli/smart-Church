@@ -24,7 +24,13 @@ export function readCsvRows(source: string, rejectUnclosedQuote = false) {
 export function membershipCsvRows(source: string) {
   const [header, ...rows] = readCsvRows(source, true);
   const names = (header ?? []).map(value => value.trim().toLowerCase().replace(/[^a-z0-9]/g, ""));
-  const first = names.indexOf("firstname"), last = names.indexOf("lastname"), email = names.findIndex(value => value === "email" || value === "emailaddress");
+  const first = names.indexOf("firstname");
+  const last = names.indexOf("lastname");
+  const emailColumns = names.flatMap((name, index) => name === "email" || name === "emailaddress" ? [index] : []);
+  if (first !== names.lastIndexOf("firstname") || last !== names.lastIndexOf("lastname") || emailColumns.length > 1) {
+    throw new Error("Use only one column each for First name, Last name, and Email.");
+  }
+  const email = emailColumns[0] ?? -1;
   if (first < 0 || last < 0) throw new Error("Use a CSV with First name and Last name columns, plus Email when available.");
   if (rows.length < 1 || rows.length > 100) throw new Error("Use a CSV with one to 100 data rows.");
   return rows.map(row => ({ firstName: (row[first] ?? "").trim(), lastName: (row[last] ?? "").trim(), email: (row[email] ?? "").trim() }));
