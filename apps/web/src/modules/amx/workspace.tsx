@@ -302,6 +302,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
 
   const renderObject = (page: PanelPage, object: PanelObject, layer: number): ReactNode => {
     if (page.kind === "subpage" && object.name === "Alle Räume" && !object.channel && !object.pageFlip) return null;
+    if (page.group === "Power" && object.type === "general" && object.width === panel.project.screen.width
+      && object.height === panel.project.screen.height && !object.channel && !object.pageFlip) return null;
     const activeRoomState = page.name === "Home" && typeof object.channel === "number" && roomChannels[object.channel] === selectedRoom;
     const activeModeState = page.name === "Modus" && selectedModeChannel === object.channel;
     const state = stateFor(object, activeRoomState || activeModeState);
@@ -312,7 +314,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const levelPercent = levelValue === undefined || high <= low ? undefined : Math.max(0, Math.min(100, (levelValue - low) / (high - low) * 100));
     const activationLevel = levelValues["1"];
     const activationPercent = activationLevel === undefined ? undefined : Math.max(0, Math.min(100, activationLevel / 255 * 100));
-    let text = object.type === "bargraph" ? levelPercent !== undefined ? `${Math.round(levelPercent)}%` : "—" : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
+    let text = object.type === "bargraph"
+      ? page.name === "PWR_COUNT" ? "" : levelPercent !== undefined ? `${Math.round(levelPercent)}%` : "—"
+      : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
     if (page.name === "PWR_COUNT" && object.name === "100 %") text = activationPercent === undefined ? "—" : `${Math.round(activationPercent)}%`;
     if (page.name === "PWR_COUNT" && /wird aktiviert/i.test(baseText)) {
       const title = selectedRoom === "Gemeindesaal quer" ? "Quer Gemeindesaal" : selectedRoom === "Gemeindesaal längs" ? "Längs Gemeindesaal" : selectedRoom;
@@ -382,8 +386,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const image = detailBackground(page);
     const roomMap = pageBackgroundMaps[page.name];
     const backgroundColor = page.group === "ModusPopup" ? "#fffed3"
-      : page.group === "Power" || page.group === "EQ" ? "#d0d0d0"
-        : "#fffed3";
+      : page.group === "Power" ? "rgba(0,0,0,.34)"
+        : page.group === "EQ" ? "#d0d0d0"
+          : "#fffed3";
     const x = page.canvas.x ?? 0;
     const y = page.canvas.y ?? 0;
     return <div key={`background-${page.id}`} className="amx-page-backdrop" style={{
