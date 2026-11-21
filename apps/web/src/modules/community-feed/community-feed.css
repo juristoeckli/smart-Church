@@ -79,3 +79,7 @@
 .community-notification-preference-options{display:flex;align-items:center;flex-wrap:wrap;gap:.75rem 1rem;margin-top:.7rem}
 .community-notification-preference-options label{display:flex;align-items:center;gap:.4rem;font-size:.82rem}
 .community-notification-preference-options input{accent-color:var(--primary,#3765a8)}
+
+.community-subscription-list{margin:0;list-style:none}
+.community-upcoming-item.community-subscription-item{grid-template-columns:minmax(0,1fr) auto}
+.community-subscription-item strong{overflow-wrap:anywhere}

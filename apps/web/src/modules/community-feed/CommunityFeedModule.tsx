@@ -7,11 +7,11 @@ import { translationsForModule } from "../translations";
 import { PostBody, PostBodyEditor, type PostBodyFormat } from "./PostBody";
 import { DigestPreferences } from "./DigestPreferences";
 import { EmailHistory } from "./EmailHistory";
+import { GroupSubscriptions, type FeedGroup } from "./GroupSubscriptions";
 import "./community-feed.css";
 import "./community-feed-details.css";
 
 type FeedComment = { id: string; body: string; authorId: string; authorName: string; createdAt: string };
-type FeedGroup = { id: string; name: string; isSubscribed: boolean };
 type FeedAttachment = { id: string; filename: string; contentType: string; url: string };
 type FeedLink = { type: "person" | "group" | "wiki" | "song"; id: string; label: string };
 type EntityOption = { id: string; label: string };
@@ -56,6 +56,9 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   const canReviewReports = canManageSite || (department.modulePermissions?.["community-feed"] ?? []).includes("moderate");
   const [posts, setPosts] = useState<FeedPost[]>([]);
   const [groups, setGroups] = useState<FeedGroup[]>([]);
+  const [groupsLocationId, setGroupsLocationId] = useState("");
+  const [subscriptionBusy, setSubscriptionBusy] = useState(false);
+  const subscriptionRequest = useRef(false);
   const [groupId, setGroupId] = useState("");
   const [groupFilter, setGroupFilter] = useState("");
   const [feedScope, setFeedScope] = useState<"all" | "mine" | "groups" | "following" | "hidden" | "expired">("all");
@@ -146,7 +149,9 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
       .then(async (response) => {
         const result = await response.json() as FeedGroup[] | { error?: string };
         if (!response.ok || !Array.isArray(result)) throw new Error("Could not load groups for posting.");
+        if (controller.signal.aborted) return;
         setGroups(result);
+        setGroupsLocationId(departmentId);
       }).catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(reason instanceof Error ? t(reason.message) : t("Could not load groups for posting."));
       });
@@ -275,11 +280,15 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
   }
 
   async function toggleSubscription(group: FeedGroup) {
+    if (subscriptionRequest.current || groupsLocationId !== departmentId) return;
+    subscriptionRequest.current = true;
+    setSubscriptionBusy(true);
     try {
       await sendMutation(`/api/modules/community-feed/groups/${group.id}/subscription`, group.isSubscribed ? "DELETE" : "POST");
       setGroups((current) => current.map((item) => item.id === group.id ? { ...item, isSubscribed: !item.isSubscribed } : item));
       if (feedScope === "following") await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : t("Could not update group subscription.")); }
+    finally { subscriptionRequest.current = false; setSubscriptionBusy(false); }
   }
 
   async function openNotification(notification: FeedNotification) {
@@ -401,7 +410,7 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
       <PostBodyEditor label={t("Post text")} placeholder={t("What would you like the church to know?")} value={body} onChange={setBody} format={bodyFormat} onFormatChange={setBodyFormat} t={t} />
       <label>{t("Photos and files (up to five, 1 MiB each)")}<input type="file" multiple accept="image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain" onChange={(event) => { const chosen = Array.from(event.target.files ?? []).slice(0, 5); const invalid = chosen.find((file) => file.size > 1_048_576); if (invalid) { setError(t("Each attachment must be 1 MiB or smaller.")); setFiles([]); } else { setError(""); setFiles(chosen); } }} /></label>{files.length > 0 && <small>{files.map((file) => file.name).join(" · ")}</small>}
       <div className="community-post-composer-options"><label>{t("Link or mention")}<select value={linkType} onChange={(event) => setLinkType(event.target.value as FeedLink["type"])}><option value="person" disabled={!canMentionPeople}>{t("Mention a person")}</option><option value="group">{t("Group")}</option><option value="wiki">{t("Wiki page")}</option><option value="song">{t("Song")}</option></select></label><label>{t("Search this location")}<input value={linkQuery} onChange={(event) => setLinkQuery(event.target.value)} placeholder={t("Type a name…")} /></label>{entityOptions.length > 0 && <div role="listbox" className="community-entity-options">{entityOptions.map((option) => <button type="button" key={option.id} onClick={() => addLink(option)}>{option.label}</button>)}</div>}</div>{mentionedPeople.length > 0 && <div className="community-post-link-chips">{mentionedPeople.map((person) => <button type="button" key={`mention:${person.id}`} onClick={() => { setMentionedPeople((current) => current.filter((item) => item.id !== person.id)); setBody((current) => current.replace(`@${person.label}`, "").replace(/\s{2,}/g, " ")); }}>@{person.label} ×</button>)}</div>}{postLinks.length > 0 && <div className="community-post-link-chips">{postLinks.map((link) => <button type="button" key={`${link.type}:${link.id}`} onClick={() => setPostLinks((current) => current.filter((item) => item.id !== link.id || item.type !== link.type))}>{link.type}: {link.label} ×</button>)}</div>}
-      <div className="community-post-composer-options"><label>{t("Post to group (optional)")}<select value={groupId} onChange={(event) => { setGroupId(event.target.value); if (!event.target.value) setVisibility("location"); }}><option value="">{t("Everyone in this location")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>{groupId && <><label>{t("Who can see this post?")}<select value={visibility} onChange={(event) => setVisibility(event.target.value as "location" | "members")}><option value="location">{t("Everyone in this location")}</option><option value="members">{t("Group members only")}</option></select></label>{(() => { const group = groups.find((item) => item.id === groupId); return group ? <button className="community-post-details" type="button" onClick={() => void toggleSubscription(group)}>{group.isSubscribed ? t("Unfollow group") : t("Follow group")}</button> : null; })()}</>}</div>
+      <div className="community-post-composer-options"><label>{t("Post to group (optional)")}<select value={groupId} onChange={(event) => { setGroupId(event.target.value); if (!event.target.value) setVisibility("location"); }}><option value="">{t("Everyone in this location")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>{groupId && <><label>{t("Who can see this post?")}<select value={visibility} onChange={(event) => setVisibility(event.target.value as "location" | "members")}><option value="location">{t("Everyone in this location")}</option><option value="members">{t("Group members only")}</option></select></label>{(() => { const group = groups.find((item) => item.id === groupId); return group ? <button className="community-post-details" type="button" disabled={subscriptionBusy || groupsLocationId !== departmentId} onClick={() => void toggleSubscription(group)}>{group.isSubscribed ? t("Unfollow group") : t("Follow group")}</button> : null; })()}</>}</div>
       <div className="community-post-composer-options"><label>{t("Schedule publication")}<input type="datetime-local" min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} value={publishAt} onChange={(event) => setPublishAt(event.target.value)} /></label><label>{t("Automatically remove after")}<input type="datetime-local" min={publishAt || new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)} value={expiresAt} onChange={(event) => setExpiresAt(event.target.value)} /></label><label className="community-post-checkbox"><input type="checkbox" checked={commentsEnabled} onChange={(event) => setCommentsEnabled(event.target.checked)} />{t("Allow comments")}</label></div>
       <div className="community-post-composer-footer"><small>{body.length}/4000</small><button className="button button-primary" type="submit" disabled={saving || !body.trim()}><Send size={15} />{saving ? t("Saving…") : publishAt ? t("Schedule post") : t("Publish")}</button></div>
     </form>
@@ -414,6 +423,8 @@ export function CommunityFeedModule({ department, departmentId, csrfToken, langu
       <EmailHistory key={departmentId} departmentId={departmentId} t={t} />
     </section>
     <div className="community-feed-filters"><label>{t("Show")}<select value={feedScope} onChange={(event) => setFeedScope(event.target.value as "all" | "mine" | "groups" | "following" | "hidden" | "expired")}><option value="all">{t("All posts")}</option><option value="groups">{t("Group posts")}</option><option value="following">{t("Following")}</option><option value="mine">{t("My posts")}</option><option value="hidden">{t("Hidden posts")}</option>{canReviewReports && <option value="expired">{t("Expired posts")}</option>}</select></label>{feedScope === "groups" && <label>{t("Group")}<select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="">{t("All my groups")}</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}{canReviewReports && <button type="button" className="community-post-details" onClick={() => { const next = !showReports; setShowReports(next); if (next) void loadReports(); }}>{showReports ? t("Hide reports") : t("Review reports")}</button>}</div>
+    {groupsLocationId === departmentId && <GroupSubscriptions key={departmentId} groups={groups} busy={subscriptionBusy}
+      language={language} t={t} onToggle={(group) => void toggleSubscription(group)} />}
     {showReports && <section className="community-post-list" aria-label={t("Post reports")}><div className="community-feed-filters"><label>{t("Report status")}<select value={reportStatus} onChange={(event) => { const next = event.target.value as FeedReport["status"]; setReportStatus(next); void loadReports(next); }}><option value="open">{t("Open")}</option><option value="dismissed">{t("Dismissed")}</option><option value="actioned">{t("Actioned")}</option></select></label></div>{reports.length ? reports.map((report) => <article className="community-post-card" key={report.id}><header className="community-post-header"><div className="community-post-author"><strong>{report.title || t("Community update")}</strong><time>{t("Reported by")} {report.reporterName} · {formatPostDate(report.createdAt)}</time></div></header><p>{t("Post by")} {report.authorName} · {t(report.reason)}{report.details ? ` — ${report.details}` : ""}</p><p className="community-post-body">{report.body}</p>{report.status === "open" && <div className="community-post-actions"><button type="button" className="community-post-details" onClick={() => void reviewReport(report, "dismissed")}>{t("Dismiss report")}</button><button type="button" className="community-post-details" onClick={() => void reviewReport(report, "actioned")}>{t("Mark actioned")}</button></div>}</article>) : <p className="community-feed-empty">{t("There are no reports in this status.")}</p>}</section>}
     <section className="community-post-list" aria-label={t("Community posts")}>
       {loading ? <p className="community-feed-empty">{t("Loading posts…")}</p> : posts.length ? posts.map((post) => <article className="community-post-card" key={post.id}>
