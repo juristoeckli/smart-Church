@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 type Period = "upcoming" | "past";
 type Status = "requested" | "approved" | "declined" | "cancelled";
-type Booking = { id: string; resourceName: string; location: string; purpose: string; quantity: number; status: Status; allDayDate?: string | null; startsAt: string; endsAt: string };
+type Booking = { id: string; resourceName: string; location: string; purpose: string; subtitle?: string; quantity: number; status: Status; allDayDate?: string | null; startsAt: string; endsAt: string };
 type BookingPage = { bookings: Booking[]; nextCursor: string | null; timeZone: string };
 
 export function MyResourceBookings({ departmentId, refreshVersion, statusLabels, onHistory }: {
@@ -63,7 +63,7 @@ export function MyResourceBookings({ departmentId, refreshVersion, statusLabels,
         <thead><tr><th scope="col">Resource</th><th scope="col">Booking</th><th scope="col">Starts · {page.timeZone}</th><th scope="col">Ends</th><th scope="col">Status</th><th scope="col">History</th></tr></thead>
         <tbody>{page.bookings.map(booking => <tr key={booking.id}>
           <th scope="row">{booking.resourceName}{booking.location && <small>{booking.location}</small>}</th>
-          <td>{booking.purpose}<small>{booking.quantity} {booking.quantity === 1 ? "unit" : "units"}</small></td>
+          <td>{booking.purpose}{booking.subtitle && <small>{booking.subtitle}</small>}<small>{booking.quantity} {booking.quantity === 1 ? "unit" : "units"}</small></td>
           {booking.allDayDate ? <td colSpan={2}><time dateTime={booking.allDayDate}>{booking.allDayDate}</time> · All day</td> : <>
             <td>{formatter?.format(new Date(booking.startsAt))}</td>
             <td>{formatter?.format(new Date(booking.endsAt))}</td>
