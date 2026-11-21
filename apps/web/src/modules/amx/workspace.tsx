@@ -55,7 +55,9 @@ async function readResponse<T>(response: Response): Promise<T & { error?: string
 function stateFor(object: PanelObject) { return object.states?.find((state) => state.number === 1) ?? object.states?.[0]; }
 function labelFor(object: PanelObject) {
   const state = stateFor(object);
-  return state?.text ?? (state?.bitmap ? "" : object.label ?? object.name);
+  if (typeof state?.text === "string") return state.text;
+  if (state?.bitmap || (object.type === "general" && typeof object.channel === "number")) return "";
+  return object.label ?? object.name;
 }
 
 export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
@@ -156,7 +158,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const state = stateFor(object);
     const baseText = labelFor(object);
     const text = /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
-    const button = object.type === "general" && ((typeof object.channel === "number" && object.channel > 0) || Boolean(object.pageFlip));
+    const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
+    const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip));
     const port = object.channelPort ?? (currentPage.kind === "page" || currentPage.name.startsWith("PWR_") ? 1 : 2);
     const background = toCssColor(state?.backgroundColor);
     const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
