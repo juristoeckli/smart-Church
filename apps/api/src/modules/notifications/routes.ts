@@ -7,6 +7,7 @@ import { deliverCalendarReminders } from "../../calendar-reminders.js";
 import type { PoolClient } from "pg";
 import { renderNotificationEmail, type NotificationEmailTemplate } from "./email-templates.js";
 import { getAnnouncementAudienceCounts, getAnnouncementRecipientIds, type AnnouncementAudience } from "./announcement-audience.js";
+import { getHomeDutyRequests } from "./home-duty-requests.js";
 
 type NotificationRow = {
   id: string;
@@ -601,7 +602,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return resolveDepartmentId(request, reply);
     }
 
-    const dashboardWidgets = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts"] as const;
+    routes.get("/api/modules/notifications/home-duty-requests", async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const result = await getHomeDutyRequests(pool!, departmentId, request.authenticatedUser!.id);
+      return reply.header("Cache-Control", "private, no-store").send(result);
+    });
+
+    const dashboardWidgets = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests"] as const;
     routes.get("/api/modules/notifications/home-widgets", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
