@@ -264,8 +264,8 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
   });
   const savedIdSchema = { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } as const;
   const schedulePath = "/api/modules/reports/designer/saved/:id";
-  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null; notifyWhenReady?: boolean } }>(`${schedulePath}/schedule`, {
-    schema: { params: savedIdSchema, body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { enum: [1, 7, null] }, notifyWhenReady: { type: "boolean" } } } },
+  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null; notifyWhenReady?: boolean; runNow?: boolean } }>(`${schedulePath}/schedule`, {
+    schema: { params: savedIdSchema, body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { enum: [1, 7, null] }, notifyWhenReady: { type: "boolean" }, runNow: { type: "boolean" } } } },
   }, async (request, reply) => {
     const departmentId = await scope(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
@@ -281,10 +281,10 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
       }
       const keys = (await datasets(request, departmentId, client)).map(({ key }) => key);
       const updated = await client.query(
-        `UPDATE saved_designer_reports SET schedule_days=$4, notify_when_ready=COALESCE($6,notify_when_ready), next_run_at=CASE WHEN $4::int IS NULL THEN NULL WHEN $4=schedule_days THEN next_run_at ELSE now() END,
+        `UPDATE saved_designer_reports SET schedule_days=$4, notify_when_ready=COALESCE($6,notify_when_ready), next_run_at=CASE WHEN $4::int IS NULL THEN NULL WHEN $7::boolean THEN now() WHEN $4=schedule_days THEN next_run_at ELSE now() END,
           scheduled_result=CASE WHEN $4=schedule_days THEN scheduled_result END, last_run_at=CASE WHEN $4=schedule_days THEN last_run_at END, last_run_status=CASE WHEN $4=schedule_days THEN last_run_status END
-         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND definition->>'dataset'=ANY($5::text[])`,
-        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys, request.body.notifyWhenReady ?? null],
+         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND (NOT $7::boolean OR ($4::int IS NOT NULL AND schedule_days=$4 AND $6::boolean IS NULL)) AND definition->>'dataset'=ANY($5::text[])`,
+        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys, request.body.notifyWhenReady ?? null, request.body.runNow ?? false],
       );
       await client.query("COMMIT");
       if (!updated.rowCount) return reply.code(404).send({ error: "Personal report not found." });

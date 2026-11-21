@@ -180,13 +180,13 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     URL.revokeObjectURL(link.href);
   }
 
-  async function changeSchedule(item: SavedReport, days: 1 | 7 | null, notifyWhenReady?: boolean) {
+  async function changeSchedule(item: SavedReport, days: 1 | 7 | null, notifyWhenReady?: boolean, runNow?: boolean) {
     setError("");
     setMessage("");
     try {
-      await request(`/api/modules/reports/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days, notifyWhenReady }) });
+      await request(`/api/modules/reports/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days, notifyWhenReady, runNow }) });
       setSaved(await request<SavedReport[]>("/api/modules/reports/saved"));
-      setMessage(days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
+      setMessage(runNow ? "Report queued for the next worker scan." : days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not change the report schedule.");
     }
@@ -296,12 +296,12 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not refresh report schedules."); }
   }
 
-  async function changeDesignerSchedule(item: SavedDesignerReport, days: 1 | 7 | null, notifyWhenReady?: boolean) {
+  async function changeDesignerSchedule(item: SavedDesignerReport, days: 1 | 7 | null, notifyWhenReady?: boolean, runNow?: boolean) {
     setError("");
     try {
-      await request(`/api/modules/reports/designer/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days, notifyWhenReady }) });
+      await request(`/api/modules/reports/designer/saved/${item.id}/schedule`, { method: "PUT", body: JSON.stringify({ days, notifyWhenReady, runNow }) });
       await refreshDesignerRunStatus();
-      setMessage(days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
+      setMessage(runNow ? "Report queued for the next worker scan." : days === null ? "Report schedule stopped." : "Report scheduled. Refresh the run status to see its result.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not change the report schedule."); }
   }
 
@@ -381,7 +381,7 @@ function ScheduleList<T extends ScheduleFields & { id: string; name: string }>({
   items: T[];
   canManage: boolean;
   onRefresh: () => Promise<void>;
-  onChange: (item: T, days: 1 | 7 | null, notifyWhenReady?: boolean) => Promise<void>;
+  onChange: (item: T, days: 1 | 7 | null, notifyWhenReady?: boolean, runNow?: boolean) => Promise<void>;
   onOpen: (item: T) => Promise<void>;
 }) {
   return <>{items.length > 0 && <section className="reports-schedules">
@@ -398,6 +398,7 @@ function ScheduleList<T extends ScheduleFields & { id: string; name: string }>({
           {canManage && item.scheduleDays && <label><input type="checkbox" checked={item.notifyWhenReady ?? false} onChange={(event) => {
             void onChange(item, item.scheduleDays ?? null, event.target.checked);
           }} /> Notify me in the inbox when a result is ready</label>}
+          {canManage && (item.scheduleDays === 1 || item.scheduleDays === 7) && <button className="button button-secondary" type="button" onClick={() => void onChange(item, item.scheduleDays ?? null, undefined, true)}>Queue run now</button>}
           {item.nextRunAt && <small>Next run {new Date(item.nextRunAt).toLocaleString()}</small>}
           {item.lastRunAt && <small>Last attempt {new Date(item.lastRunAt).toLocaleString()} · {item.lastRunStatus ? scheduleStatusLabels[item.lastRunStatus] : "Unknown"}</small>}
           {!!item.runHistory?.length && <details><summary>Run history</summary><ol>{item.runHistory.map((run, index) => <li key={`${run.ranAt}:${index}`}><time dateTime={run.ranAt}>{new Date(run.ranAt).toLocaleString()}</time> · {scheduleStatusLabels[run.status] ?? "Unknown"}</li>)}</ol></details>}

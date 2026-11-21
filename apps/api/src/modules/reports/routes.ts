@@ -577,10 +577,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Saved report not found or you cannot delete it." });
     return { deleted: true };
   });
-  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null; notifyWhenReady?: boolean } }>("/api/modules/reports/saved/:id/schedule", {
+  app.put<{ Params: { id: string }; Body: { days: 1 | 7 | null; notifyWhenReady?: boolean; runNow?: boolean } }>("/api/modules/reports/saved/:id/schedule", {
     schema: {
       params: { type: "object", required: ["id"], properties: { id: uuid } },
-      body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { anyOf: [{ type: "integer", enum: [1, 7] }, { type: "null" }] }, notifyWhenReady: { type: "boolean" } } },
+      body: { type: "object", additionalProperties: false, required: ["days"], properties: { days: { anyOf: [{ type: "integer", enum: [1, 7] }, { type: "null" }] }, notifyWhenReady: { type: "boolean" }, runNow: { type: "boolean" } } },
     },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
@@ -596,10 +596,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(423).send({ error: "This location is read-only." });
       }
       const result = await client.query(
-        `UPDATE saved_report_definitions SET schedule_days=$4, notify_when_ready=COALESCE($6,notify_when_ready), next_run_at=CASE WHEN $4::int IS NULL THEN NULL WHEN $4=schedule_days THEN next_run_at ELSE now() END,
+        `UPDATE saved_report_definitions SET schedule_days=$4, notify_when_ready=COALESCE($6,notify_when_ready), next_run_at=CASE WHEN $4::int IS NULL THEN NULL WHEN $7::boolean THEN now() WHEN $4=schedule_days THEN next_run_at ELSE now() END,
            scheduled_result=CASE WHEN $4=schedule_days THEN scheduled_result END, last_run_at=CASE WHEN $4=schedule_days THEN last_run_at END, last_run_status=CASE WHEN $4=schedule_days THEN last_run_status END
-         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND ($4::int IS NULL OR report_key=ANY($5::text[])) RETURNING id`,
-        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys, request.body.notifyWhenReady ?? null],
+         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND (NOT $7::boolean OR ($4::int IS NOT NULL AND schedule_days=$4 AND $6::boolean IS NULL)) AND ($4::int IS NULL OR report_key=ANY($5::text[])) RETURNING id`,
+        [request.params.id, departmentId, request.authenticatedUser!.id, request.body.days, keys, request.body.notifyWhenReady ?? null, request.body.runNow ?? false],
       );
       await client.query("COMMIT");
       if (!result.rowCount) return reply.code(404).send({ error: "No accessible saved report owned by your account." });
