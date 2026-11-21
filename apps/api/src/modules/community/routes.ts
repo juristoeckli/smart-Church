@@ -7,6 +7,7 @@ import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { groupMemberDraftSchema, groupMembershipState, groupWaitlist, type GroupMembershipDraft } from "./group-waitlist.js";
 import { captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAnswerFields, signupSettingsSchema, type SignupSettings } from "./signup-form.js";
+import { checkGroupAdmissionCapacity } from "./signup-capacity.js";
 import { defaultSignupPolicy, editableSignupPolicy, normalizeSignupPolicy, signupState } from "./signup-policy.js";
 import { registerCommunityReplication } from "./replication.js";
 
@@ -376,6 +377,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         }
         await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser?.id ?? ""]);
         if (promoteContactId) {
+          const role = queue.find(({ contactId }) => contactId === promoteContactId)!.role;
+          const { policy } = await readSignupForm(client, departmentId, groupId);
+          const capacityError = await checkGroupAdmissionCapacity(client, departmentId, groupId, "active", role, policy);
+          if (capacityError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: capacityError }); }
           await client.query(
             `UPDATE group_members member SET status='active', joined_on=COALESCE(member.joined_on,
                (current_timestamp AT TIME ZONE COALESCE(zone.name,'UTC'))::date)
@@ -475,18 +480,26 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "The signup form changed. Reload it before saving." });
         }
-        const policy = request.body.policy ? normalizeSignupPolicy(request.body.policy, group.time_zone) : previous.policy;
+        const policyDraft = request.body.policy;
+        const policy = policyDraft ? normalizeSignupPolicy({
+          ...policyDraft,
+          activeSeatLimit: policyDraft.activeSeatLimit === undefined ? previous.policy.activeSeatLimit : policyDraft.activeSeatLimit,
+          waitlistLimit: policyDraft.waitlistLimit === undefined ? previous.policy.waitlistLimit : policyDraft.waitlistLimit,
+          countedRoles: policyDraft.countedRoles ?? previous.policy.countedRoles,
+        }, group.time_zone) : previous.policy;
         if (typeof policy === "string") { await client.query("ROLLBACK"); return reply.code(400).send({ error: policy }); }
-        const hasPolicy = policy.opensAt || policy.closesAt || policy.heading || policy.defaultRole !== defaultSignupPolicy.defaultRole;
+        const hasPolicy = policy.opensAt || policy.closesAt || policy.heading || policy.defaultRole !== defaultSignupPolicy.defaultRole || policy.activeSeatLimit != null
+          || policy.waitlistLimit != null || Boolean(policy.countedRoles?.length);
         const revision = questions.length || hasPolicy ? randomUUID() : null;
         if (revision) {
           await client.query(
-            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading)
-             VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8)
+            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading,active_seat_limit,waitlist_limit,counted_roles)
+             VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8,$9,$10,$11)
              ON CONFLICT(group_id) DO UPDATE SET revision=EXCLUDED.revision,questions=EXCLUDED.questions,opens_at=EXCLUDED.opens_at,
-               closes_at=EXCLUDED.closes_at,default_role=EXCLUDED.default_role,heading=EXCLUDED.heading
+               closes_at=EXCLUDED.closes_at,default_role=EXCLUDED.default_role,heading=EXCLUDED.heading,
+               active_seat_limit=EXCLUDED.active_seat_limit,waitlist_limit=EXCLUDED.waitlist_limit,counted_roles=EXCLUDED.counted_roles
              WHERE group_signup_forms.department_id=EXCLUDED.department_id`,
-            [departmentId, groupId, revision, JSON.stringify(questions), policy.opensAt, policy.closesAt, policy.defaultRole, policy.heading],
+            [departmentId, groupId, revision, JSON.stringify(questions), policy.opensAt, policy.closesAt, policy.defaultRole, policy.heading, policy.activeSeatLimit, policy.waitlistLimit, policy.countedRoles],
           );
         } else await client.query("DELETE FROM group_signup_forms WHERE department_id=$1 AND group_id=$2", [departmentId, groupId]);
         await client.query("COMMIT");
@@ -534,6 +547,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         let contactId: string | null = null;
         const { decision } = request.body;
         if (decision !== "declined") {
+          const destination = decision === "waitlisted" ? "waitlist" : "active";
+          const form = await readSignupForm(client, departmentId, request.params.id);
+          const findMembership = async (personId: string) => (await client.query<{ status: string }>(
+            "SELECT status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [request.params.id, personId],
+          )).rows[0];
           if (request.body.contactId) {
             const selected = await client.query<{ id: string }>("SELECT id FROM contacts WHERE id=$1 AND department_id=$2 AND lower(email)=lower($3)", [request.body.contactId, departmentId, joinRequest.rows[0].email]);
             if (!selected.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a directory person with the same email address, or leave this blank to create a visitor record." }); }
@@ -542,30 +560,36 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
             const matching = await client.query<{ id: string }>("SELECT id FROM contacts WHERE department_id=$1 AND lower(email)=lower($2) ORDER BY id LIMIT 2", [departmentId, joinRequest.rows[0].email]);
             if (matching.rows.length > 1) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "More than one person uses this email. Select the matching person explicitly before reviewing this application." }); }
             contactId = matching.rows[0]?.id ?? null;
+          }
+          const membership = contactId ? await findMembership(contactId) : undefined;
+          if (membership && membership.status !== destination) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "This person already has a different membership status. Review their membership before resolving the application." });
+          }
+          if (!membership) {
+            const capacityError = await checkGroupAdmissionCapacity(client, departmentId, request.params.id, destination, form.policy.defaultRole, form.policy);
+            if (capacityError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: capacityError }); }
+            await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
             if (!contactId) {
               const created = await client.query<{ id: string }>(
                 `INSERT INTO contacts (id,department_id,first_name,last_name,email,status) VALUES ($1,$2,$3,$4,$5,'visitor') RETURNING id`,
                 [randomUUID(), departmentId, joinRequest.rows[0].first_name, joinRequest.rows[0].last_name, joinRequest.rows[0].email],
               );
               contactId = created.rows[0].id;
+              if (await findMembership(contactId)) {
+                await client.query("ROLLBACK");
+                return reply.code(409).send({ error: "An automatic membership rule conflicts with this application. Review the group's membership rules before retrying." });
+              }
             }
-          }
-          const waitlisted = decision === "waitlisted";
-          const form = await readSignupForm(client, departmentId, request.params.id);
-          await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
-          const inserted = await client.query(
-            `INSERT INTO group_members (group_id,contact_id,role,status,joined_on,waitlisted_at)
-             VALUES($1,$2,$4,$3,CASE WHEN $3='active' THEN CURRENT_DATE END,CASE WHEN $3='waitlist' THEN statement_timestamp() END)
-             ON CONFLICT (group_id,contact_id) DO NOTHING RETURNING contact_id`,
-            [request.params.id, contactId, waitlisted ? "waitlist" : "active", form.policy.defaultRole],
-          );
-          if (waitlisted && !inserted.rowCount) {
-            const membership = await client.query<{ status: string }>(
-              "SELECT status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [request.params.id, contactId],
+            const inserted = await client.query(
+              `INSERT INTO group_members (group_id,contact_id,role,status,joined_on,waitlisted_at)
+               VALUES($1,$2,$4,$3,CASE WHEN $3='active' THEN CURRENT_DATE END,CASE WHEN $3='waitlist' THEN statement_timestamp() END)
+               ON CONFLICT (group_id,contact_id) DO NOTHING RETURNING contact_id`,
+              [request.params.id, contactId, destination, form.policy.defaultRole],
             );
-            if (membership.rows[0]?.status !== "waitlist") {
+            if (!inserted.rowCount && (await findMembership(contactId))?.status !== destination) {
               await client.query("ROLLBACK");
-              return reply.code(409).send({ error: "This person already has a group membership. Review that membership before waitlisting the application." });
+              return reply.code(409).send({ error: "This person's group membership changed. Review it before retrying." });
             }
           }
         }

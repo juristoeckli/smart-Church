@@ -45,12 +45,13 @@ export async function readSignupForm(db: Pool | PoolClient, departmentId: string
     `SELECT revision,questions,
        to_char(opens_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "opensAt",
        to_char(closes_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "closesAt",
-       default_role AS "defaultRole",heading FROM group_signup_forms WHERE department_id=$1 AND group_id=$2`,
+       default_role AS "defaultRole",heading,active_seat_limit AS "activeSeatLimit",waitlist_limit AS "waitlistLimit",counted_roles AS "countedRoles" FROM group_signup_forms WHERE department_id=$1 AND group_id=$2`,
     [departmentId, groupId],
   );
   const row = result.rows[0];
   return row ? { revision: row.revision, questions: row.questions, policy: {
     opensAt: row.opensAt, closesAt: row.closesAt, defaultRole: row.defaultRole, heading: row.heading,
+    activeSeatLimit: row.activeSeatLimit, waitlistLimit: row.waitlistLimit, countedRoles: row.countedRoles,
   } } : { revision: null, questions: [], policy: defaultSignupPolicy };
 }
 

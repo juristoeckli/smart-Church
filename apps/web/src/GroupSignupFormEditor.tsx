@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 export type SignupQuestion = { id: string; label: string; type: "text" | "choice"; required: boolean; options?: string[] };
-type SignupPolicy = { opensAt: string | null; closesAt: string | null; defaultRole: string; heading: string; timeZone: string };
+type SignupPolicy = { opensAt: string | null; closesAt: string | null; defaultRole: string; heading: string; timeZone: string; activeSeatLimit?: number | null; waitlistLimit?: number | null; countedRoles?: string[] };
 type SignupForm = { revision: string | null; questions: SignupQuestion[]; policy: SignupPolicy };
 const emptyPolicy: SignupPolicy = { opensAt: null, closesAt: null, defaultRole: "Member", heading: "", timeZone: "UTC" };
 type QuestionDraft = Omit<SignupQuestion, "options"> & { optionText: string };
@@ -11,6 +11,7 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
   const [loaded, setLoaded] = useState(false);
   const [revision, setRevision] = useState<string | null>(null);
   const [policy, setPolicy] = useState(emptyPolicy);
+  const [countedRoleText, setCountedRoleText] = useState("");
   const [draft, setDraft] = useState<QuestionDraft[]>([]);
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -21,6 +22,7 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
   function apply(result: SignupForm) {
     setRevision(result.revision);
     setPolicy(result.policy ?? emptyPolicy);
+    setCountedRoleText(result.policy?.countedRoles?.join("\n") ?? "");
     setDraft(result.questions.map(({ options, ...question }) => ({ ...question, optionText: options?.join("\n") ?? "" })));
   }
 
@@ -58,7 +60,7 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
         headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken, "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: revision,
-          policy: policyDraft,
+          policy: { ...policyDraft, countedRoles: countedRoleText.split("\n").map((role) => role.trim()).filter(Boolean) },
           questions: draft.map(({ label, type, required, optionText }) => ({
             label, type, required, ...(type === "choice" ? { options: optionText.split("\n").map((option) => option.trim()).filter(Boolean) } : {}),
           })),
@@ -86,6 +88,14 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
         <label>Open signup ({policy.timeZone})<input type="datetime-local" step={1} value={policy.opensAt ?? ""} onChange={(event) => setPolicy({ ...policy, opensAt: event.target.value || null })} /></label>
         <label>Close signup ({policy.timeZone})<input type="datetime-local" step={1} value={policy.closesAt ?? ""} onChange={(event) => setPolicy({ ...policy, closesAt: event.target.value || null })} /></label>
         <label>Default role for new admissions<input required maxLength={80} value={policy.defaultRole} onChange={(event) => setPolicy({ ...policy, defaultRole: event.target.value })} /></label>
+        <label>Admission seats<input type="number" min={1} max={100000} step={1} value={policy.activeSeatLimit ?? ""} onChange={(event) => setPolicy({
+          ...policy, activeSeatLimit: event.target.value ? Number(event.target.value) : null,
+        })} /></label>
+        <label>Roles counted against admission seats (one per line)<textarea rows={3} maxLength={3240} value={countedRoleText} onChange={(event) => setCountedRoleText(event.target.value)} /></label>
+        <label>Admission waitlist limit<input type="number" min={0} max={100000} step={1} value={policy.waitlistLimit ?? ""} onChange={(event) => setPolicy({
+          ...policy, waitlistLimit: event.target.value ? Number(event.target.value) : null,
+        })} /></label>
+        <p>Leave a limit blank for unlimited places. With no roles listed, all active members count. These limits apply to application decisions and waitlist promotions. Existing memberships stay in place if a limit is lowered.</p>
         <p>Signup must be enabled to use the schedule. Each application still needs review.</p>
         <h4>Signup questions</h4>
         <p>Applicants see these questions. Group managers can read the answers when reviewing the application.</p>
