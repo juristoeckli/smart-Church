@@ -64,14 +64,14 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       return (await pool!.query(
-        `SELECT id,name,search_text AS "searchText",status_filter AS "statusFilter",group_type_filter AS "groupTypeFilter",sort_order AS "sortOrder",created_at AS "createdAt",updated_at AS "updatedAt"
+        `SELECT id,name,search_text AS "searchText",status_filter AS "statusFilter",group_type_filter AS "groupTypeFilter",sort_order AS "sortOrder",display_mode AS "displayMode",visible_columns AS "visibleColumns",created_at AS "createdAt",updated_at AS "updatedAt"
            FROM group_directory_views WHERE department_id=$1 AND user_id=$2 ORDER BY lower(name),created_at`,
         [departmentId, request.authenticatedUser!.id],
       )).rows;
     });
 
-    routes.post<{ Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus; groupTypeFilter?: string; sortOrder?: "name_asc" | "name_desc" | "members_desc" | "start_desc" } }>("/api/groups/views", { schema: {
-      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] } } },
+    routes.post<{ Body: { name: string; searchText?: string; statusFilter?: "all" | GroupLifecycleStatus; groupTypeFilter?: string; sortOrder?: "name_asc" | "name_desc" | "members_desc" | "start_desc"; displayMode?: "list" | "table"; visibleColumns?: string[] } }>("/api/groups/views", { schema: {
+      body: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, searchText: { type: "string", maxLength: 120 }, statusFilter: { type: "string", enum: ["all", "active", "draft", "ended", "archived"] }, groupTypeFilter: { type: "string", maxLength: 80 }, sortOrder: { type: "string", enum: ["name_asc", "name_desc", "members_desc", "start_desc"] }, displayMode: { type: "string", enum: ["list", "table"] }, visibleColumns: { type: "array", maxItems: 5, uniqueItems: true, items: { type: "string", enum: ["type", "status", "members", "start", "end"] } } } },
     } }, async (request, reply) => {
       if (!validateMutation(request, reply)) return reply;
       const departmentId = await department(request, reply);
@@ -82,12 +82,12 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const statusFilter = request.body.statusFilter ?? "all";
       const groupTypeFilter = (request.body.groupTypeFilter ?? "").trim();
       const result = await pool!.query(
-        `INSERT INTO group_directory_views(id,department_id,user_id,name,search_text,status_filter,group_type_filter,sort_order)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        `INSERT INTO group_directory_views(id,department_id,user_id,name,search_text,status_filter,group_type_filter,sort_order,display_mode,visible_columns)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,COALESCE($9,'list'),COALESCE($10,ARRAY['type','status','members','start','end']::TEXT[]))
          ON CONFLICT(department_id,user_id,(lower(name))) DO UPDATE
-           SET name=EXCLUDED.name,search_text=EXCLUDED.search_text,status_filter=EXCLUDED.status_filter,group_type_filter=EXCLUDED.group_type_filter,sort_order=EXCLUDED.sort_order,updated_at=now()
-         RETURNING id,name,search_text AS "searchText",status_filter AS "statusFilter",group_type_filter AS "groupTypeFilter",sort_order AS "sortOrder",created_at AS "createdAt",updated_at AS "updatedAt"`,
-        [randomUUID(), departmentId, request.authenticatedUser!.id, name, searchText, statusFilter, groupTypeFilter, request.body.sortOrder ?? "name_asc"],
+           SET name=EXCLUDED.name,search_text=EXCLUDED.search_text,status_filter=EXCLUDED.status_filter,group_type_filter=EXCLUDED.group_type_filter,sort_order=EXCLUDED.sort_order,display_mode=COALESCE($9,group_directory_views.display_mode),visible_columns=COALESCE($10,group_directory_views.visible_columns),updated_at=now()
+         RETURNING id,name,search_text AS "searchText",status_filter AS "statusFilter",group_type_filter AS "groupTypeFilter",sort_order AS "sortOrder",display_mode AS "displayMode",visible_columns AS "visibleColumns",created_at AS "createdAt",updated_at AS "updatedAt"`,
+        [randomUUID(), departmentId, request.authenticatedUser!.id, name, searchText, statusFilter, groupTypeFilter, request.body.sortOrder ?? "name_asc", request.body.displayMode ?? null, request.body.visibleColumns ?? null],
       );
       return reply.code(200).send(result.rows[0]);
     });

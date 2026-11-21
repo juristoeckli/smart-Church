@@ -10,7 +10,17 @@ type AttendanceEntry = { contactId: string; firstName: string; lastName: string;
 type GroupJoinRequest = { id: string; groupId: string; firstName: string; lastName: string; email: string; status: "pending"; createdAt: string };
 type GroupStatusFilter = "all" | GroupLifecycleStatus;
 type GroupSortOrder = "name_asc" | "name_desc" | "members_desc" | "start_desc";
-type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sortOrder?: GroupSortOrder; createdAt: string; updatedAt: string };
+const groupColumns = [
+  { key: "type", label: "Type", value: (group: ChurchGroup) => group.groupType },
+  { key: "status", label: "Status", value: (group: ChurchGroup) => group.status },
+  { key: "members", label: "Members", value: (group: ChurchGroup) => group.memberCount },
+  { key: "start", label: "Start date", value: (group: ChurchGroup) => group.startsOn && formatUserDate(group.startsOn) },
+  { key: "end", label: "End date", value: (group: ChurchGroup) => group.endsOn && formatUserDate(group.endsOn) },
+] as const;
+type GroupColumn = (typeof groupColumns)[number]["key"];
+const defaultGroupColumns: GroupColumn[] = groupColumns.map(({ key }) => key);
+
+type SavedGroupView = { id: string; name: string; searchText: string; statusFilter: GroupStatusFilter; groupTypeFilter?: string; sortOrder?: GroupSortOrder; displayMode?: "list" | "table"; visibleColumns?: GroupColumn[]; createdAt: string; updatedAt: string };
 
 function csvCell(value: string) {
   return `"${value.replace(/"/g, '""')}"`;
@@ -22,6 +32,9 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [statusFilter, setStatusFilter] = useState<GroupStatusFilter>("all");
   const [groupTypeFilter, setGroupTypeFilter] = useState("");
   const [sortOrder, setSortOrder] = useState<GroupSortOrder>("name_asc");
+  const [displayMode, setDisplayMode] = useState<"list" | "table">("list");
+  const [visibleColumns, setVisibleColumns] = useState<GroupColumn[]>(defaultGroupColumns);
+  const displayedColumns = groupColumns.filter(({ key }) => visibleColumns.includes(key));
   const [savedViews, setSavedViews] = useState<SavedGroupView[]>([]);
   const [selectedSavedViewId, setSelectedSavedViewId] = useState("");
   const [savedViewName, setSavedViewName] = useState("");
@@ -99,7 +112,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   useEffect(() => {
     const controller = new AbortController();
     void loadGroups(controller.signal);
-    setDirectorySearch(""); setStatusFilter("all"); setGroupTypeFilter(""); setSortOrder("name_asc"); setSavedViews([]); setSelectedSavedViewId(""); setSavedViewName("");
+    setDirectorySearch(""); setStatusFilter("all"); setGroupTypeFilter(""); setSortOrder("name_asc"); setDisplayMode("list"); setVisibleColumns(defaultGroupColumns); setSavedViews([]); setSelectedSavedViewId(""); setSavedViewName("");
     void fetch("/api/groups/views", { headers: { "x-department-id": departmentId }, signal: controller.signal })
       .then(async (response) => {
         const result = await response.json() as SavedGroupView[] | { error?: string };
@@ -134,7 +147,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     if (!savedViewName.trim()) { setError("Enter a name for this saved view."); return; }
     setSaving(true); setError(""); setFeedback("");
     try {
-      const response = await fetch("/api/groups/views", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ name: savedViewName.trim(), searchText: directorySearch, statusFilter, groupTypeFilter, sortOrder }) });
+      const response = await fetch("/api/groups/views", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ name: savedViewName.trim(), searchText: directorySearch, statusFilter, groupTypeFilter, sortOrder, displayMode, visibleColumns }) });
       const result = await response.json() as SavedGroupView | { error?: string };
       if (!response.ok || !("id" in result)) throw new Error("error" in result ? result.error ?? "Could not save this view." : "Could not save this view.");
       setSavedViews((current) => [...current.filter((view) => view.id !== result.id), result].sort((a, b) => a.name.localeCompare(b.name)));
@@ -159,6 +172,8 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   function applySavedView(id: string) {
     const view = savedViews.find((item) => item.id === id);
     setSelectedSavedViewId(id); setSavedViewName(view?.name ?? ""); setDirectorySearch(view?.searchText ?? ""); setStatusFilter(view?.statusFilter ?? "all"); setGroupTypeFilter(view?.groupTypeFilter ?? ""); setSortOrder(view?.sortOrder ?? "name_asc");
+    setDisplayMode(view?.displayMode ?? "list");
+    setVisibleColumns(view?.visibleColumns ?? defaultGroupColumns);
   }
 
   useEffect(() => {
@@ -366,7 +381,34 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       <section className="directory-card community-group-list"><div className="directory-heading"><div><h2>{translate("groups.listTitle")}</h2><p>{(visibleGroups.length === 1 ? translate("groups.countOne") : translate("groups.count")).replace("{count}", String(visibleGroups.length))}</p></div></div>
         <div className="community-group-directory-tools"><label className="search-field"><Search size={15} /><input type="search" value={directorySearch} onChange={(event) => { setDirectorySearch(event.target.value); setSelectedSavedViewId(""); }} placeholder="Search groups by name or type" aria-label="Search groups by name or type" /></label><label className="community-group-status-filter">Group status<select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as GroupStatusFilter); setSelectedSavedViewId(""); }}><option value="all">All statuses</option>{availableStatuses.map((status) => <option key={status} value={status}>{status[0].toUpperCase() + status.slice(1)}</option>)}</select></label><label className="community-group-status-filter">Group type<select value={groupTypeFilter} onChange={(event) => { setGroupTypeFilter(event.target.value); setSelectedSavedViewId(""); }}><option value="">All types</option>{availableGroupTypes.map((type) => <option key={type} value={type}>{type}</option>)}</select></label><label className="community-group-status-filter">Sort groups<select value={sortOrder} onChange={(event) => { setSortOrder(event.target.value as GroupSortOrder); setSelectedSavedViewId(""); }}><option value="name_asc">Name A–Z</option><option value="name_desc">Name Z–A</option><option value="members_desc">Most members</option><option value="start_desc">Newest start date</option></select></label></div>
         <div className="community-saved-group-views"><select aria-label="Load a saved group view" value={selectedSavedViewId} onChange={(event) => applySavedView(event.target.value)}><option value="">Saved views</option>{savedViews.map((view) => <option key={view.id} value={view.id}>{view.name}</option>)}</select><input value={savedViewName} maxLength={80} onChange={(event) => setSavedViewName(event.target.value)} placeholder="View name" aria-label="Saved view name" /><button className="button button-secondary" type="button" disabled={saving || !savedViewName.trim()} onClick={() => void saveDirectoryView()}>{saving ? "Saving..." : "Save view"}</button>{selectedSavedViewId && <button className="button button-secondary" type="button" disabled={saving} onClick={() => void deleteSavedView()}>Delete</button>}</div>
-        {loading ? <p className="community-empty">{translate("groups.loading")}</p> : visibleGroups.length ? <div className="community-group-options">{visibleGroups.map((group) => <button type="button" key={group.id} className={`community-group-option${selectedId === group.id ? " is-active" : ""}`} onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}><span className="community-group-icon"><ContactRound size={17} /></span><span><strong>{group.name}</strong><small>{group.groupType ? `${group.groupType} · ` : ""}{group.memberCount} {group.memberCount === 1 ? translate("groups.person") : translate("groups.people")} · {group.status}</small></span></button>)}</div> : <p className="community-empty">{((directorySearch || statusFilter !== "all" || groupTypeFilter) ? "No groups match these filters." : translate("groups.none"))}</p>}
+        <div className="community-group-directory-tools">
+          <label className="community-group-status-filter">Layout
+            <select value={displayMode} onChange={(event) => { setDisplayMode(event.target.value === "table" ? "table" : "list"); setSelectedSavedViewId(""); }}>
+              <option value="list">List</option><option value="table">Table</option>
+            </select>
+          </label>
+          {displayMode === "table" && <details>
+            <summary>Columns</summary>
+            {groupColumns.map(({ key, label }) => <label className="community-group-status-filter" key={key}>
+              <input type="checkbox" checked={visibleColumns.includes(key)} onChange={(event) => {
+                const isChecked = event.target.checked;
+                setVisibleColumns((current) => isChecked ? [...current, key] : current.filter((column) => column !== key));
+                setSelectedSavedViewId("");
+              }} />{label}
+            </label>)}
+          </details>}
+        </div>
+        {loading ? <p className="community-empty">{translate("groups.loading")}</p> : visibleGroups.length ? displayMode === "table" ? (
+          <div className="table-scroll">
+            <table className="people-table" aria-label="Groups directory">
+              <thead><tr><th scope="col">Group</th>{displayedColumns.map(({ key, label }) => <th scope="col" key={key}>{label}</th>)}</tr></thead>
+              <tbody>{visibleGroups.map((group) => <tr key={group.id}>
+                <td><button type="button" className="button button-secondary" onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}>{group.name}</button></td>
+                {displayedColumns.map(({ key, value }) => <td key={key}>{value(group) ?? "—"}</td>)}
+              </tr>)}</tbody>
+            </table>
+          </div>
+        ) : <div className="community-group-options">{visibleGroups.map((group) => <button type="button" key={group.id} className={`community-group-option${selectedId === group.id ? " is-active" : ""}`} onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}><span className="community-group-icon"><ContactRound size={17} /></span><span><strong>{group.name}</strong><small>{group.groupType ? `${group.groupType} · ` : ""}{group.memberCount} {group.memberCount === 1 ? translate("groups.person") : translate("groups.people")} · {group.status}</small></span></button>)}</div> : <p className="community-empty">{((directorySearch || statusFilter !== "all" || groupTypeFilter) ? "No groups match these filters." : translate("groups.none"))}</p>}
       </section>
       <section className="directory-card community-group-detail">
         {selected ? <>
