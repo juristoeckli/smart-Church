@@ -175,7 +175,17 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       setOverlayPages([]);
       return;
     }
-    setOverlayPages((stack) => stack.at(-1) === page.name ? stack : [...stack, page.name]);
+    setOverlayPages((stack) => {
+      if (stack.at(-1) === page.name) return stack;
+      const groupsToReplace = page.group === "ModusPopup"
+        ? new Set(["ModusPopup", "DetailPopup", "EQ"])
+        : page.group === "DetailPopup" || page.group === "EQ"
+          ? new Set(["DetailPopup", "EQ"])
+          : page.group
+            ? new Set([page.group])
+            : new Set<string>();
+      return [...stack.filter((name) => !groupsToReplace.has(findPage(name)?.group ?? "")), page.name];
+    });
   }
 
   function closeOverlay() {
