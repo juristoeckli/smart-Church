@@ -265,10 +265,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await requireAmxDepartment(request, reply);
     if (!departmentId) return reply;
-    const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
-    const storedSettings = result.rows[0];
-    const settings = storedSettings ?? defaultSettings;
-    if (!settings.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+    const settings = await getTelnetSettings(departmentId);
+    if (!settings) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
     const systemActions: AmxAction[] = amxSystemActions.map((item) => ({ id: item.id, name: item.name, command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 1}:1,${item.channel}]` }));
     const action = [...roomActions, ...systemActions, ...audioActions].find((item) => item.id === request.body.actionId);
     if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });

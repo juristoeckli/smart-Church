@@ -287,7 +287,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
 
   async function holdAction(action: Action) {
     if (!configured || heldPresses.current.has(action.id)) return;
-    const held = { releaseRequested: false };
+    const held: { pressId?: string; releaseRequested: boolean } = { releaseRequested: false };
     heldPresses.current.set(action.id, held);
     setBusy(action.id); setFeedback(""); setFailed(false);
     try {
