@@ -6,7 +6,7 @@ import layoutJson from "../../../../api/src/modules/amx/tp4-layout.json";
 import "./amx.css";
 
 type PanelState = { number: number; style?: string; backgroundColor?: string; fontColor?: string; textColor?: string; fontId?: number; text?: string; bitmap?: string; bitmapX?: number; bitmapY?: number; textX?: number; textY?: number; iconId?: number; iconX?: number; iconY?: number; justification?: number; textEffect?: number };
-type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; hitStyle?: string | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[] };
+type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; hitStyle?: string | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[]; uncertainty?: string[] };
 type PanelPage = { id: number; name: string; kind: string; group?: string | null; canvas: { x?: number | null; y?: number | null; width: number; height: number }; objects: PanelObject[] };
 type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }>; fonts?: Array<{ id: number; name: string; subfamily: string; size: number }> };
 type Action = { id: string; name: string; channel: number; port?: number };
@@ -379,7 +379,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       text = title ? `"${title}" wird aktiviert` : "Betriebsmodus wird aktiviert";
     }
     if (page.name === "Modus" && /^Betriebsmodus/.test(baseText)) text = selectedRoom ? `Betriebsmodus "${selectedRoom}"` : "Betriebsmodus";
-    const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
+    const isStatusOnlyUnknown = /^Button\s+\d+$/.test(object.label?.trim() || object.name || "")
+      || object.uncertainty?.some((item) => /channel role is unclear/i.test(item)) === true;
+    const isStyledChannelButton = !isStatusOnlyUnknown && object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && object.hitStyle !== "passThru" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
     const port = portForObject(page, object);
@@ -432,7 +434,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
         {levelPercent !== undefined && <span className="amx-level-fill" style={page.name === "PWR_COUNT" ? { width: `${levelPercent}%` } : { height: `${levelPercent}%` }} />}{inner}
       </div>;
     }
-    if (!button) return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
+    if (!button) return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}
+      aria-label={isStatusOnlyUnknown ? `Channel status indicator ${object.channel ?? "unknown"}` : undefined}
+      title={isStatusOnlyUnknown ? "TP4 channel feedback only; input mapping is unknown." : undefined}>{inner}</div>;
     const mapped = actionIndex.has(`${port}:${object.channel}`);
     const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip));
     return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${activeRoomState || activeModeState || state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
