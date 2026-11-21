@@ -48,6 +48,16 @@ const bitmapDimensions: Record<string, [number, number]> = {
 const toCssColor = (color?: string) => !color ? undefined : color.startsWith("#") ? color : palette[color] ?? undefined;
 const roomPrefix: Record<string, string> = { "Gemeindesaal quer": "Que", "Gemeindesaal längs": "Lan", "Konferenzsaal 1": "Kon", "Bibliothek": "Bib" };
 const findPage = (name: string) => panel.pages.find((page) => page.name === name);
+const detailBackgrounds: Array<[RegExp, string]> = [
+  [/^Detail_(?:Auton_)?Gem_/, "Gemeindesaal_gross.png"],
+  [/^Detail_(?:Auton_)?Kon1_/, "Konferenz1_gross.png"],
+  [/^Detail_(?:Auton_)?Kon2_/, "konferenz2.png"],
+  [/^Detail_(?:Auton_)?Bib_/, "bibliothek.png"],
+  [/^Detail_(?:Auton_)?Geb_/, "Gebetsaal2.png"],
+];
+function detailBackground(page: PanelPage) {
+  return detailBackgrounds.find(([pattern]) => pattern.test(page.name))?.[1];
+}
 // Control actions target virtual device 34001, whose channels are on port 1.
 // TP4 channelPort values remain relevant only to feedback from panel 10001.
 const portForObject = (_page: PanelPage, _object: PanelObject) => 1;
@@ -361,12 +371,27 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     return <button key={`${page.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${activeRoomState || activeModeState || state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object, page)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
   };
 
+  const renderPageBackdrop = (page: PanelPage, layer: number): ReactNode => {
+    if (page.kind !== "subpage") return null;
+    const image = detailBackground(page);
+    const backgroundColor = page.group === "ModusPopup" ? "#fffed3"
+      : page.group === "Power" || page.group === "EQ" ? "#d0d0d0"
+        : "#fffed3";
+    const x = page.canvas.x ?? 0;
+    const y = page.canvas.y ?? 0;
+    return <div key={`background-${page.id}`} className="amx-page-backdrop" style={{
+      left: `${x / panel.project.screen.width * 100}%`, top: `${y / panel.project.screen.height * 100}%`,
+      width: `${page.canvas.width / panel.project.screen.width * 100}%`, height: `${page.canvas.height / panel.project.screen.height * 100}%`,
+      zIndex: layer * 1000, backgroundColor, backgroundImage: image ? `url("${imageUrl(image) ?? ""}")` : undefined,
+    }} />;
+  };
+
   const screenStyle: CSSProperties = { ...pageScale, backgroundImage: basePageName === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
 
   return <section className="amx-workspace" aria-label="AMX room control">
     <div className="amx-panel-frame">
       <div className="amx-panel-screen" style={screenStyle}>
-        {visiblePages.map((page, layer) => page.objects.map((object) => renderObject(page, object, layer)))}
+        {visiblePages.flatMap((page, layer) => [renderPageBackdrop(page, layer), ...page.objects.map((object) => renderObject(page, object, layer))])}
         {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
         {currentPage.name === "PWR_COUNT" && failed && <button type="button" className="amx-progress-continue" onClick={() => { setBasePageName("Modus"); setOverlayPages([]); setFeedback(""); setFailed(false); }}>Weiter</button>}
       </div>
