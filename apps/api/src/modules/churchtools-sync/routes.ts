@@ -7,6 +7,7 @@ import { parseChurchToolsEventDateTime } from "./event-time.js";
 import { bookingSourceId, normalizeChurchToolsBookingHistory, type ChurchToolsBookingHistory } from "./booking-history.js";
 import { churchToolsSongCrosswalkId, importChurchToolsSong, readChurchToolsSongCatalog, type ChurchToolsSong } from "./song-catalog.js";
 import { churchToolsAgendaSourceId, normalizeChurchToolsAgenda, resolveChurchToolsAgendaSongs } from "./event-agenda.js";
+import { importChurchToolsMemberships, readChurchToolsGroupMemberships, readChurchToolsGroupRoles, type ChurchToolsGroupMembership } from "./group-membership.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -896,7 +897,9 @@ function plainDescription(value: unknown) {
   return value.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">") .replace(/\s+/g, " ").trim();
 }
 function personIdOf(row: JsonObject) {
-  const value = row.personId ?? row.person?.id ?? row.person_id ?? row.memberId ?? row.person?.personId ?? row.id;
+  if (row.person?.icon === "user-shield") return "";
+  const legacyPersonId = row.groupTypeRoleId === undefined && row.groupMemberStatus === undefined ? row.id : undefined;
+  const value = row.person?.domainIdentifier ?? row.personId ?? row.person?.id ?? row.person_id ?? row.memberId ?? row.person?.personId ?? legacyPersonId;
   return value === undefined || value === null ? "" : String(value);
 }
 function membershipDate(...values: unknown[]) {
@@ -915,8 +918,8 @@ function groupMembershipSnapshot(member: JsonObject): JsonObject | null {
   const role = firstText(member.groupMemberRole?.name, member.group_member_role?.name, member.groupRole?.name, member.group_role?.name, member.role?.name, member.membership?.role?.name, member.membership?.role, member.groupMembership?.role?.name, member.group_membership?.role, member.roleName, member.role_name, member.groupRole, member.group_role, member.role, member.groupMemberRole, member.group_member_role).slice(0, 80) || "Member";
   const rawStatus = firstText(member.groupMemberStatus?.name, member.group_member_status?.name, member.membershipStatus?.name, member.membership_status?.name, member.status?.name, member.membership?.status?.name, member.membership?.status, member.groupMembership?.status?.name, member.group_membership?.status, member.statusName, member.status_name, member.groupMemberStatus, member.group_member_status, member.status);
   const statusText = rawStatus.toLocaleLowerCase();
-  const status = /wait|warteliste/.test(statusText) ? "waitlist" : /pause|inactive|passiv|ruhend/.test(statusText) ? "paused" : "active";
-  const joinedOn = membershipDate(member.joinedOn, member.joined_on, member.startDate, member.start_date, member.entryDate, member.entry_date, member.dateOfEntry, member.membership?.startDate, member.membership?.start_date, member.groupMembership?.startDate, member.group_membership?.start_date);
+  const status = /wait|warteliste/.test(statusText) ? "waitlist" : /pause|inactive|passiv|ruhend|^requested$|^to_delete$/.test(statusText) ? "paused" : "active";
+  const joinedOn = membershipDate(member.memberStartDate, member.joinedOn, member.joined_on, member.startDate, member.start_date, member.entryDate, member.entry_date, member.dateOfEntry, member.membership?.startDate, member.membership?.start_date, member.groupMembership?.startDate, member.group_membership?.start_date);
   return { sourcePersonId, role, status, ...(joinedOn ? { joinedOn } : {}) };
 }
 async function mapConcurrent<T, R>(items: T[], concurrency: number, run: (item: T) => Promise<R>): Promise<R[]> {
@@ -1111,7 +1114,12 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             }
             personMap.set(sourceId, localId);
           }
-          if (people.length) await db.query("DELETE FROM contacts WHERE department_id=$1 AND source_system='churchtools' AND source_id<>ALL($2::text[])", [departmentId, people.map(idOf).filter(Boolean)]);
+          if (people.length) await db.query(`DELETE FROM contacts person WHERE department_id=$1 AND source_system='churchtools' AND source_id<>ALL($2::text[])
+            AND NOT EXISTS (SELECT 1 FROM churchtools_migration_membership_details membership WHERE membership.department_id=$1 AND membership.contact_id=person.id)`, [departmentId, people.map(idOf).filter(Boolean)]);
+          const archivedGroups = await db.query<{ group_id: string }>(
+            "SELECT DISTINCT group_id FROM churchtools_migration_membership_details WHERE department_id=$1", [departmentId],
+          );
+          const groupsWithDetailedMemberships = new Set(archivedGroups.rows.map((row) => row.group_id));
           for (const [groupIndex, group] of groups.entries()) {
             const sourceId = idOf(group); const name = firstText(group.name, group.title);
             if (!sourceId || !name) continue;
@@ -1133,7 +1141,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
             }
             const importedMembers = groupMembers[groupIndex];
-            if (importedMembers !== null) {
+            if (importedMembers !== null && !groupsWithDetailedMemberships.has(groupId)) {
               await db.query("DELETE FROM group_members WHERE group_id=$1", [groupId]);
               for (const member of importedMembers) {
                 const personId = personIdOf(member);
@@ -1143,7 +1151,8 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               }
             }
           }
-          if (groups.length) await db.query("DELETE FROM church_groups WHERE department_id=$1 AND source_system='churchtools' AND source_id<>ALL($2::text[])", [departmentId, groups.map(idOf).filter(Boolean)]);
+          if (groups.length) await db.query(`DELETE FROM church_groups church_group WHERE department_id=$1 AND source_system='churchtools' AND source_id<>ALL($2::text[])
+            AND NOT EXISTS (SELECT 1 FROM churchtools_migration_membership_details membership WHERE membership.department_id=$1 AND membership.group_id=church_group.id)`, [departmentId, groups.map(idOf).filter(Boolean)]);
           for (const resource of resources) {
             const sourceId = idOf(resource);
             const name = firstText(resource.name, resource.title, resource.resourceName);
@@ -1190,7 +1199,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     }
 
     if (integration === "churchtools") {
-    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean; includeEventAgendas?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" }, includeEventAgendas: { type: "boolean" } } } } }, async (request, reply) => {
+    routes.post<{ Body: { startDate: string; endDate: string; includeBookingHistory?: boolean; includeSongCatalog?: boolean; includeEventAgendas?: boolean; includeMembershipDetails?: boolean } }>("/api/modules/sync/churchtools/migration-preview", { schema: { body: { type: "object", additionalProperties: false, required: ["startDate", "endDate"], properties: { startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" }, includeBookingHistory: { type: "boolean" }, includeSongCatalog: { type: "boolean" }, includeEventAgendas: { type: "boolean" }, includeMembershipDetails: { type: "boolean" } } } } }, async (request, reply) => {
       const dept = await department(request, reply, true); if (!dept) return reply;
       if (running.has(dept)) return reply.code(409).send({ error: "Wait for the scheduled ChurchTools sync to finish before previewing a migration." });
       const config = await settings(dept); if (!config) return reply.code(404).send({ error: "Configure ChurchTools before preparing a migration." });
@@ -1198,7 +1207,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       running.add(dept);
       try {
         const token = decrypt(config.encrypted_login_token);
-        const [peopleResult, groupsResult, resourcesResult, eventsResult, relationshipsPayload, songCatalog] = await Promise.all([
+        const [peopleResult, groupsResult, resourcesResult, eventsResult, relationshipsPayload, songCatalog, membershipRoles] = await Promise.all([
           listComplete(config.instance_url, token, "persons"), listComplete(config.instance_url, token, "groups"), listComplete(config.instance_url, token, "resources"),
           request.body.includeEventAgendas
             ? listChurchToolsAgendaEvents(config, token, request.body.startDate, request.body.endDate)
@@ -1208,6 +1217,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             const query = new URLSearchParams({ "include[]": "arrangements", page: String(page), limit: String(limit) });
             return get(config.instance_url, token, `songs?${query}`);
           }) : null,
+          request.body.includeMembershipDetails ? get(config.instance_url, token, "group/roles").then(readChurchToolsGroupRoles) : null,
         ]);
         if (![peopleResult, groupsResult, resourcesResult, eventsResult].every((result) => result.complete)) return reply.code(413).send({ error: "At least one ChurchTools list exceeds the complete preview limit of 20,000 records. Narrow the migration date range and preview again." });
         const bookingHistory = request.body.includeBookingHistory
@@ -1229,15 +1239,23 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const relationshipRows = rows(relationshipsPayload);
         if (relationshipRows.length > 200000) return reply.code(413).send({ error: "ChurchTools returned more than 200,000 person relationships. No migration preview was saved." });
         const relationshipsByPerson = churchToolsRelationshipsByPerson(relationshipRows);
+        let detailedMembershipCount = 0;
         const memberResults = await mapConcurrent(groupsResult.items, 8, async (group) => {
           const sourceId = idOf(group); if (!sourceId) return { sourceId, members: [] as JsonObject[], complete: true };
+          if (membershipRoles) {
+            const result = await readChurchToolsGroupMemberships((page, limit) => get(config.instance_url, token,
+              `groups/${encodeURIComponent(sourceId)}/members?page=${page}&limit=${limit}`), membershipRoles);
+            detailedMembershipCount += result.members.length + result.concealed;
+            if (detailedMembershipCount > 50_000) throw new Error("ChurchTools returned more than 50,000 memberships for the location.");
+            return { sourceId, members: [] as JsonObject[], complete: true, detailed: result.members, concealed: result.concealed };
+          }
           const embedded = Array.isArray(group.members) ? group.members : Array.isArray(group.persons) ? group.persons : null;
           if (embedded) return { sourceId, members: embedded as JsonObject[], complete: true };
           const result = await listComplete(config.instance_url, token, `groups/${encodeURIComponent(sourceId)}/members`);
           return { sourceId, members: result.items, complete: result.complete };
         });
         if (memberResults.some((result) => !result.complete)) return reply.code(413).send({ error: "At least one ChurchTools group has more than 20,000 members. No migration preview was saved." });
-        const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result.members]));
+        const membersByGroup = new Map(memberResults.map((result) => [result.sourceId, result]));
         const departmentProfile = await pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [dept]);
         const timeZone = departmentProfile.rows[0]?.time_zone ?? "Europe/Zurich";
         const events = mapEvents(eventsResult.items, timeZone);
@@ -1279,8 +1297,11 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             return { area: "person", sourceId, firstName: firstText(person.firstName, person.first_name, person.firstname, person.givenName), lastName: firstText(person.lastName, person.last_name, person.lastname, person.familyName), email: firstText(person.email, person.emailAddress) || null, phone: firstText(person.mobile, person.phonePrivate, person.phoneWork, person.phone) || null, sourceProfile: { ...sourceProfile, relationships }, relationshipsCount: relationships.length, unmappedFields: Object.keys(person).filter((key) => !["id", "firstName", "first_name", "firstname", "givenName", "lastName", "last_name", "lastname", "familyName", "email", "emailAddress", "mobile", "phonePrivate", "phoneWork", "phone"].includes(key)) };
           }),
           ...groupsResult.items.map((group) => {
-            const memberDetails = (membersByGroup.get(idOf(group)) ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
-            return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), groupType: churchToolsGroupType(group), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails };
+            const memberships = membersByGroup.get(idOf(group));
+            const memberDetails = (memberships?.members ?? []).map(groupMembershipSnapshot).filter((item): item is JsonObject => item !== null);
+            return { area: "group", sourceId: idOf(group), name: firstText(group.name, group.title).slice(0, 120), description: firstText(group.description, group.information, group.note).slice(0, 1000), groupType: churchToolsGroupType(group), memberSourceIds: memberDetails.map((member) => member.sourcePersonId), memberDetails,
+              ...(memberships?.detailed ? { detailedMemberships: memberships.detailed, membershipInstanceUrl: config.instance_url } : {}),
+            };
           }),
           ...(songCatalog ?? []).map((song) => ({ area: "song", sourceId: song.sourceId, title: song.title, song, instanceUrl: config.instance_url })),
           ...eventRecords,
@@ -1341,7 +1362,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
             else { record.action = "create"; create += 1; }
           }
         }
-        const encryptedSnapshot = encrypt(JSON.stringify(records));
+        const serializedSnapshot = JSON.stringify(records);
+        if (membershipRoles && Buffer.byteLength(serializedSnapshot) > 40 * 1024 * 1024) return reply.code(413).send({ error: "The detailed membership migration preview exceeds 40 MiB. Use a ChurchTools token scoped to fewer groups." });
+        const encryptedSnapshot = encrypt(serializedSnapshot);
         const saved = await pool!.query(`INSERT INTO churchtools_migration_snapshots (department_id,encrypted_snapshot,start_date,end_date,preview_at,page,total,created_count,updated_count,skipped_count,complete,updated_at)
           VALUES ($1,$2,$3,$4,now(),0,$5,0,0,0,FALSE,now()) ON CONFLICT (department_id) DO UPDATE SET encrypted_snapshot=EXCLUDED.encrypted_snapshot,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,preview_at=now(),page=0,total=EXCLUDED.total,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,migration_running=FALSE,migration_started_at=NULL,updated_at=now()
           WHERE churchtools_migration_snapshots.migration_running=FALSE OR churchtools_migration_snapshots.migration_started_at < now()-interval '15 minutes'`, [dept, encryptedSnapshot, request.body.startDate, request.body.endDate, records.length]);
@@ -1354,7 +1377,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           skipped: detailedAgendas.filter((detail) => detail.state === "oversized" || detail.state === "unsupported").length,
           songSelections: detailedAgendas.reduce((total, detail) => total + (detail.agenda?.items.filter((item) => item.sourceSongId).length ?? 0), 0),
         };
-        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, eventAgendas, songCatalog: songCatalog && { songs: songCatalog.length, arrangements: songCatalog.reduce((total, song) => total + song.arrangements.length, 0), conflicts: records.filter((record) => record.action === "review_song_conflict").length }, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
+        const groupMemberships = membershipRoles && memberResults.reduce((summary, result) => {
+          summary.concealed += result.concealed ?? 0;
+          for (const member of result.detailed ?? []) {
+            summary.members += 1;
+            if (!member.roleKnown) summary.unknownRoles += 1;
+            if (member.plannedEndOn || member.comment || member.waitingListPosition) summary.withRestrictedDetails += 1;
+            summary.customFields += member.customFieldCount;
+          }
+          return summary;
+        }, { members: 0, concealed: 0, unknownRoles: 0, withRestrictedDetails: 0, customFields: 0 });
+        return { complete: true, total: records.length, create, update, review, invalid, unmappedFields, startDate: request.body.startDate, endDate: request.body.endDate, eventAgendas, groupMemberships, songCatalog: songCatalog && { songs: songCatalog.length, arrangements: songCatalog.reduce((total, song) => total + song.arrangements.length, 0), conflicts: records.filter((record) => record.action === "review_song_conflict").length }, bookingHistory: bookingHistory && { series: bookingHistory.length, occurrences: bookingHistory.reduce((total, booking) => total + booking.occurrences.length, 0), anonymized: bookingHistory.filter((booking) => booking.anonymized).length }, sample: records.slice(0, 40).map((record) => ({ area: record.area, name: record.area === "person" ? `${record.firstName} ${record.lastName}`.trim() : record.name ?? record.title, email: record.email, date: record.date, action: record.action, ...(record.area === "person" && Number(record.relationshipsCount) > 0 ? { relationshipsCount: Number(record.relationshipsCount) } : {}), ...(Array.isArray(record.unmappedFields) && record.unmappedFields.length ? { unmappedFields: record.unmappedFields.slice(0, 8) } : {}) })) };
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools migration preview." }); }
       finally { running.delete(dept); }
     });
@@ -1378,7 +1411,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         let page = pageBefore; let created = request.body?.restart ? 0 : saved.created_count; let updated = request.body?.restart ? 0 : saved.updated_count; let skipped = request.body?.restart ? 0 : saved.skipped_count; let failed = request.body?.restart ? 0 : saved.failed_count; const failures = request.body?.restart ? [] : saved.failed_records;
         if (request.body?.restart) await pool!.query("UPDATE churchtools_migration_snapshots SET page=0,created_count=0,updated_count=0,skipped_count=0,failed_count=0,failed_records='[]'::jsonb,complete=FALSE,updated_at=now() WHERE department_id=$1", [dept]);
         const batch = snapshot.slice(page, page + 50); let batchCreated = 0; let batchUpdated = 0; let batchSkipped = 0; let batchFailed = 0; const batchFailures: Array<{ area: string; sourceId: string }> = [];
-        const bookingArchiveKey = batch.some((record) => record.area === "booking") ? cryptoKey() : undefined;
+        const migrationArchiveKey = batch.some((record) => record.area === "booking" || Array.isArray(record.detailedMemberships)) ? cryptoKey() : undefined;
         const db = await pool!.connect();
         try {
           await db.query("BEGIN");
@@ -1417,7 +1450,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
                 await db.query("INSERT INTO churchtools_migration_links (department_id,area,source_id,local_record_id) VALUES ($1,'group',$2,$3) ON CONFLICT (department_id,area,source_id) DO UPDATE SET local_record_id=EXCLUDED.local_record_id", [dept, sourceId, linked.rows[0].id]); batchUpdated += 1;
               }
               const memberDetails = Array.isArray(record.memberDetails) ? record.memberDetails.filter((item: unknown): item is JsonObject => Boolean(item) && typeof item === "object" && !Array.isArray(item)) : [];
-              if (memberDetails.length) {
+              if (Array.isArray(record.detailedMemberships)) {
+                await importChurchToolsMemberships(db, dept, record.membershipInstanceUrl, linked.rows[0].id, sourceId,
+                  record.detailedMemberships as ChurchToolsGroupMembership[], (value) => encrypt(value, migrationArchiveKey));
+              } else if (memberDetails.length) {
                 await db.query(`INSERT INTO group_members (group_id,contact_id,role,status,joined_on)
                   SELECT $1,COALESCE(link.local_record_id,c.id),left(COALESCE(NULLIF(trim(member.role),''),'Member'),80),
                     CASE WHEN member.status IN ('paused','waitlist') THEN member.status ELSE 'active' END,member."joinedOn"
@@ -1486,7 +1522,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
               else batchSkipped += 1;
             } else if (record.area === "booking") {
               const booking = record.booking as ChurchToolsBookingHistory;
-              const args = [dept, record.instanceUrl, record.windowStart, record.windowEnd, sourceId, booking.resourceSourceId, booking.occurrences.length, encrypt(JSON.stringify(booking), bookingArchiveKey)];
+              const args = [dept, record.instanceUrl, record.windowStart, record.windowEnd, sourceId, booking.resourceSourceId, booking.occurrences.length, encrypt(JSON.stringify(booking), migrationArchiveKey)];
               const result = await db.query(`INSERT INTO churchtools_migration_booking_history
                 (department_id,instance_url,start_date,end_date,source_id,resource_source_id,occurrence_count,encrypted_snapshot)
                 SELECT department_id,instance_url,$3::date,$4::date,$5,$6,$7,$8
@@ -1518,6 +1554,31 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         } catch (error) { await db.query("ROLLBACK"); throw error; } finally { db.release(); }
       } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "The ChurchTools migration batch failed." }); }
       finally { if (reserved) await pool!.query("UPDATE churchtools_migration_snapshots SET migration_running=FALSE,migration_started_at=NULL,updated_at=now() WHERE department_id=$1", [dept]).catch(() => {}); running.delete(dept); }
+    });
+    routes.get<{ Querystring: { offset?: number; query?: string } }>("/api/modules/sync/churchtools/membership-details", {
+      schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 2147483647 }, query: { type: "string", maxLength: 120 } } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const offset = request.query.offset ?? 0;
+      const query = request.query.query?.trim() ?? "";
+      const result = await pool!.query<{ encrypted_snapshot: string; group_name: string; person_name: string; source_group_id: string }>(`
+        SELECT archive.encrypted_snapshot,archive.source_group_id,church_group.name AS group_name,
+          concat_ws(' ',person.first_name,person.last_name) AS person_name
+        FROM churchtools_migration_membership_details archive
+        JOIN churchtools_sync_settings config ON config.department_id=archive.department_id AND config.instance_url=archive.instance_url
+        JOIN church_groups church_group ON church_group.department_id=archive.department_id AND church_group.id=archive.group_id
+        JOIN contacts person ON person.department_id=archive.department_id AND person.id=archive.contact_id
+        WHERE archive.department_id=$1 AND ($3='' OR strpos(lower(church_group.name),lower($3))>0 OR strpos(lower(concat_ws(' ',person.first_name,person.last_name)),lower($3))>0)
+        ORDER BY lower(church_group.name),lower(person.last_name),lower(person.first_name),archive.source_group_id,archive.source_id
+        OFFSET $2 LIMIT 21`, [dept, offset, query]);
+      const archiveKey = result.rows.length ? cryptoKey() : undefined;
+      return reply.header("Cache-Control", "private, no-store").send({
+        entries: result.rows.slice(0, 20).map((row) => ({
+          group: row.group_name, person: row.person_name, groupSourceId: row.source_group_id,
+          details: JSON.parse(decrypt(row.encrypted_snapshot, archiveKey)) as ChurchToolsGroupMembership,
+        })),
+        nextOffset: result.rows.length > 20 ? offset + 20 : null,
+      });
     });
     routes.get<{ Querystring: { offset?: number } }>("/api/modules/sync/churchtools/booking-history", {
       schema: { querystring: { type: "object", additionalProperties: false, properties: { offset: { type: "integer", minimum: 0, maximum: 2147483647 } } } },
