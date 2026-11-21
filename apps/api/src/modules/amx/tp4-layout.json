@@ -8239,6 +8239,7 @@
           "height": 92,
           "z": 11,
           "level": 1,
+          "levelPort": 1,
           "rangeLow": 0,
           "rangeHigh": 255,
           "rangeCount": 256,

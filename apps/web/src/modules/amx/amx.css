@@ -83,7 +83,9 @@
 .amx-object-image~.amx-object-label{z-index:2}
 .amx-object-bargraph,.amx-object-multiBargraph{border:1px solid #6a6a61;border-radius:3px;background:linear-gradient(90deg,#777,#b2b2a5 45%,#777);box-shadow:inset 0 0 4px #2228}
 .amx-level-fill{position:absolute;inset:auto 0 0;z-index:0;background:linear-gradient(90deg,#0872b7,#33a7df 48%,#0872b7);opacity:.82;pointer-events:none}
+.amx-progress-bar .amx-level-fill{inset:0 auto 0 0;height:100%;transition:width .35s ease}
 .amx-level-value{z-index:1;color:#fff;text-shadow:0 1px 2px #000;font-size:.78em}
+.amx-progress-continue{position:absolute;z-index:5000;right:2%;bottom:2%;padding:6px 12px;border:1px solid #666;border-radius:4px;background:#eee;color:#222;font:600 clamp(9px,1.2vw,13px) Arial,sans-serif;cursor:pointer}
 .amx-panel-status{display:flex;align-items:center;gap:clamp(4px,.8vw,10px);min-height:22px;padding:1px 2%;background:#e5e2cc;color:#272722;font:600 clamp(8px,1.15vw,12px) Arial,sans-serif}
 .amx-panel-status>span:first-child{margin-right:2px}
 .amx-panel-status .amx-dsp-indicator{display:flex;align-items:center;gap:2px}

@@ -45,9 +45,9 @@ const portForObject = (page: PanelPage, object: PanelObject) => object.channelPo
   ? object.channelPort
   : page.kind === "page" || page.name.startsWith("PWR_") ? 1 : 2;
 const mainAudioPage = (room: string, label: string) => {
-  const prefix = roomPrefix[room] ?? (room === "Konferenz gross" ? "Kon" : undefined);
+  const prefix = roomPrefix[room] ?? (room === "Konferenz gross" || room === "Konferenzsaal" ? "Kon" : undefined);
   const suffix = label === "Volumen" ? "Volume" : label === "Mikrofon" ? "Mik" : "Lautsprecher";
-  return prefix ? findPage(`${prefix}_${suffix}`) : room === "Alle Räume Autonom" ? findPage(`All_${suffix}`) : undefined;
+  return prefix ? findPage(`${prefix}_${suffix}`) : ["Alle Räume Autonom", "Alle Räume", "All rooms"].includes(room) ? findPage(`All_${suffix}`) : undefined;
 };
 
 async function readResponse<T>(response: Response): Promise<T & { error?: string }> {
@@ -70,7 +70,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [levelValues, setLevelValues] = useState<Record<string, number>>({});
   const [basePageName, setBasePageName] = useState("Home");
   const [overlayPages, setOverlayPages] = useState<string[]>([]);
-  const [selectedRoom, setSelectedRoom] = useState("");
+  const [selectedRoom, setSelectedRoom] = useState(() => window.sessionStorage.getItem("amx-selected-room") ?? "");
   const [busy, setBusy] = useState("");
   const [feedback, setFeedback] = useState("");
   const [failed, setFailed] = useState(false);
@@ -83,11 +83,12 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const pageScale = useMemo(() => ({ width: "100%", aspectRatio: `${panel.project.screen.width}/${panel.project.screen.height}` }), []);
   const configured = Boolean(status?.configured);
 
-  async function refreshPageLevels(page: PanelPage = currentPage, signal?: AbortSignal) {
-    if (!page.objects.some((object) => object.type === "bargraph" && typeof object.level === "number" && typeof object.levelPort === "number" && object.levelPort > 0)) return;
+  async function refreshPageLevels(page: PanelPage = currentPage, signal?: AbortSignal): Promise<Record<string, number>> {
+    if (!page.objects.some((object) => object.type === "bargraph" && typeof object.level === "number" && typeof object.levelPort === "number" && object.levelPort > 0)) return {};
     const response = await fetch(`/api/modules/amx/levels?page=${encodeURIComponent(page.name)}`, { headers: { "x-department-id": departmentId }, signal });
     const result = await readResponse<LevelFeedback>(response);
     setLevelValues((current) => ({ ...current, ...result.values }));
+    return result.values;
   }
 
   useEffect(() => {
@@ -126,6 +127,38 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
   }, [configured, currentPage, departmentId]);
 
+  useEffect(() => {
+    if (!configured || currentPage.name !== "PWR_COUNT") return;
+    let active = true;
+    let timer = 0;
+    const controller = new AbortController();
+    setLevelValues((current) => { const next = { ...current }; delete next["1"]; return next; });
+    const pollProgress = async () => {
+      try {
+        const values = await refreshPageLevels(currentPage, controller.signal);
+        if (!active) return;
+        if (values["1"] !== undefined && values["1"] >= 255) {
+          setBasePageName("Modus");
+          setOverlayPages([]);
+          setFeedback("");
+          setFailed(false);
+          return;
+        }
+        setFeedback("");
+        setFailed(false);
+      } catch (error) {
+        if (active && !controller.signal.aborted) {
+          setFeedback(error instanceof Error ? `Activation progress unavailable: ${error.message}` : "Activation progress is unavailable.");
+          setFailed(true);
+        }
+      } finally {
+        if (active) timer = window.setTimeout(() => void pollProgress(), 2000);
+      }
+    };
+    void pollProgress();
+    return () => { active = false; controller.abort(); window.clearTimeout(timer); };
+  }, [configured, currentPage, departmentId]);
+
   function navigate(next: string) {
     const page = findPage(next);
     if (!page) return;
@@ -141,12 +174,17 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     setOverlayPages((stack) => stack.slice(0, -1));
   }
 
-  async function send(action: Action, sourcePage: PanelPage = currentPage) {
+  function chooseRoom(room: string) {
+    window.sessionStorage.setItem("amx-selected-room", room);
+    setSelectedRoom(room);
+  }
+
+  async function send(action: Action, sourcePage: PanelPage = currentPage, quietSuccess = false) {
     if (!configured || busy) return false;
     setBusy(action.id); setFeedback(""); setFailed(false);
     try {
       await readResponse(await fetch("/api/modules/amx/send", { method: "POST", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify({ actionId: action.id }) }));
-      setFeedback(`${action.name}: sent.`);
+      if (!quietSuccess) setFeedback(`${action.name}: sent.`);
       if (sourcePage.objects.some((object) => object.type === "bargraph" && typeof object.level === "number")) {
         void refreshPageLevels(sourcePage).catch((error: unknown) => {
           if (error instanceof Error) { setFeedback(`Live level feedback: ${error.message}`); setFailed(true); }
@@ -168,21 +206,37 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const channel = object.channel ?? 0;
     const port = portForObject(sourcePage, object);
     const action = actionIndex.get(`${port}:${channel}`);
+    if (sourcePage.name === "Home" && object.pageFlip === "PWR_ASK" && roomChannels[channel]) {
+      chooseRoom(roomChannels[channel]!);
+      navigate("PWR_ASK");
+      if (action) void send(action, sourcePage, true);
+      return;
+    }
+    if (sourcePage.name === "PWR_ASK" && channel === 2) {
+      navigate("PWR_COUNT");
+      if (action) void send(action, sourcePage, true);
+      return;
+    }
+    if (sourcePage.name === "Modus" && object.pageFlip === "DetailPopup") {
+      const mode = channel === 5 ? "Volumen" : channel === 6 ? "Mikrofon" : channel === 7 ? "Lautsprecher" : "";
+      const target = mode ? mainAudioPage(selectedRoom, mode) : undefined;
+      if (target) navigate(target.name);
+      else { setFeedback("Select a room before opening its controls."); setFailed(true); }
+      return;
+    }
+    if (sourcePage.name === "Modus" && channel === 8) {
+      navigate("Regie");
+      return;
+    }
     const sent = action ? await send(action, sourcePage) : true;
     if (!sent) return;
 
-    if (sourcePage.name === "Home" && object.pageFlip === "PWR_ASK" && roomChannels[channel]) {
-      setSelectedRoom(roomChannels[channel]);
-      navigate("PWR_ASK");
-      return;
-    }
     if (sourcePage.name === "PWR_ASK") {
       if (roomChannels[channel]) {
-        setSelectedRoom(roomChannels[channel]!);
+        chooseRoom(roomChannels[channel]!);
         return;
       }
-      if (channel === 2) navigate("Modus");
-      else if (channel === 4) closeOverlay();
+      if (channel === 4) closeOverlay();
       return;
     }
     if (sourcePage.name === "PWR_OFF_ASK") {
@@ -192,17 +246,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     }
     if (sourcePage.name === "Modus") {
       if (roomChannels[channel] && channel !== 5 && channel !== 6 && channel !== 7) {
-        setSelectedRoom(roomChannels[channel]!);
-      }
-      if (object.pageFlip === "DetailPopup") {
-        const mode = channel === 5 ? "Volumen" : channel === 6 ? "Mikrofon" : channel === 7 ? "Lautsprecher" : "";
-        const target = mode ? mainAudioPage(selectedRoom, mode) : undefined;
-        if (target) navigate(target.name);
-        return;
-      }
-      if (channel === 8) {
-        navigate("Regie");
-        return;
+        chooseRoom(roomChannels[channel]!);
       }
     }
     if (object.pageFlip) {
@@ -230,7 +274,15 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const low = object.rangeLow ?? 0;
     const high = object.rangeHigh ?? 100;
     const levelPercent = levelValue === undefined || high <= low ? undefined : Math.max(0, Math.min(100, (levelValue - low) / (high - low) * 100));
-    const text = object.type === "bargraph" ? levelPercent !== undefined ? `${Math.round(levelPercent)}%` : "—" : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
+    const activationLevel = levelValues["1"];
+    const activationPercent = activationLevel === undefined ? undefined : Math.max(0, Math.min(100, activationLevel / 255 * 100));
+    let text = object.type === "bargraph" ? levelPercent !== undefined ? `${Math.round(levelPercent)}%` : "—" : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
+    if (page.name === "PWR_COUNT" && object.name === "100 %") text = activationPercent === undefined ? "—" : `${Math.round(activationPercent)}%`;
+    if (page.name === "PWR_COUNT" && /wird aktiviert/i.test(baseText)) {
+      const title = selectedRoom === "Gemeindesaal quer" ? "Quer Gemeindesaal" : selectedRoom === "Gemeindesaal längs" ? "Längs Gemeindesaal" : selectedRoom;
+      text = title ? `"${title}" wird aktiviert` : "Betriebsmodus wird aktiviert";
+    }
+    if (page.name === "Modus" && /^Betriebsmodus/.test(baseText)) text = selectedRoom ? `Betriebsmodus "${selectedRoom}"` : "Betriebsmodus";
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
     const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
     const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
@@ -251,8 +303,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       {text && text !== "header" && text !== "StatusBar" && <span className={`amx-object-label${levelValue !== undefined ? " amx-level-value" : ""}`}>{text}</span>}
     </>;
     if (!button && object.type === "bargraph") {
-      return <div key={`${page.id}-${object.id}`} className="amx-panel-object amx-object-bargraph" style={style} aria-label={levelPercent === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelPercent)} percent`}>
-        {levelPercent !== undefined && <span className="amx-level-fill" style={{ height: `${levelPercent}%` }} />}{inner}
+      return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-bargraph${page.name === "PWR_COUNT" ? " amx-progress-bar" : ""}`} style={style} aria-label={levelPercent === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelPercent)} percent`}>
+        {levelPercent !== undefined && <span className="amx-level-fill" style={page.name === "PWR_COUNT" ? { width: `${levelPercent}%` } : { height: `${levelPercent}%` }} />}{inner}
       </div>;
     }
     if (!button) return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
@@ -268,6 +320,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       <div className="amx-panel-screen" style={screenStyle}>
         {visiblePages.map((page, layer) => page.objects.map((object) => renderObject(page, object, layer)))}
         {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
+        {currentPage.name === "PWR_COUNT" && failed && <button type="button" className="amx-progress-continue" onClick={() => { setBasePageName("Modus"); setOverlayPages([]); setFeedback(""); setFailed(false); }}>Weiter</button>}
       </div>
     </div>
     {!configured && status && <p className="amx-setup-note">A site administrator must enter the NetLinx master IP address under Settings → Modules → AMX to enable controls.</p>}
