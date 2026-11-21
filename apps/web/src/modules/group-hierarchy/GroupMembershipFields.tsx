@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent, type ChangeEvent } fr
 
 const fieldTypes = { text: "Text", number: "Number", boolean: "Yes / no", date: "Date", select: "Single choice" } as const;
 type FieldType = keyof typeof fieldTypes;
-type Field = { id: string; label: string; type: FieldType; options: string[] };
+type Field = { id: string; label: string; type: FieldType; options: string[]; revision: number; archivedAt: string | null };
 type Value = string | number | boolean;
 type Answers = { values: Record<string, Value>; revision: number };
 
@@ -20,6 +20,9 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
   const [reload, setReload] = useState(0);
+  const [rename, setRename] = useState<{ field: Field; label: string } | null>(null);
+  const activeFields = fields?.filter(field => !field.archivedAt) ?? [];
+  const archivedFields = fields?.filter(field => field.archivedAt) ?? [];
   const request = useCallback(async <T,>(url: string, init: RequestInit = {}): Promise<T> => {
     const response = await fetch(url, {
       ...init, cache: "no-store",
@@ -44,6 +47,7 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
       setFields(definitions);
       setAnswers(currentAnswers);
       setDraft({});
+      setRename(null);
     }).catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
   }, [base, contactId, reload, request]);
@@ -68,11 +72,27 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     finally { setSaving(false); }
   }
 
+  async function changeField(field: Field, change: { label: string } | { archived: boolean }) {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    setMessage("");
+    try {
+      const updated = await request<Field>(base + "/definitions/" + field.id, {
+        method: "PATCH", body: JSON.stringify({ ...change, revision: field.revision }),
+      });
+      setFields(current => current?.map(item => item.id === updated.id ? updated : item) ?? null);
+      setRename(null);
+      setMessage("label" in change ? "Membership field renamed." : change.archived ? "Membership field archived." : "Membership field restored.");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update the membership field."); }
+    finally { setSaving(false); }
+  }
+
   async function saveAnswers(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving || !answers || !fields) return;
     const values: Record<string, Value | null> = {};
-    for (const field of fields) {
+    for (const field of activeFields) {
       const input = draft[field.id];
       if (input === undefined) continue;
       values[field.id] = input === "" ? null : field.type === "number" ? Number(input) : field.type === "boolean" ? input === "true" : input;
@@ -93,9 +113,27 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
     {error && <p role="alert">{error} <button type="button" onClick={() => setReload(current => current + 1)}>Reload fields</button></p>}
     {message && <p role="status">{message}</p>}
     {!fields && !error && <p>Loading membership fields…</p>}
-    {fields?.length === 0 && <p>No typed fields configured for this group.</p>}
+    {fields && activeFields.length === 0 && <p>No active typed fields configured for this group.</p>}
     {fields && !contactId && <>
-      {fields.length > 0 && <ul>{fields.map(field => <li key={field.id}>{field.label} · {fieldTypes[field.type]}</li>)}</ul>}
+      {activeFields.length > 0 && <ul>{activeFields.map(field => <li key={field.id}>
+        {rename?.field.id === field.id ? <form onSubmit={event => { event.preventDefault(); void changeField(rename.field, { label: rename.label }); }}>
+          <label>Field label<input required maxLength={80} disabled={saving} value={rename.label} onChange={event => setRename({ field: rename.field, label: event.target.value })}/></label>
+          <button disabled={saving || !rename.label.trim()}>Save field name</button>
+          <button type="button" disabled={saving} onClick={() => setRename(null)}>Cancel</button>
+        </form> : <>
+          <span>{field.label} · {fieldTypes[field.type]}</span>
+          <button type="button" disabled={saving} onClick={() => setRename({ field, label: field.label })}>Rename</button>
+          <button type="button" disabled={saving} onClick={() => void changeField(field, { archived: true })}>Archive</button>
+        </>}
+      </li>)}</ul>}
+      {archivedFields.length > 0 && <details>
+        <summary>Archived fields ({archivedFields.length})</summary>
+        <p>Archived fields keep saved values and are hidden from the member editor.</p>
+        <ul>{archivedFields.map(field => <li key={field.id}>
+          <span>{field.label} · {fieldTypes[field.type]}</span>
+          <button type="button" disabled={saving} onClick={() => void changeField(field, { archived: false })}>Restore</button>
+        </li>)}</ul>
+      </details>}
       {fields.length < 40 && <form onSubmit={addField}>
         <label>Field label<input value={newLabel} required maxLength={80} onChange={event => setNewLabel(event.target.value)}/></label>
         <label>Field type<select value={newType} onChange={event => setNewType(event.target.value as FieldType)}>{Object.entries(fieldTypes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -103,8 +141,8 @@ export function GroupMembershipFields({ groupId, contactId, departmentId, csrfTo
         <button disabled={saving || !newLabel.trim()}>Add member field</button>
       </form>}
     </>}
-    {contactId && answers && fields && fields.length > 0 && <form onSubmit={saveAnswers}>
-      {fields.map(field => {
+    {contactId && answers && activeFields.length > 0 && <form onSubmit={saveAnswers}>
+      {activeFields.map(field => {
         const value = draft[field.id] ?? (answers.values[field.id] === undefined ? "" : String(answers.values[field.id]));
         const inputProps = { value, disabled: saving, onChange: (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setDraft(current => ({ ...current, [field.id]: event.target.value })) };
         return <label key={field.id}>{field.label}
