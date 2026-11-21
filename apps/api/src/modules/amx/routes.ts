@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { amxAudioActions, amxAudioLevels, amxAudioPages, amxSystemActions } from "./audio-mappings.js";
-import { readIcspDeviceLevels, pulseIcspChannel } from "./icsp.js";
+import { readIcspDeviceChannels, readIcspDeviceLevels, pulseIcspChannel } from "./icsp.js";
 
 type AmxAction = { id: string; name: string; command: string };
 type AmxSettings = { host: string; actions: AmxAction[] };
@@ -22,6 +22,10 @@ const audioActions: AmxAction[] = amxAudioActions.map((item) => ({
   command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 2}:1,${item.channel}]`,
 }));
 const defaultSettings: AmxSettings = { host: "", actions: roomActions };
+const roomStatusChannels: Array<[number, string]> = [
+  [11, "Gemeindesaal quer"], [16, "Gemeindesaal längs"], [13, "Konferenzsaal 1"],
+  [12, "Bibliothek"], [15, "Alle Räume Autonom"], [14, "Konferenz gross"],
+];
 
 function validHost(host: string) {
   if (!host || host.length > 253 || host.includes("://") || /[\s/@\\]/.test(host)) return false;
@@ -88,6 +92,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get<{ Querystring: { page?: string } }>("/api/modules/amx/levels", async (request, reply) => {
     const departmentId = await requireAmxDepartment(request, reply);
     if (!departmentId) return reply;
+    if (request.query.page === "PWR_COUNT") {
+      const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+      const host = result.rows[0]?.host;
+      if (!host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+      try {
+        const values = await readIcspDeviceLevels(host, { device: 10001, port: 1, system: 1 }, [1]);
+        return { page: "PWR_COUNT", values, updatedAt: new Date().toISOString() };
+      } catch (error) {
+        return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read AMX activation progress." });
+      }
+    }
     const page = amxAudioPages.find((item) => item.id === request.query.page);
     if (!page) return reply.code(400).send({ error: "Choose a known AMX audio page to read its levels." });
     const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
@@ -107,6 +122,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { page: page.id, values, updatedAt: new Date().toISOString() };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read AMX level feedback." });
+    }
+  });
+
+  app.get("/api/modules/amx/controller-state", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const host = result.rows[0]?.host;
+    if (!host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+    try {
+      const channels = await readIcspDeviceChannels(host, { device: 10001, port: 1, system: 1 });
+      const activeRooms = roomStatusChannels.filter(([channel]) => channels.includes(channel)).map(([, name]) => name);
+      return { currentRoom: activeRooms.length === 1 ? activeRooms[0] : null, activeRooms, channels, updatedAt: new Date().toISOString() };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read current AMX mode." });
     }
   });
 
@@ -162,3 +192,4 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   });
 }
+
