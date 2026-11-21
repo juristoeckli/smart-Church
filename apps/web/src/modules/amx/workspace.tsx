@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { ModuleContext } from "../../module-registry";
 import { audioPages } from "./audio-pages";
@@ -96,6 +96,9 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [levelValues, setLevelValues] = useState<Record<string, number>>({});
   const [basePageName, setBasePageName] = useState("Home");
   const [overlayPages, setOverlayPages] = useState<string[]>([]);
+  const overlayPagesRef = useRef(overlayPages);
+  overlayPagesRef.current = overlayPages;
+  const lastControllerRoom = useRef<string | null | undefined>(undefined);
   const [selectedRoom, setSelectedRoom] = useState("");
   const [activePanelChannels, setActivePanelChannels] = useState<Record<string, number[]>>({});
   const [busy, setBusy] = useState("");
@@ -134,14 +137,22 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     let active = true;
     let timer = 0;
     const controller = new AbortController();
+    lastControllerRoom.current = undefined;
     const pollControllerState = async () => {
       try {
         const response = await fetch("/api/modules/amx/controller-state", { headers: { "x-department-id": departmentId }, signal: controller.signal });
         const state = await readResponse<ControllerState>(response);
         if (active) {
+          const roomChanged = lastControllerRoom.current !== state.currentRoom;
+          lastControllerRoom.current = state.currentRoom;
           setSelectedRoom(state.currentRoom ?? "");
           setActivePanelChannels(state.channelsByPort ?? { "1": state.channels });
           setControllerStatusError("");
+          const activationInProgress = overlayPagesRef.current.some((name) => name === "PWR_ASK" || name === "PWR_COUNT");
+          if (roomChanged && !activationInProgress) {
+            setBasePageName(state.currentRoom ? "Modus" : "Home");
+            setOverlayPages([]);
+          }
         }
       } catch (error) {
         if (active && !controller.signal.aborted) {
