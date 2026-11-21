@@ -19,6 +19,11 @@ const transactionSchema = {
 } as const;
 
 function cleanText(value: string) { return value.trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " "); }
+function validDateOnly(value: string | undefined) {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}
 function csvCell(value: unknown) {
   const text = String(value ?? "");
   const safeText = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
@@ -206,6 +211,43 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
   });
 
+  app.get<{ Params: { year: string } }>("/api/modules/finance/accounting-years/:year/summary", { schema: { params: { type: "object", additionalProperties: false, required: ["year"], properties: { year: { type: "string", pattern: "^(19[0-9]{2}|20[0-9]{2}|21[0-9]{2}|2200)$" } } } }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const year = Number(request.params.year);
+    const configured = await pool!.query<{ accountingYear: number; label: string; startDate: string; endDate: string; status: string }>("SELECT accounting_year AS \"accountingYear\",label,start_date::text AS \"startDate\",end_date::text AS \"endDate\",status FROM finance_accounting_years WHERE department_id=$1 AND accounting_year=$2", [departmentId, year]);
+    if (!configured.rowCount) return reply.code(404).send({ error: "Accounting year not found." });
+    const period = configured.rows[0]!;
+    const [totals, bankRows, budgets, settings] = await Promise.all([
+      pool!.query<{ transactions: string; debitCents: string; creditCents: string; incomeCents: string; expenseCents: string }>(
+        `SELECT count(DISTINCT t.id)::text AS transactions,COALESCE(sum(l.debit_cents),0)::text AS \"debitCents\",COALESCE(sum(l.credit_cents),0)::text AS \"creditCents\",
+                COALESCE(sum(CASE WHEN a.account_type='income' THEN l.credit_cents-l.debit_cents ELSE 0 END),0)::text AS \"incomeCents\",
+                COALESCE(sum(CASE WHEN a.account_type='expense' THEN l.debit_cents-l.credit_cents ELSE 0 END),0)::text AS \"expenseCents\"
+           FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
+           JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id
+          WHERE t.department_id=$1 AND t.accounting_year=$2 AND t.booking_date BETWEEN $3::date AND $4::date AND t.status='posted'`, [departmentId, year, period.startDate, period.endDate]),
+      pool!.query<{ rowCount: string; amountCents: string }>("SELECT count(*)::text AS \"rowCount\",COALESCE(sum(abs(amount_cents)),0)::text AS \"amountCents\" FROM finance_bank_statement_rows WHERE department_id=$1 AND booking_date BETWEEN $2::date AND $3::date AND status IN ('unmatched','suggested')", [departmentId, period.startDate, period.endDate]),
+      pool!.query<{ id: string; accountCode: string | null; accountName: string | null; accountType: string | null; costCenterCode: string | null; costCenterName: string | null; budgetCents: string; actualCents: string }>(
+        `SELECT b.id,a.code AS \"accountCode\",a.name AS \"accountName\",a.account_type AS \"accountType\",c.code AS \"costCenterCode\",c.name AS \"costCenterName\",
+                b.amount_cents::text AS \"budgetCents\",COALESCE(sum(CASE WHEN t.id IS NULL THEN 0 WHEN actual_account.account_type='income' THEN l.credit_cents-l.debit_cents ELSE l.debit_cents-l.credit_cents END),0)::text AS \"actualCents\"
+           FROM finance_budgets b LEFT JOIN finance_accounts a ON a.department_id=b.department_id AND a.id=b.account_id
+           LEFT JOIN finance_cost_centers c ON c.department_id=b.department_id AND c.id=b.cost_center_id
+           LEFT JOIN finance_transactions t ON t.department_id=b.department_id AND t.accounting_year=b.accounting_year AND t.status='posted'
+           LEFT JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
+              AND (b.account_id IS NULL OR l.account_id=b.account_id) AND (b.cost_center_id IS NULL OR l.cost_center_id=b.cost_center_id)
+           LEFT JOIN finance_accounts actual_account ON actual_account.department_id=l.department_id AND actual_account.id=l.account_id
+          WHERE b.department_id=$1 AND b.accounting_year=$2 GROUP BY b.id,a.code,a.name,a.account_type,c.code,c.name ORDER BY a.code,c.code,b.id LIMIT 5000`, [departmentId, year]),
+      pool!.query<{ currency: string }>("SELECT currency_code AS currency FROM finance_settings WHERE department_id=$1", [departmentId]),
+    ]);
+    const total = totals.rows[0]!; const unmatched = bankRows.rows[0]!;
+    return {
+      period,
+      currency: settings.rows[0]?.currency ?? "CHF",
+      totals: { transactionCount: Number(total.transactions), debitCents: asMoney(total.debitCents), creditCents: asMoney(total.creditCents), incomeCents: asMoney(total.incomeCents), expenseCents: asMoney(total.expenseCents) },
+      unreconciledBank: { rowCount: Number(unmatched.rowCount), amountCents: asMoney(unmatched.amountCents) },
+      budgetVariance: budgets.rows.map((row) => ({ ...row, budgetCents: asMoney(row.budgetCents), actualCents: asMoney(row.actualCents), varianceCents: asMoney(row.budgetCents) - asMoney(row.actualCents) })),
+    };
+  });
+
   app.get("/api/modules/finance/receipts/settings", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     const result = await pool!.query("SELECT organization_name AS \"organizationName\",template_text AS \"templateText\",numbering_prefix AS \"numberingPrefix\" FROM finance_receipt_settings WHERE department_id=$1", [departmentId]);
@@ -342,17 +384,44 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Donor not found." }); publish(departmentId, "donor-updated", request.params.id); return { updated: true };
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string } }>("/api/modules/finance/transactions", async (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>("/api/modules/finance/donors/:id/statement.csv", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, querystring: { type: "object", additionalProperties: false, properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
+    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid donor-statement date range." });
+    const donor = await pool!.query("SELECT 1 FROM finance_donors WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
+    if (!donor.rowCount) return reply.code(404).send({ error: "Donor not found." });
+    const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,d.display_name AS donor_name,t.booking_text,a.code AS account_code,a.name AS account_name,c.code AS cost_center_code,l.line_text,l.credit_cents-l.debit_cents AS amount_cents,s.currency_code
+         FROM finance_donors d
+         JOIN finance_transaction_lines l ON l.department_id=d.department_id AND l.donor_id=d.id
+         JOIN finance_transactions t ON t.department_id=l.department_id AND t.id=l.transaction_id AND t.status='posted'
+         JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id AND a.account_type='income'
+         LEFT JOIN finance_cost_centers c ON c.department_id=l.department_id AND c.id=l.cost_center_id
+         JOIN finance_settings s ON s.department_id=d.department_id
+        WHERE d.department_id=$1 AND d.id=$2 AND l.credit_cents<>l.debit_cents
+          AND ($3::date IS NULL OR t.booking_date >= $3) AND ($4::date IS NULL OR t.booking_date <= $4)
+        ORDER BY t.booking_date,t.created_at,t.id,l.line_number`, [departmentId, request.params.id, request.query.from ?? null, request.query.to ?? null]);
+    const header = ["booking_date", "accounting_year", "receipt_number", "donor_name", "booking_text", "account_code", "account_name", "cost_center_code", "line_text", "gift_amount_cents", "currency"];
+    const csv = [header, ...result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.donor_name, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.line_text, row.amount_cents, row.currency_code])].map((row) => row.map(csvCell).join(",")).join("\r\n");
+    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename=finance-donor-statement-${request.params.id}.csv`).send(`\uFEFF${csv}`);
+  });
+
+  app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string; page?: string; pageSize?: string } }>("/api/modules/finance/transactions", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
+    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to))) return reply.code(400).send({ error: "Choose valid start and end dates." });
     const from = request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null;
     const to = request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null;
+    if (from && to && from > to) return reply.code(400).send({ error: "The start date must be on or before the end date." });
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null;
     const q = cleanText(request.query.q ?? "").slice(0, 100);
+    const page = Math.max(1, Math.min(100_000, Number.parseInt(request.query.page ?? "1", 10) || 1));
+    const pageSize = Math.max(10, Math.min(100, Number.parseInt(request.query.pageSize ?? "50", 10) || 50));
+    const filters = [departmentId, from, to, year, q];
+    const count = await pool!.query<{ total: string }>(`SELECT count(*)::text AS total FROM finance_transactions t
+      WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%')`, filters);
     const result = await pool!.query(`SELECT t.id,t.booking_date AS "bookingDate",t.accounting_year AS "accountingYear",t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",t.status,t.reverses_transaction_id AS "reversesTransactionId",t.created_at AS "createdAt",COALESCE(sum(l.debit_cents),0)::text AS "debitCents",COALESCE(sum(l.credit_cents),0)::text AS "creditCents",count(l.id)::int AS "lineCount"
       FROM finance_transactions t LEFT JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
       WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%')
-      GROUP BY t.id ORDER BY t.booking_date DESC,t.created_at DESC LIMIT 500`, [departmentId, from, to, year, q]);
-    return result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) }));
+      GROUP BY t.id ORDER BY t.booking_date DESC,t.created_at DESC,t.id DESC LIMIT $6 OFFSET $7`, [...filters, pageSize, (page - 1) * pageSize]);
+    return { items: result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) })), total: Number(count.rows[0]?.total ?? 0), page, pageSize };
   });
 
   app.post<{ Body: FinanceTransactionBody }>("/api/modules/finance/transactions", { schema: { body: transactionSchema } }, async (request, reply) => {
@@ -469,7 +538,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     const accountId = request.query.accountId; if (!accountId) return reply.code(400).send({ error: "Choose an account." });
-    const result = await pool!.query(`SELECT t.id,t.booking_date AS "bookingDate",t.accounting_year AS "accountingYear",t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",l.line_text AS "lineText",l.debit_cents::text AS "debitCents",l.credit_cents::text AS "creditCents",sum(l.debit_cents-l.credit_cents) OVER (ORDER BY t.booking_date,t.created_at,t.id,l.line_number)::text AS "runningBalanceCents" FROM finance_transaction_lines l JOIN finance_transactions t ON t.id=l.transaction_id AND t.department_id=l.department_id WHERE l.department_id=$1 AND l.account_id=$2 AND t.status='posted' AND ($3::date IS NULL OR t.booking_date >= $3) AND ($4::date IS NULL OR t.booking_date <= $4) ORDER BY t.booking_date,t.created_at,t.id,l.line_number`, [departmentId, accountId, request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null, request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null]);
+    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid account-statement date range." });
+    const result = await pool!.query(`WITH entries AS (
+        SELECT t.id,t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,l.line_text,l.debit_cents,l.credit_cents,t.created_at,l.line_number,
+               sum(l.debit_cents-l.credit_cents) OVER (ORDER BY t.booking_date,t.created_at,t.id,l.line_number)::text AS running_balance_cents
+          FROM finance_transaction_lines l JOIN finance_transactions t ON t.id=l.transaction_id AND t.department_id=l.department_id
+         WHERE l.department_id=$1 AND l.account_id=$2 AND t.status='posted'
+      )
+      SELECT id,booking_date AS "bookingDate",accounting_year AS "accountingYear",receipt_number AS "receiptNumber",booking_text AS "bookingText",line_text AS "lineText",debit_cents::text AS "debitCents",credit_cents::text AS "creditCents",running_balance_cents AS "runningBalanceCents"
+        FROM entries WHERE ($3::date IS NULL OR booking_date >= $3) AND ($4::date IS NULL OR booking_date <= $4)
+       ORDER BY booking_date,created_at,id,line_number`, [departmentId, accountId, request.query.from ?? null, request.query.to ?? null]);
     return result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents), runningBalanceCents: asMoney(row.runningBalanceCents) }));
   });
 
@@ -482,12 +560,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement.csv", { schema: { querystring: { type: "object", additionalProperties: false, required: ["accountId"], properties: { accountId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
-    const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,l.line_text,l.debit_cents,l.credit_cents,
-              sum(l.debit_cents-l.credit_cents) OVER (ORDER BY t.booking_date,t.created_at,t.id,l.line_number) AS running_balance_cents
-         FROM finance_transaction_lines l JOIN finance_transactions t ON t.id=l.transaction_id AND t.department_id=l.department_id
-        WHERE l.department_id=$1 AND l.account_id=$2 AND t.status='posted'
-          AND ($3::date IS NULL OR t.booking_date >= $3) AND ($4::date IS NULL OR t.booking_date <= $4)
-        ORDER BY t.booking_date,t.created_at,t.id,l.line_number`, [departmentId, request.query.accountId, request.query.from ?? null, request.query.to ?? null]);
+    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid account-statement date range." });
+    const result = await pool!.query(`WITH entries AS (
+        SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,l.line_text,l.debit_cents,l.credit_cents,t.created_at,t.id,l.line_number,
+               sum(l.debit_cents-l.credit_cents) OVER (ORDER BY t.booking_date,t.created_at,t.id,l.line_number) AS running_balance_cents
+          FROM finance_transaction_lines l JOIN finance_transactions t ON t.id=l.transaction_id AND t.department_id=l.department_id
+         WHERE l.department_id=$1 AND l.account_id=$2 AND t.status='posted'
+      )
+      SELECT booking_date,accounting_year,receipt_number,booking_text,line_text,debit_cents,credit_cents,running_balance_cents
+        FROM entries WHERE ($3::date IS NULL OR booking_date >= $3) AND ($4::date IS NULL OR booking_date <= $4)
+       ORDER BY booking_date,created_at,id,line_number`, [departmentId, request.query.accountId, request.query.from ?? null, request.query.to ?? null]);
     const header = ["booking_date", "accounting_year", "receipt_number", "booking_text", "line_text", "debit_cents", "credit_cents", "running_balance_cents"];
     const csv = [header, ...result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.line_text, row.debit_cents, row.credit_cents, row.running_balance_cents])].map((row) => row.map(csvCell).join(",")).join("\r\n");
     return reply.type("text/csv; charset=utf-8").header("Content-Disposition", "attachment; filename=finance-account-statement.csv").send(`\uFEFF${csv}`);
@@ -526,6 +608,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string } }>("/api/modules/finance/transactions/export.csv", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
+    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid date range." });
     const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,a.code AS account_code,a.name AS account_name,c.code AS cost_center_code,d.display_name AS donor_name,l.debit_cents,l.credit_cents,l.line_text FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id LEFT JOIN finance_cost_centers c ON c.department_id=l.department_id AND c.id=l.cost_center_id LEFT JOIN finance_donors d ON d.department_id=l.department_id AND d.id=l.donor_id WHERE t.department_id=$1 AND t.status='posted' AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ORDER BY t.booking_date,t.created_at,l.line_number`, [departmentId, request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null, request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null, request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null, cleanText(request.query.q ?? "").slice(0, 100)]);
     const header = ["booking_date", "accounting_year", "receipt_number", "booking_text", "account_code", "account_name", "cost_center_code", "donor_name", "debit_cents", "credit_cents", "line_text"];
     const csv = [header, ...result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.account_code, row.account_name, row.cost_center_code, row.donor_name, row.debit_cents, row.credit_cents, row.line_text])].map((row) => row.map(csvCell).join(",")).join("\r\n");

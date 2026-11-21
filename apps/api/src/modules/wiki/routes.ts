@@ -89,6 +89,47 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return (await pool!.query("SELECT id,name FROM church_groups WHERE department_id=$1 AND status='active' ORDER BY name LIMIT 1000", [departmentId])).rows;
   });
 
+  app.get<{ Querystring: { type: "person" | "group" | "wiki" | "song"; q: string } }>("/api/modules/wiki/entity-search", { schema: {
+    querystring: { type: "object", additionalProperties: false, required: ["type", "q"], properties: { type: { type: "string", enum: ["person", "group", "wiki", "song"] }, q: { type: "string", minLength: 2, maxLength: 80 } } },
+  } }, async (request, reply) => {
+    const departmentId = await site(request, reply);
+    if (!departmentId) return reply;
+    const query = request.query.q.trim().replace(/[\\%_]/g, "").slice(0, 80);
+    if (query.length < 2) return [];
+    const pattern = `%${query}%`;
+    if (request.query.type === "wiki") {
+      return (await pool!.query<{ id: string; title: string; detail: string }>(
+        `SELECT page.id,page.title,COALESCE(category.name,'') AS detail FROM wiki_pages page
+          LEFT JOIN wiki_categories category ON category.id=page.category_id AND category.department_id=page.department_id
+          WHERE page.department_id=$1 AND page.status='active' AND page.title ILIKE $2
+            AND ${pageReadCondition("page", 3, 4)}
+          ORDER BY lower(page.title),page.id LIMIT 50`, [departmentId, pattern, isWikiManager(request), request.authenticatedUser!.id],
+      )).rows;
+    }
+    if (request.query.type === "person") {
+      const canViewPrivatePeople = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
+      if (!canViewPrivatePeople) return reply.code(403).send({ error: "Private People access is required to search people." });
+      return (await pool!.query<{ id: string; title: string }>(
+        `SELECT id,concat_ws(' ',first_name,last_name) AS title FROM contacts
+          WHERE department_id=$1 AND concat_ws(' ',first_name,last_name) ILIKE $2
+          ORDER BY lower(last_name),lower(first_name),id LIMIT 50`, [departmentId, pattern],
+      )).rows;
+    }
+    if (request.query.type === "group") {
+      return (await pool!.query<{ id: string; title: string }>(
+        `SELECT id,name AS title FROM church_groups WHERE department_id=$1 AND status='active' AND name ILIKE $2
+          ORDER BY lower(name),id LIMIT 50`, [departmentId, pattern],
+      )).rows;
+    }
+    const songsInstalled = await pool!.query<{ installed: boolean }>("SELECT to_regclass('public.worship_songs') IS NOT NULL AS installed");
+    if (!songsInstalled.rows[0]?.installed) return [];
+    return (await pool!.query<{ id: string; title: string; detail: string }>(
+      `SELECT id,title,authors AS detail FROM worship_songs
+        WHERE department_id=$1 AND active=true AND title ILIKE $2
+        ORDER BY lower(title),id LIMIT 50`, [departmentId, pattern],
+    )).rows.map((song) => ({ ...song, detail: song.detail || "" }));
+  });
+
   app.get<{ Querystring: { search?: string; categoryId?: string; status?: string } }>("/api/modules/wiki/categories", async (request, reply) => {
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;

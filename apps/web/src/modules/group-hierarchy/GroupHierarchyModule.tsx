@@ -7,6 +7,7 @@ type Member = { contactId: string; firstName: string; lastName: string; email: s
 type History = { id: string; entityKind: string; action: string; beforeData: unknown; afterData: unknown; createdAt: string; actorName: string };
 type Leader = { groupId: string; groupName: string; groupDescription: string; parentGroupName: string | null; contactId: string; firstName: string; lastName: string; email: string | null; role: string; joinedOn: string | null };
 type GroupNote = { id: string; title: string; body: string; createdAt: string; updatedAt: string; authorName: string; canArchive: boolean };
+type GroupInvitation = { id: string; contactId: string; firstName: string; lastName: string; createdAt: string; expiresAt: string; acceptedAt: string | null; revokedAt: string | null; status: "pending" | "accepted" | "revoked" | "expired" };
 
 export function GroupHierarchyModule({ departmentId, csrfToken, language }: ModuleContext) {
   const [groups, setGroups] = useState<Group[]>([]);
@@ -22,6 +23,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   const [message, setMessage] = useState("");
   const [inviteContactId, setInviteContactId] = useState("");
   const [inviteLink, setInviteLink] = useState("");
+  const [invitations, setInvitations] = useState<GroupInvitation[]>([]);
+  const [canManageInvitations, setCanManageInvitations] = useState(false);
   const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(window.location.search).get("groupInvite") ?? "");
   const [edit, setEdit] = useState<Member | null>(null);
   const [customText, setCustomText] = useState("{}");
@@ -37,20 +40,24 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
     setSelectedId((current) => data.some((group) => group.id === current) ? current : data[0]?.id ?? "");
   }, [headers]);
   const loadDetails = useCallback(async (id: string) => {
-    if (!id) { setMembers([]); setHistory([]); setNotes([]); setCanManageNotes(false); return; }
-    const [memberResponse, historyResponse, ruleResponse, noteResponse] = await Promise.all([
+    if (!id) { setMembers([]); setHistory([]); setNotes([]); setCanManageNotes(false); setInvitations([]); setCanManageInvitations(false); return; }
+    const [memberResponse, historyResponse, ruleResponse, noteResponse, invitationResponse] = await Promise.all([
       fetch(`/api/modules/group-hierarchy/groups/${id}/members`, { headers }),
       fetch(`/api/modules/group-hierarchy/groups/${id}/history`, { headers }),
       fetch(`/api/modules/group-hierarchy/groups/${id}/membership-rules`, { headers }),
       fetch(`/api/modules/group-hierarchy/groups/${id}/notes`, { headers }),
+      fetch(`/api/modules/group-hierarchy/groups/${id}/invitations`, { headers }),
     ]);
-    if (!memberResponse.ok || !historyResponse.ok || !ruleResponse.ok || !noteResponse.ok) throw new Error("Could not load group details.");
+    if (!memberResponse.ok || !historyResponse.ok || !ruleResponse.ok || !noteResponse.ok || !invitationResponse.ok) throw new Error("Could not load group details.");
     setMembers(await memberResponse.json() as Member[]);
     setHistory(await historyResponse.json() as History[]);
     setRules(await ruleResponse.json() as Array<{ contactStatus: "member" | "visitor"; enabled: boolean }>);
     const noteData = await noteResponse.json() as { notes: GroupNote[]; canManage: boolean };
     setNotes(noteData.notes);
     setCanManageNotes(noteData.canManage);
+    const invitationData = await invitationResponse.json() as { invitations: GroupInvitation[]; canManage: boolean };
+    setInvitations(invitationData.invitations);
+    setCanManageInvitations(invitationData.canManage);
     setParentId(groups.find((group) => group.id === id)?.parentId ?? "");
   }, [groups, headers]);
   useEffect(() => { void load().catch((reason: Error) => setError(reason.message)); }, [load]);
@@ -83,8 +90,13 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
   };
   const sendInvite = async () => {
     try { const result = await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/invitations`, "POST", { contactId: inviteContactId }) as { invitationToken: string };
-      setInviteLink(`${window.location.origin}/?groupInvite=${result.invitationToken}`); setMessage("Invitation created. The invited person can sign in and accept it from this group administration page.");
+      setInviteLink(`${window.location.origin}/?groupInvite=${result.invitationToken}`); await loadDetails(selectedId); setMessage("Invitation created. The invited person can sign in and accept it from this group administration page.");
     } catch (reason) { setError((reason as Error).message); }
+  };
+  const revokeInvite = async (invitation: GroupInvitation) => {
+    if (!window.confirm(`Revoke the invitation for ${invitation.firstName} ${invitation.lastName}?`)) return;
+    try { await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/invitations/${invitation.id}`, "DELETE", {}); await loadDetails(selectedId); setMessage("Invitation revoked."); }
+    catch (reason) { setError((reason as Error).message); }
   };
   const acceptInvite = async () => {
     try { await mutate(`/api/modules/group-hierarchy/invitations/${inviteToken}/accept`, "POST", {}); setInviteToken(""); setMessage("Invitation accepted. You are now a group member."); await load(); }
@@ -126,6 +138,7 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
         </div>
         <div className="gh-panel"><h2>{text.members} <small>({members.length})</small></h2><div className="gh-member-list">{members.map((member) => <article key={member.contactId} className="gh-member"><div><strong>{member.firstName} {member.lastName}</strong><small>{member.email || ""} · {member.role} · {member.status}</small></div><button disabled={selected.imported} onClick={() => { setEdit(member); setCustomText(JSON.stringify(member.customFields, null, 2)); }}>Edit</button></article>)}</div>
           <div className="gh-invite"><label>Invite existing person by contact ID<input value={inviteContactId} onChange={(event) => setInviteContactId(event.target.value)} placeholder="Contact UUID" /></label><button disabled={!inviteContactId || selected.imported} onClick={() => void sendInvite()}>Create invitation</button>{inviteLink && <input readOnly value={inviteLink} onFocus={(event) => event.currentTarget.select()} />}</div>
+          {canManageInvitations && <section className="gh-invitations"><h3>Invitation history <small>({invitations.length})</small></h3>{invitations.length ? <div className="gh-member-list">{invitations.map((invitation) => <article className="gh-member" key={invitation.id}><div><strong>{invitation.firstName} {invitation.lastName}</strong><small>{invitation.status} · Created {new Date(invitation.createdAt).toLocaleString()} · Expires {new Date(invitation.expiresAt).toLocaleDateString()}</small></div>{invitation.status === "pending" && <button onClick={() => void revokeInvite(invitation)}>Revoke</button>}</article>)}</div> : <p>No invitations have been created for this group.</p>}</section>}
         </div>
         <div className="gh-panel"><h2>Automatic membership</h2><p>Rules affect future people and only remove memberships created by these rules.</p>{(["member", "visitor"] as const).map((status) => <label className="gh-check" key={status}><input type="checkbox" checked={rules.some((rule) => rule.contactStatus === status && rule.enabled)} onChange={(event) => setRules((current) => [...current.filter((rule) => rule.contactStatus !== status), ...(event.target.checked ? [{ contactStatus: status, enabled: true }] : [])])} /> Automatically add {status}s</label>)}<button disabled={selected.imported} onClick={() => void saveRules()}>Save rules</button></div>
         <div className="gh-panel"><h2>Group notes <small>({notes.length})</small></h2><p>Notes are visible to this group’s leaders and group managers.</p>

@@ -339,6 +339,33 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return result.rows;
   });
 
+  app.get<{ Params: { groupId: string } }>("/api/modules/group-hierarchy/groups/:groupId/invitations", {
+    schema: { params: { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: { type: "string", format: "uuid" } } } },
+  }, async (request, reply) => {
+    if (!pool || !isDatabaseReady()) return unavailable(reply);
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const canManageInvitations = managerGrant(request) || await canManageGroup(request, request.params.groupId, departmentId);
+    if (!canManageInvitations) return { invitations: [], canManage: false };
+    const group = await pool.query("SELECT 1 FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.groupId, departmentId]);
+    if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
+    const result = await pool.query(
+      `SELECT invitation.id,invitation.contact_id AS "contactId",
+              person.first_name AS "firstName",person.last_name AS "lastName",
+              invitation.created_at AS "createdAt",invitation.expires_at AS "expiresAt",
+              invitation.accepted_at AS "acceptedAt",invitation.revoked_at AS "revokedAt",
+              CASE WHEN invitation.accepted_at IS NOT NULL THEN 'accepted'
+                   WHEN invitation.revoked_at IS NOT NULL THEN 'revoked'
+                   WHEN invitation.expires_at<=now() THEN 'expired' ELSE 'pending' END AS status
+         FROM group_hierarchy_invitations invitation
+         JOIN contacts person ON person.id=invitation.contact_id AND person.department_id=invitation.department_id
+        WHERE invitation.department_id=$1 AND invitation.group_id=$2
+        ORDER BY invitation.created_at DESC,invitation.id DESC LIMIT 200`,
+      [departmentId, request.params.groupId],
+    );
+    return { invitations: result.rows, canManage: true };
+  });
+
   app.post<{ Params: { groupId: string }; Body: { contactId: string } }>("/api/modules/group-hierarchy/groups/:groupId/invitations", {
     schema: {
       params: { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: { type: "string", format: "uuid" } } },

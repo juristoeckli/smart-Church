@@ -4,6 +4,11 @@ import type { ModuleServerContext } from "../module-sdk.js";
 
 const uuid = { type: "string", format: "uuid" };
 const date = { type: "string", format: "date" };
+function csvCell(value: unknown): string {
+  let text = String(value ?? "");
+  if (/^[\s]*[=+@-]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
@@ -33,6 +38,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     );
     return Boolean(result.rowCount);
   }
+  async function activeGroupContact(request: FastifyRequest, groupId: string, departmentId: string) {
+    const result = await pool!.query<{ contactId: string }>(
+      `SELECT member.contact_id AS "contactId"
+         FROM group_members member
+         JOIN department_memberships account ON account.contact_id=member.contact_id AND account.department_id=$2 AND account.user_id=$3
+         JOIN church_groups group_row ON group_row.id=member.group_id AND group_row.department_id=$2
+        WHERE member.group_id=$1 AND member.status='active' LIMIT 1`,
+      [groupId, departmentId, request.authenticatedUser?.id],
+    );
+    return result.rows[0]?.contactId ?? null;
+  }
   async function recordAudit(departmentId: string, groupId: string, request: FastifyRequest, action: string, recordId: string | null, details: object = {}) {
     await pool!.query("INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)", [randomUUID(), departmentId, groupId, request.authenticatedUser?.id ?? null, action, recordId, JSON.stringify(details)]);
     realtime.publish("module:group-operations:changed", departmentId, { action, groupId, recordId });
@@ -55,19 +71,137 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     schema: { querystring: { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: uuid, meetingId: uuid } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
-    if (!(await canManageGroup(request, request.query.groupId, departmentId))) return reply.code(403).send({ error: "Group leader access is required to view meeting feedback." });
+    const canManageFeedback = await canManageGroup(request, request.query.groupId, departmentId);
+    const canSubmitFeedback = Boolean(await activeGroupContact(request, request.query.groupId, departmentId));
+    if (!canManageFeedback && !canSubmitFeedback) return reply.code(403).send({ error: "Active group membership is required to view meeting feedback." });
     const meetings = await pool!.query(`SELECT id,meeting_date::text AS date,title FROM group_meetings WHERE department_id=$1 AND group_id=$2 ORDER BY meeting_date DESC,created_at DESC LIMIT 200`, [departmentId, request.query.groupId]);
     const template = await pool!.query(`SELECT id,title,questions,updated_at AS "updatedAt" FROM group_meeting_feedback_templates WHERE department_id=$1 AND group_id=$2`, [departmentId, request.query.groupId]);
     let response = null;
     if (request.query.meetingId) {
       const meeting = meetings.rows.find((row) => row.id === request.query.meetingId);
       if (!meeting) return reply.code(404).send({ error: "Meeting not found for this group." });
-      const result = await pool!.query(`SELECT answers,created_at AS "createdAt",updated_at AS "updatedAt",COALESCE(actor.display_name,'Former user') AS "updatedBy"
+      const result = canManageFeedback ? await pool!.query(`SELECT answers,created_at AS "createdAt",updated_at AS "updatedAt",COALESCE(actor.display_name,'Former user') AS "updatedBy"
         FROM group_meeting_feedback_responses feedback LEFT JOIN app_users actor ON actor.id=feedback.updated_by
-        WHERE feedback.department_id=$1 AND feedback.group_id=$2 AND feedback.meeting_id=$3`, [departmentId, request.query.groupId, request.query.meetingId]);
+        WHERE feedback.department_id=$1 AND feedback.group_id=$2 AND feedback.meeting_id=$3`, [departmentId, request.query.groupId, request.query.meetingId]) : { rows: [] };
       response = result.rows[0] ?? null;
     }
-    return { meetings: meetings.rows, template: template.rows[0] ?? null, response };
+    return { meetings: meetings.rows, template: template.rows[0] ?? null, response, canManageFeedback, canSubmitFeedback };
+  });
+
+  app.get<{ Querystring: { groupId: string } }>("/api/modules/group-operations/meeting-feedback/eligibility", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: uuid } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    if (!(await existsInLocation("church_groups", request.query.groupId, departmentId))) return reply.code(404).send({ error: "Group not found in this location." });
+    return { canSubmitFeedback: Boolean(await activeGroupContact(request, request.query.groupId, departmentId)), canManageFeedback: await canManageGroup(request, request.query.groupId, departmentId) };
+  });
+
+  app.get<{ Querystring: { groupId: string; meetingId: string } }>("/api/modules/group-operations/meeting-feedback/attendees", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["groupId", "meetingId"], properties: { groupId: uuid, meetingId: uuid } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    const contactId = await activeGroupContact(request, request.query.groupId, departmentId);
+    const canViewResponses = await canManageGroup(request, request.query.groupId, departmentId);
+    if (!contactId && !canViewResponses) return reply.code(403).send({ error: "An active group membership and linked location account are required." });
+    const meeting = await pool!.query<{ date: string; feedbackOpen: boolean }>("SELECT meeting_date::text AS date,(meeting_date<=CURRENT_DATE) AS \"feedbackOpen\" FROM group_meetings WHERE id=$1 AND group_id=$2 AND department_id=$3", [request.query.meetingId, request.query.groupId, departmentId]);
+    if (!meeting.rowCount) return reply.code(404).send({ error: "Meeting not found for this group." });
+    const template = await pool!.query("SELECT id,title,questions,updated_at AS \"updatedAt\" FROM group_meeting_feedback_templates WHERE department_id=$1 AND group_id=$2", [departmentId, request.query.groupId]);
+    if (!template.rowCount) return reply.code(409).send({ error: "This group has no meeting feedback template." });
+    const mine = contactId ? await pool!.query("SELECT answers,updated_at AS \"updatedAt\" FROM group_meeting_feedback_attendee_submissions WHERE department_id=$1 AND group_id=$2 AND meeting_id=$3 AND contact_id=$4", [departmentId, request.query.groupId, request.query.meetingId, contactId]) : { rows: [] };
+    const responses = canViewResponses ? await pool!.query(
+      `SELECT submission.contact_id AS "contactId",person.first_name AS "firstName",person.last_name AS "lastName",
+              submission.answers,submission.updated_at AS "updatedAt"
+         FROM group_meeting_feedback_attendee_submissions submission
+         JOIN contacts person ON person.id=submission.contact_id AND person.department_id=submission.department_id
+        WHERE submission.department_id=$1 AND submission.group_id=$2 AND submission.meeting_id=$3
+        ORDER BY lower(person.last_name),lower(person.first_name),person.id`,
+      [departmentId, request.query.groupId, request.query.meetingId],
+    ) : { rows: [] };
+    return { meetingDate: meeting.rows[0].date, feedbackOpen: meeting.rows[0].feedbackOpen, template: template.rows[0], myResponse: mine.rows[0] ?? null, responses: responses.rows, canViewResponses, canSubmit: Boolean(contactId && meeting.rows[0].feedbackOpen) };
+  });
+
+  app.put<{ Body: { groupId: string; meetingId: string; answers: Record<string, string> } }>("/api/modules/group-operations/meeting-feedback/attendees", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "meetingId", "answers"], properties: { groupId: uuid, meetingId: uuid, answers: { type: "object", maxProperties: 10, additionalProperties: { type: "string", maxLength: 2000 } } } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const client = await pool!.connect();
+    let contactId: string | null = null;
+    let answerCount = 0;
+    try {
+      await client.query("BEGIN");
+      const membership = await client.query<{ contact_id: string }>(
+        `SELECT member.contact_id FROM group_members member
+         JOIN department_memberships account ON account.contact_id=member.contact_id AND account.department_id=$2 AND account.user_id=$3
+         JOIN church_groups group_row ON group_row.id=member.group_id AND group_row.department_id=$2
+         WHERE member.group_id=$1 AND member.status='active' FOR SHARE OF member,account`,
+        [request.body.groupId, departmentId, request.authenticatedUser?.id],
+      );
+      if (!membership.rowCount) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "An active group membership and linked location account are required." }); }
+      contactId = membership.rows[0].contact_id;
+      const meeting = await client.query("SELECT id FROM group_meetings WHERE id=$1 AND group_id=$2 AND department_id=$3 AND meeting_date<=CURRENT_DATE FOR SHARE", [request.body.meetingId, request.body.groupId, departmentId]);
+      if (!meeting.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Meeting not found, or attendee feedback is not open before its date." }); }
+      const template = await client.query<{ questions: Array<{ id: string; prompt: string }> }>("SELECT questions FROM group_meeting_feedback_templates WHERE group_id=$1 AND department_id=$2 FOR SHARE", [request.body.groupId, departmentId]);
+      if (!template.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Create a meeting feedback template before responses can be submitted." }); }
+      const allowedIds = new Set(template.rows[0].questions.map((question) => question.id));
+      if (Object.keys(request.body.answers).some((id) => !allowedIds.has(id))) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "The feedback form changed. Reload it before saving." }); }
+      const answers = Object.fromEntries(Object.entries(request.body.answers).map(([id, value]) => [id, value.trim()]));
+      answerCount = Object.keys(answers).length;
+      const saved = await client.query(
+        `INSERT INTO group_meeting_feedback_attendee_submissions(id,department_id,group_id,meeting_id,contact_id,answers,created_by,updated_by)
+         VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$7)
+         ON CONFLICT(meeting_id,contact_id) DO UPDATE SET answers=EXCLUDED.answers,updated_by=EXCLUDED.updated_by,updated_at=now()
+         WHERE group_meeting_feedback_attendee_submissions.department_id=EXCLUDED.department_id AND group_meeting_feedback_attendee_submissions.group_id=EXCLUDED.group_id
+         RETURNING id`,
+        [randomUUID(), departmentId, request.body.groupId, request.body.meetingId, contactId, JSON.stringify(answers), request.authenticatedUser?.id ?? null],
+      );
+      if (!saved.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The response belongs to another group or location." }); }
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    await recordAudit(departmentId, request.body.groupId, request, "attendee_meeting_feedback_saved", request.body.meetingId, { contactId, answerCount });
+    return { saved: true };
+  });
+
+  app.get<{ Querystring: { groupId: string } }>("/api/modules/group-operations/meeting-feedback/export", {
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["groupId"], properties: { groupId: uuid } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    if (!(await canManageGroup(request, request.query.groupId, departmentId))) return reply.code(403).send({ error: "Group leader access is required to export meeting feedback." });
+    const template = await pool!.query<{ title: string; questions: Array<{ id: string; prompt: string }> }>(
+      "SELECT title,questions FROM group_meeting_feedback_templates WHERE department_id=$1 AND group_id=$2",
+      [departmentId, request.query.groupId],
+    );
+    if (!template.rowCount) return reply.code(404).send({ error: "This group has no meeting feedback template." });
+    const responses = await pool!.query<{ date: string; meeting_title: string | null; response_type: string; respondent: string | null; answers: Record<string, string>; updated_by: string; updated_at: Date | string }>(
+      `WITH feedback_rows AS (
+         SELECT meeting_id,answers,'Leader'::text AS response_type,NULL::text AS respondent,
+                COALESCE(actor.display_name,'Former user') AS updated_by,feedback.updated_at
+           FROM group_meeting_feedback_responses feedback LEFT JOIN app_users actor ON actor.id=feedback.updated_by
+          WHERE feedback.department_id=$1 AND feedback.group_id=$2
+         UNION ALL
+         SELECT submission.meeting_id,submission.answers,'Attendee'::text AS response_type,
+                concat_ws(' ',person.first_name,person.last_name) AS respondent,
+                COALESCE(actor.display_name,'Former user') AS updated_by,submission.updated_at
+           FROM group_meeting_feedback_attendee_submissions submission
+           JOIN contacts person ON person.id=submission.contact_id AND person.department_id=submission.department_id
+           LEFT JOIN app_users actor ON actor.id=submission.updated_by
+          WHERE submission.department_id=$1 AND submission.group_id=$2
+       )
+       SELECT meeting.meeting_date::text AS date,meeting.title AS meeting_title,feedback.response_type,feedback.respondent,feedback.answers,
+              feedback.updated_by,feedback.updated_at
+         FROM feedback_rows feedback
+         JOIN group_meetings meeting ON meeting.id=feedback.meeting_id AND meeting.department_id=$1 AND meeting.group_id=$2
+        ORDER BY meeting.meeting_date,meeting.created_at,meeting.id,feedback.response_type,feedback.respondent`,
+      [departmentId, request.query.groupId],
+    );
+    const questions = template.rows[0].questions;
+    const rows = [
+      ["Meeting date", "Meeting", "Feedback form", "Response type", "Respondent", "Updated by", "Updated at", ...questions.map((question) => question.prompt)],
+      ...responses.rows.map((response) => [response.date, response.meeting_title, template.rows[0].title, response.response_type, response.respondent, response.updated_by, new Date(response.updated_at).toISOString(), ...questions.map((question) => response.answers?.[question.id] ?? "")]),
+    ];
+    const csv = `\uFEFF${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}`;
+    return reply.type("text/csv; charset=utf-8").header("Content-Disposition", `attachment; filename="group-meeting-feedback-${request.query.groupId}.csv"`).send(csv);
   });
 
   app.put<{ Body: { groupId: string; title: string; questions: string[] } }>("/api/modules/group-operations/meeting-feedback/template", {

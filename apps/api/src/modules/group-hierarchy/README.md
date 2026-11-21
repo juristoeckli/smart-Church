@@ -2,6 +2,8 @@
 
 Group administration manages group trees, membership roles, custom membership values, invitations, and change history for the active location.
 
+Group leaders and managers can review the latest 200 invitations for a group, including recipient, creation/expiry dates and pending, accepted, revoked or expired status. They can revoke pending invitations. Invitation tokens are never included in the history response; a newly created token is returned once so the creator can share the link. Invitation emails are not sent automatically.
+
 ## Group leadership roster
 
 Users with `groups_manage` or the Group Administration `manage` grant can load a roster of active group members whose roles identify them as leader, co-leader, group owner, or group manager. The roster shows each person's group, parent group, role, membership start date, and group description, and can be exported as CSV. Email is shown only to site admins and users with private People access. The API caps the roster at 5,000 rows and scopes all group and contact records to the active location.
