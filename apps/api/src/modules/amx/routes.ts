@@ -4,8 +4,7 @@ import type { FastifyInstance } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { amxAudioActions, amxAudioLevels, amxAudioPages, amxSystemActions } from "./audio-mappings.js";
 import { decryptTelnetPassword, encryptTelnetPassword } from "./credentials.js";
-import { readIcspDeviceLevels } from "./icsp.js";
-import { assertNetLinxDevicePresent, NetLinxTerminal, readTelnetDeviceChannels, sendTelnetChannel, type TelnetSettings } from "./telnet.js";
+import { assertNetLinxDevicePresent, NetLinxTerminal, readTelnetDeviceChannels, readTelnetDeviceStatus, sendTelnetChannel, type TelnetSettings } from "./telnet.js";
 
 type AmxAction = { id: string; name: string; command: string };
 type AmxSettings = { host: string; port: number; username: string; password: string; clearPassword: boolean; actions: AmxAction[] };
@@ -124,21 +123,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get<{ Querystring: { page?: string } }>("/api/modules/amx/levels", async (request, reply) => {
     const departmentId = await requireAmxDepartment(request, reply);
     if (!departmentId) return reply;
+    const settings = await getTelnetSettings(departmentId);
+    if (!settings?.host) return reply.code(409).send({ error: "Enter the NetLinx controller address under AMX module settings first." });
     if (request.query.page === "PWR_COUNT") {
-      const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
-      const host = result.rows[0]?.host;
-      if (!host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
       try {
-        const values = await readIcspDeviceLevels(host, { device: 10001, port: 1, system: 1 }, [1]);
-        return { page: "PWR_COUNT", values, updatedAt: new Date().toISOString() };
+        const status = await readTelnetDeviceStatus(settings, { device: 10001, port: 1, system: 1 });
+        if (status.levels[1] === undefined) throw new Error("NetLinx Telnet status did not include activation progress level 1.");
+        return { page: "PWR_COUNT", values: { 1: status.levels[1] }, updatedAt: new Date().toISOString() };
       } catch (error) {
         return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read AMX activation progress." });
       }
     }
     const page = amxAudioPages.find((item) => item.id === request.query.page);
     if (!page) return reply.code(400).send({ error: "Choose a known AMX audio page to read its levels." });
-    const settings = await getTelnetSettings(departmentId);
-    if (!settings?.host) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
     const pageLevels = amxAudioLevels.filter((item) => item.page === page.id);
     const ports = [...new Set(pageLevels.map((item) => item.port))];
     if (!pageLevels.length || !ports.length) return { page: page.id, values: {} };
@@ -146,8 +143,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const values: Record<string, number> = {};
       for (const port of ports) {
         const requested = [...new Set(pageLevels.filter((item) => item.port === port).map((item) => item.level))];
-        const levels = await readIcspDeviceLevels(settings.host, { device: 10001, port, system: 1 }, requested);
-        Object.assign(values, levels);
+        const status = await readTelnetDeviceStatus(settings, { device: 10001, port, system: 1 });
+        for (const level of requested) {
+          const value = status.levels[level];
+          if (value === undefined) throw new Error(`NetLinx Telnet status did not include level ${level} on port ${port}.`);
+          values[level] = value;
+        }
       }
       return { page: page.id, values, updatedAt: new Date().toISOString() };
     } catch (error) {
