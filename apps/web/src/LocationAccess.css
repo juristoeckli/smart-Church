@@ -29,4 +29,10 @@
 .location-access-history-list summary{cursor:pointer}
 .location-access-history-states{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:7px}
 .location-access-history-states ul{margin:0;padding-inline-start:18px}
+.location-access-preview{display:grid;gap:10px}
+.location-access-preview>label{display:grid;gap:5px;justify-self:start}
+.location-access-history-scroll{overflow:auto}
+.location-access-history-table{width:100%;border-collapse:collapse;font-size:inherit}
+.location-access-history-table caption{text-align:start;font-weight:700;padding:6px 0}
+.location-access-history-table th,.location-access-history-table td{padding:7px;text-align:start;border-bottom:1px solid var(--line)}
 @media(max-width:760px){.location-access-embedded .location-access-layout{grid-template-columns:1fr;max-height:none;overflow:visible}.location-access-embedded .location-access-list,.location-access-embedded .location-access-form{max-height:none}}

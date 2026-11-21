@@ -58,6 +58,7 @@ These routes include server-wide administration. Most writes require a Server Ad
 | `GET`, `PUT` | `/api/department` | Read/update the selected location profile. |
 | `GET`, `PUT`, `DELETE` | `/api/location-access`, `/api/location-access/:userId` | List, grant, edit, or revoke a user's membership in the selected location. |
 | `GET` | `/api/location-access/history` | Site administrators can review the latest 100 committed membership changes at the selected location. Optional `q` matches account or actor name, and `action` can be `granted`, `changed`, or `revoked`. |
+| `GET` | `/api/location-access/:userId/preview` | Site administrator browser sessions can review a selected location member's account status, direct and inherited location permissions, and configured module grants. The preview stays in the administrator's session and covers the currently selected location. |
 | `GET` | `/api/people-options` | People choices used by account/access forms; fields are permission-filtered. |
 | `GET`, `PUT` | `/api/branding` | Read or update installation branding. |
 

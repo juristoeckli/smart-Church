@@ -3,6 +3,7 @@ import { Check, Plus, Trash2, UsersRound, X } from "lucide-react";
 import type { DepartmentProfile, LocationPermission } from "@smart-church/contracts";
 import { ApiKeySettings } from "./ApiKeySettings";
 import { LocationAccessHistory } from "./LocationAccessHistory";
+import { LocationAccessPreview } from "./LocationAccessPreview";
 import { ModuleTranslationHost, registeredModules, translateModuleText } from "./module-registry";
 import { mergeModuleTranslationOverrides } from "./modules/ui-translation-overrides";
 import { translateModuleMessage, translationsForModule } from "./modules/translations";
@@ -33,7 +34,7 @@ const locationRights: Array<{ value: LocationPermission; label: string; descript
   { value: "resources_manage", label: "Manage resources", description: "Manage rooms, equipment and booking approvals." },
 ];
 export function LocationAccess({ department, csrfToken, onClose, embedded = false }: { department: DepartmentProfile; csrfToken: string; onClose: () => void; embedded?: boolean }) {
-  const [section, setSection] = useState<"members" | "history">("members");
+  const [section, setSection] = useState<"members" | "history" | "preview">("members");
   const [members, setMembers] = useState<LocationMember[]>([]);
   const [availableUsers, setAvailableUsers] = useState<LocationAccessData["availableUsers"]>([]);
   const [currentUserId, setCurrentUserId] = useState("");
@@ -138,9 +139,12 @@ export function LocationAccess({ department, csrfToken, onClose, embedded = fals
       <div className="modal-heading"><div><span className="eyebrow">LOCATION MANAGEMENT</span><h2 id="location-access-title">People &amp; access</h2><p>Manage who can use {department.location} and what each person can do.</p></div><button className="icon-button" type="button" aria-label="Close dialog" onClick={onClose}><X size={19} /></button></div>
       <nav className="module-tabs" aria-label="Location access views">
         <button type="button" aria-current={section === "members" ? "page" : undefined} onClick={() => setSection("members")}>Members</button>
+        <button type="button" aria-current={section === "preview" ? "page" : undefined} onClick={() => setSection("preview")}>Effective access</button>
         <button type="button" aria-current={section === "history" ? "page" : undefined} onClick={() => setSection("history")}>Access history</button>
       </nav>
-      {section === "history" ? <LocationAccessHistory key={department.id} departmentId={department.id} permissionLabels={Object.fromEntries(locationRights.map(({ value, label }) => [value, label]))} /> : <div className="location-access-layout">
+      {section === "history" && <LocationAccessHistory key={department.id} departmentId={department.id} permissionLabels={Object.fromEntries(locationRights.map(({ value, label }) => [value, label]))} />}
+      {section === "preview" && <LocationAccessPreview key={department.id} department={department} members={members} userId={selectedId} selectUser={setSelectedId} permissionLabels={Object.fromEntries(locationRights.map(({ value, label }) => [value, label]))} />}
+      {section === "members" && <div className="location-access-layout">
         <aside className="location-access-list" aria-label={`${department.location} members`}>
           {availableUsers.length > 0 && <div className="location-access-add"><label htmlFor="location-access-add">Add an existing account</label><select id="location-access-add" value={addUserId} onChange={(event) => setAddUserId(event.target.value)}><option value="">Choose a user</option>{availableUsers.map((user) => <option value={user.id} key={user.id}>{user.displayName} (@{user.username})</option>)}</select><button className="button button-secondary" type="button" disabled={!addUserId || saving} onClick={() => void addUser()}><Plus size={15} />Add access</button></div>}
           {loading ? <p className="user-access-empty" role="status">Loading people…</p> : members.length === 0 ? <p className="user-access-empty">No people have access to this location.</p> : members.map((member) => <button className={`user-access-item ${member.id === selectedId ? "user-access-item-active" : ""}`} type="button" key={member.id} onClick={() => { setSelectedId(member.id); setError(""); setNotice(""); }}><strong>{member.displayName}{member.id === currentUserId ? " (you)" : ""}</strong>{!member.isServiceUser && <small>@{member.username}</small>}<span>{member.isServiceUser ? "Service user" : member.role === "site_admin" ? "Site administrator" : "Member"}</span></button>)}

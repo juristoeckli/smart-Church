@@ -16,6 +16,7 @@ import { getRegisteredServerModuleCatalog, getRegisteredServerModuleIds, getRequ
 import { registerCoreReplicationAdapter } from "./core-replication.js";
 import { RealtimeHub, websocketRequestProtocol } from "./realtime.js";
 import { registerAccountSetupInvitations } from "./account-setup-invitations.js";
+import { canReadPrivateContactDetails, hasLocationPermission, readLocationGrant, registerLocationAccessPreview } from "./location-grants.js";
 import { followRuntimeLogFile, recentRuntimeLogs, recordRuntimeLog, registerRuntimeWorker, restartRuntimeWorker, runtimeWorkerDiagnostics, type RuntimeLogLevel } from "./runtime-diagnostics.js";
 import { createEmailConnector } from "./modules/email-worker/service.js";
 import { allServerPermissions, hasServerPermission as userHasServerPermission, serverPermissionsForUser } from "./server-permissions.js";
@@ -263,25 +264,19 @@ async function activeDepartmentId(request: FastifyRequest, reply: FastifyReply, 
     reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
     return null;
   }
-  const result = await pool.query(
-    `SELECT m.role, m.permissions, m.module_permissions
-       FROM department_memberships m
-       JOIN departments d ON d.id = m.department_id
-      WHERE m.department_id = $1 AND m.user_id = $2`,
-    [selectedId, request.authenticatedUser?.id],
-  );
-  if (!result.rowCount) {
+  const grant = await readLocationGrant(pool, selectedId, request.authenticatedUser?.id);
+  if (!grant) {
     reply.code(403).send({ error: "You do not have access to this location." });
     return null;
   }
-  request.activeDepartmentRole = result.rows[0].role;
-  request.activeDepartmentPermissions = result.rows[0].permissions ?? [];
-  request.activeDepartmentModulePermissions = result.rows[0].module_permissions ?? {};
+  request.activeDepartmentRole = grant.role;
+  request.activeDepartmentPermissions = grant.permissions ?? [];
+  request.activeDepartmentModulePermissions = grant.module_permissions ?? {};
   if (requireSiteAdmin && request.activeDepartmentRole !== "site_admin") {
     reply.code(403).send({ error: "Site administrator access is required for this action." });
     return null;
   }
-  if (requiredPermission && request.activeDepartmentRole !== "site_admin" && !(request.activeDepartmentPermissions ?? []).includes(requiredPermission)) {
+  if (requiredPermission && !hasLocationPermission(grant.role, grant.permissions, requiredPermission)) {
     reply.code(403).send({ error: "You do not have permission to manage this area." });
     return null;
   }
@@ -1472,6 +1467,7 @@ const locationAccessBodySchema = {
 };
 
 registerLocationAccessHistory(app, () => databaseReady ? pool : null, (request, reply) => activeDepartmentId(request, reply, true));
+registerLocationAccessPreview(app, () => databaseReady ? pool : null, (request, reply) => activeDepartmentId(request, reply, true));
 
 app.get("/api/location-access", async (request, reply) => {
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The account database is unavailable." });
@@ -2504,7 +2500,7 @@ app.get("/api/contacts", async (request, reply): Promise<Contact[] | { error: st
       ORDER BY created_at DESC, last_name, first_name`,
     [selectedDepartmentId],
   );
-  const canViewPrivatePeople = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("people_view_private") || (request.activeDepartmentPermissions ?? []).includes("people_manage");
+  const canViewPrivatePeople = canReadPrivateContactDetails(request.activeDepartmentRole, request.activeDepartmentPermissions);
   const relationshipsByContact = new Map<string, ContactRelationship[]>();
   if (canViewPrivatePeople) {
     const relationships = await pool.query<{
