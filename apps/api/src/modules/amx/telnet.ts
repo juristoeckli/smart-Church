@@ -25,13 +25,19 @@ export class NetLinxTerminal {
   }
 
   async connect(settings: TelnetSettings) {
+    const host = typeof settings?.host === "string" ? settings.host.trim() : "";
+    const configuredPort = Number(settings?.port ?? 23);
+    if (!host) throw new Error("Enter the NetLinx master IP address or hostname in AMX settings.");
+    if (!Number.isInteger(configuredPort) || configuredPort < 1 || configuredPort > 65535) {
+      throw new Error("The AMX Telnet port must be a number between 1 and 65535.");
+    }
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => { this.socket.destroy(); reject(new Error("Connecting to the NetLinx Telnet terminal timed out.")); }, 5000);
       const onError = (error: Error) => { clearTimeout(timer); this.socket.off("connect", onConnect); reject(new Error(`Could not reach the NetLinx Telnet terminal: ${error.message}`)); };
       const onConnect = () => { clearTimeout(timer); this.socket.off("error", onError); resolve(); };
       this.socket.once("error", onError);
       this.socket.once("connect", onConnect);
-      this.socket.connect(settings.port, settings.host);
+      this.socket.connect({ port: configuredPort, host });
     });
 
     const prompt = /(?:login\s*:|password\s*:|(?:^|\n)\s*>\s*$)/i;
