@@ -20,7 +20,7 @@ type NotificationRow = {
   read_at: Date | string | null;
 };
 
-type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; title: string; body: string; template_subject: string | null; template_body: string | null; attempt_count: number };
+type PendingEmail = { notification_id: string; department_id: string; recipient_user_id: string; recipient_email: string; current_email: string | null; recipient_language: UserLanguage; email_enabled: boolean; notification_email_enabled: boolean; email_suppressed: boolean; personal_announcement: boolean; personal_recipient_current: boolean; title: string; body: string; template_subject: string | null; template_body: string | null; attempt_count: number };
 type ResendWebhookPayload = { type?: string; data?: { email_id?: string; to?: string[]; [key: string]: unknown } };
 type StoredResendEvent = { provider_event_id: string; event_type: string; provider_email_id: string };
 type StoredWebhookEvent = { provider_event_id: string; event_type: string; provider_email_id: string; received_at: Date | string; processed_at: Date | string | null };
@@ -60,13 +60,14 @@ const announcementSchema = {
     properties: {
       title: { type: "string", minLength: 1, maxLength: 120 },
       body: { type: "string", minLength: 1, maxLength: 2000 },
-      audience: { type: "string", enum: ["location", "groups"] },
+      audience: { type: "string", enum: ["location", "groups", "people"] },
       groupIds: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },
+      personIds: { type: "array", maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },
     },
   },
 };
 
-type Announcement = { title: string; body: string; audience: AnnouncementAudience; groupIds: string[] };
+type Announcement = { title: string; body: string; audience: AnnouncementAudience; groupIds: string[]; personIds?: string[] };
 
 const configurableEmailKinds = ["announcement", "event_reminder", "service_request", "follow_up_assignment", "follow_up_reminder", "community_feed"] as const;
 const emailTemplatePlaceholders = new Set(["title", "body", "open_url"]);
@@ -322,10 +323,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   COALESCE(preference.email_notifications_enabled,false) AS email_enabled,
                   notification.email_enabled AS notification_email_enabled,
                   (suppressed.email IS NOT NULL) AS email_suppressed,
+                  COALESCE(batch.audience='people',false) AS personal_announcement,
+                  (account.is_enabled AND NOT account.is_service_user AND trim(account.email)=trim(delivery.recipient_email) AND EXISTS (
+                    SELECT 1 FROM department_memberships m JOIN contacts c ON c.id=m.contact_id AND c.department_id=m.department_id
+                     WHERE m.department_id=notification.department_id AND m.user_id=notification.recipient_user_id
+                       AND c.id=notification.related_contact_id AND c.archived_at IS NULL
+                  )) AS personal_recipient_current,
                    notification.title,notification.body,template.subject_template,template.body_template,delivery.attempt_count
              FROM module_notification_email_deliveries delivery
              JOIN module_notifications notification ON notification.id=delivery.notification_id
              JOIN app_users account ON account.id=notification.recipient_user_id
+             LEFT JOIN module_notification_announcement_batches batch ON batch.id=notification.announcement_batch_id AND batch.department_id=notification.department_id
              LEFT JOIN module_notification_preferences preference ON preference.department_id=notification.department_id AND preference.user_id=notification.recipient_user_id
              LEFT JOIN module_notification_email_suppressions suppressed ON suppressed.email=lower(trim(account.email))
               LEFT JOIN module_notification_email_templates template ON template.department_id=notification.department_id AND template.kind=notification.kind
@@ -335,7 +343,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         if (!result.rowCount) { await client.query("COMMIT"); break; }
         const delivery = result.rows[0];
-        if (!delivery.email_enabled || !delivery.notification_email_enabled || !delivery.current_email || delivery.email_suppressed) {
+        if (delivery.personal_announcement && !await context.lockDepartmentForWrite(client, delivery.department_id)) {
+          await client.query("ROLLBACK");
+          break;
+        }
+        if (!delivery.email_enabled || !delivery.notification_email_enabled || !delivery.current_email || delivery.email_suppressed
+            || (delivery.personal_announcement && !delivery.personal_recipient_current)) {
           await client.query("UPDATE module_notification_email_deliveries SET status='skipped',last_error=CASE WHEN $2 THEN 'Address suppressed after a bounce or complaint.' ELSE NULL END,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.email_suppressed]);
           await client.query("COMMIT");
           continue;
@@ -343,10 +356,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const attempts = delivery.attempt_count + 1;
         try {
           const emailContent = renderNotificationEmail(delivery.title, delivery.body, process.env.SMART_CHURCH_WEB_ORIGIN, delivery.recipient_language, { subjectTemplate: delivery.template_subject, bodyTemplate: delivery.template_body });
-          const sent = await context.email.send({
-            recipientUserId: delivery.recipient_user_id,
-            ...emailContent,
-          }, delivery.department_id);
+          const recipient = delivery.personal_announcement ? { recipientEmail: delivery.recipient_email.trim() } : { recipientUserId: delivery.recipient_user_id };
+          const sent = await context.email.send({ ...recipient, ...emailContent }, delivery.department_id);
           await client.query("UPDATE module_notification_email_deliveries SET recipient_email=$2,provider_email_id=$3,status='sent',attempt_count=$4,sent_at=now(),last_error=NULL,updated_at=now() WHERE notification_id=$1", [delivery.notification_id, delivery.current_email, sent.messageId, attempts]);
         } catch (error) {
           const message = error instanceof Error ? error.message.slice(0, 500) : "Email delivery failed.";
@@ -807,7 +818,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         reply.code(400).send({ error: "Enter a title and message." });
         return null;
       }
-      const groupIds = audience === "groups" ? request.body.groupIds : [];
+      const groupIds = audience === "groups" ? [...new Set(request.body.groupIds.map((id) => id.toLowerCase()))] : [];
+      const personIds = audience === "people" ? [...new Set((request.body.personIds ?? []).map((id) => id.toLowerCase()))] : [];
       if (audience === "groups") {
         if (!groupIds.length) {
           reply.code(400).send({ error: "Select at least one group." });
@@ -819,15 +831,53 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return null;
         }
       }
-      return { title, body, audience, departmentId, groupIds };
+      if (audience === "people") {
+        if (!personIds.length) {
+          reply.code(400).send({ error: "Select at least one person." });
+          return null;
+        }
+        const people = await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[]) AND archived_at IS NULL",
+          [departmentId, personIds]);
+        if (people.rowCount !== personIds.length) {
+          reply.code(400).send({ error: "One or more selected people are unavailable in this location." });
+          return null;
+        }
+      }
+      return { title, body, audience, departmentId, groupIds, personIds };
     }
+
+    routes.get<{ Querystring: { q: string } }>("/api/modules/notifications/announcements/people", {
+      schema: { querystring: { type: "object", required: ["q"], additionalProperties: false, properties: {
+        q: { type: "string", minLength: 2, maxLength: 80 },
+      } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      if (request.activeDepartmentRole !== "site_admin" || request.headers.authorization) {
+        return reply.code(403).send({ error: "A site administrator browser session is required to choose recipients." });
+      }
+      const search = request.query.q.trim();
+      if (search.length < 2) return reply.code(400).send({ error: "Enter at least two characters to search." });
+      const { rows } = await pool!.query(
+        `SELECT person.id, concat_ws(' ', person.first_name, person.last_name) AS "displayName"
+           FROM contacts person WHERE person.department_id=$1 AND person.archived_at IS NULL
+            AND strpos(lower(concat_ws(' ', person.first_name, person.last_name)), lower($2)) > 0
+            AND EXISTS (SELECT 1 FROM department_memberships admin JOIN app_users account ON account.id=admin.user_id
+                         WHERE admin.department_id=person.department_id AND admin.user_id=$3 AND admin.role='site_admin'
+                           AND account.is_enabled AND NOT account.is_service_user
+                           AND NOT (account.must_change_password AND account.can_change_password))
+          ORDER BY lower(person.last_name), lower(person.first_name), person.id LIMIT 31`,
+        [departmentId, search, request.authenticatedUser!.id],
+      );
+      return reply.header("Cache-Control", "private, no-store").send({ people: rows.slice(0, 30), hasMore: rows.length > 30 });
+    });
 
     routes.post<{ Body: Announcement }>("/api/modules/notifications/announcements/preview", { schema: announcementSchema }, async (request, reply) => {
       const announcement = await resolveAnnouncement(request, reply);
       if (!announcement) return reply;
-      const { title, body, departmentId, audience, groupIds } = announcement;
+      const { title, body, departmentId, audience, groupIds, personIds } = announcement;
       const [counts, templates, emailConfigured] = await Promise.all([
-        getAnnouncementAudienceCounts(pool!, departmentId, audience, groupIds),
+        getAnnouncementAudienceCounts(pool!, departmentId, audience, groupIds, personIds),
         pool!.query<NotificationEmailTemplate>(
           `SELECT subject_template AS "subjectTemplate", body_template AS "bodyTemplate"
              FROM module_notification_email_templates WHERE department_id=$1 AND kind='announcement'`, [departmentId],
@@ -843,7 +893,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
     routes.get<{ Querystring: { audience?: AnnouncementAudience; page?: number } }>("/api/modules/notifications/announcements/history", {
       schema: { querystring: { type: "object", additionalProperties: false, properties: {
-        audience: { type: "string", enum: ["location", "groups"] }, page: { type: "integer", minimum: 1, maximum: 2000 },
+        audience: { type: "string", enum: ["location", "groups", "people"] }, page: { type: "integer", minimum: 1, maximum: 2000 },
       } } },
     }, async (request, reply) => {
       const departmentId = await department(request, reply);
@@ -885,38 +935,71 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.post<{ Body: Announcement }>("/api/modules/notifications/announcements", { schema: announcementSchema }, async (request, reply) => {
       const announcement = await resolveAnnouncement(request, reply);
       if (!announcement) return reply;
-      const { title, body, departmentId, audience, groupIds } = announcement;
-      const recipients = await getAnnouncementRecipientIds(pool!, departmentId, audience, groupIds);
+      const { title, body, departmentId, audience, groupIds, personIds } = announcement;
+      const personal = audience === "people";
+      if (personal && !await context.email.isConfigured(departmentId)) {
+        return reply.code(503).send({ error: "Email delivery is not configured for this location." });
+      }
       const client = await pool!.connect();
       const batchId = randomUUID();
-      const recipientCount = recipients.length;
+      let recipientCount = 0;
+      let emailQueuedCount = 0;
       try {
         await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        if (personal) {
+          const sender = await client.query(
+            `SELECT account.id FROM app_users account JOIN department_memberships membership ON membership.user_id=account.id
+              WHERE account.id=$1 AND membership.department_id=$2 AND membership.role='site_admin'
+                AND account.is_enabled AND NOT account.is_service_user AND NOT (account.must_change_password AND account.can_change_password)
+              FOR SHARE OF account,membership`,
+            [request.authenticatedUser!.id, departmentId],
+          );
+          if (!sender.rowCount || request.headers.authorization) {
+            await client.query("ROLLBACK");
+            return reply.code(403).send({ error: "A site administrator browser session is required to send this email." });
+          }
+        }
+        const recipients = await getAnnouncementRecipientIds(client, departmentId, audience, groupIds, personIds);
+        recipientCount = recipients.length;
+        if (personal && !recipientCount) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "None of the selected people can currently receive this email." });
+        }
         await client.query(
           `INSERT INTO module_notification_announcement_batches (id, department_id, sender_name, title, audience, group_names, recipient_count)
            VALUES ($1, $2, $3, $4, $5, ARRAY(SELECT name FROM church_groups WHERE department_id=$2 AND id=ANY($6::uuid[]) ORDER BY lower(name), id), $7)`,
           [batchId, departmentId, request.authenticatedUser!.displayName, title, audience, groupIds, recipientCount],
         );
         await client.query(
-          `INSERT INTO module_notifications (id, department_id, recipient_user_id, sender_user_id, kind, title, body, announcement_batch_id)
+          `INSERT INTO module_notifications (id, department_id, recipient_user_id, sender_user_id, kind, title, body, announcement_batch_id, in_app_enabled, related_contact_id)
            SELECT gen_random_uuid(), $1, recipient, $2, 'announcement', $3, $4, $5
-             FROM unnest($6::uuid[]) AS recipient`,
-          [departmentId, request.authenticatedUser!.id, title, body, batchId, recipients.map((recipient) => recipient.user_id)],
+                  , NOT $8::boolean, CASE WHEN $8::boolean THEN person ELSE NULL END
+             FROM unnest($6::uuid[], $7::uuid[]) AS selected(recipient, person)`,
+          [departmentId, request.authenticatedUser!.id, title, body, batchId, recipients.map((recipient) => recipient.user_id), recipients.map((recipient) => recipient.contact_id), personal],
         );
-        await client.query(
+        const { rows: [batch] } = await client.query<{ email_queued_count: number }>(
           `UPDATE module_notification_announcement_batches batch SET email_queued_count = (
              SELECT count(*)::integer FROM module_notifications n
              JOIN module_notification_email_deliveries d ON d.notification_id=n.id
              WHERE n.department_id=batch.department_id AND n.announcement_batch_id=batch.id
-           ) WHERE batch.id=$1 AND batch.department_id=$2`,
+           ) WHERE batch.id=$1 AND batch.department_id=$2 RETURNING email_queued_count`,
           [batchId, departmentId],
         );
+        emailQueuedCount = batch.email_queued_count;
+        if (personal && !emailQueuedCount) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "None of the selected people can currently receive this email." });
+        }
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
         throw error;
       } finally { client.release(); }
-      return reply.code(201).send({ sent: true, recipientCount, audience, batchId });
+      return reply.code(201).send({ sent: true, recipientCount, emailQueuedCount, audience, batchId });
     });
   });
 }

@@ -7,7 +7,7 @@ const deliveryStatuses = [
   ["suppressed", "Suppressed"], ["failed", "Failed"], ["skipped", "Skipped"],
 ] as const;
 
-type Audience = "" | "location" | "groups";
+type Audience = "" | "location" | "groups" | "people";
 type Batch = {
   id: string;
   sentAt: string;
@@ -52,7 +52,7 @@ export function AnnouncementHistory({ departmentId, refresh }: { departmentId: s
     <div className="announcement-history">
       <div className="module-toolbar">
         <label>Audience<select value={audience} onChange={(event) => { setPage(1); setAudience(event.target.value as Audience); }}>
-          <option value="">All audiences</option><option value="location">Entire location</option><option value="groups">Selected groups</option>
+          <option value="">All audiences</option><option value="location">Entire location</option><option value="groups">Selected groups</option><option value="people">Selected people · email</option>
         </select></label>
         <button className="button button-secondary" type="button" onClick={() => setReload((value) => value + 1)}>Refresh history</button>
       </div>
@@ -65,9 +65,9 @@ export function AnnouncementHistory({ departmentId, refresh }: { departmentId: s
           return <li className="announcement-preview" key={batch.id}>
             <h3>{batch.title}</h3>
             <p>{formatUserDate(batch.sentAt, true)} · {batch.senderName}</p>
-            <p>{batch.audience === "location" ? "Entire location" : batch.groupNames.join(", ") || "Selected groups"}</p>
+            <p>{batch.audience === "location" ? "Entire location" : batch.audience === "people" ? "Selected people · email" : batch.groupNames.join(", ") || "Selected groups"}</p>
             <dl>
-              <div><dt>In-app recipients</dt><dd>{batch.recipientCount}</dd></div>
+              {batch.audience !== "people" && <div><dt>In-app recipients</dt><dd>{batch.recipientCount}</dd></div>}
               <div><dt>Emails originally queued</dt><dd>{batch.emailQueuedCount}</dd></div>
               {deliveryStatuses.map(([status, label]) => batch.emailStatuses[status] > 0
                 ? <div key={status}><dt>{label}</dt><dd>{batch.emailStatuses[status]}</dd></div> : null)}

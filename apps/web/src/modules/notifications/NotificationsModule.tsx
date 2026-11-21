@@ -4,6 +4,7 @@ import { moduleTranslation, type ModuleContext } from "../../module-registry";
 import type { ChurchGroup } from "@smart-church/contracts";
 import { formatUserDate } from "../../date-format";
 import { AnnouncementHistory } from "./AnnouncementHistory";
+import { AnnouncementPeoplePicker, type AnnouncementPerson } from "./AnnouncementPeoplePicker";
 import { translationsForModule } from "../translations";
 import { mergeModuleTranslationOverrides } from "../ui-translation-overrides";
 import "./notifications.css";
@@ -43,7 +44,7 @@ type AnnouncementPreview = {
   emailConfigured: boolean;
   sampleEmail: { subject: string; text: string };
 };
-type NotificationMutationResult = { eventRemindersEnabled?: boolean; serviceRequestsEnabled?: boolean; followUpsEnabled?: boolean; emailEnabled?: boolean; recipientCount?: number };
+type NotificationMutationResult = { eventRemindersEnabled?: boolean; serviceRequestsEnabled?: boolean; followUpsEnabled?: boolean; emailEnabled?: boolean; recipientCount?: number; emailQueuedCount?: number };
 const emailTemplateKinds: Array<{ kind: EmailTemplateKind; label: string }> = [
   { kind: "announcement", label: "Church announcements" },
   { kind: "event_reminder", label: "Event reminders" },
@@ -78,10 +79,23 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   const [announcementHistoryRefresh, setAnnouncementHistoryRefresh] = useState(0);
   const [detailsNotification, setDetailsNotification] = useState<Notification | null>(null);
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
-  const [announcementAudience, setAnnouncementAudience] = useState<"location" | "groups">("location");
+  const [announcementAudience, setAnnouncementAudience] = useState<"location" | "groups" | "people">("location");
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [selectedPeople, setSelectedPeople] = useState<AnnouncementPerson[]>([]);
   const [announcementPreview, setAnnouncementPreview] = useState<{ departmentId: string; result: AnnouncementPreview }>();
   const unreadCount = notifications.filter((notification) => !notification.readAt).length;
+  const peopleAudience = announcementAudience === "people";
+  const currentPreview = announcementPreview?.departmentId === departmentId ? announcementPreview.result : undefined;
+  const hasAudience = announcementAudience === "location" || (peopleAudience ? selectedPeople.length > 0 : selectedGroupIds.length > 0);
+  const canQueuePeopleEmail = Boolean(currentPreview?.emailConfigured && currentPreview.emailEligibleCount > 0);
+
+  useEffect(() => {
+    setSelectedPeople([]);
+    setSelectedGroupIds([]);
+    setAnnouncementPreview(undefined);
+    setAnnouncementAudience("location");
+    setComposeOpen(false);
+  }, [departmentId]);
 
   const load = useCallback(async () => {
     setError("");
@@ -204,6 +218,7 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   async function submitAnnouncement(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const preview = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") !== "send";
+    if (!hasAudience || (!preview && peopleAudience && !canQueuePeopleEmail)) return;
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const title = String(form.get("title") ?? "").trim();
@@ -211,8 +226,8 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     setBusy(true); setError(""); setFeedback("");
     try {
       const groupIds = announcementAudience === "groups" ? selectedGroupIds : [];
-      if (announcementAudience === "groups" && groupIds.length === 0) throw new Error("Select at least one group for this announcement.");
-      const payload = { title, body, audience: announcementAudience, groupIds };
+      const personIds = peopleAudience ? selectedPeople.map((person) => person.id) : [];
+      const payload = { title, body, audience: announcementAudience, groupIds, personIds };
       if (preview) {
         setAnnouncementPreview(undefined);
         const result = await mutate<AnnouncementPreview>("/api/modules/notifications/announcements/preview", "POST", payload);
@@ -222,10 +237,12 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
       const result = await mutate("/api/modules/notifications/announcements", "POST", payload);
       const recipientCount = result.recipientCount ?? 0;
       setAnnouncementHistoryRefresh((value) => value + 1);
-      setFeedback(format(recipientCount === 1 ? "Announcement sent to {count} person." : "Announcement sent to {count} people.", { count: String(recipientCount) }));
+      setFeedback(peopleAudience ? format("Email queued for {count} selected recipients.", { count: String(result.emailQueuedCount ?? 0) })
+        : format(recipientCount === 1 ? "Announcement sent to {count} person." : "Announcement sent to {count} people.", { count: String(recipientCount) }));
       setComposeOpen(false);
       setAnnouncementAudience("location");
       setSelectedGroupIds([]);
+      setSelectedPeople([]);
       setAnnouncementPreview(undefined);
       formElement.reset();
       await load();
@@ -246,27 +263,32 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
 
     {announcementHistoryOpen && canSend && <AnnouncementHistory key={departmentId} departmentId={departmentId} refresh={announcementHistoryRefresh} />}
     {composeOpen && canSend && <section className="directory-card notification-compose-card">
-      <div className="directory-heading"><div><h2>Church announcement</h2><p>Send this message to everyone in the location or to active members of selected groups.</p></div></div>
+      <div className="directory-heading"><div><h2>Church announcement</h2><p>Post to the location or selected groups, or email individual people with linked accounts and email opt-in.</p></div></div>
       <form className="notification-compose-form" onSubmit={submitAnnouncement} onInput={() => setAnnouncementPreview(undefined)} aria-busy={busy}>
-        <fieldset className="announcement-audience" disabled={busy}><legend>Audience</legend><label><input type="radio" name="announcementAudience" checked={announcementAudience === "location"} onChange={() => setAnnouncementAudience("location")} />Everyone in this location</label><label><input type="radio" name="announcementAudience" checked={announcementAudience === "groups"} onChange={() => setAnnouncementAudience("groups")} />Selected groups</label></fieldset>
+        <fieldset className="announcement-audience" disabled={busy}><legend>Audience</legend><label><input type="radio" name="announcementAudience" checked={announcementAudience === "location"} onChange={() => setAnnouncementAudience("location")} />Everyone in this location</label><label><input type="radio" name="announcementAudience" checked={announcementAudience === "groups"} onChange={() => setAnnouncementAudience("groups")} />Selected groups</label><label><input type="radio" name="announcementAudience" checked={peopleAudience} onChange={() => setAnnouncementAudience("people")} />Email selected people</label></fieldset>
         {announcementAudience === "groups" && <fieldset className="announcement-group-picker" disabled={busy}><legend>Select groups</legend>{groups.length ? groups.map((group) => <label key={group.id}><input type="checkbox" checked={selectedGroupIds.includes(group.id)} onChange={(event) => setSelectedGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /><span>{group.name}<small>{group.memberCount} people</small></span></label>) : <p>No groups are available in this location.</p>}</fieldset>}
+        {peopleAudience && <AnnouncementPeoplePicker key={departmentId} departmentId={departmentId} selected={selectedPeople} disabled={busy} onToggle={(person) => {
+          setAnnouncementPreview(undefined);
+          setSelectedPeople((current) => current.some((item) => item.id === person.id) ? current.filter((item) => item.id !== person.id) : current.length < 100 ? [...current, person] : current);
+        }} />}
         <label>Title<input name="title" required maxLength={120} placeholder="A short announcement" disabled={busy} /></label>
         <label>Message<textarea name="body" required maxLength={2000} rows={4} placeholder="Write a message for your church community…" disabled={busy} /></label>
-        {announcementPreview?.departmentId === departmentId && <section className="announcement-preview" aria-label="Announcement preview">
+        {currentPreview && <section className="announcement-preview" aria-label="Announcement preview">
           <h3>Announcement preview</h3>
           <dl>
-            <div><dt>In-app recipients</dt><dd>{announcementPreview.result.accountCount}</dd></div>
-            <div><dt>Eligible for email</dt><dd>{announcementPreview.result.emailEligibleCount}</dd></div>
+            {peopleAudience && <div><dt>People selected</dt><dd>{selectedPeople.length}</dd></div>}
+            <div><dt>{peopleAudience ? "Linked accounts" : "In-app recipients"}</dt><dd>{currentPreview.accountCount}</dd></div>
+            <div><dt>Eligible for email</dt><dd>{currentPreview.emailEligibleCount}</dd></div>
           </dl>
-          {!announcementPreview.result.emailConfigured && <p>Email delivery is currently unavailable for this location.</p>}
+          {!currentPreview.emailConfigured && <p>Email delivery is currently unavailable for this location.</p>}
           <p>These counts reflect current membership and email preferences.</p>
           <h4>Sample email in your language</h4>
-          <strong>{announcementPreview.result.sampleEmail.subject}</strong>
-          <pre>{announcementPreview.result.sampleEmail.text}</pre>
+          <strong>{currentPreview.sampleEmail.subject}</strong>
+          <pre>{currentPreview.sampleEmail.text}</pre>
         </section>}
         <div className="form-actions">
-          <button className="button button-secondary" type="submit" value="preview" disabled={busy || (announcementAudience === "groups" && selectedGroupIds.length === 0)}>Preview announcement</button>
-          <button className="button button-primary" type="submit" value="send" disabled={busy || (announcementAudience === "groups" && selectedGroupIds.length === 0)}><Send size={14} />Send announcement</button>
+          <button className="button button-secondary" type="submit" value="preview" disabled={busy || !hasAudience}>{peopleAudience ? "Preview email" : "Preview announcement"}</button>
+          <button className="button button-primary" type="submit" value="send" disabled={busy || !hasAudience || (peopleAudience && !canQueuePeopleEmail)}><Send size={14} />{peopleAudience ? "Queue email" : "Send announcement"}</button>
         </div>
       </form>
     </section>}
