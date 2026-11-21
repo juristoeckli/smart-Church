@@ -34,6 +34,8 @@ Reports render a limited table preview, with CSV export of the returned rows. Sa
 
 ## Ad hoc designer
 
+Grouped reports can optionally pivot a second field into columns. Each populated cell uses the selected count, sum, or average. The saved definition retains both axes and works in previews, CSV and workbook exports, and scheduled runs. A pivot with more than 24 distinct column values requires a narrower filter or another column field.
+
 The designer exposes fixed People, Groups, Group memberships, Events/attendance, and Finance posting datasets only when their required permissions and schemas are available. When People custom fields are installed and the viewer has private People access, active text, date, boolean, and select fields are added to the People dataset with location-scoped values. Membership custom values are also added as text columns to the Group memberships dataset for users with People access. A user can choose up to twelve allow-listed columns, add up to eight typed filters, sort, group by one field, and apply count/sum/average to an approved numeric field. Source queries are fixed and location-scoped, capped at 5,000 rows; previews and CSV exports are capped at 500 rows. Personal definitions can be saved, edited, and deleted by their owner; the API revalidates the dataset and every selected field/operator on each save and preview. The designer does not accept SQL, table names, joins, custom expressions, or user-supplied query fragments.
 
 ## Not implemented
