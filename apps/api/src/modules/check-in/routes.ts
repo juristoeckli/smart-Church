@@ -87,16 +87,32 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ORDER BY contact.last_name,contact.first_name`, [departmentId, request.params.eventId, canViewPrivatePeople]);
     const attendees = [...roster.rows, ...visitors.rows] as Array<Record<string, unknown> & { id: string }>;
     if (canManage(request) && attendees.length) {
-      const pickupRows = await pool!.query<{ child_contact_id: string; id: string; name: string }>(
-        `SELECT authorization.child_contact_id,authorized.id,concat_ws(' ',authorized.first_name,authorized.last_name) AS name
-           FROM check_in_pickup_authorizations authorization
-           JOIN contacts authorized ON authorized.id=authorization.authorized_contact_id AND authorized.department_id=$1
-          WHERE authorization.department_id=$1 AND authorization.child_contact_id=ANY($2::uuid[])
-          ORDER BY lower(authorized.last_name),lower(authorized.first_name)`, [departmentId, attendees.map((attendee) => attendee.id)],
+      const pickupRows = await pool!.query<{ child_contact_id: string; id: string | null; name: string; released_at: Date | null; legacy: boolean }>(
+        `SELECT pickup.child_contact_id,authorized.id,COALESCE(NULLIF(concat_ws(' ',authorized.first_name,authorized.last_name),''),'Removed contact') AS name,pickup.released_at,false AS legacy
+           FROM check_in_event_pickups pickup
+      LEFT JOIN contacts authorized ON authorized.id=pickup.authorized_contact_id AND authorized.department_id=$1
+          WHERE pickup.department_id=$1 AND pickup.child_contact_id=ANY($2::uuid[])
+            AND pickup.event_id=$3
+            AND (pickup.released_at IS NOT NULL OR (authorized.status='member' AND authorized.archived_at IS NULL))
+         UNION ALL
+         SELECT pickup.child_contact_id,authorized.id,concat_ws(' ',authorized.first_name,authorized.last_name),NULL,true
+           FROM check_in_pickup_authorizations pickup
+           JOIN contacts authorized ON authorized.id=pickup.authorized_contact_id AND authorized.department_id=$1 AND authorized.status='member' AND authorized.archived_at IS NULL
+          WHERE pickup.department_id=$1 AND pickup.child_contact_id=ANY($2::uuid[])
+          ORDER BY name`, [departmentId, attendees.map((attendee) => attendee.id), request.params.eventId],
       );
       const byChild = new Map<string, Array<{ id: string; name: string }>>();
-      for (const row of pickupRows.rows) byChild.set(row.child_contact_id, [...(byChild.get(row.child_contact_id) ?? []), { id: row.id, name: row.name }]);
-      return { attendees: attendees.map((attendee) => ({ ...attendee, authorizedPickups: byChild.get(attendee.id) ?? [] })) };
+      const legacyByChild = new Map<string, string[]>();
+      const releases = new Map<string, { name: string; at: Date }>();
+      for (const row of pickupRows.rows) {
+        if (row.legacy && row.id) {
+          legacyByChild.set(row.child_contact_id, [...(legacyByChild.get(row.child_contact_id) ?? []), row.id]);
+          continue;
+        }
+        if (row.id) byChild.set(row.child_contact_id, [...(byChild.get(row.child_contact_id) ?? []), { id: row.id, name: row.name }]);
+        if (row.released_at) releases.set(row.child_contact_id, { name: row.name, at: row.released_at });
+      }
+      return { attendees: attendees.map((attendee) => ({ ...attendee, authorizedPickups: byChild.get(attendee.id) ?? [], previousPickupIds: legacyByChild.get(attendee.id) ?? [], pickupRelease: releases.get(attendee.id) ?? null })) };
     }
     return { attendees: attendees.map((attendee) => ({ ...attendee, authorizedPickups: [] })) };
   });
@@ -106,23 +122,26 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }, async (request, reply) => {
     const departmentId = await scope(request, reply, true); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
+    if (![request.params.eventId, request.params.contactId].every((id) => UUID_PATTERN.test(id))) return reply.code(400).send({ error: "Invalid meeting or attendee." });
     if (!request.body.guardianConfirmed) return reply.code(400).send({ error: "Confirm that a parent or guardian authorized these pickup contacts." });
+    const selectedGroups = await pool!.query("SELECT id FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='active'", [departmentId, request.body.groupIds]);
+    if (selectedGroups.rowCount !== request.body.groupIds.length) return reply.code(403).send({ error: "One or more selected groups are outside this location." });
     const hierarchyAvailable = Boolean(request.body.includeChildGroups && (await pool!.query<{ present: boolean }>("SELECT to_regclass('public.group_hierarchy_history') IS NOT NULL AS present")).rows[0]?.present);
     const membership = await pool!.query(hierarchyAvailable ? `WITH RECURSIVE selected_groups(id) AS (
         SELECT id FROM church_groups WHERE department_id=$2 AND id=ANY($4::uuid[]) AND status='active'
         UNION SELECT child.id FROM church_groups child JOIN selected_groups parent ON child.parent_group_id=parent.id WHERE child.department_id=$2 AND child.status='active'
-      ) SELECT 1 FROM service_events event JOIN contacts child ON child.id=$3 AND child.department_id=event.department_id
+      ) SELECT 1 FROM service_events event JOIN contacts child ON child.id=$3 AND child.department_id=event.department_id AND child.status='member' AND child.archived_at IS NULL
         JOIN group_members member ON member.contact_id=child.id AND member.status='active' AND member.group_id IN (SELECT id FROM selected_groups)
-       WHERE event.id=$1 AND event.department_id=$2 LIMIT 1` : `SELECT 1 FROM service_events event JOIN contacts child ON child.id=$3 AND child.department_id=event.department_id
+       WHERE event.id=$1 AND event.department_id=$2 LIMIT 1` : `SELECT 1 FROM service_events event JOIN contacts child ON child.id=$3 AND child.department_id=event.department_id AND child.status='member' AND child.archived_at IS NULL
        JOIN group_members member ON member.contact_id=child.id AND member.status='active' AND member.group_id=ANY($4::uuid[])
        JOIN church_groups group_row ON group_row.id=member.group_id AND group_row.department_id=event.department_id AND group_row.status='active'
        WHERE event.id=$1 AND event.department_id=$2 LIMIT 1`,
       [request.params.eventId, departmentId, request.params.contactId, request.body.groupIds],
     );
     if (!membership.rowCount) return reply.code(404).send({ error: "Meeting attendee not found in this location." });
-    if (request.body.authorizedContactIds.includes(request.params.contactId)) return reply.code(400).send({ error: "A child cannot be their own authorized pickup contact." });
+    if (request.body.authorizedContactIds.some((id) => id.toLowerCase() === request.params.contactId.toLowerCase())) return reply.code(400).send({ error: "A child cannot be their own authorized pickup contact." });
     const validContacts = request.body.authorizedContactIds.length ? await pool!.query(
-      "SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, request.body.authorizedContactIds],
+      "SELECT id FROM contacts WHERE department_id=$1 AND status='member' AND archived_at IS NULL AND id=ANY($2::uuid[])", [departmentId, request.body.authorizedContactIds],
     ) : { rowCount: 0, rows: [] };
     if (validContacts.rowCount !== request.body.authorizedContactIds.length) return reply.code(400).send({ error: "One or more pickup contacts are outside this location." });
     if (request.body.authorizedContactIds.length) {
@@ -141,16 +160,84 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
-      await client.query("DELETE FROM check_in_pickup_authorizations WHERE department_id=$1 AND child_contact_id=$2", [departmentId, request.params.contactId]);
+      const attendeeParams = [departmentId, request.params.eventId, request.params.contactId];
+      await client.query("SELECT id FROM service_events WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.eventId]);
+      const released = await client.query("SELECT 1 FROM check_in_event_pickups WHERE department_id=$1 AND event_id=$2 AND child_contact_id=$3 AND released_at IS NOT NULL", attendeeParams);
+      if (released.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Pickup contacts are locked after release." });
+      }
+      await client.query("DELETE FROM check_in_event_pickups WHERE department_id=$1 AND event_id=$2 AND child_contact_id=$3", attendeeParams);
       for (const authorizedId of request.body.authorizedContactIds) await client.query(
-        "INSERT INTO check_in_pickup_authorizations(department_id,child_contact_id,authorized_contact_id,created_by,guardian_confirmed_by,guardian_confirmed_at) VALUES($1,$2,$3,$4,$4,now())",
-        [departmentId, request.params.contactId, authorizedId, request.authenticatedUser?.id ?? null],
+        "INSERT INTO check_in_event_pickups(department_id,event_id,child_contact_id,authorized_contact_id,guardian_confirmed_by) VALUES($1,$2,$3,$4,$5)",
+        [...attendeeParams, authorizedId, request.authenticatedUser?.id ?? null],
       );
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
     realtime.publish("module:check-in:changed", departmentId, { eventId: request.params.eventId, contactId: request.params.contactId, action: "pickup-authorizations" });
     return { saved: true };
+  });
+  app.put<{
+    Params: { eventId: string; contactId: string };
+    Body: { authorizedContactId: string; identityCheck: "photo_id" | "personally_known" };
+  }>("/api/modules/check-in/events/:eventId/attendees/:contactId/release", {
+    schema: {
+      params: { type: "object", additionalProperties: false, required: ["eventId", "contactId"], properties: { eventId: { type: "string", format: "uuid" }, contactId: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["authorizedContactId", "identityCheck"], properties: { authorizedContactId: { type: "string", format: "uuid" }, identityCheck: { type: "string", enum: ["photo_id", "personally_known"] } } },
+    },
+  }, async (request, reply) => {
+    const departmentId = await scope(request, reply, true); if (!departmentId) return reply;
+    if (!validateMutation(request, reply)) return reply;
+    const { eventId, contactId } = request.params;
+    const { authorizedContactId, identityCheck } = request.body;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      const event = await client.query("SELECT id FROM service_events WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, eventId]);
+      if (!event.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Meeting not found in this location." });
+      }
+      const existing = await client.query<{ authorized_contact_id: string | null; released_at: Date }>(
+        "SELECT authorized_contact_id,released_at FROM check_in_event_pickups WHERE department_id=$1 AND event_id=$2 AND child_contact_id=$3 AND released_at IS NOT NULL",
+        [departmentId, eventId, contactId],
+      );
+      if (existing.rows[0]) {
+        await client.query("COMMIT");
+        if (existing.rows[0].authorized_contact_id === authorizedContactId.toLowerCase()) return { releasedAt: existing.rows[0].released_at };
+        return reply.code(409).send({ error: "This attendee has already been released." });
+      }
+      const checkedIn = await client.query(
+        `SELECT 1 FROM event_attendance_checkins attendance
+          JOIN contacts child ON child.id=attendance.contact_id AND child.department_id=$1 AND child.status='member' AND child.archived_at IS NULL
+         WHERE attendance.event_id=$2 AND attendance.contact_id=$3 FOR UPDATE OF attendance`,
+        [departmentId, eventId, contactId],
+      );
+      if (!checkedIn.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The attendee must be checked in before release." });
+      }
+      const released = await client.query<{ released_at: Date }>(
+        `UPDATE check_in_event_pickups pickup SET released_at=now(),released_by=$5,identity_check=$6
+           FROM contacts adult WHERE pickup.department_id=$1 AND pickup.event_id=$2 AND pickup.child_contact_id=$3
+            AND pickup.authorized_contact_id=$4 AND adult.id=pickup.authorized_contact_id AND adult.department_id=$1
+            AND adult.status='member' AND adult.archived_at IS NULL RETURNING pickup.released_at`,
+        [departmentId, eventId, contactId, authorizedContactId, request.authenticatedUser?.id ?? null, identityCheck],
+      );
+      if (!released.rows[0]) {
+        await client.query("ROLLBACK");
+        return reply.code(403).send({ error: "This contact is not authorized for this meeting." });
+      }
+      await client.query("COMMIT");
+      realtime.publish("module:check-in:changed", departmentId, { eventId, contactId, action: "pickup-release" });
+      return { releasedAt: released.rows[0].released_at };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   });
   app.put<{ Params: { eventId: string; contactId: string }; Body: { present: boolean; firstTimeVisitor?: boolean; groupIds: string[]; includeChildGroups?: boolean } }>("/api/modules/check-in/events/:eventId/attendees/:contactId", { schema: { body: { type: "object", additionalProperties: false, required: ["present", "groupIds"], properties: { present: { type: "boolean" }, firstTimeVisitor: { type: "boolean" }, includeChildGroups: { type: "boolean" }, groupIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply, true); if (!departmentId) return reply;
@@ -169,15 +256,32 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         SELECT 1 FROM group_members gm JOIN church_groups g ON g.id=gm.group_id AND g.department_id=e.department_id AND g.status='active'
         WHERE gm.contact_id=c.id AND gm.status='active' AND gm.group_id=ANY($4::uuid[])))`, [request.params.eventId, departmentId, request.params.contactId, request.body.groupIds]);
     if (!valid.rowCount) return reply.code(404).send({ error: "Meeting or attendee not found in this location." });
-    if (request.body.present) {
-      let firstTimeVisitor = Boolean(request.body.firstTimeVisitor);
-      if (valid.rows[0].status === "visitor") {
-        const previousAttendance = await pool!.query("SELECT 1 FROM event_attendance_checkins WHERE contact_id=$1 AND event_id<>$2 LIMIT 1", [request.params.contactId, request.params.eventId]);
-        firstTimeVisitor = previousAttendance.rowCount === 0;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT id FROM service_events WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.eventId]);
+      const release = await client.query("SELECT 1 FROM check_in_event_pickups WHERE department_id=$1 AND event_id=$2 AND child_contact_id=$3 AND released_at IS NOT NULL", [departmentId, request.params.eventId, request.params.contactId]);
+      if (release.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This attendee has already been released." });
       }
-      await pool!.query(`INSERT INTO event_attendance_checkins(event_id,contact_id,first_time_visitor) VALUES($1,$2,$3) ON CONFLICT(event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,updated_at=now()`, [request.params.eventId, request.params.contactId, firstTimeVisitor]);
+      if (request.body.present) {
+        let firstTimeVisitor = Boolean(request.body.firstTimeVisitor);
+        if (valid.rows[0].status === "visitor") {
+          const previousAttendance = await client.query("SELECT 1 FROM event_attendance_checkins WHERE contact_id=$1 AND event_id<>$2 LIMIT 1", [request.params.contactId, request.params.eventId]);
+          firstTimeVisitor = previousAttendance.rowCount === 0;
+        }
+        await client.query(`INSERT INTO event_attendance_checkins(event_id,contact_id,first_time_visitor) VALUES($1,$2,$3) ON CONFLICT(event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,updated_at=now()`, [request.params.eventId, request.params.contactId, firstTimeVisitor]);
+      } else {
+        await client.query("DELETE FROM event_attendance_checkins WHERE event_id=$1 AND contact_id=$2", [request.params.eventId, request.params.contactId]);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
-    else await pool!.query("DELETE FROM event_attendance_checkins WHERE event_id=$1 AND contact_id=$2", [request.params.eventId, request.params.contactId]);
     realtime.publish("module:check-in:changed", departmentId, { eventId: request.params.eventId, contactId: request.params.contactId, present: request.body.present });
     return { present: request.body.present };
   });

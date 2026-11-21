@@ -11,8 +11,8 @@ When Group Hierarchy is not installed, the option is hidden and selection uses o
 ## Boundaries
 
 - The member roster includes active memberships in the selected groups; event check-ins for visitor-status contacts are added to the same roster. New visitor contacts require both event-management and People-management permission.
-- This is a staffed check-in desk, not an unattended kiosk. It does not verify guardian pickup identity or print to dedicated label hardware.
+- Check-in uses a staffed desk and standard browser printing.
 - Group selection aggregates membership records, not ChurchTools age/date rules; age subgroups must already be represented as child groups.
-- Event/group managers can record attendee pickup contacts after attesting that a parent/guardian approved the list. The API restricts both the attendee and authorized contacts to active members of the selected groups in the same location. Manager and confirmation time are retained, and names appear on printable labels.
-- Pickup authorization rows are part of core-site replication snapshots (snapshot version 7); standby restore remaps the confirming manager account ID while preserving the contact links.
-- Guardian authorization is a manager attestation; no guardian is contacted and consent is not independently verified. The picker is limited to the visible roster, and authorizations apply across meetings rather than to one event. Short check-in codes, pickup identity verification, and unattended kiosk mode remain open.
+- Event and group managers can record pickup contacts after confirming the parent or guardian's approval for the selected meeting. The attendee and pickup contacts must be active members of the selected group roster from the same location. Previous location-wide contacts appear as suggestions and require fresh confirmation for a meeting.
+- Staff can find a checked-in child by name or the printed desk reference, select an authorized contact, verify a photo ID or attest that they personally know the contact, and record the handoff. The app records the authorizing and releasing staff, timestamps and verification method without collecting the ID itself. Each child can be released once per event. The Check-in module locks the pickup list and attendance controls after release, while attendance history retains the arrival.
+- Core replication snapshot version 18 includes event pickup state and maps the staff account links to the standby site.

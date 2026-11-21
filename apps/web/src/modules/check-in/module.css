@@ -7,4 +7,4 @@
 .checkin-guardian-confirm{display:flex;gap:9px;align-items:flex-start;margin-top:12px;padding:10px;border-radius:8px;background:#f5f8fb;color:#3f5367;font-size:12px;line-height:1.4}
 .checkin-pickup-edit{display:inline-flex;align-items:center;gap:5px}
 .checkin-pickup-dialog>label:not(.checkin-guardian-confirm){display:grid;gap:5px;margin-top:12px;color:#43586d;font-size:12px;font-weight:650}
-.checkin-pickup-dialog>label:not(.checkin-guardian-confirm) input{min-height:38px;padding:8px 10px;border:1px solid #dce5ec;border-radius:7px;background:#fff;color:#233447;font:inherit;font-weight:450}
+.checkin-pickup-dialog>label:not(.checkin-guardian-confirm) :is(input,select){min-height:38px;padding:8px 10px;border:1px solid #dce5ec;border-radius:7px;background:#fff;color:#233447;font:inherit;font-weight:450}
