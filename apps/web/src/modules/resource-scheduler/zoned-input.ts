@@ -21,3 +21,16 @@ export function zonedInputToUtc(value: string, timeZone: string) {
   if (chosen===undefined) throw new Error(`Could not resolve local time in ${timeZone}.`);
   return new Date(chosen).toISOString();
 }
+
+export function fullDayBookingWindow(date: string, timeZone: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Choose a valid booking date.");
+  const nextDay = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(nextDay.getTime()) || nextDay.toISOString().slice(0, 10) !== date) {
+    throw new Error("Choose a valid booking date.");
+  }
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+  return {
+    startsAt: zonedInputToUtc(`${date}T00:00`, timeZone),
+    endsAt: zonedInputToUtc(`${nextDay.toISOString().slice(0, 10)}T00:00`, timeZone),
+  };
+}
