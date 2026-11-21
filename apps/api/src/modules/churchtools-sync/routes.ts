@@ -11,6 +11,7 @@ import { importChurchToolsMemberships, readChurchToolsGroupMemberships, readChur
 import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCustomValue } from "./group-membership-custom-fields.js";
 import { ChurchToolsFinanceRangeError, compareChurchToolsFinanceCodes, financeDay, readChurchToolsFinanceCodes, readChurchToolsFinanceJournal, readChurchToolsFinancePeriods } from "./finance-preview.js";
 import { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
+import { buildChurchToolsFinanceJournalDryRun, isTwoDecimalFinanceCurrency, selectChurchToolsJournalRow } from "./finance-journal-dry-run.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -1752,6 +1753,68 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const status = error instanceof ChurchToolsFinanceRangeError ? 413
           : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not preview ChurchTools finance data." });
+      }
+    });
+    routes.get<{ Querystring: { periodId: string; startDate: string; endDate: string; sourceCurrency: string } }>("/api/modules/sync/churchtools/finance/journal-dry-run", {
+      schema: { querystring: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
+        sourceCurrency: { type: "string", pattern: "^[A-Z]{3}$" },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const { periodId, startDate, endDate, sourceCurrency } = request.query;
+      if (!financeDay(startDate) || !financeDay(endDate) || startDate > endDate) return reply.code(400).send({ error: "Choose a valid finance preview date range." });
+      if (!isTwoDecimalFinanceCurrency(sourceCurrency)) return reply.code(400).send({ error: "Confirm a valid source currency that uses two decimal places." });
+      try {
+        const source = await readFinanceMappingSource(config, periodId);
+        if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        if (startDate < source.period.startDate || endDate > source.period.endDate) return reply.code(400).send({ error: "The preview dates must stay within the selected ChurchTools accounting period." });
+        const token = decrypt(config.encrypted_login_token);
+        const mapping = await reviewFinanceMapping(pool!, dept, config.instance_url, source);
+        const accounts = readChurchToolsFinanceCodes(source.chart.accounts, periodId, "account");
+        const costCenters = readChurchToolsFinanceCodes(source.chart.costCenters, periodId, "cost center");
+        const rows: ReturnType<typeof selectChurchToolsJournalRow>[] = [];
+        await readChurchToolsFinanceJournal((page, limit) => {
+          const query = new URLSearchParams({ accounting_period_id: periodId, start_date: startDate, end_date: endDate,
+            order_by: "date", order_direction: "ASC", page: String(page), limit: String(limit) });
+          return get(config.instance_url, token, `finance/transactions?${query}`);
+        }, accounts, costCenters, startDate, endDate, { maxPages: 5, inspectRow: (row) => rows.push(selectChurchToolsJournalRow(row)) });
+        const ledgerTables = await pool!.query<{ installed: boolean }>(`SELECT to_regclass('public.finance_settings') IS NOT NULL
+          AND to_regclass('public.finance_accounting_years') IS NOT NULL AND to_regclass('public.finance_transactions') IS NOT NULL AS installed`);
+        const targetAvailable = mapping.canApply && ledgerTables.rows[0]?.installed === true;
+        type Inputs = Parameters<typeof buildChurchToolsFinanceJournalDryRun>[1];
+        let localPeriod: Inputs["localPeriod"] = null;
+        let targetCurrency: string | null = null;
+        let links: Inputs["links"] = [];
+        const existingDocumentNumbers = new Set<string>();
+        if (targetAvailable) {
+          const [periods, currency, crosswalk] = await Promise.all([
+            pool!.query<NonNullable<Inputs["localPeriod"]>>(`SELECT accounting_year AS year,start_date::text AS "startDate",end_date::text AS "endDate",status
+              FROM finance_accounting_years WHERE department_id=$1 AND start_date<=$3::date AND end_date>=$2::date`, [dept, source.period.startDate, source.period.endDate]),
+            pool!.query<{ currency: string }>("SELECT currency_code AS currency FROM finance_settings WHERE department_id=$1", [dept]),
+            pool!.query<Inputs["links"][number]>(`SELECT kind,source_id,target_id FROM churchtools_migration_finance_links
+              WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`, [dept, config.instance_url, periodId]),
+          ]);
+          localPeriod = periods.rows.length === 1 && periods.rows[0].startDate === source.period.startDate && periods.rows[0].endDate === source.period.endDate ? periods.rows[0] : null;
+          targetCurrency = currency.rows[0]?.currency.trim() ?? "CHF";
+          links = crosswalk.rows;
+          const numbers = [...new Set(rows.map((row) => row.documentNumber).filter(Boolean))];
+          if (localPeriod && numbers.length) {
+            const duplicates = await pool!.query<{ receipt_number: string }>(`SELECT DISTINCT receipt_number FROM finance_transactions
+              WHERE department_id=$1 AND accounting_year=$2 AND receipt_number=ANY($3::text[])`, [dept, localPeriod.year, numbers]);
+            for (const duplicate of duplicates.rows) existingDocumentNumbers.add(duplicate.receipt_number);
+          }
+        }
+        const preview = buildChurchToolsFinanceJournalDryRun(rows, {
+          sourceCurrency, targetCurrency, startDate, endDate, sourcePeriod: source.period, localPeriod, targetAvailable, existingDocumentNumbers, mapping, links,
+        });
+        return reply.header("Cache-Control", "private, no-store").send({ formatVersion: 1, periodId, sourceInstance: config.instance_url, ...preview });
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceRangeError ? 413
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools journal dry-run." });
       }
     });
     routes.get<{ Querystring: { offset?: number; query?: string } }>("/api/modules/sync/churchtools/membership-details", {

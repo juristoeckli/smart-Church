@@ -79,9 +79,10 @@ export async function readChurchToolsFinanceJournal(
   readPage: (page: number, limit: number) => Promise<unknown>,
   accounts: ReadonlyMap<string, string>, costCenters: ReadonlyMap<string, string>,
   startDate: string, endDate: string,
+  options?: { maxPages?: number; inspectRow?: (row: Readonly<SourceObject>) => void },
 ) {
   const limit = 200;
-  const maxPages = 50;
+  const maxPages = options?.maxPages ?? 50;
   const seen = new Set<string>();
   const splitParents = new Set<string>();
   const result = { visible: 0, splitChildren: 0, splitParents: 0, taxLinked: 0, cancellationLinked: 0, immutable: 0,
@@ -102,7 +103,7 @@ export async function readChurchToolsFinanceJournal(
       || (total !== undefined && (typeof total !== "number" || !Number.isSafeInteger(total) || total < 0))
       || (expectedTotal !== undefined && total !== expectedTotal)) throw new Error("ChurchTools returned inconsistent finance journal pagination.");
     if (lastPage > maxPages || (typeof total === "number" && total > limit * maxPages)) {
-      throw new ChurchToolsFinanceRangeError("The selected range contains more than 10,000 visible journal rows. Choose a narrower date range.");
+      throw new ChurchToolsFinanceRangeError(`The selected range contains more than ${(limit * maxPages).toLocaleString("en-US")} visible journal rows. Choose a narrower date range.`);
     }
     expectedLastPage = lastPage;
     expectedTotal = typeof total === "number" ? total : undefined;
@@ -113,6 +114,7 @@ export async function readChurchToolsFinanceJournal(
         throw new Error("ChurchTools returned an invalid, duplicate, or out-of-range journal row. Run a fresh preview.");
       }
       seen.add(id);
+      options?.inspectRow?.(row);
       result.visible += 1;
       const account = financeSourceId(row.accountId);
       const contraAccount = financeSourceId(row.contraAccountId);

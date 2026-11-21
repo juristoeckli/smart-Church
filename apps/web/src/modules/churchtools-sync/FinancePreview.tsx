@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { FinanceMappingReview } from "./FinanceMappingReview";
+import { FinanceJournalDryRun } from "./FinanceJournalDryRun";
 
 type Period = {
   periodId: string; clientId: string; clientName: string | null; startDate: string; endDate: string;
@@ -113,6 +114,7 @@ export function FinancePreview({ departmentId, t }: { departmentId: string; t: (
       </div>
     </form>}
     {period && <FinanceMappingReview key={period.periodId} departmentId={departmentId} periodId={period.periodId} t={t} />}
+    {period && <FinanceJournalDryRun key={`${period.periodId}|${startDate}|${endDate}`} departmentId={departmentId} periodId={period.periodId} startDate={startDate} endDate={endDate} t={t} />}
     {busy && <p role="status">{t("Reading ChurchTools finance data…")}</p>}
     {error && <p role="alert">{t(error)}</p>}
     {preview && <section aria-live="polite">
