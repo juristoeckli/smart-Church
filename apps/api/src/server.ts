@@ -580,7 +580,7 @@ const serviceEventProperties = {
 };
 
 const songArrangementSchema = { type: "object", additionalProperties: false, required: ["name"], properties: { id: { type: "string", format: "uuid" }, name: { type: "string", minLength: 1, maxLength: 160 }, key: { type: "string", maxLength: 16 }, chartUrl: { type: "string", maxLength: 2048 }, audioUrl: { type: "string", maxLength: 2048 }, active: { type: "boolean" } } };
-const worshipSongBodySchema = { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 200 }, authors: { type: "string", maxLength: 500 }, defaultKey: { type: "string", maxLength: 16 }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, arrangements: { type: "array", maxItems: 40, items: songArrangementSchema } } };
+const worshipSongBodySchema = { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 200 }, authors: { type: "string", maxLength: 500 }, defaultKey: { type: "string", maxLength: 16 }, bpm: { anyOf: [{ type: "integer", minimum: 1, maximum: 400 }, { type: "null" }] }, timeSignature: { anyOf: [{ type: "string", pattern: "^(?:[1-9]|[1-5][0-9]|6[0-4])/(?:1|2|4|8|16|32|64)$" }, { type: "null" }] }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, arrangements: { type: "array", maxItems: 40, items: songArrangementSchema } } };
 const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
 const serviceEventBodySchema = {
   type: "object",
@@ -589,7 +589,7 @@ const serviceEventBodySchema = {
   properties: serviceEventProperties,
 };
 
-type WorshipSongInput = { title: string; authors?: string; defaultKey?: string; notes?: string; arrangements?: Array<{ id?: string; name: string; key?: string; chartUrl?: string; audioUrl?: string }> };
+type WorshipSongInput = { title: string; authors?: string; defaultKey?: string; bpm?: number | null; timeSignature?: string | null; notes?: string; arrangements?: Array<{ id?: string; name: string; key?: string; chartUrl?: string; audioUrl?: string }> };
 type ServicePlanTemplateInput = { name: string; description?: string; positions?: Array<{ name: string; category?: string; qualificationIds?: string[] }>; items?: NonNullable<CreateServiceEvent["timePlan"]> };
 
 function validHttpsLink(value: string | undefined) {
@@ -804,8 +804,8 @@ async function syncEventPositionResponses(
 }
 
 async function listWorshipSongs(departmentId: string, includeArchived = false): Promise<WorshipSong[]> {
-  const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; notes: string; active: boolean; arrangements: WorshipSong["arrangements"] }>(
-    `SELECT song.id,song.title,song.authors,song.default_key,song.notes,song.active,
+  const result = await pool!.query<{ id: string; title: string; authors: string; default_key: string; bpm: number | null; time_signature: string | null; notes: string; active: boolean; arrangements: WorshipSong["arrangements"] }>(
+    `SELECT song.id,song.title,song.authors,song.default_key,song.bpm,song.time_signature,song.notes,song.active,
             COALESCE(json_agg(json_build_object('id',arrangement.id,'name',arrangement.name,'key',arrangement.musical_key,'chartUrl',arrangement.chart_url,'audioUrl',arrangement.audio_url,'active',arrangement.active) ORDER BY lower(arrangement.name)) FILTER (WHERE arrangement.id IS NOT NULL),'[]'::json) AS arrangements
        FROM worship_songs song
        LEFT JOIN worship_song_arrangements arrangement ON arrangement.song_id=song.id
@@ -814,7 +814,7 @@ async function listWorshipSongs(departmentId: string, includeArchived = false): 
       ORDER BY lower(song.title),song.id`,
     [departmentId, includeArchived],
   );
-  return result.rows.map((row) => ({ id: row.id, title: row.title, ...(row.authors ? { authors: row.authors } : {}), ...(row.default_key ? { defaultKey: row.default_key } : {}), ...(row.notes ? { notes: row.notes } : {}), arrangements: row.arrangements.filter((arrangement) => includeArchived || arrangement.active), active: row.active }));
+  return result.rows.map((row) => ({ id: row.id, title: row.title, ...(row.authors ? { authors: row.authors } : {}), ...(row.default_key ? { defaultKey: row.default_key } : {}), ...(row.bpm !== null ? { bpm: row.bpm } : {}), ...(row.time_signature ? { timeSignature: row.time_signature } : {}), ...(row.notes ? { notes: row.notes } : {}), arrangements: row.arrangements.filter((arrangement) => includeArchived || arrangement.active), active: row.active }));
 }
 
 async function persistWorshipSong(departmentId: string, id: string, input: WorshipSongInput) {
@@ -826,10 +826,10 @@ async function persistWorshipSong(departmentId: string, id: string, input: Worsh
   try {
     await client.query("BEGIN");
     if (id) {
-      const updated = await client.query("UPDATE worship_songs SET title=$3,authors=$4,default_key=$5,notes=$6,active=true,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [id, departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes]);
+      const updated = await client.query("UPDATE worship_songs SET title=$3,authors=$4,default_key=$5,notes=$6,bpm=CASE WHEN $7 THEN $8 ELSE bpm END,time_signature=CASE WHEN $9 THEN $10 ELSE time_signature END,active=true,updated_at=now() WHERE id=$1 AND department_id=$2 RETURNING id", [id, departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes, input.bpm !== undefined, input.bpm ?? null, input.timeSignature !== undefined, input.timeSignature ?? null]);
       if (!updated.rowCount) { await client.query("ROLLBACK"); return false; }
     } else {
-      const created = await client.query<{ id: string }>("INSERT INTO worship_songs (id,department_id,title,authors,default_key,notes) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id", [randomUUID(), departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes]);
+      const created = await client.query<{ id: string }>("INSERT INTO worship_songs (id,department_id,title,authors,default_key,notes,bpm,time_signature) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id", [randomUUID(), departmentId, clean.title, clean.authors, clean.defaultKey, clean.notes, input.bpm ?? null, input.timeSignature ?? null]);
       id = created.rows[0].id;
     }
     const retainedIds: string[] = [];

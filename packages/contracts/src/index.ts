@@ -60,6 +60,8 @@ export interface WorshipSong {
   title: string;
   authors?: string;
   defaultKey?: string;
+  bpm?: number;
+  timeSignature?: string;
   notes?: string;
   arrangements: WorshipSongArrangement[];
   active: boolean;

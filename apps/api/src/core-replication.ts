@@ -14,11 +14,12 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 14 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 15 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
   tables.event_registrations = (tables.event_registrations ?? []).map((row) => ({ ...row, cancellation_token_hash: row.cancellation_token_hash ?? null }));
   tables.contacts = (tables.contacts ?? []).map((row) => ({ ...row, postal_address: row.postal_address ?? {}, archived_at: row.archived_at ?? null }));
   tables.service_events = (tables.service_events ?? []).map((row) => ({ ...row, responsible_contact_id: row.responsible_contact_id ?? null }));
+  tables.worship_songs = (tables.worship_songs ?? []).map((row) => ({ ...row, bpm: row.bpm ?? null, time_signature: row.time_signature ?? null }));
   tables.church_groups = (tables.church_groups ?? []).map((raw) => {
     const row = { ...raw };
     if (row.status === undefined) row.status = "active";
@@ -130,7 +131,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 14, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 15, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -234,8 +235,8 @@ export function registerCoreReplicationAdapter(pool: Pool) {
         // Worship library rows are soft-deleted and referenced by the
         // ChurchTools/Elvanto integration module. Updating them in place keeps
         // those module-owned foreign keys valid across repeated snapshots.
-        worship_songs: `INSERT INTO worship_songs(id,department_id,title,authors,default_key,notes,active,created_at,updated_at)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET department_id=EXCLUDED.department_id,title=EXCLUDED.title,authors=EXCLUDED.authors,default_key=EXCLUDED.default_key,notes=EXCLUDED.notes,active=EXCLUDED.active,created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at`,
+        worship_songs: `INSERT INTO worship_songs(id,department_id,title,authors,default_key,notes,active,created_at,updated_at,bpm,time_signature)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET bpm=EXCLUDED.bpm,time_signature=EXCLUDED.time_signature,department_id=EXCLUDED.department_id,title=EXCLUDED.title,authors=EXCLUDED.authors,default_key=EXCLUDED.default_key,notes=EXCLUDED.notes,active=EXCLUDED.active,created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at`,
         worship_song_arrangements: `INSERT INTO worship_song_arrangements(id,song_id,name,musical_key,chart_url,audio_url,active,created_at,updated_at)
           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(id) DO UPDATE SET song_id=EXCLUDED.song_id,name=EXCLUDED.name,musical_key=EXCLUDED.musical_key,chart_url=EXCLUDED.chart_url,audio_url=EXCLUDED.audio_url,active=EXCLUDED.active,created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at`,
       };
@@ -269,7 +270,9 @@ export function registerCoreReplicationAdapter(pool: Pool) {
             row.starts_on ??= null;
             row.ends_on ??= null;
           }
-          const columns = Object.keys(row);
+          const columns = table === "worship_songs"
+            ? ["id", "department_id", "title", "authors", "default_key", "notes", "active", "created_at", "updated_at", "bpm", "time_signature"]
+            : Object.keys(row);
           const values = columns.map((column) => replicationValue(row[column], jsonTypes.get(`${table}.${column}`)));
           const placeholders = columns.map((_, index) => `$${index + 1}`);
           const inserted = await client.query(upsertQueries[table] ?? `INSERT INTO public."${table}" (${columns.map((column) => `"${column}"`).join(",")}) VALUES (${placeholders.join(",")}) ON CONFLICT DO NOTHING`, values);
