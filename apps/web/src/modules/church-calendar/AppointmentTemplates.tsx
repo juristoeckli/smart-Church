@@ -12,6 +12,7 @@ export function AppointmentTemplates({ departmentId, calendarId, csrfToken, draf
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const lifetime = useRef<AbortController | null>(null);
   const path = `/api/modules/church-calendar/calendars/${calendarId}/appointment-templates`;
@@ -24,23 +25,23 @@ export function AppointmentTemplates({ departmentId, calendarId, csrfToken, draf
   }, []);
 
   useEffect(() => {
-    if (!open) return;
+    // Wait for the write to settle before reading the authoritative list.
+    if (!open || busy) return;
     const controller = new AbortController();
-    setTemplates(null);
-    setError("");
+    setLoadError("");
     async function load() {
       try {
-        const response = await fetch(path, { signal: controller.signal, headers: { "x-department-id": departmentId } });
+        const response = await fetch(path, { signal: controller.signal, cache: "no-store", headers: { "x-department-id": departmentId } });
         if (!response.ok) throw new Error("Could not load appointment templates.");
         const rows = await response.json() as AppointmentTemplate[];
         if (!controller.signal.aborted) setTemplates(rows);
       } catch (cause) {
-        if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "Could not load appointment templates.");
+        if (!controller.signal.aborted) setLoadError(cause instanceof Error ? cause.message : "Could not load appointment templates.");
       }
     }
     void load();
     return () => controller.abort();
-  }, [departmentId, open, path]);
+  }, [busy, departmentId, open, path]);
 
   async function change(action: "create" | "update" | "delete") {
     const id = action === "create" ? "" : selected?.id;
@@ -69,13 +70,18 @@ export function AppointmentTemplates({ departmentId, calendarId, csrfToken, draf
     } finally { if (!signal?.aborted) setBusy(false); }
   }
 
-  return <details className="church-calendar-extra-date wide" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+  const visibleError = error || loadError;
+  return <details className="church-calendar-extra-date wide" open={open} onToggle={(event) => {
+    const next = event.currentTarget.open;
+    if (next && !open && !busy) setTemplates(null);
+    setOpen(next);
+  }}>
     <summary>Appointment templates</summary>
     {open && <div className="church-calendar-form-grid">
       <p className="wide">A template fills the title and details on this draft. Dates, recurrence, and linked records stay as selected.</p>
-      {error && <p className="wide" role="alert">{error}</p>}
+      {visibleError && <p className="wide" role="alert">{visibleError}</p>}
       {notice && <p className="wide" role="status">{notice}</p>}
-      {!templates && !error && <p className="wide" role="status">Loading templates…</p>}
+      {!templates && !visibleError && <p className="wide" role="status">Loading templates…</p>}
       {templates && <>
         <label>Saved template<select value={selectedId} disabled={busy} onChange={(event) => {
           setSelectedId(event.target.value);
