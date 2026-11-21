@@ -2,6 +2,11 @@ import type { UserLanguage } from "@smart-church/contracts";
 import { browserDefaultLanguage } from "./i18n";
 
 const english = {
+  registrationReceipt: "Registration receipt",
+  receiptEventCancelled: "This event has been cancelled.",
+  receiptUnavailable: "This registration receipt is unavailable.",
+  refreshReceipt: "Refresh status",
+  receiptPrivacy: "Keep this link private. Anyone with it can view this place or cancel it while cancellation is available.",
   waitlistNotices: "Waitlist notices",
   waitlistNoticeHelp: "Get a notification in Smart-Church when a place from this registration or its guests is confirmed.",
   enableWaitlistNotice: "Enable notices",
@@ -30,7 +35,7 @@ const english = {
   additionalAttendee: "Additional attendee {count}",
   partyRegistered: "Your party is registered",
   partyWaitlisted: "Your party is on the waitlist",
-  partyLinksHelp: "Save the private links below to cancel individual registrations later.",
+  partyLinksHelp: "Save the private links below to check or cancel individual registrations.",
   registeredHelp: "Your place is confirmed. We look forward to seeing you.",
   waitlistedHelp: "The event is full, but you’re on the waitlist. The organizers will contact you if a place opens.",
   registrationClosed: "Registration for this event is closed.",
@@ -57,6 +62,11 @@ type PublicTranslationKey = keyof typeof english;
 const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> = {
   en: english,
   de: {
+    registrationReceipt: "Anmeldebeleg",
+    receiptEventCancelled: "Diese Veranstaltung wurde abgesagt.",
+    receiptUnavailable: "Dieser Anmeldebeleg ist nicht verfügbar.",
+    refreshReceipt: "Status aktualisieren",
+    receiptPrivacy: "Bewahre diesen Link vertraulich auf. Wer ihn hat, kann diesen Platz ansehen oder stornieren.",
     waitlistNotices: "Wartelistenhinweise",
     waitlistNoticeHelp: "Erhalte in Smart-Church eine Benachrichtigung, wenn ein Platz für diese Anmeldung oder ihre Gäste bestätigt wird.",
     enableWaitlistNotice: "Hinweise einschalten",
@@ -85,6 +95,11 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
     groupRequestSent: "Anfrage gesendet", groupRequestHelp: "Die Gruppenleitung prüft deine Anfrage und meldet sich bei dir.", groupRequestIntro: "Sende eine Beitrittsanfrage. Deine Mitgliedschaft beginnt, sobald die Gruppenleitung zustimmt.", groupPrivacy: "Dein Name und deine E-Mail-Adresse werden mit der Gruppenleitung geteilt, damit sie deine Anfrage prüfen kann.", sending: "Wird gesendet …", requestToJoin: "Beitritt anfragen", smartChurch: "Smart Church",
   },
   fr: {
+    registrationReceipt: "Reçu d’inscription",
+    receiptEventCancelled: "Cet événement a été annulé.",
+    receiptUnavailable: "Ce reçu d’inscription est indisponible.",
+    refreshReceipt: "Actualiser le statut",
+    receiptPrivacy: "Gardez ce lien privé. Toute personne qui le possède peut consulter ou annuler cette place.",
     waitlistNotices: "Notifications de liste d’attente",
     waitlistNoticeHelp: "Recevez une notification dans Smart-Church lorsqu’une place de cette inscription ou de ses invités est confirmée.",
     enableWaitlistNotice: "Activer les notifications",
@@ -113,6 +128,11 @@ const dictionaries: Record<UserLanguage, Record<PublicTranslationKey, string>> =
     groupRequestSent: "Demande envoyée", groupRequestHelp: "Un responsable du groupe examinera votre demande et vous recontactera.", groupRequestIntro: "Envoyez une demande pour rejoindre le groupe. Votre adhésion commencera après l’approbation d’un responsable.", groupPrivacy: "Votre nom et votre adresse e-mail seront transmis aux responsables du groupe afin qu’ils examinent votre demande.", sending: "Envoi en cours…", requestToJoin: "Demander à rejoindre", smartChurch: "Smart Church",
   },
   it: {
+    registrationReceipt: "Ricevuta di iscrizione",
+    receiptEventCancelled: "Questo evento è stato annullato.",
+    receiptUnavailable: "Questa ricevuta di iscrizione non è disponibile.",
+    refreshReceipt: "Aggiorna stato",
+    receiptPrivacy: "Mantieni privato questo link. Chi lo possiede può consultare o annullare questo posto.",
     waitlistNotices: "Notifiche lista d’attesa",
     waitlistNoticeHelp: "Ricevi una notifica in Smart-Church quando viene confermato un posto per questa iscrizione o per i suoi ospiti.",
     enableWaitlistNotice: "Attiva le notifiche",

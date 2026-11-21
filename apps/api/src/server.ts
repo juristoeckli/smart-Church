@@ -1,4 +1,4 @@
-import { registerRegistrationNoticeRoutes } from "./event-registration-notices.js";
+import { registerRegistrationReceiptRoutes } from "./event-registration-notices.js";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
 import { readFile, stat, statfs } from "node:fs/promises";
@@ -3581,7 +3581,7 @@ app.post<{ Body: { cancellationToken: string } }>("/api/public/event-registratio
   finally { client.release(); }
 });
 
-registerRegistrationNoticeRoutes(app, { pool: pool ?? null, isDatabaseReady: () => databaseReady,
+registerRegistrationReceiptRoutes(app, { pool: pool ?? null, isDatabaseReady: () => databaseReady,
   validateMutation: validModuleMutation, lockDepartmentForWrite });
 
 type ManagedEventRegistration = Omit<EventRegistration, "status"> & { status: EventRegistration["status"] | "cancelled" };

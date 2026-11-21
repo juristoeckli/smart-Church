@@ -1,10 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { CalendarDays, Check, Clock3, MapPin } from "lucide-react";
-import type { AuthStatus, PublicRegistrationEvent } from "@smart-church/contracts";
+import type { AuthStatus, PublicRegistrationEvent, PublicRegistrationReceiptStatus } from "@smart-church/contracts";
 import { publicErrorText, publicLanguage, publicText } from "./public-translations";
 
 export function PublicEventRegistration({ token }: { token: string }) {
   const language = publicLanguage();
+  const [receiptToken] = useState(() => /^#receipt=([0-9a-f]{64})$/.exec(window.location.hash)?.[1] ?? "");
+  const [receipt, setReceipt] = useState<PublicRegistrationReceiptStatus | null>(null);
+  const [receiptLoading, setReceiptLoading] = useState(true);
+  const [receiptRefresh, setReceiptRefresh] = useState(0);
   const [event, setEvent] = useState<PublicRegistrationEvent | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -22,7 +26,7 @@ export function PublicEventRegistration({ token }: { token: string }) {
 
   useEffect(() => {
     document.documentElement.lang = language;
-    if (linkToken || waitlistToken) return;
+    if (linkToken || waitlistToken || receiptToken) return;
     let active = true;
     fetch(`/api/public/event-registrations/${encodeURIComponent(token)}`)
       .then(async (response) => {
@@ -33,7 +37,28 @@ export function PublicEventRegistration({ token }: { token: string }) {
       .catch((reason) => { if (active) setError(publicErrorText(language, reason instanceof Error ? reason.message : "Could not load this event.")); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [token, language, linkToken, waitlistToken]);
+  }, [token, language, linkToken, waitlistToken, receiptToken]);
+
+  useEffect(() => {
+    if (!receiptToken) return;
+    const controller = new AbortController();
+    setReceiptLoading(true);
+    setError("");
+    fetch("/api/public/event-registrations/receipt", {
+      method: "POST", headers: { "content-type": "application/json" }, signal: controller.signal,
+      cache: "no-store", body: JSON.stringify({ receiptToken }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error();
+      const body = await response.json() as PublicRegistrationReceiptStatus;
+      if (!controller.signal.aborted) setReceipt(body);
+    }).catch(() => {
+      if (!controller.signal.aborted) {
+        setReceipt(null);
+        setError(publicText(language, "receiptUnavailable"));
+      }
+    }).finally(() => { if (!controller.signal.aborted) setReceiptLoading(false); });
+    return () => controller.abort();
+  }, [language, receiptToken, receiptRefresh]);
 
   useEffect(() => {
     if (!waitlistToken) return;
@@ -99,6 +124,31 @@ export function PublicEventRegistration({ token }: { token: string }) {
     }
   }
 
+  if (receiptToken) {
+    const date = receipt ? new Intl.DateTimeFormat(language, { weekday: "long", day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }).format(new Date(`${receipt.eventDate}T12:00:00Z`)) : "";
+    return <main className="public-registration-page"><section className="public-registration-card">
+      <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
+      <h1>{publicText(language, "registrationReceipt")}</h1>
+      {receiptLoading ? <p role="status">{publicText(language, "eventLoading")}</p> : receipt ? <>
+        <h2>{receipt.title}</h2>
+        <div className="public-registration-details">
+          <span><CalendarDays size={17} />{date}</span>
+          <span><Clock3 size={17} />{receipt.isAllDay ? publicText(language, "allDay") : `${receipt.startTime}${receipt.endTime ? ` – ${receipt.endTime}` : ""}`}</span>
+          {receipt.location && <span><MapPin size={17} />{receipt.location}</span>}
+        </div>
+        <p className="public-registration-message">{publicText(language, receipt.eventCancelled ? "receiptEventCancelled"
+          : receipt.status === "cancelled" ? "cancelledRegistration" : receipt.status)}</p>
+        {!receipt.eventCancelled && receipt.status === "waitlisted" && <p>
+          <a href={window.location.pathname + "#waitlist=" + receiptToken} target="_blank" rel="noreferrer">{publicText(language, "waitlistNotices")}</a>
+        </p>}
+        {receipt.canCancel && <p><a href={window.location.pathname + "#cancel=" + receiptToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a></p>}
+        <p className="public-registration-privacy">{publicText(language, "receiptPrivacy")}</p>
+      </> : <p role="alert" className="public-registration-error">{error}</p>}
+      <button className="button button-secondary" type="button" disabled={receiptLoading} onClick={() => setReceiptRefresh((current) => current + 1)}>{publicText(language, "refreshReceipt")}</button>
+      <footer>{publicText(language, "smartChurch")}</footer>
+    </section></main>;
+  }
+
   if (waitlistToken) return <main className="public-registration-page"><section className="public-registration-card">
     <span className="eyebrow">{publicText(language, "eventEyebrow")}</span>
     <h1>{publicText(language, "waitlistNotices")}</h1>
@@ -154,11 +204,11 @@ export function PublicEventRegistration({ token }: { token: string }) {
             </form>
           </>}
     </>}
-    {attendees.length > 0 && <ul>{attendees.map((person) => <li key={person.cancellationToken}>{person.firstName} {person.lastName} · <a href={window.location.pathname + "#cancel=" + person.cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a></li>)}</ul>}
+    {attendees.length > 0 && <ul>{attendees.map((person) => <li key={person.cancellationToken}>{person.firstName} {person.lastName} · <a href={window.location.pathname + "#receipt=" + person.cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "registrationReceipt")}</a></li>)}</ul>}
     {submitted === "waitlisted" && cancellationToken && <p>
       <a href={window.location.pathname + "#waitlist=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "waitlistNotices")}</a>
     </p>}
-    {!attendees.length && cancellationToken && <p><a href={window.location.pathname + "#cancel=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "cancelRegistration")}</a> · {publicText(language, "saveCancelLink")}</p>}
+    {!attendees.length && cancellationToken && <p><a href={window.location.pathname + "#receipt=" + cancellationToken} target="_blank" rel="noreferrer">{publicText(language, "registrationReceipt")}</a> · {publicText(language, "receiptPrivacy")}</p>}
     <footer>{publicText(language, "smartChurch")}</footer>
   </section></main>;
 }

@@ -161,6 +161,12 @@ export interface PublicRegistrationEvent {
   registrationOpen: boolean;
 }
 
+export interface PublicRegistrationReceiptStatus extends Pick<PublicRegistrationEvent, "title" | "eventDate" | "isAllDay" | "startTime" | "endTime" | "location"> {
+  status: "registered" | "waitlisted" | "cancelled";
+  eventCancelled: boolean;
+  canCancel: boolean;
+}
+
 export interface ChurchGroup {
   id: string;
   name: string;

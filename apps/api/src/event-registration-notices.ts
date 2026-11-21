@@ -1,13 +1,38 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import type { PublicRegistrationReceiptStatus } from "@smart-church/contracts";
 import type { ModuleServerContext } from "./modules/module-sdk.js";
 
 type Context = Pick<ModuleServerContext, "pool" | "isDatabaseReady" | "validateMutation" | "lockDepartmentForWrite">;
 
-export function registerRegistrationNoticeRoutes(app: FastifyInstance, context: Context) {
+export function registerRegistrationReceiptRoutes(app: FastifyInstance, context: Context) {
+  const receiptTokenSchema = { type: "string", pattern: "^[0-9a-f]{64}$" } as const;
+  app.post<{ Body: { receiptToken: string } }>("/api/public/event-registrations/receipt", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["receiptToken"], properties: { receiptToken: receiptTokenSchema } } },
+  }, async (request, reply): Promise<PublicRegistrationReceiptStatus | { error: string }> => {
+    reply.header("Cache-Control", "private, no-store").header("Referrer-Policy", "no-referrer");
+    if (!context.pool || !context.isDatabaseReady()) return reply.code(503).send({ error: "Event registration is temporarily unavailable." });
+    const hash = createHash("sha256").update(request.body.receiptToken).digest("hex");
+    const result = await context.pool.query<Omit<PublicRegistrationReceiptStatus, "endTime"> & { endTime: string | null }>(
+      `SELECT event.title,event.event_date::text AS "eventDate",event.is_all_day AS "isAllDay",
+              to_char(event.start_time,'HH24:MI') AS "startTime",to_char(event.end_time,'HH24:MI') AS "endTime",
+              event.location,registration.status,event.cancelled_at IS NOT NULL AS "eventCancelled",
+              (registration.status<>'cancelled' AND registration.checked_in_at IS NULL AND event.cancelled_at IS NULL
+                AND event.event_date >= (now() AT TIME ZONE COALESCE(zone.name,'UTC'))::date) AS "canCancel"
+         FROM event_registrations registration JOIN service_events event ON event.id=registration.event_id
+         JOIN departments department ON department.id=event.department_id
+         LEFT JOIN pg_timezone_names zone ON zone.name=department.time_zone
+        WHERE registration.cancellation_token_hash=$1`, [hash],
+    );
+    const receipt = result.rows[0];
+    if (!receipt) return reply.code(404).send({ error: "This registration receipt is unavailable." });
+    const { endTime, ...status } = receipt;
+    return { ...status, ...(endTime ? { endTime } : {}) };
+  });
+
   app.put<{ Body: { receiptToken: string; enabled: boolean } }>("/api/events/registration-waitlist-notices", {
     schema: { body: { type: "object", additionalProperties: false, required: ["receiptToken", "enabled"], properties: {
-      receiptToken: { type: "string", pattern: "^[0-9a-f]{64}$" }, enabled: { type: "boolean" },
+      receiptToken: receiptTokenSchema, enabled: { type: "boolean" },
     } } },
   }, async (request, reply) => {
     reply.header("Cache-Control", "private, no-store");
