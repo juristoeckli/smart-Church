@@ -272,9 +272,30 @@ export const moduleUiTranslationOverrides: Record<string, ModuleDictionaries> = 
     },
   },
   "core-events": {
-    de: { "Could not update registration.": "Anmeldung konnte nicht aktualisiert werden." },
-    fr: { "Could not update registration.": "Impossible de mettre à jour l’inscription." },
-    it: { "Could not update registration.": "Impossibile aggiornare la registrazione." },
+    de: {
+      "Could not update registration.": "Anmeldung konnte nicht aktualisiert werden.",
+      "Fill role": "Dienst besetzen",
+      "Save as template": "Als Vorlage speichern",
+      "Candidate group": "Gruppe der Freiwilligen",
+      "All eligible volunteers": "Alle geeigneten Freiwilligen",
+      "No eligible volunteers match this group and the selected roles.": "In dieser Gruppe gibt es keine geeigneten Freiwilligen für die ausgewählten Dienste.",
+    },
+    fr: {
+      "Could not update registration.": "Impossible de mettre à jour l’inscription.",
+      "Fill role": "Pourvoir le rôle",
+      "Save as template": "Enregistrer comme modèle",
+      "Candidate group": "Groupe de bénévoles",
+      "All eligible volunteers": "Tous les bénévoles admissibles",
+      "No eligible volunteers match this group and the selected roles.": "Aucun bénévole de ce groupe ne répond aux critères des rôles sélectionnés.",
+    },
+    it: {
+      "Could not update registration.": "Impossibile aggiornare la registrazione.",
+      "Fill role": "Assegna il ruolo",
+      "Save as template": "Salva come modello",
+      "Candidate group": "Gruppo di volontari",
+      "All eligible volunteers": "Tutti i volontari idonei",
+      "No eligible volunteers match this group and the selected roles.": "Nessun volontario di questo gruppo è idoneo per i ruoli selezionati.",
+    },
   },
   chat: {
     de: {
