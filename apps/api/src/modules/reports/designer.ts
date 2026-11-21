@@ -5,11 +5,11 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type FieldType = "text" | "number" | "date";
-type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance";
+type DatasetKey = "people" | "groups" | "memberships" | "events" | "finance" | "resourceBookings";
 type Field = { key: string; label: string; type: FieldType };
 type Filter = { field: string; operator: "equals" | "contains" | "gt" | "gte" | "lt" | "lte"; value: string | number };
 type Definition = { dataset: DatasetKey; columns: string[]; filters: Filter[]; sortBy: string; direction: "asc" | "desc"; groupBy?: string; aggregate?: { operation: "count" | "sum" | "average"; field?: string } };
-type DataSet = { key: DatasetKey; title: string; permission: "people" | "groups" | "events" | "finance"; description: string; fields: Field[]; sql: string };
+type DataSet = { key: DatasetKey; title: string; permission: "people" | "groups" | "events" | "finance" | "resources"; description: string; fields: Field[]; sql: string };
 const MAX_ROWS = 5000;
 const MAX_PREVIEW = 500;
 const datasetDefinitions: DataSet[] = [
@@ -25,6 +25,24 @@ const datasetDefinitions: DataSet[] = [
   { key: "events", title: "Events and attendance", permission: "events", description: "Service dates, attendance totals, and check-in counts.", fields: [
     { key: "eventDate", label: "Date", type: "date" }, { key: "title", label: "Title", type: "text" }, { key: "kind", label: "Type", type: "text" }, { key: "location", label: "Location", type: "text" }, { key: "adults", label: "Adults", type: "number" }, { key: "children", label: "Children", type: "number" }, { key: "checkIns", label: "Check-ins", type: "number" }, { key: "firstTimeVisitors", label: "First-time visitors", type: "number" },
   ], sql: `SELECT event.event_date::text AS "eventDate",event.title,event.kind,event.location,event.attendance_adults AS adults,event.attendance_children AS children,COUNT(checkin.contact_id)::int AS "checkIns",COUNT(checkin.contact_id) FILTER(WHERE checkin.first_time_visitor)::int AS "firstTimeVisitors" FROM service_events event LEFT JOIN event_attendance_checkins checkin ON checkin.event_id=event.id LEFT JOIN contacts contact ON contact.id=checkin.contact_id AND contact.department_id=event.department_id WHERE event.department_id=$1 AND (checkin.contact_id IS NULL OR contact.id IS NOT NULL) GROUP BY event.id ORDER BY event.event_date DESC,event.start_time DESC LIMIT ${MAX_ROWS}` },
+  { key: "resourceBookings", title: "Resource bookings", permission: "resources", description: "Booking dates, status, and duration by resource. Dates use the location time zone.", fields: [
+    { key: "resourceName", label: "Resource", type: "text" },
+    { key: "category", label: "Resource category", type: "text" },
+    { key: "startsOn", label: "Start date", type: "date" },
+    { key: "endsOn", label: "End date", type: "date" },
+    { key: "status", label: "Booking status", type: "text" },
+    { key: "durationMinutes", label: "Duration (minutes)", type: "number" },
+  ], sql: `SELECT resource.name AS "resourceName", resource.category,
+                 to_char(booking.starts_at AT TIME ZONE department.time_zone, 'YYYY-MM-DD') AS "startsOn",
+                 to_char(booking.ends_at AT TIME ZONE department.time_zone, 'YYYY-MM-DD') AS "endsOn",
+                 booking.status,
+                 extract(epoch FROM booking.ends_at - booking.starts_at)::double precision / 60 AS "durationMinutes"
+            FROM resource_bookings booking
+            JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+            JOIN departments department ON department.id=booking.department_id
+           WHERE booking.department_id=$1
+           ORDER BY booking.starts_at DESC, booking.id
+           LIMIT ${MAX_ROWS}` },
   { key: "finance", title: "Finance postings", permission: "finance", description: "Posted ledger lines with account, donor, and cost-center labels.", fields: [
     { key: "bookingDate", label: "Booking date", type: "date" }, { key: "receiptNumber", label: "Receipt number", type: "text" }, { key: "bookingText", label: "Booking text", type: "text" }, { key: "accountCode", label: "Account code", type: "text" }, { key: "accountName", label: "Account", type: "text" }, { key: "costCenter", label: "Cost center", type: "text" }, { key: "donor", label: "Donor", type: "text" }, { key: "debitCents", label: "Debit (minor units)", type: "number" }, { key: "creditCents", label: "Credit (minor units)", type: "number" },
   ], sql: `SELECT txn.booking_date::text AS "bookingDate",txn.receipt_number AS "receiptNumber",txn.booking_text AS "bookingText",account.code AS "accountCode",account.name AS "accountName",COALESCE(center.name,'') AS "costCenter",COALESCE(donor.display_name,'') AS donor,line.debit_cents::numeric AS "debitCents",line.credit_cents::numeric AS "creditCents" FROM finance_transaction_lines line JOIN finance_transactions txn ON txn.id=line.transaction_id AND txn.department_id=line.department_id JOIN finance_accounts account ON account.id=line.account_id AND account.department_id=line.department_id LEFT JOIN finance_cost_centers center ON center.id=line.cost_center_id AND center.department_id=line.department_id LEFT JOIN finance_donors donor ON donor.id=line.donor_id AND donor.department_id=line.department_id WHERE line.department_id=$1 AND txn.status='posted' ORDER BY txn.booking_date DESC,txn.created_at DESC LIMIT ${MAX_ROWS}` },
@@ -39,6 +57,7 @@ function permitted(request: DesignerAccess, permission: DataSet["permission"]) {
   if (permission === "people") return grants.includes("people_view_private") || grants.includes("people_manage");
   if (permission === "groups") return grants.includes("groups_manage");
   if (permission === "events") return grants.includes("events_manage");
+  if (permission === "resources") return grants.includes("resources_manage") || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
   const finance = request.activeDepartmentModulePermissions?.finance ?? [];
   return finance.includes("view") || finance.includes("manage");
 }
@@ -145,10 +164,12 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     return departmentId;
   }
   async function datasets(request: DesignerAccess, departmentId: string, database: Pool | PoolClient = pool!): Promise<DataSet[]> {
-    const presence = await database.query<{ finance: boolean; people: boolean; memberships: boolean }>(
+    const presence = await database.query<{ finance: boolean; people: boolean; memberships: boolean; resources: boolean }>(
       `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
               to_regclass('public.people_record_fields') IS NOT NULL AS people,
-              to_regclass('public.group_membership_custom_fields') IS NOT NULL AS memberships`,
+              to_regclass('public.group_membership_custom_fields') IS NOT NULL AS memberships,
+              to_regclass('public.bookable_resources') IS NOT NULL
+                AND to_regclass('public.resource_bookings') IS NOT NULL AS resources`,
     );
     const present = presence.rows[0];
     const customFields = permitted(request, "people") && present?.people
@@ -179,6 +200,7 @@ export function registerReportDesigner(app: FastifyInstance, context: ModuleServ
     });
     return definitions.filter((item) => permitted(request, item.permission)
       && (item.key !== "finance" || present?.finance)
+      && (item.key !== "resourceBookings" || present?.resources)
       && (item.key !== "memberships" || permitted(request, "people")));
   }
   async function runSavedDesign(access: DesignerAccess, departmentId: string, input: Record<string, unknown>, database: PoolClient) {

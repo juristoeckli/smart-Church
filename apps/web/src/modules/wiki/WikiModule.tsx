@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { createPortal } from "react-dom";
-import { Archive, ArrowDownToLine, BookOpenText, Copy, FilePlus2, FileText, History, ImagePlus, Link2, Pencil, Plus, Printer, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
+import { Archive, ArrowDownToLine, BookOpenText, ChevronDown, ChevronRight, Copy, FilePlus2, FileText, History, ImagePlus, Link2, Pencil, Plus, Printer, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 
 type Category = { id: string; name: string; parentId: string | null; position: number; archivedAt: string | null };
@@ -96,6 +96,28 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const canUpload = canManageSite || (department.modulePermissions?.["file-storage"] ?? []).includes("manage");
   const canSearchPeople = department.role === "site_admin" || (department.permissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
   const flatCategories = useMemo(() => categoryTree(categories), [categories]);
+  const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(() => new Set());
+  const categoryParents = useMemo(() => new Map(categories.map((category) => [category.id, category.parentId])), [categories]);
+  const parentCategories = useMemo(() => new Set(categoryParents.values()), [categoryParents]);
+  const visibleCategories = flatCategories.filter(({ category }) => {
+    const visited = new Set<string>();
+    for (let parent = category.parentId; parent && !visited.has(parent); parent = categoryParents.get(parent) ?? null) {
+      visited.add(parent);
+      if (collapsedCategories.has(parent)) return false;
+    }
+    return true;
+  });
+  useEffect(() => { setCollapsedCategories(new Set()); }, [departmentId]);
+  useEffect(() => {
+    const ancestors = new Set<string>();
+    for (const id of [selectedPage?.categoryId, selectedCategoryId]) {
+      for (let parent = id ? categoryParents.get(id) : null; parent && !ancestors.has(parent); parent = categoryParents.get(parent) ?? null) ancestors.add(parent);
+    }
+    setCollapsedCategories((current) => {
+      if (![...ancestors].some((id) => current.has(id))) return current;
+      return new Set([...current].filter((id) => !ancestors.has(id)));
+    });
+  }, [categoryParents, selectedPage?.id, selectedPage?.categoryId, selectedCategoryId]);
   const [pageLayout, setPageLayout] = useState<"list" | "gallery" | "table">("list");
   const [tableSort, setTableSort] = useState("updated-desc");
   const [tableColumns, setTableColumns] = useState({ category: true, updated: true, editor: false, status: false });
@@ -530,7 +552,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   }
 
   function renderCategory(category: Category, depth: number) {
-    return <div className="wiki-category-row" key={category.id}><button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} style={{ paddingLeft: `${.6 + Math.min(depth, 6) * .8}rem` }} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" disabled={busy} onClick={() => void setCategoryPosition(category)}>Set sort order</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
+    return <div className="wiki-category-row" key={category.id} style={{ paddingInlineStart: `${Math.min(depth, 6) * .8}rem` }}>{parentCategories.has(category.id) && <button className="wiki-category-toggle" type="button" aria-expanded={!collapsedCategories.has(category.id)} aria-label={`${collapsedCategories.has(category.id) ? "Expand" : "Collapse"} ${category.name}`} onClick={() => setCollapsedCategories((current) => { const next = new Set(current); if (next.has(category.id)) next.delete(category.id); else next.add(category.id); return next; })}>{collapsedCategories.has(category.id) ? <ChevronRight size={15} /> : <ChevronDown size={15} />}</button>}<button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" disabled={busy} onClick={() => void setCategoryPosition(category)}>Set sort order</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
   }
 
   function goToWikiHome() {
@@ -549,7 +571,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
       <div className="wiki-panel-head"><h2>Categories</h2><div className="wiki-actions"><select className="wiki-select" aria-label="Category status" value={categoryStatus} onChange={(event) => { setCategoryStatus(event.target.value as "active" | "archived"); setSelectedCategoryId(""); }}><option value="active">Active</option><option value="archived">Archived</option></select>{canManage && categoryStatus === "active" && <button className="button button-secondary" type="button" title="Create category" onClick={() => setShowNewCategory(true)}><Plus size={15} /></button>}</div></div>
       <button type="button" className="wiki-category-item" disabled={busy || editing || creating} onClick={goToWikiHome}>Wiki home</button>
       {categoryStatus === "active" && <button type="button" className={`wiki-category-item ${!selectedCategoryId ? "wiki-category-selected" : ""}`} onClick={() => setSelectedCategoryId("")}>All pages</button>}
-      <div className="wiki-category-list">{flatCategories.map(({ category, depth }) => renderCategory(category, depth))}</div>
+      <div className="wiki-category-list">{visibleCategories.map(({ category, depth }) => renderCategory(category, depth))}</div>
       {!categories.length && <p className="wiki-empty">No categories yet. Create a category to organize pages.</p>}
       {canManage && <button className="button button-primary" type="button" onClick={() => { setDraftCategory(selectedCategoryId || categories[0]?.id || ""); setDraftTitle(""); setCreating(true); }} disabled={!categories.length}><FilePlus2 size={15} /> New page</button>}
     </aside>

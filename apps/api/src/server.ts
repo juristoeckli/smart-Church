@@ -3520,12 +3520,13 @@ app.post<{ Params: { token: string }; Body: PublicRegistrationBody }>("/api/publ
     if (duplicate.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This email address is already registered for the event." }); }
     const registered = await client.query<{ count: number }>("SELECT count(*)::int AS count FROM event_registrations WHERE event_id=$1 AND status='registered'", [eventId]);
     const status = capacity !== null && registered.rows[0].count + party.length > capacity ? "waitlisted" : "registered";
+    const partyId = party.length > 1 ? randomUUID() : null;
     const attendees: PublicRegistrationReceipt[] = [];
     for (const [index, person] of party.entries()) {
       const cancellationToken = randomBytes(32).toString("hex");
       await client.query(
-        "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash,additional_attendee) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-        [randomUUID(), eventId, person.firstName, person.lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex"), index > 0],
+        "INSERT INTO event_registrations (id,event_id,first_name,last_name,email,status,cancellation_token_hash,additional_attendee,party_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        [randomUUID(), eventId, person.firstName, person.lastName, email, status, createHash("sha256").update(cancellationToken).digest("hex"), index > 0, partyId],
       );
       attendees.push({ ...person, cancellationToken });
     }
@@ -3587,7 +3588,7 @@ app.get<{ Params: { id: string } }>("/api/events/:id/registrations", {
   if (!selectedDepartmentId) return reply;
   const result = await pool.query<ManagedEventRegistration>(
     `SELECT registration.id,registration.first_name AS "firstName",registration.last_name AS "lastName",registration.email,
-            registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt"
+            registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt",registration.party_id AS "partyId",registration.additional_attendee AS "additionalAttendee"
        FROM event_registrations registration JOIN service_events gathering ON gathering.id=registration.event_id
       WHERE registration.event_id=$1 AND gathering.department_id=$2 ORDER BY registration.status,registration.registered_at,registration.last_name`,
     [request.params.id, selectedDepartmentId],
@@ -3618,7 +3619,7 @@ app.put<{ Params: { id: string; registrationId: string } }>("/api/events/:id/reg
     const result = await client.query<ManagedEventRegistration>(
       `UPDATE event_registrations SET status='cancelled',cancelled_at=now(),cancelled_by=$3
         WHERE event_id=$1 AND id=$2
-        RETURNING id,first_name AS "firstName",last_name AS "lastName",email,status,registered_at AS "registeredAt",checked_in_at AS "checkedInAt"`,
+        RETURNING id,first_name AS "firstName",last_name AS "lastName",email,status,registered_at AS "registeredAt",checked_in_at AS "checkedInAt",party_id AS "partyId",additional_attendee AS "additionalAttendee"`,
       [request.params.id, request.params.registrationId, request.authenticatedUser?.id],
     );
     await client.query("COMMIT");
@@ -3654,7 +3655,7 @@ app.put<{ Params: { id: string; registrationId: string } }>("/api/events/:id/reg
     const result = await client.query<ManagedEventRegistration>(
       `UPDATE event_registrations SET status='registered'
         WHERE event_id=$1 AND id=$2
-        RETURNING id,first_name AS "firstName",last_name AS "lastName",email,status,registered_at AS "registeredAt",checked_in_at AS "checkedInAt"`,
+        RETURNING id,first_name AS "firstName",last_name AS "lastName",email,status,registered_at AS "registeredAt",checked_in_at AS "checkedInAt",party_id AS "partyId",additional_attendee AS "additionalAttendee"`,
       [request.params.id, request.params.registrationId],
     );
     await client.query("COMMIT");
@@ -3676,7 +3677,7 @@ app.put<{ Params: { id: string; registrationId: string }; Body: { checkedIn: boo
     `UPDATE event_registrations registration SET checked_in_at=CASE WHEN $4 THEN COALESCE(checked_in_at,now()) ELSE NULL END
       FROM service_events gathering WHERE registration.id=$2 AND registration.event_id=$1 AND registration.status='registered' AND gathering.id=registration.event_id AND gathering.department_id=$3
       RETURNING registration.id,registration.first_name AS "firstName",registration.last_name AS "lastName",registration.email,
-                registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt"`,
+                registration.status,registration.registered_at AS "registeredAt",registration.checked_in_at AS "checkedInAt",registration.party_id AS "partyId",registration.additional_attendee AS "additionalAttendee"`,
     [request.params.id, request.params.registrationId, selectedDepartmentId, request.body.checkedIn],
   );
   if (!result.rowCount) return reply.code(404).send({ error: "This registration could not be found." });

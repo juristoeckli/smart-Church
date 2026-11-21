@@ -45,3 +45,5 @@
 .wiki-index th{white-space:nowrap}
 .wiki-index-title{font:inherit;font-weight:600;color:inherit;text-align:left;overflow-wrap:anywhere;background:transparent;border:0;border-radius:.25rem;padding:.2rem;cursor:pointer}
 .wiki-index-title.wiki-page-item-selected{background:var(--accent-soft,#e8f0ff)}
+
+.wiki-category-toggle{display:grid;place-items:center;flex:0 0 1.65rem;min-height:1.9rem;border:0;border-radius:6px;background:transparent;color:inherit}.wiki-category-toggle:hover{background:var(--surface-hover,#f1f5f9)}

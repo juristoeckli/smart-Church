@@ -51,6 +51,8 @@ This is an initial reporting slice, not feature parity with ChurchTools reportin
 
 The current result limits are fixed per report. CSV export includes the rows returned by the current bounded query.
 
+The ad hoc Resource bookings dataset uses the same management permissions as catalog resource reports. It includes resource names and categories, dates in the location time zone, booking statuses, and elapsed minutes. It excludes booking purposes, requester details, and linked appointment information.
+
 Managers can schedule their own saved catalog reports to run immediately on the next worker scan and repeat every 24 hours or 7 days. Runs use the saved filters, each run rechecks the owner's current permissions, and the latest result up to 2 MB can be opened and downloaded by the owner in Reports. Result access also checks current report permissions. Scheduled results are local to the installation.
 
 Saved ad hoc designs also support owner-managed daily or weekly runs. The shared scheduler revalidates dataset and field access at execution. The latest result is available only if the run succeeded and the owner still has dataset access. Editing the design invalidates its previous result and queues a replacement. Scheduled results can include up to 5,000 source rows and must fit the 2 MB result limit.

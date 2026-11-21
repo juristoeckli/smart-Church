@@ -136,6 +136,8 @@ export interface EventRecurrence {
 export type CreateServiceEvent = Omit<ServiceEvent, "id" | "seriesId" | "registrationToken" | "registrationCount"> & { recurrence?: EventRecurrence };
 
 export interface EventRegistration {
+  partyId?: string | null;
+  additionalAttendee?: boolean;
   id: string;
   firstName: string;
   lastName: string;
