@@ -224,7 +224,7 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
               <option value="name">Last name</option><option value="role">Role</option><option value="joined">Newest join date</option>
             </select></label>
           </div>
-          {canBulkEdit && <GroupMembershipFields key={groupScope} groupId={selectedId} departmentId={departmentId} csrfToken={csrfToken}/>}
+          {canBulkEdit && <GroupMembershipFields key={groupScope} selectedContactIds={bulkIds} groupId={selectedId} departmentId={departmentId} csrfToken={csrfToken}/>}
           {canBulkEdit && <section aria-label="Bulk membership editing">
             <label>Role<input value={bulkRole} maxLength={80} placeholder="Keep current role" disabled={bulkSaving} onChange={(event) => setBulkRole(event.target.value)} /></label>
             <label>Status<select value={bulkStatus} disabled={bulkSaving} onChange={(event) => setBulkStatus(event.target.value as "" | Member["status"])}>

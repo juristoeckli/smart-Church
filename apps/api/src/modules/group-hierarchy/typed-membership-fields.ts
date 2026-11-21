@@ -166,6 +166,85 @@ export function registerTypedMembershipFields(app: FastifyInstance, context: Mod
     return changed.rows[0];
   }, 200));
 
+  const bulkContactIds = { type: "array", items: uuid, minItems: 1, maxItems: 100, uniqueItems: true } as const;
+  const revisionSchema = { type: "integer", minimum: 0, maximum: 2147483646 } as const;
+  const bulkFields = {
+    fieldId: uuid, fieldRevision: { ...revisionSchema, minimum: 1 },
+    value: {},
+  } as const;
+  type BulkChange = { fieldId: string; fieldRevision: number; value: unknown };
+  type MemberVersion = { contactId: string; revision: number };
+  type BulkRow = MemberVersion & { value: unknown };
+
+  async function prepareBulkChange(client: PoolClient, location: Scope, reply: FastifyReply, input: BulkChange, contactIds: string[]) {
+    const field = (await definitions(client, location)).find(item => item.id === input.fieldId.toLowerCase());
+    if (!field || field.archivedAt || field.revision !== input.fieldRevision) {
+      reply.code(409).send({ error: "This field is unavailable or changed. Reload the member fields and try again." }); return null;
+    }
+    const value = normalizedValue(field, input.value);
+    if (value === undefined || (value === null && input.value !== null)) {
+      reply.code(400).send({ error: `Enter a valid value for ${field.label} or choose Clear value.` }); return null;
+    }
+    const normalizedIds = contactIds.map(id => id.toLowerCase());
+    if (new Set(normalizedIds).size !== normalizedIds.length) {
+      reply.code(400).send({ error: "Select each group membership only once." }); return null;
+    }
+    const result = await client.query<BulkRow>(
+      `SELECT member.contact_id AS "contactId",COALESCE(answer.revision,0) AS revision,answer.field_values->($4::text) AS value
+         FROM group_members member JOIN contacts person ON person.id=member.contact_id AND person.department_id=$1
+         LEFT JOIN group_member_field_answers answer ON answer.department_id=$1 AND answer.group_id=$2 AND answer.contact_id=member.contact_id
+        WHERE member.group_id=$2 AND member.contact_id=ANY($3::uuid[]) AND person.archived_at IS NULL
+        ORDER BY member.contact_id FOR UPDATE OF member,person`,
+      [location.departmentId, location.groupId, normalizedIds, field.id],
+    );
+    if (result.rows.length !== normalizedIds.length) {
+      reply.code(409).send({ error: "Some selected people are no longer active in this group. Refresh the roster and try again." }); return null;
+    }
+    return { field, value, rows: result.rows, changed: result.rows.filter(row => row.value !== value) };
+  }
+
+  app.post<{ Params: { groupId: string }; Body: BulkChange & { contactIds: string[] } }>(`${base}/bulk-preview`, {
+    schema: { params: groupParams, body: { type: "object", additionalProperties: false,
+      required: ["fieldId", "fieldRevision", "value", "contactIds"], properties: { ...bulkFields, contactIds: bulkContactIds },
+    } },
+  }, async (request, reply) => {
+    reply.header("cache-control", "private, no-store");
+    return change(request, reply, async (client, location) => {
+      const preview = await prepareBulkChange(client, location, reply, request.body, request.body.contactIds);
+      if (!preview) return null;
+      return { fieldId: preview.field.id, fieldRevision: preview.field.revision, value: preview.value,
+        members: preview.rows.map(({ contactId, revision }) => ({ contactId, revision })), changedCount: preview.changed.length };
+    }, 200);
+  });
+
+  app.put<{ Params: { groupId: string }; Body: BulkChange & { members: MemberVersion[] } }>(`${base}/bulk-changes`, {
+    schema: { params: groupParams, body: { type: "object", additionalProperties: false,
+      required: ["fieldId", "fieldRevision", "value", "members"], properties: { ...bulkFields,
+        members: { type: "array", minItems: 1, maxItems: 100, items: { type: "object", additionalProperties: false,
+          required: ["contactId", "revision"], properties: { contactId: uuid, revision: revisionSchema },
+        } },
+      },
+    } },
+  }, async (request, reply) => change(request, reply, async (client, location) => {
+    const expected = new Map(request.body.members.map(member => [member.contactId.toLowerCase(), member.revision]));
+    const patch = await prepareBulkChange(client, location, reply, request.body, request.body.members.map(member => member.contactId));
+    if (!patch) return null;
+    if (patch.rows.some(row => expected.get(row.contactId) !== row.revision)) {
+      reply.code(409).send({ error: "Membership values changed after the preview. Preview the update again." }); return null;
+    }
+    if (patch.changed.length === 0) return { updated: 0 };
+    const changed = await client.query(
+      `INSERT INTO group_member_field_answers(department_id,group_id,contact_id,field_values,updated_by)
+       SELECT $1,$2,selected.contact_id,jsonb_strip_nulls($4::jsonb),$5 FROM unnest($3::uuid[]) selected(contact_id)
+       ON CONFLICT(department_id,group_id,contact_id) DO UPDATE
+          SET field_values=jsonb_strip_nulls(group_member_field_answers.field_values || $4::jsonb),
+              revision=group_member_field_answers.revision+1,updated_at=now(),updated_by=EXCLUDED.updated_by`,
+      [location.departmentId, location.groupId, patch.changed.map(row => row.contactId),
+        JSON.stringify({ [patch.field.id]: patch.value }), request.authenticatedUser!.id],
+    );
+    return { updated: changed.rowCount };
+  }, 200));
+
   app.get<{ Params: { groupId: string; contactId: string } }>(`${base}/:contactId`, { schema: { params: memberParams } }, async (request, reply) => {
     const location = await scope(request, reply);
     if (!location || !await checkGroup(request, reply, location, pool!)) return reply;
