@@ -21,6 +21,8 @@ import { readChurchToolsAllDaySeriesDates, reviewChurchToolsCalendarSeries } fro
 import { applyCalendarServiceEventLinks, calendarServiceEventLinkFingerprint, reviewCalendarServiceEventLinks } from "./calendar-series-event-links.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
+import { applyChurchToolsServiceTemplates, readChurchToolsServiceTemplates, reviewChurchToolsServiceTemplates, ServiceTemplateReviewError, type ChurchToolsTemplateKind } from "./service-templates.js";
+
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
 const elvantoAreas = ["people", "peopleFlows", "groups", "services", "songs", "calendar", "financial"] as const;
@@ -1988,6 +1990,64 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (error instanceof ArrangementMediaReviewError) return reply.code(409).send({ error: error.message });
         if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
           return reply.code(409).send({ error: "The local arrangement is busy. Try the review again." });
+        }
+        throw error;
+      } finally { db.release(); }
+    });
+
+    type TemplateImportBody = { kind: ChurchToolsTemplateKind; reviewHash?: string; sourceIds?: string[] };
+    routes.post<{ Body: TemplateImportBody }>("/api/modules/sync/churchtools/service-templates", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["kind"], properties: {
+        kind: { type: "string", enum: ["event", "agenda"] }, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        sourceIds: { type: "array", minItems: 1, maxItems: 25, uniqueItems: true, items: { type: "string", pattern: "^[1-9][0-9]{0,15}$" } },
+      } } },
+    }, async (request, reply) => {
+      const departmentId = await department(request, reply, true);
+      if (!departmentId || !deps.validateMutation(request, reply)) return reply;
+      const config = await settings(departmentId);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing service templates." });
+      const { kind, reviewHash, sourceIds } = request.body;
+      if (!!reviewHash !== !!sourceIds) return reply.code(400).send({ error: "Select reviewed templates before importing." });
+      const scope = { departmentId, instanceUrl: config.instance_url, kind };
+      let templates: ReturnType<typeof readChurchToolsServiceTemplates>;
+      try {
+        const token = decrypt(config.encrypted_login_token);
+        const signal = AbortSignal.timeout(20_000);
+        const [source, roles] = await Promise.all([
+          get(config.instance_url, token, kind === "event" ? "eventtemplates" : "agendatemplates", signal),
+          kind === "event" ? get(config.instance_url, token, "services", signal) : undefined,
+        ]);
+        templates = readChurchToolsServiceTemplates(kind, source, roles);
+      } catch (error) {
+        const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read ChurchTools service templates." });
+      }
+      if (!reviewHash || !sourceIds) {
+        const review = await reviewChurchToolsServiceTemplates(pool!, scope, templates);
+        return reply.header("Cache-Control", "private, no-store").send(review);
+      }
+      const db = await pool!.connect();
+      try {
+        await db.query("BEGIN");
+        await db.query("SET LOCAL lock_timeout = '5s'");
+        if (!await deps.lockDepartmentForWrite(db, departmentId)) {
+          await db.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        const current = await db.query(`SELECT 1 FROM churchtools_sync_settings
+          WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE`,
+        [departmentId, config.instance_url, config.encrypted_login_token]);
+        if (!current.rowCount) throw new ServiceTemplateReviewError("The ChurchTools connection changed. Open a fresh review.");
+        await db.query("LOCK TABLE service_plan_templates IN SHARE ROW EXCLUSIVE MODE");
+        const review = await reviewChurchToolsServiceTemplates(db, scope, templates, true);
+        const result = await applyChurchToolsServiceTemplates(db, scope, review, reviewHash, sourceIds);
+        await db.query("COMMIT");
+        return reply.header("Cache-Control", "private, no-store").send(result);
+      } catch (error) {
+        await db.query("ROLLBACK");
+        if (error instanceof ServiceTemplateReviewError) return reply.code(409).send({ error: error.message });
+        if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
+          return reply.code(409).send({ error: "Service templates are busy. Open a fresh review." });
         }
         throw error;
       } finally { db.release(); }
