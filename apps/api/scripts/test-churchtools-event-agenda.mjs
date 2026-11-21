@@ -34,10 +34,58 @@ assert.deepEqual(agenda.items.map((item) => item.plan), [
 assert.deepEqual([agenda.items[1].sourceSongId, agenda.items[1].sourceArrangementId], ["17", "19"]);
 assert.equal(agenda.hidden, 1);
 assert.equal(agenda.unsupported, 1);
-assert.deepEqual(agenda.unmappedFields, ["agenda.serviceGroupNotes", "agenda.responsible"]);
+assert.deepEqual(agenda.unmappedFields, ["agenda.headingAsPlanItem", "agenda.serviceGroupNotes", "agenda.responsible"]);
 assert.doesNotMatch(JSON.stringify(agenda), /visible to one source group|Hidden source item/);
 assert.throws(() => normalizeChurchToolsAgenda({ data: [] }, "1", "Europe/Zurich", []), /invalid event agenda/);
 assert.deepEqual(normalizeChurchToolsAgenda({ data: { items: [] } }, "1", "Europe/Zurich", []).items, []);
+
+const sectionSource = (items, eventStartPosition = 0) =>
+  normalizeChurchToolsAgenda({ data: { items, eventStartPosition } }, "1", "Europe/Zurich", []);
+const header = (title, fields = {}) => ({ type: "header", title, ...fields });
+const speech = (title, fields = {}) => ({ type: "text", title, ...fields });
+const start = "2026-10-25T08:00:00Z";
+const heading = sectionSource([
+  speech("Preparation"),
+  header("Gathering", { startTimes: { 1: start }, duration: 0 }),
+  { type: "song", song: { title: "Morning Song", songId: 17, arrangementId: 19 }, startTimes: { 1: start } },
+  header("Hidden heading", { startTimes: { 1: null } }),
+  speech("Welcome", { startTimes: { 1: "2026-10-25T08:05:00Z" } }),
+  header("Blessing"),
+  speech("Closing prayer"),
+]);
+assert.deepEqual(heading.items.map(({ plan }) => plan), [
+  { title: "Preparation" },
+  { title: "Morning Song", startTime: "09:00", section: "Gathering" },
+  { title: "Welcome", startTime: "09:05", section: "Gathering" },
+  { title: "Closing prayer", section: "Blessing" },
+]);
+assert.deepEqual([heading.items[1].sourceSongId, heading.items[1].sourceArrangementId], ["17", "19"]);
+assert.equal(heading.hidden, 1);
+assert.deepEqual(heading.unmappedFields, []);
+
+const repeated = sectionSource([
+  header("Empty"), header("Reading"), speech("First reading"), header("Reading"), speech("Second reading"),
+  header("Standalone", { note: "<p>Keep heading notes</p>" }), speech("More"),
+  header("L".repeat(81)), speech("Long heading item"), header("No following item"),
+]);
+assert.deepEqual(repeated.items.map(({ plan }) => plan), [
+  { title: "Empty" },
+  { title: "First reading", section: "Reading" },
+  { title: "Reading" }, { title: "Second reading" },
+  { title: "Standalone", notes: "Keep heading notes" }, { title: "More" },
+  { title: "L".repeat(81) }, { title: "Long heading item" }, { title: "No following item" },
+]);
+assert.deepEqual(repeated.unmappedFields, ["agenda.headingAsPlanItem"]);
+assert.deepEqual(sectionSource([
+  header("Before start"), speech("Soundcheck"), speech("Opening"), header("Closing"), speech("Prayer"),
+], 2).items.map(({ plan }) => plan), [
+  { title: "Soundcheck", section: "Before start" }, { title: "Opening" }, { title: "Prayer", section: "Closing" },
+]);
+assert.deepEqual(sectionSource([
+  header("Before start"), speech("Opening"), header("Empty"), { type: "new_item" }, speech("Other"),
+], 1).items.map(({ plan }) => plan), [
+  { title: "Before start" }, { title: "Opening" }, { title: "Empty" }, { title: "Other" },
+]);
 
 const location = "location";
 const base = "https://catalog.church.tools";

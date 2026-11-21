@@ -18,9 +18,22 @@ export function normalizeChurchToolsAgenda(payload: unknown, eventId: string, ti
   const unmappedFields = new Set<string>();
   let hidden = 0;
   let unsupported = 0;
-  for (const value of data.items) {
+  let section: string | undefined;
+  let pendingHeader: AgendaItem | undefined;
+  function finishSection() {
+    if (pendingHeader) {
+      items.push(pendingHeader);
+      unmappedFields.add("agenda.headingAsPlanItem");
+      pendingHeader = undefined;
+    }
+    section = undefined;
+  }
+
+  for (const [index, value] of data.items.entries()) {
+    if (index === data.eventStartPosition) finishSection();
     const item = object(value);
     if (!item || (item.type !== "header" && item.type !== "text" && item.type !== "song")) {
+      finishSection();
       unsupported += 1;
       continue;
     }
@@ -31,9 +44,11 @@ export function normalizeChurchToolsAgenda(payload: unknown, eventId: string, ti
       hidden += 1;
       continue;
     }
+    if (item.type === "header") finishSection();
     const song = item.type === "song" ? object(item.song) : undefined;
     const title = text(item.title, 160) || text(song?.title, 160);
     if (!title) {
+      finishSection();
       unsupported += 1;
       continue;
     }
@@ -58,8 +73,27 @@ export function normalizeChurchToolsAgenda(payload: unknown, eventId: string, ti
     else if (services.length || text(responsibility?.text, 1)) unmappedFields.add("agenda.responsible");
     const sourceSongId = churchToolsAgendaSourceId(song?.songId);
     const sourceArrangementId = churchToolsAgendaSourceId(song?.arrangementId);
-    items.push({ plan, sourceSongId, sourceArrangementId });
+    const entry = { plan, sourceSongId, sourceArrangementId };
+    if (item.type === "header") {
+      pendingHeader = entry;
+      const hasSeparateContent = title.length > 80 || /[\p{Cc}\p{Cf}]/u.test(title) || note
+        || services.length || text(responsibility?.text, 1) || (Array.isArray(item.serviceGroupNotes) && item.serviceGroupNotes.length)
+        || (item.duration != null && item.duration !== 0) || (start != null && !plan.startTime);
+      if (hasSeparateContent) finishSection();
+      continue;
+    }
+    if (pendingHeader) {
+      const heading = pendingHeader.plan;
+      // Matching labels would merge separate adjacent sections in the native plan.
+      if (heading.startTime === plan.startTime && items.at(-1)?.plan.section !== heading.title) {
+        section = heading.title;
+        pendingHeader = undefined;
+      } else finishSection();
+    }
+    if (section) plan.section = section;
+    items.push(entry);
   }
+  finishSection();
   return { items, hidden, unsupported, unmappedFields: [...unmappedFields] };
 }
 

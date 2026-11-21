@@ -80,7 +80,6 @@ function agendaDefaults(row: Raw, template: Template) {
   const items = row.items.map((value) => {
     const item = object(value);
     if (!item) return value;
-    if (item.type === "header") template.omitted.push("headings_become_plan_items");
     if (text(item.title).length > 160 || plain(item.note).length > 500) template.omitted.push("agenda_text_shortened");
     if (item.type !== "header" && item.duration != null && (!Number.isSafeInteger(item.duration)
       || Number(item.duration) < 0 || Number(item.duration) > 86_400 || Number(item.duration) % 60 !== 0)) {
@@ -89,7 +88,7 @@ function agendaDefaults(row: Raw, template: Template) {
     }
     return item;
   });
-  const agenda = normalizeChurchToolsAgenda({ data: { items } }, "", "UTC", []);
+  const agenda = normalizeChurchToolsAgenda({ data: { items, eventStartPosition: row.eventStartPosition } }, "", "UTC", []);
   template.sourceItems = agenda.items;
   if (agenda.unsupported) template.omitted.push("unsupported_agenda_items");
   template.omitted.push(...agenda.unmappedFields);

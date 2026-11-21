@@ -36,6 +36,14 @@ assert.deepEqual(agenda.sourceItems.map(({ plan }) => plan), [{ title: "Welcome"
 assert.equal(agenda.sourceItems[2].sourceArrangementId, "5");
 assert.ok(agenda.omitted.includes("before_event_anchor"));
 assert.ok(agenda.omitted.includes("unsupported_agenda_duration"));
+assert.ok(agenda.omitted.includes("agenda.headingAsPlanItem"));
+const [sectioned] = readChurchToolsServiceTemplates("agenda", list([{ ...sourceAgenda, eventStartPosition: 0 }]));
+assert.deepEqual(sectioned.sourceItems.map(({ plan }) => plan), [
+  { title: "Announcements", durationMinutes: 2, notes: "Read the notices.", section: "Welcome" },
+  { title: "Song", section: "Welcome" },
+]);
+assert.equal(sectioned.sourceItems[1].sourceArrangementId, "5");
+assert.ok(!sectioned.omitted.includes("agenda.headingAsPlanItem"));
 const [occurrence] = readChurchToolsServiceTemplates("agenda", list([{ ...sourceAgenda, items: [{ ...sourceAgenda.items[0], startTimes: { 1: "10:00" } }] }]));
 assert.ok(occurrence.blocked.includes("instance_agenda_has_occurrence_times"));
 assert.throws(() => readChurchToolsServiceTemplates("agenda", { ...list([sourceAgenda]), meta: { count: 0 } }), /complete list/);
