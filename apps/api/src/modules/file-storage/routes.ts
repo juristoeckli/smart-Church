@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { canManageStoredFileWikiAudience, hasWikiFileAudienceSchema, storedFileWikiAudienceSql } from "../../stored-file-wiki-access.js";
+import { canManageStoredFileWikiAudience, wikiFileAudienceSchema, storedFileWikiAudienceSql } from "../../stored-file-wiki-access.js";
 
 const resourceLimit = 25 * 1024 * 1024;
 function canonical(value: unknown): string {
@@ -113,12 +113,19 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return departmentId;
     }
 
-    async function canReadStoredFile(request: FastifyRequest, departmentId: string, fileId: string) {
-      if (!await hasWikiFileAudienceSchema(pool!)) return true;
+    async function requireStoredFileRead(request: FastifyRequest, reply: FastifyReply, departmentId: string, fileId: string) {
+      const schema = await wikiFileAudienceSchema(pool!);
+      if (schema === "absent") return true;
+      if (schema === "partial") {
+        reply.code(503).send({ error: "File sharing permissions are unavailable." });
+        return false;
+      }
       const result = await pool!.query(`SELECT 1 FROM stored_files stored
         WHERE stored.department_id=$1 AND stored.id=$4 AND ${storedFileWikiAudienceSql}`,
         [departmentId, canManageStoredFileWikiAudience(request), request.authenticatedUser!.id, fileId]);
-      return Boolean(result.rowCount);
+      if (result.rowCount) return true;
+      reply.code(404).send({ error: "Resource not found." });
+      return false;
     }
 
     routes.get<{ Querystring: { view?: string } }>("/api/files", async (request, reply) => {
@@ -126,9 +133,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (view !== "active" && view !== "trash") return reply.code(400).send({ error: "Choose a valid file view." });
       const departmentId = await department(request, reply, view === "trash");
       if (!departmentId) return reply;
-      const wikiSchema = await hasWikiFileAudienceSchema(pool!);
-      const audienceFilter = wikiSchema ? `AND ${storedFileWikiAudienceSql}` : "";
-      const listParameters = wikiSchema ? [departmentId, canManageStoredFileWikiAudience(request), request.authenticatedUser!.id] : [departmentId];
+      const wikiSchema = await wikiFileAudienceSchema(pool!);
+      if (wikiSchema === "partial") return reply.code(503).send({ error: "File sharing permissions are unavailable." });
+      const audienceFilter = wikiSchema === "complete" ? `AND ${storedFileWikiAudienceSql}` : "";
+      const listParameters = wikiSchema === "complete" ? [departmentId, canManageStoredFileWikiAudience(request), request.authenticatedUser!.id] : [departmentId];
       const result = await pool!.query<ResourceRow>(
         `SELECT stored.id,stored.title,stored.category,stored.file_name,stored.content_type,stored.file_size,stored.created_at,stored.folder_id FROM stored_files stored
           WHERE stored.department_id = $1 AND ${view === "trash" ? "stored.deleted_at IS NOT NULL" : "stored.deleted_at IS NULL"} ${audienceFilter}
@@ -249,7 +257,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query("SELECT file_name, content_type, file_data FROM stored_files WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL", [request.params.id, departmentId]);
       const resource = result.rows[0];
       if (!resource) return reply.code(404).send({ error: "Resource not found." });
-      if (!await canReadStoredFile(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Resource not found." });
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       reply.type(resource.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(resource.file_name)}`).header("X-Content-Type-Options", "nosniff");
       return resource.file_data as Buffer;
     });
@@ -258,7 +266,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const file = await pool!.query("SELECT id FROM stored_files WHERE id=$1 AND department_id=$2 AND deleted_at IS NULL", [request.params.id, departmentId]);
-      if (!file.rowCount || !await canReadStoredFile(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Resource not found." });
+      if (!file.rowCount) return reply.code(404).send({ error: "Resource not found." });
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const versions = await pool!.query(
         `SELECT version.id,version.version_number AS "versionNumber",version.title,version.category,version.file_name AS "fileName",version.content_type AS "contentType",version.file_size AS "fileSize",version.uploaded_by AS "uploadedBy",u.display_name AS "uploadedByName",version.created_at AS "createdAt"
            FROM stored_file_versions version LEFT JOIN app_users u ON u.id=version.uploaded_by
@@ -310,7 +319,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.get<{ Params: { id: string; versionId: string } }>("/api/files/:id/versions/:versionId/download", { schema: { params: { type: "object", required: ["id", "versionId"], properties: { id: { type: "string", format: "uuid" }, versionId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
-      if (!await canReadStoredFile(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Resource not found." });
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const result = await pool!.query<{ file_name: string; content_type: string; file_data: Buffer }>(
         "SELECT version.file_name,version.content_type,version.file_data FROM stored_file_versions version JOIN stored_files stored ON stored.id=version.file_id AND stored.department_id=version.department_id WHERE version.id=$1 AND version.file_id=$2 AND version.department_id=$3 AND stored.deleted_at IS NULL",
         [request.params.versionId, request.params.id, departmentId],

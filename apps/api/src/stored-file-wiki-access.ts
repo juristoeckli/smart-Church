@@ -1,11 +1,14 @@
 import type { FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 
-export async function hasWikiFileAudienceSchema(db: Pick<PoolClient, "query">) {
-  const schema = await db.query<{ installed: boolean }>(
-    "SELECT to_regclass('public.wiki_page_files') IS NOT NULL AND to_regclass('public.wiki_pages') IS NOT NULL AS installed",
+export async function wikiFileAudienceSchema(db: Pick<PoolClient, "query">) {
+  const result = await db.query<{ pages: boolean; attachments: boolean }>(
+    "SELECT to_regclass('public.wiki_pages') IS NOT NULL AS pages,to_regclass('public.wiki_page_files') IS NOT NULL AS attachments",
   );
-  return schema.rows[0]?.installed === true;
+  const state = result.rows[0];
+  if (state?.pages && state.attachments) return "complete" as const;
+  if (state?.pages === false && state.attachments === false) return "absent" as const;
+  return "partial" as const;
 }
 
 export function canManageStoredFileWikiAudience(request: FastifyRequest) {

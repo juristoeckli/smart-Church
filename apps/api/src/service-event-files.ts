@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
-import { canManageStoredFileWikiAudience, hasWikiFileAudienceSchema, storedFileWikiAudienceSql } from "./stored-file-wiki-access.js";
+import { canManageStoredFileWikiAudience, wikiFileAudienceSchema, storedFileWikiAudienceSql } from "./stored-file-wiki-access.js";
 
 type Context = {
   pool: Pool | null;
@@ -21,7 +21,7 @@ export function registerServiceEventFilesRoutes(app: FastifyInstance, context: C
     if (!context.pool || !context.available()) { reply.code(503).send({ error: "Event attachments are unavailable." }); return null; }
     const id = await context.resolveScope(request, reply);
     if (!id) return null;
-    if (!await hasWikiFileAudienceSchema(context.pool)) {
+    if (await wikiFileAudienceSchema(context.pool) !== "complete") {
       reply.code(503).send({ error: "File sharing permissions are unavailable." });
       return null;
     }
