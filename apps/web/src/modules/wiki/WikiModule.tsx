@@ -533,9 +533,21 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     return <div className="wiki-category-row" key={category.id}><button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} style={{ paddingLeft: `${.6 + Math.min(depth, 6) * .8}rem` }} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" disabled={busy} onClick={() => void setCategoryPosition(category)}>Set sort order</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
   }
 
+  function goToWikiHome() {
+    const needsRefresh = status !== "active" || categoryStatus !== "active" || search !== "";
+    setStatus("active");
+    setCategoryStatus("active");
+    setSearch("");
+    setSelectedCategoryId("");
+    setEditing(false);
+    setCreating(false);
+    if (!needsRefresh) void refresh("");
+  }
+
   return <div className={`wiki-page ${pageLayout !== "list" ? "wiki-page-gallery-layout" : ""}`}>
     <aside className="wiki-panel" aria-label="Wiki categories">
       <div className="wiki-panel-head"><h2>Categories</h2><div className="wiki-actions"><select className="wiki-select" aria-label="Category status" value={categoryStatus} onChange={(event) => { setCategoryStatus(event.target.value as "active" | "archived"); setSelectedCategoryId(""); }}><option value="active">Active</option><option value="archived">Archived</option></select>{canManage && categoryStatus === "active" && <button className="button button-secondary" type="button" title="Create category" onClick={() => setShowNewCategory(true)}><Plus size={15} /></button>}</div></div>
+      <button type="button" className="wiki-category-item" disabled={busy || editing || creating} onClick={goToWikiHome}>Wiki home</button>
       {categoryStatus === "active" && <button type="button" className={`wiki-category-item ${!selectedCategoryId ? "wiki-category-selected" : ""}`} onClick={() => setSelectedCategoryId("")}>All pages</button>}
       <div className="wiki-category-list">{flatCategories.map(({ category, depth }) => renderCategory(category, depth))}</div>
       {!categories.length && <p className="wiki-empty">No categories yet. Create a category to organize pages.</p>}
