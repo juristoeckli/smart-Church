@@ -421,6 +421,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { weekday: result.rows[0]?.digest_weekday ?? null };
   });
 
+  app.get("/api/modules/community-feed/email-history", async (request, reply) => {
+    if (!pool || !isDatabaseReady()) return unavailable(reply);
+    const departmentId = await resolveDepartmentId(request, reply);
+    if (!departmentId) return reply;
+    const result = await pool.query(
+      `SELECT notification.id, CASE WHEN notification.title=$3 AND NOT notification.in_app_enabled THEN 'digest' ELSE 'alert' END AS kind,
+              delivery.status, delivery.created_at AS "queuedAt", delivery.updated_at AS "updatedAt"
+         FROM module_notifications notification
+         JOIN module_notification_email_deliveries delivery ON delivery.notification_id=notification.id
+        WHERE notification.department_id=$1 AND notification.recipient_user_id=$2 AND notification.kind='community_feed'
+        ORDER BY notification.created_at DESC,notification.id DESC LIMIT 30`,
+      [departmentId, request.authenticatedUser!.id, DIGEST_TITLE],
+    );
+    return reply.header("Cache-Control", "private, no-store").send(result.rows);
+  });
+
   app.put<{ Body: { weekday: number | null } }>("/api/modules/community-feed/digest-preferences", {
     schema: { body: { type: "object", additionalProperties: false, required: ["weekday"], properties: { weekday: { anyOf: [{ type: "integer", minimum: 1, maximum: 7 }, { type: "null" }] } } } },
   }, async (request, reply) => {
