@@ -168,6 +168,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return result.rows;
   });
 
+  const noteRevision = `to_char(note.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
   app.get<{ Params: { id: string } }>("/api/modules/group-hierarchy/groups/:id/notes", {
     schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
   }, async (request, reply) => {
@@ -177,16 +178,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const group = await pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
     if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
     const canManageNotes = managerGrant(request) || await canManageGroup(request, request.params.id, departmentId);
+    reply.header("Cache-Control", "private, no-store");
     if (!canManageNotes) return { notes: [], canManage: false };
     const result = await pool.query(
-      `SELECT note.id,note.title,note.body,note.created_at AS "createdAt",note.updated_at AS "updatedAt",
+      `SELECT note.id,note.title,note.body,note.created_at AS "createdAt",note.updated_at AS "updatedAt",${noteRevision} AS revision,
               COALESCE(actor.display_name,'Former user') AS "authorName",note.created_by AS "createdBy"
          FROM group_notes note LEFT JOIN app_users actor ON actor.id=note.created_by
         WHERE note.department_id=$1 AND note.group_id=$2 AND note.archived_at IS NULL
         ORDER BY note.created_at DESC,note.id DESC LIMIT 200`,
       [departmentId, request.params.id],
     );
-    return { notes: result.rows.map((row) => ({ ...row, canArchive: managerGrant(request) || row.createdBy === request.authenticatedUser?.id })), canManage: true };
+    return { notes: result.rows.map(row => {
+      const canChange = managerGrant(request) || row.createdBy === request.authenticatedUser?.id;
+      return { ...row, canEdit: canChange, canArchive: canChange };
+    }), canManage: true };
   });
 
   app.post<{ Params: { id: string }; Body: { title: string; body: string } }>("/api/modules/group-hierarchy/groups/:id/notes", {
@@ -215,26 +220,85 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.code(201).send({ ...result.rows[0], authorName: request.authenticatedUser?.displayName ?? "You", canArchive: true });
   });
 
-  app.delete<{ Params: { id: string; noteId: string } }>("/api/modules/group-hierarchy/groups/:id/notes/:noteId", {
-    schema: { params: { type: "object", additionalProperties: false, required: ["id", "noteId"], properties: { id: { type: "string", format: "uuid" }, noteId: { type: "string", format: "uuid" } } } },
-  }, async (request, reply) => {
+  const noteEditParams = { type: "object", additionalProperties: false, required: ["id", "noteId"],
+    properties: { id: { type: "string", format: "uuid" }, noteId: { type: "string", format: "uuid" } },
+  } as const;
+  type NoteParams = { id: string; noteId: string };
+  type NoteEdit = { title: string; body: string; revision: string };
+
+  async function changeGroupNote(request: FastifyRequest<{ Params: NoteParams }>, reply: FastifyReply, edit?: NoteEdit) {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const group = await pool.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2", [request.params.id, departmentId]);
-    if (!group.rowCount) return reply.code(404).send({ error: "Group not found." });
-    const result = await pool.query(
-      `UPDATE group_notes SET archived_at=now(),archived_by=$4,updated_at=now()
-        WHERE id=$1 AND group_id=$2 AND department_id=$3 AND archived_at IS NULL
-          AND (created_by=$4 OR $5::boolean)
-        RETURNING id`,
-      [request.params.noteId, request.params.id, departmentId, request.authenticatedUser!.id, managerGrant(request)],
-    );
-    if (!result.rowCount) return reply.code(404).send({ error: "Note not found or you cannot archive it." });
-    realtime.publish("core:groups:changed", departmentId, { groupId: request.params.id, action: "note-archived" });
-    return { archived: true };
-  });
+    const { id: groupId, noteId } = request.params;
+    const actorId = request.authenticatedUser!.id;
+    const title = edit?.title.trim(), body = edit?.body.trim();
+    if (edit && (!title || !body || title.includes("\u0000") || body.includes("\u0000"))) {
+      return reply.code(400).send({ error: "Enter a valid title and note." });
+    }
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(423).send({ error: "This location is read-only." });
+      }
+      const group = await client.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 FOR SHARE", [groupId, departmentId]);
+      if (!group.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Group not found." }); }
+      if (!await canManageGroup(request, groupId, departmentId, client)) {
+        await client.query("ROLLBACK");
+        return reply.code(403).send({ error: "Group leader access is required to change group notes." });
+      }
+      const values = [noteId, groupId, departmentId, actorId, managerGrant(request)];
+      const note = await client.query<{ revision: string }>(
+        `SELECT ${noteRevision} AS revision FROM group_notes note
+          WHERE note.id=$1 AND note.group_id=$2 AND note.department_id=$3 AND note.archived_at IS NULL
+            AND (note.created_by=$4 OR $5::boolean) FOR UPDATE`,
+        values,
+      );
+      if (!note.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Note not found or you cannot change it." });
+      }
+      if (edit && edit.revision !== note.rows[0].revision) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This note changed. Reload it and try your edit again." });
+      }
+      if (edit) {
+        await client.query(
+          `UPDATE group_notes SET title=$4,body=$5,updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond')
+            WHERE id=$1 AND group_id=$2 AND department_id=$3`,
+          [noteId, groupId, departmentId, title, body],
+        );
+      } else {
+        await client.query(
+          "UPDATE group_notes SET archived_at=now(),archived_by=$4,updated_at=now() WHERE id=$1 AND group_id=$2 AND department_id=$3",
+          [noteId, groupId, departmentId, actorId],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+    realtime.publish("core:groups:changed", departmentId, { groupId, action: edit ? "note-edited" : "note-archived" });
+    return edit ? { edited: true } : { archived: true };
+  }
+
+  app.put<{ Params: NoteParams; Body: NoteEdit }>("/api/modules/group-hierarchy/groups/:id/notes/:noteId", {
+    schema: { params: noteEditParams, body: {
+      type: "object", additionalProperties: false, required: ["title", "body", "revision"],
+      properties: {
+        title: { type: "string", minLength: 1, maxLength: 160 }, body: { type: "string", minLength: 1, maxLength: 10000 },
+        revision: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$" },
+      },
+    } },
+  }, (request, reply) => changeGroupNote(request, reply, request.body));
+
+  app.delete<{ Params: NoteParams }>("/api/modules/group-hierarchy/groups/:id/notes/:noteId", {
+    schema: { params: noteEditParams },
+  }, (request, reply) => changeGroupNote(request, reply));
 
   app.get<{ Params: { id: string } }>("/api/modules/group-hierarchy/groups/:id/members", {
     schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },

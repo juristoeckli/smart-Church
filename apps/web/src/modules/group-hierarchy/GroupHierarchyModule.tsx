@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ModuleContext } from "../../module-registry";
 import { GroupMembershipFields } from "./GroupMembershipFields";
 import "./styles.css";
@@ -7,7 +7,7 @@ type Group = { id: string; name: string; description: string; parentId: string |
 type Member = { contactId: string; firstName: string; lastName: string; email: string | null; role: string; status: "active" | "paused" | "waitlist"; joinedOn: string | null; customFields: Record<string, string | number | boolean | null> };
 type History = { id: string; entityKind: string; entityId: string; action: string; beforeData: unknown; afterData: unknown; createdAt: string; actorName: string };
 type Leader = { groupId: string; groupName: string; groupDescription: string; parentGroupName: string | null; contactId: string; firstName: string; lastName: string; email: string | null; role: string; joinedOn: string | null };
-type GroupNote = { id: string; title: string; body: string; createdAt: string; updatedAt: string; authorName: string; canArchive: boolean };
+type GroupNote = { id: string; title: string; body: string; createdAt: string; updatedAt: string; authorName: string; revision: string; canEdit: boolean; canArchive: boolean };
 type GroupInvitation = { id: string; contactId: string; firstName: string; lastName: string; createdAt: string; expiresAt: string; acceptedAt: string | null; revokedAt: string | null; status: "pending" | "accepted" | "revoked" | "expired" };
 
 function historyRecord(value: unknown): Record<string, unknown> {
@@ -50,6 +50,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language, onOpen
   const [notes, setNotes] = useState<GroupNote[]>([]);
   const [canManageNotes, setCanManageNotes] = useState(false);
   const [noteDraft, setNoteDraft] = useState({ title: "", body: "" });
+  const [editingNote, setEditingNote] = useState<GroupNote | null>(null);
+  const [noteSaving, setNoteSaving] = useState(false);
   const [rules, setRules] = useState<Array<{ contactStatus: "member" | "visitor"; enabled: boolean }>>([]);
   const [parentId, setParentId] = useState("");
   const [error, setError] = useState("");
@@ -64,6 +66,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language, onOpen
   const [leaders, setLeaders] = useState<Leader[] | null>(null);
   const selected = groups.find((group) => group.id === selectedId) ?? null;
   const groupScope = `${departmentId}:${selectedId}`;
+  const currentNoteScope = useRef(groupScope);
+  currentNoteScope.current = groupScope;
   const currentRoster = rosterScope === groupScope ? members : [];
   const memberRoles = [...new Set(currentRoster.map((member) => member.role))].filter(Boolean).sort((a, b) => a.localeCompare(b, language));
   const memberSearch = memberQuery.trim().toLocaleLowerCase(language);
@@ -82,6 +86,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language, onOpen
   const bulkIds = bulkSelection.scope === groupScope ? bulkSelection.ids.filter((id) => visibleMembers.some((member) => member.contactId === id)) : [];
   useEffect(() => {
     setEdit(null);
+    setEditingNote(null);
+    setNoteDraft({ title: "", body: "" });
     setBulkSelection({ scope: "", ids: [] });
     setBulkRole("");
     setBulkStatus("");
@@ -132,9 +138,25 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language, onOpen
   };
   const saveParent = async () => { try { await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/parent`, "PUT", { parentId: parentId || null }); await load(); setMessage("Group hierarchy saved."); } catch (reason) { setError((reason as Error).message); } };
   const saveRules = async () => { try { await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/membership-rules`, "PUT", { rules }); await loadDetails(selectedId); setMessage("Automatic membership rules saved."); } catch (reason) { setError((reason as Error).message); } };
-  const addNote = async () => {
-    try { await mutate(`/api/modules/group-hierarchy/groups/${selectedId}/notes`, "POST", noteDraft); setNoteDraft({ title: "", body: "" }); await loadDetails(selectedId); setMessage("Group note added."); }
-    catch (reason) { setError((reason as Error).message); }
+  const saveNote = async () => {
+    if (noteSaving || !noteDraft.title.trim() || !noteDraft.body.trim()) return;
+    setNoteSaving(true);
+    try {
+      const endpoint = `/api/modules/group-hierarchy/groups/${selectedId}/notes`;
+      if (editingNote) {
+        await mutate(endpoint + "/" + editingNote.id, "PUT", { ...noteDraft, revision: editingNote.revision });
+      } else await mutate(endpoint, "POST", noteDraft);
+      if (currentNoteScope.current !== groupScope) return;
+      setNoteDraft({ title: "", body: "" });
+      setEditingNote(null);
+      await loadDetails(selectedId);
+      if (currentNoteScope.current === groupScope) setMessage(editingNote ? "Group note saved." : "Group note added.");
+    } catch (reason) { if (currentNoteScope.current === groupScope) setError((reason as Error).message); }
+    finally { setNoteSaving(false); }
+  };
+  const cancelNoteEdit = () => {
+    setEditingNote(null);
+    setNoteDraft({ title: "", body: "" });
   };
   const archiveNote = async (note: GroupNote) => {
     if (!window.confirm(`Archive “${note.title}”?`)) return;
@@ -251,8 +273,8 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language, onOpen
         </div>
         <div className="gh-panel"><h2>Automatic membership</h2><p>Rules affect future people and only remove memberships created by these rules.</p>{(["member", "visitor"] as const).map((status) => <label className="gh-check" key={status}><input type="checkbox" checked={rules.some((rule) => rule.contactStatus === status && rule.enabled)} onChange={(event) => setRules((current) => [...current.filter((rule) => rule.contactStatus !== status), ...(event.target.checked ? [{ contactStatus: status, enabled: true }] : [])])} /> Automatically add {status}s</label>)}<button disabled={selected.imported} onClick={() => void saveRules()}>Save rules</button></div>
         <div className="gh-panel"><h2>Group notes <small>({notes.length})</small></h2><p>Notes are visible to this group’s leaders and group managers.</p>
-          {canManageNotes && <form className="gh-note-form" onSubmit={(event) => { event.preventDefault(); void addNote(); }}><label>Title<input required maxLength={160} value={noteDraft.title} onChange={(event) => setNoteDraft({ ...noteDraft, title: event.target.value })} /></label><label>Note<textarea required maxLength={10000} rows={4} value={noteDraft.body} onChange={(event) => setNoteDraft({ ...noteDraft, body: event.target.value })} /></label><button disabled={!noteDraft.title.trim() || !noteDraft.body.trim()}>Add note</button></form>}
-          {notes.length ? notes.map((note) => <article className="gh-history" key={note.id}><strong>{note.title}</strong><small>{note.authorName} · {new Date(note.createdAt).toLocaleString()}</small><p className="gh-note-body">{note.body}</p>{note.canArchive && <button className="gh-note-archive" onClick={() => void archiveNote(note)}>Archive note</button>}</article>) : <p>No group notes yet.</p>}
+          {canManageNotes && <form className="gh-note-form" onSubmit={(event) => { event.preventDefault(); void saveNote(); }}><label>Title<input required maxLength={160} value={noteDraft.title} onChange={(event) => setNoteDraft({ ...noteDraft, title: event.target.value })} /></label><label>Note<textarea required maxLength={10000} rows={4} value={noteDraft.body} onChange={(event) => setNoteDraft({ ...noteDraft, body: event.target.value })} /></label><button disabled={noteSaving || !noteDraft.title.trim() || !noteDraft.body.trim()}>{editingNote ? "Save note" : "Add note"}</button>{editingNote && <button type="button" disabled={noteSaving} onClick={cancelNoteEdit}>Cancel edit</button>}</form>}
+          {notes.length ? notes.map((note) => <article className="gh-history" key={note.id}><strong>{note.title}</strong><small>{note.authorName} · {new Date(note.createdAt).toLocaleString()}</small><p className="gh-note-body">{note.body}</p>{note.canEdit && <button type="button" disabled={noteSaving} onClick={() => { setEditingNote(note); setNoteDraft({ title: note.title, body: note.body }); }}>Edit note</button>}{note.canArchive && <button type="button" className="gh-note-archive" disabled={noteSaving || editingNote?.id === note.id} onClick={() => void archiveNote(note)}>Archive note</button>}</article>) : <p>No group notes yet.</p>}
         </div>
         <div className="gh-panel">
           <h2>{text.history}</h2>
