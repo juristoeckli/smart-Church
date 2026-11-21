@@ -2,7 +2,9 @@ import { useState } from "react";
 
 type Review = {
   reviewHash: string; currency: string; bookingDate: string; accountingYear: number; receiptNumber: string; bookingText: string;
-  source: { instanceUrl: string; periodId: string; sourceId: string };
+  source: { instanceUrl: string; periodId: string; sourceId: string; split?: {
+    parentId: string; children: Array<{ sourceId: string; documentNumber: string; signedMinor: string; sourceDebitAccountId: string; sourceCreditAccountId: string }>;
+  } };
   lines: Array<{ accountCode: string; accountName: string; accountType: string; debitMinor: string; creditMinor: string; text: string }>;
 };
 
@@ -56,7 +58,13 @@ export function DraftPostingReview({ transactionId, departmentId, onPosted }: {
     {review && <>
       <h3>{review.receiptNumber} · {review.bookingDate}</h3>
       <p>{review.bookingText}</p>
-      <p>ChurchTools {review.source.instanceUrl} · period #{review.source.periodId} · journal #{review.source.sourceId}</p>
+      <p>ChurchTools {review.source.instanceUrl} · period #{review.source.periodId} · {review.source.split ? `split parent #${review.source.split.parentId}` : `journal #${review.source.sourceId}`}</p>
+      {review.source.split && <details>
+        <summary>{review.source.split.children.length} original ChurchTools child bookings</summary>
+        <ul>{review.source.split.children.map((child) => <li key={child.sourceId}>
+          #{child.sourceId} · {child.documentNumber} · {minor(child.signedMinor, review.currency)} · Debit #{child.sourceDebitAccountId} · Credit #{child.sourceCreditAccountId}
+        </li>)}</ul>
+      </details>}
       <p>Accounting year {review.accountingYear}</p>
       <div className="finance-table-wrap"><table className="finance-table">
         <thead><tr><th scope="col">Account</th><th scope="col">Debit</th><th scope="col">Credit</th></tr></thead>

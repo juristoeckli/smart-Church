@@ -75,7 +75,9 @@ export async function createFinanceDraftBatch(db: Queryable, scope: Scope, actor
     await db.query(`INSERT INTO finance_audit(id,department_id,actor_user_id,action,record_kind,record_id,details)
       VALUES($1,$2,$3,$4,'transaction',$5,$6::jsonb)`,
     [randomUUID(), departmentId, actorId, row.split ? "churchtools-journal-split-draft-created" : "churchtools-journal-draft-created", transactionId,
-      JSON.stringify({ instanceUrl, periodId, sourceId: row.sourceId, accountingYear: plan.targetYear, ...(row.split ? { sourceParentId: row.split.parentId, sourceChildren: row.split.children } : {}) })]);
+      JSON.stringify({ instanceUrl, periodId, sourceId: row.sourceId, accountingYear: plan.targetYear, ...(row.split ? {
+        sourceParentId: row.split.parentId, sourceParentDocumentNumber: row.documentNumber, sourceParentDate: row.date, sourceChildren: row.split.children,
+      } : {}) })]);
     drafts.push({ sourceId: row.sourceId, transactionId });
   }
   const result = { created: drafts.length, drafts };
