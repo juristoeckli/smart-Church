@@ -13,7 +13,7 @@ import { registerHomeLayout } from "./home-layout.js";
 
 type NotificationRow = {
   id: string;
-  kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed" | "report_ready";
+  kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed" | "report_ready" | "resource_booking";
   title: string;
   body: string;
   event_id: string | null;
@@ -105,7 +105,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }
 
   context.replication.register({
-    schemaVersion: "9",
+    schemaVersion: "10",
     inspect: async (departmentId) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["Notifications database is unavailable."], recordCount: 0 };
       try {
@@ -341,6 +341,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           `SELECT delivery.notification_id,notification.department_id,notification.recipient_user_id,delivery.recipient_email,account.email AS current_email,account.language AS recipient_language,
                   (COALESCE(preference.email_notifications_enabled,false)
                    AND (notification.kind<>'service_request' OR COALESCE(preference.service_requests_enabled,true))
+                   AND (notification.kind<>'resource_booking' OR (account.is_enabled AND NOT account.is_service_user AND EXISTS (
+                     SELECT 1 FROM department_memberships member
+                     WHERE member.department_id=notification.department_id AND member.user_id=notification.recipient_user_id
+                   )))
                    AND (notification.related_swap_id IS NULL OR EXISTS (
                      SELECT 1 FROM event_position_swap_requests swap
                      JOIN department_memberships member ON member.department_id=notification.department_id AND member.user_id=notification.recipient_user_id
@@ -504,7 +508,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           department_id UUID NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
           recipient_user_id UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
           sender_user_id UUID REFERENCES app_users(id) ON DELETE SET NULL,
-          kind TEXT NOT NULL CHECK (kind IN ('announcement', 'event_reminder', 'service_request', 'follow_up_assignment', 'follow_up_reminder', 'community_feed', 'report_ready')),
+          kind TEXT NOT NULL CHECK (kind IN ('announcement', 'event_reminder', 'service_request', 'follow_up_assignment', 'follow_up_reminder', 'community_feed', 'report_ready', 'resource_booking')),
           title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 120),
           body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
           event_id UUID REFERENCES service_events(id) ON DELETE CASCADE,
@@ -554,7 +558,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         END $$;
         CREATE INDEX IF NOT EXISTS idx_module_notifications_announcement_batch
           ON module_notifications (department_id, announcement_batch_id) WHERE announcement_batch_id IS NOT NULL;
-        ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed','report_ready'));
+        ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed','report_ready','resource_booking'));
         DROP INDEX IF EXISTS module_notifications_follow_up_unique_idx;
         CREATE UNIQUE INDEX IF NOT EXISTS module_notifications_follow_up_unique_idx
           ON module_notifications (department_id,recipient_user_id,kind,related_event_id,related_contact_id)

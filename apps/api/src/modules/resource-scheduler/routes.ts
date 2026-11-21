@@ -1,3 +1,4 @@
+import { recordResourceBookingDecision } from "../../resource-booking-notices.js";
 import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -966,22 +967,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!booking) return reply.code(404).send({ error: "Booking not found." });
     if (!isManager(request) && (request.body.status !== "cancelled" || booking.requested_by !== request.authenticatedUser!.id)) return reply.code(403).send({ error: "Resource management access is required to change booking status." });
     if (request.body.status === "approved" && !isManager(request)) return reply.code(403).send({ error: "Resource management access is required to approve bookings." });
-    let result: { rowCount: number | null };
+    const client = await context.pool!.connect();
     try {
-      result = await context.pool!.query(`WITH changed AS (
+      await client.query("BEGIN");
+      const result = await client.query(`WITH changed AS (
         UPDATE resource_bookings SET status=$1,updated_at=now()
-        WHERE id=$2 AND department_id=$3 AND status IN ('requested','approved') AND ($7::text IS NULL OR (status=$7 AND ends_at>now()))
+        WHERE id=$2 AND department_id=$3 AND status IN ('requested','approved') AND status<>$1 AND ($7::text IS NULL OR (status=$7 AND ends_at>now()))
         RETURNING id,department_id,status
       )
       INSERT INTO resource_scheduler_audit (id,department_id,actor_user_id,action,booking_id,details)
       SELECT $4,department_id,$5,$6,id,jsonb_build_object('status',status) FROM changed`,
       [request.body.status, request.params.bookingId, departmentId, randomUUID(), request.authenticatedUser!.id, `booking_${request.body.status}`, request.body.expectedStatus ?? null]);
-    }
-    catch (error) {
+      if (!result.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: request.body.expectedStatus ? "This booking is no longer awaiting a decision." : "This booking is already closed or has that status." });
+      }
+      await recordResourceBookingDecision(client, departmentId, request.params.bookingId, request.authenticatedUser!.id, request.body.status);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
       if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "This approval conflicts with another booking or exceeds the configured quantity." });
       throw error;
-    }
-    if (!result.rowCount) return reply.code(409).send({ error: request.body.expectedStatus ? "This booking is no longer awaiting a decision." : "This booking is already closed." });
+    } finally { client.release(); }
     context.realtime.publish("module:resource-scheduler:changed", departmentId, { bookingId: request.params.bookingId, action: request.body.status });
     return { status: request.body.status };
   });

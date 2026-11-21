@@ -1,3 +1,4 @@
+import { recordResourceBookingDecision } from "../../resource-booking-notices.js";
 import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
@@ -1184,6 +1185,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           if (conflict.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Another booking has already been approved for this time." }); }
         }
         await client.query("UPDATE resource_bookings SET status=$3, updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, departmentId, request.body.status]);
+        await recordResourceBookingDecision(client, departmentId, request.params.id, request.authenticatedUser!.id, request.body.status);
         await client.query("COMMIT");
         return { updated: true, status: request.body.status };
       } catch (error) {
