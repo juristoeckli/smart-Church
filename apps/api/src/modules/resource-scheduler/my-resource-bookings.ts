@@ -55,12 +55,15 @@ export function registerMyResourceBookings(app: FastifyInstance, context: Module
       context.pool!.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query<{ id: string; cursorStart: string }>(
         `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,booking.quantity,
-                booking.status,CASE WHEN series.all_day_date IS NOT NULL THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
+                booking.status,CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
                 to_char(booking.starts_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorStart"
            FROM resource_bookings booking JOIN bookable_resources resource
              ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
            LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
            LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
+           LEFT JOIN resource_booking_series_occurrence_overrides day_override
+          ON day_override.series_id=series.id AND day_override.resource_booking_id=booking.id
+          AND day_override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date
           WHERE booking.department_id=$1 AND booking.requested_by=$2
             AND ($3::boolean OR resource.active)
             AND ($4::text IS NULL OR booking.status=$4)

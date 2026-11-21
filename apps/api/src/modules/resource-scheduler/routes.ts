@@ -394,7 +394,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",occurrence.is_extra_date AS "isExtraDate",
-          CASE WHEN series.all_day_date IS NOT NULL THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
+          CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate", (series.all_day_date IS NOT NULL) AS "seriesAllDay",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
           booking.created_at AS "createdAt",booking.updated_at AS "updatedAt"
@@ -402,6 +402,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         JOIN app_users requester ON requester.id=booking.requested_by
         LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
         LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
+        LEFT JOIN resource_booking_series_occurrence_overrides day_override
+          ON day_override.series_id=series.id AND day_override.resource_booking_id=booking.id
+          AND day_override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date
         WHERE booking.department_id=$1 AND booking.ends_at >= ($2::date::timestamptz - interval '1 day') AND booking.starts_at < ($3::date::timestamptz + interval '1 day')
           AND ($4::text IS NULL OR booking.status=$4) AND ($5::uuid IS NULL OR booking.resource_id=$5)
           AND ($10::text IS NULL OR resource.category=$10)
@@ -964,10 +967,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { ok: true, ...summary };
   });
 
-  app.put<{ Params: { seriesId: string; date: string }; Body: { startsAt: string; endsAt: string; quantity: number } }>("/api/modules/resource-scheduler/series/:seriesId/occurrences/:date", {
+  app.put<{ Params: { seriesId: string; date: string }; Body: { startsAt: string; endsAt: string; quantity: number; allDay?: boolean } }>("/api/modules/resource-scheduler/series/:seriesId/occurrences/:date", {
     schema: {
       params: { type: "object", required: ["seriesId", "date"], properties: { seriesId: { type: "string", format: "uuid" }, date: { type: "string", format: "date" } } },
-      body: { type: "object", additionalProperties: false, required: ["startsAt", "endsAt", "quantity"], properties: { startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" }, quantity: { type: "integer", minimum: 1, maximum: 10000 } } },
+      body: { type: "object", additionalProperties: false, required: ["startsAt", "endsAt", "quantity"], properties: { startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" }, quantity: { type: "integer", minimum: 1, maximum: 10000 }, allDay: { type: "boolean" } } },
     },
   }, async (request, reply) => {
     const departmentId = await location(request, reply);
@@ -993,16 +996,29 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const row = found.rows[0];
       if (!row) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "No booking occurrence exists on this date." }); }
       if (row.requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can edit this occurrence." }); }
-      if (row.all_day_date) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Cancel this full-day booking and create a new request to change its time." }); }
       const today = occurrenceDateKey(new Date(), row.time_zone ?? null);
       if (request.params.date < today) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Only future occurrences can be edited." }); }
-      if (occurrenceDateKey(startsAt, row.time_zone ?? null) !== request.params.date || occurrenceDateKey(endsAt, row.time_zone ?? null) !== request.params.date) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a valid start and end time on the selected location date." }); }
+      const { allDay } = request.body;
+      if (row.all_day_date ? allDay === undefined : allDay === true) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose a valid full-day setting for this booking series." });
+      }
+      if (allDay) {
+        const fullDay = fullDayBounds(request.params.date, row.time_zone);
+        if (+fullDay.startsAt !== +startsAt || +fullDay.endsAt !== +endsAt) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Full-day bookings must occupy the full date in the series time zone." });
+        }
+      } else if (occurrenceDateKey(startsAt, row.time_zone ?? null) !== request.params.date || occurrenceDateKey(endsAt, row.time_zone ?? null) !== request.params.date) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose a valid start and end time on the selected location date." });
+      }
       if (row.status !== "requested") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only pending occurrences can be edited. Cancel or resolve a confirmed occurrence individually first." }); }
       if (request.body.quantity > Number(row.total_units)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Quantity exceeds this resource's available units." }); }
       await client.query("UPDATE resource_bookings SET starts_at=$3,ends_at=$4,quantity=$5,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [row.booking_id, departmentId, startsAt, endsAt, request.body.quantity]);
-      await client.query(`INSERT INTO resource_booking_series_occurrence_overrides(series_id,occurrence_date,resource_booking_id,updated_by)
-        VALUES($1,$2,$3,$4) ON CONFLICT(series_id,occurrence_date) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,updated_by=EXCLUDED.updated_by,updated_at=now()`, [request.params.seriesId, request.params.date, row.booking_id, request.authenticatedUser!.id]);
-      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_overridden',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, next: { startsAt, endsAt, quantity: request.body.quantity } })]);
+      await client.query(`INSERT INTO resource_booking_series_occurrence_overrides(series_id,occurrence_date,resource_booking_id,updated_by,all_day)
+        VALUES($1,$2,$3,$4,$5) ON CONFLICT(series_id,occurrence_date) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,updated_by=EXCLUDED.updated_by,all_day=EXCLUDED.all_day,updated_at=now()`, [request.params.seriesId, request.params.date, row.booking_id, request.authenticatedUser!.id, row.all_day_date ? allDay : null]);
+      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_overridden',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, next: { startsAt, endsAt, quantity: request.body.quantity, ...(row.all_day_date ? { allDay } : {}) } })]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -1024,7 +1040,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.params.seriesId]);
-      const found = await client.query(`SELECT series.id,series.requested_by,series.time_zone,series.starts_at AS series_starts_at,series.ends_at AS series_ends_at,series.quantity AS series_quantity,
+      const found = await client.query(`SELECT series.id,series.requested_by,series.time_zone,series.all_day_date,series.starts_at AS series_starts_at,series.ends_at AS series_ends_at,series.quantity AS series_quantity,
           series.lead_in_minutes,series.cleanup_minutes,booking.id AS booking_id,booking.status,booking.starts_at,booking.ends_at,booking.quantity
         FROM resource_booking_series series
         JOIN resource_booking_series_occurrence_overrides override ON override.series_id=series.id AND override.occurrence_date=$3::date
@@ -1036,10 +1052,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (request.params.date < occurrenceDateKey(new Date(), row.time_zone ?? null)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Only future occurrences can be reset." }); }
       if (row.requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can reset this occurrence." }); }
       if (row.status !== "requested") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only pending occurrences can be reset. Cancel or resolve a confirmed occurrence individually first." }); }
-      const { startsAt, endsAt } = occurrenceAtDate(new Date(row.series_starts_at), new Date(row.series_ends_at), request.params.date, row.time_zone ?? null);
+      const { startsAt, endsAt } = row.all_day_date
+        ? fullDayBounds(request.params.date, row.time_zone)
+        : occurrenceAtDate(new Date(row.series_starts_at), new Date(row.series_ends_at), request.params.date, row.time_zone ?? null);
       await client.query("UPDATE resource_bookings SET starts_at=$3,ends_at=$4,quantity=$5,lead_in_minutes=$6,cleanup_minutes=$7,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [row.booking_id, departmentId, startsAt, endsAt, row.series_quantity, row.lead_in_minutes, row.cleanup_minutes]);
       await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND occurrence_date=$2::date", [request.params.seriesId, request.params.date]);
-      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_override_reset',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, restored: { startsAt, endsAt, quantity: row.series_quantity } })]);
+      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_override_reset',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, restored: { startsAt, endsAt, quantity: row.series_quantity, ...(row.all_day_date ? { allDay: true } : {}) } })]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
