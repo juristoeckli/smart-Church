@@ -7,14 +7,15 @@ type Resource = {
 };
 
 type Props = {
-  appointmentId: string; title: string; startsAt: string; endsAt: string;
+  appointmentId: string; defaultPurpose: string; startsAt: string; endsAt: string;
   headers: Record<string, string>; onCreated: (bookingId: string) => void;
 };
 
-export function CalendarResourceRequest({ appointmentId, title, startsAt, endsAt, headers, onCreated }: Props) {
+export function CalendarResourceRequest({ appointmentId, defaultPurpose, startsAt, endsAt, headers, onCreated }: Props) {
   const [data, setData] = useState<{ resources: Resource[]; timeZone: string; canManage: boolean }>();
   const [open, setOpen] = useState(false);
   const [resourceId, setResourceId] = useState("");
+  const [purpose, setPurpose] = useState(defaultPurpose);
   const [quantity, setQuantity] = useState("1");
   const [leadIn, setLeadIn] = useState("0");
   const [cleanup, setCleanup] = useState("0");
@@ -44,7 +45,7 @@ export function CalendarResourceRequest({ appointmentId, title, startsAt, endsAt
     setQuantity("1");
   }
   async function book() {
-    if (!selected || !data?.canManage || busy) return;
+    if (!selected || !data?.canManage || !purpose.trim() || busy) return;
     const units = Number(quantity), before = Number(leadIn), after = Number(cleanup);
     if (!quantity.trim() || !leadIn.trim() || !cleanup.trim() || !Number.isInteger(units) || units < 1 || units > selected.totalUnits
         || ![before, after].every((minutes) => Number.isInteger(minutes) && minutes >= 0 && minutes <= 10080)) {
@@ -58,7 +59,7 @@ export function CalendarResourceRequest({ appointmentId, title, startsAt, endsAt
         method: "POST",
         headers,
         body: JSON.stringify({
-          resourceId, purpose: title, quantity: units, leadInMinutes: before, cleanupMinutes: after,
+          resourceId, purpose: purpose.trim(), quantity: units, leadInMinutes: before, cleanupMinutes: after,
           startsAt: zonedInputToUtc(startsAt.slice(0, 16), data.timeZone),
           endsAt: zonedInputToUtc(endsAt.slice(0, 16), data.timeZone),
           linkedAppointmentId: appointmentId,
@@ -81,6 +82,7 @@ export function CalendarResourceRequest({ appointmentId, title, startsAt, endsAt
       <strong>Book a resource for this occurrence</strong>
       <small>Uses the saved appointment time{data ? " in " + data.timeZone : ""}. Booking is saved separately from appointment edits.</small>
       {data?.canManage && <div>
+        <label>Booking purpose<input value={purpose} onChange={(event) => setPurpose(event.target.value)} maxLength={240} disabled={busy} /><small>Shown in Resource Scheduler.</small></label>
         <label>Resource<select value={resourceId} onChange={(event) => selectResource(event.target.value)} disabled={busy}>
           <option value="">Choose a resource…</option>
           {resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}{resource.location ? " · " + resource.location : ""}</option>)}
@@ -88,7 +90,7 @@ export function CalendarResourceRequest({ appointmentId, title, startsAt, endsAt
         <label>Quantity<input type="number" min={1} max={selected?.totalUnits ?? 1} value={quantity} onChange={(event) => setQuantity(event.target.value)} disabled={busy} /></label>
         <label>Setup minutes<input type="number" min={0} max={10080} value={leadIn} onChange={(event) => setLeadIn(event.target.value)} disabled={busy} /></label>
         <label>Cleanup minutes<input type="number" min={0} max={10080} value={cleanup} onChange={(event) => setCleanup(event.target.value)} disabled={busy} /></label>
-        <button type="button" className="button button-secondary" onClick={() => void book()} disabled={!selected || busy}>{busy ? "Booking…" : "Reserve and link"}</button>
+        <button type="button" className="button button-secondary" onClick={() => void book()} disabled={!selected || !purpose.trim() || busy}>{busy ? "Booking…" : "Reserve and link"}</button>
       </div>}
       {!data && !error && <small>Loading resources…</small>}
       {data && !data.canManage && <small>Resource manager access is required to link a booking.</small>}

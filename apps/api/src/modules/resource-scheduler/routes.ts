@@ -17,6 +17,16 @@ function isManager(request: FastifyRequest) {
     || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
 }
 
+// Match the shared-calendar management policy. These grants also allow
+// reading group calendars. Resource management by itself is insufficient.
+function sharedCalendarLinkAccess(request: FastifyRequest) {
+  const permissions = request.activeDepartmentPermissions ?? [];
+  const shared = request.activeDepartmentRole === "site_admin"
+    || (request.activeDepartmentModulePermissions?.["church-calendar"] ?? []).includes("manage")
+    || permissions.includes("events_manage");
+  return { community: shared, group: shared || permissions.includes("groups_manage") };
+}
+
 type ZonedParts = { year: number; month: number; day: number; hour: number; minute: number; second: number };
 const DAY_MS = 86_400_000;
 function partsInTimeZone(value: Date, timeZone: string): ZonedParts {
@@ -191,6 +201,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (requireManager && !isManager(request)) { reply.code(403).send({ error: "Resource management access is required." }); return null; }
     return departmentId;
   }
+  async function lockLinkableAppointment(client: { query: (sql: string, values?: unknown[]) => Promise<any> }, request: FastifyRequest, departmentId: string, appointmentId: string) {
+    const access = sharedCalendarLinkAccess(request);
+    const result = await client.query(
+      `SELECT appointment.id FROM church_calendar_appointments appointment
+        JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+        WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL
+          AND calendar.archived_at IS NULL
+          AND ((calendar.scope='community' AND $3::boolean) OR (calendar.scope='group' AND $4::boolean))
+        FOR SHARE OF appointment,calendar`, [appointmentId, departmentId, access.community, access.group]);
+    return Boolean(result.rowCount);
+  }
+
   async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: { query: (sql: string, values?: unknown[]) => Promise<any> }) {
     const seriesResult = await queryable.query("SELECT * FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [seriesId, departmentId]);
     const series = seriesResult.rows[0];
@@ -240,7 +262,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.requested_by AS "requestedBy",requester.display_name AS "requesterName",booking.purpose,
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
-          series.id AS "seriesId",series.recurrence,series.linked_appointment_id AS "linkedAppointmentId",occurrence.is_extra_date AS "isExtraDate",
+          series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",occurrence.is_extra_date AS "isExtraDate",
           series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
@@ -366,17 +388,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "This location is read-only on this installation." });
       }
-      if (appointmentId) {
-        const appointment = await client.query(
-          `SELECT appointment.id FROM church_calendar_appointments appointment
-            JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
-            WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL
-              AND calendar.archived_at IS NULL AND calendar.scope IN ('community','group')
-            FOR SHARE OF appointment,calendar`, [appointmentId, departmentId]);
-        if (!appointment.rowCount) {
-          await client.query("ROLLBACK");
-          return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
-        }
+      if (appointmentId && !await lockLinkableAppointment(client, request, departmentId, appointmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
       }
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.body.resourceId]);
       await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
@@ -439,6 +453,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const plan = await calculateFutureEdit(departmentId, request.params.seriesId, request.body, client);
       if ("error" in plan) { await client.query("ROLLBACK"); return reply.code(400).send({ error: plan.error }); }
       if (plan.approvedCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `${plan.approvedCount} future occurrence(s) are already approved. No changes were made; handle those bookings individually before editing the series.` }); }
+      if (plan.addedCount > 0 && plan.series.linked_appointment_id) {
+        if (!isManager(request)) {
+          await client.query("ROLLBACK");
+          return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
+        }
+        const links = await client.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
+        if (!links.rows[0]?.available || !await lockLinkableAppointment(client, request, departmentId, plan.series.linked_appointment_id)) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
+        }
+      }
       const input = request.body;
       const currentByDate = new Map<string, { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }>(plan.requested.map((row: { id: string; occurrenceStartsAt: Date; occurrenceDate: string; hasOccurrenceOverride: boolean }) => [row.occurrenceDate, row] as const));
       const proposedDates = new Set(plan.proposed.map((item) => item.localDate));
@@ -470,8 +495,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await client.query(`INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)
             ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,is_extra_date=EXCLUDED.is_extra_date`, [randomUUID(), departmentId, request.params.seriesId, bookingId, occurrence.startsAt, extras.has(date)]);
           if (plan.series.linked_appointment_id) {
-            const links = await client.query("SELECT to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
-            if (links.rows[0]?.available) await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [plan.series.linked_appointment_id, bookingId, request.authenticatedUser!.id]);
+            await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [plan.series.linked_appointment_id, bookingId, request.authenticatedUser!.id]);
           }
           addedCount++;
         }
