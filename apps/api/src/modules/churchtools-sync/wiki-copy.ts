@@ -49,16 +49,21 @@ export function guestWikiPages(payload: unknown, categoryId: string) {
   });
 }
 
-export function guestWikiRevision(payload: unknown, categoryId: string, guid: string) {
+export function guestWikiIdentity(payload: unknown, categoryId: string, guid: string) {
   const row = object(object(payload)?.data);
   const revision = positive(row?.version);
   const name = title(row?.title, 180);
-  const body = row?.text;
   if (!row || positive(object(row.wikiCategory)?.id) !== categoryId || wikiGuid(row.guid) !== guid || !revision || !name
-    || row.redirectTo !== null || row.isMarkdown !== true || typeof body !== "string" || !body.trim() || body.length > 75_000
-    || /[\[\]<>]|(?:https?|ftp|mailto|file|data|javascript):|(?:^|\s)\/\/|\bwww\.|\bchurch\.tools\b|\bchurchtools\.[a-z]+\b|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\p{Cf}/iu.test(body)) return null;
-  const escaped = body.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[character]!));
-  return { guid, revision, title: name, text: body, html: `<pre><code>${escaped}</code></pre>` };
+    || row.redirectTo !== null || row.isMarkdown !== true) return null;
+  return { guid, revision, title: name };
+}
+
+export function guestWikiRevision(payload: unknown, categoryId: string, guid: string) {
+  const identity = guestWikiIdentity(payload, categoryId, guid);
+  const text = object(object(payload)?.data)?.text;
+  if (!identity || typeof text !== "string" || !text.trim() || text.length > 75_000
+    || /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]|\p{Cf}/u.test(text)) return null;
+  return { ...identity, text };
 }
 
 export async function fetchGuestWiki(instance: string, path: string, signal: AbortSignal) {

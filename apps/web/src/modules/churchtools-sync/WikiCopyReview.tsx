@@ -4,7 +4,9 @@ type Category = { id: string; name: string };
 type Page = { guid: string; title: string; revision: string };
 type Review = Page & {
   category: Category;
-  text: string;
+  previewHtml: string;
+  matchedLinks: number;
+  omittedReferences: number;
   target: { action: string; name: string | null };
   review: string | null;
 };
@@ -67,7 +69,7 @@ export function WikiCopyReview({ departmentId, csrfToken, t }: {
 
   return <section className="panel stack">
     <h3>{t("Copy ChurchTools Wiki pages")}</h3>
-    <p>{t("Copy guest-readable, reference-free Markdown as text into a managers-only Wiki page.")}</p>
+    <p>{t("Copy supported formatting from guest-readable Markdown into a managers-only Wiki page. Internal links can point to pages already copied to this category.")}</p>
     <button type="button" disabled={busy} onClick={() => void load("categories")}>{t("Find guest-readable categories")}</button>
     {categories && (categories.length ? <>
       <label>{t("ChurchTools Wiki category")}<select value={categoryId} disabled={busy} onChange={(event) => {
@@ -92,7 +94,8 @@ export function WikiCopyReview({ departmentId, csrfToken, t }: {
     {shown && <div className="stack">
       <h4>{shown.title}</h4>
       <p>{t("Source revision")} {shown.revision} · {t("Destination category")} {shown.target.name ?? shown.category.name}</p>
-      <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", maxHeight: "16rem", overflow: "auto" }}>{shown.text}</pre>
+      <div className="wiki-content" style={{ overflowWrap: "anywhere", maxHeight: "16rem", overflow: "auto" }} dangerouslySetInnerHTML={{ __html: shown.previewHtml }} />
+      {Boolean(shown.matchedLinks || shown.omittedReferences) && <p>{t("Verified internal links")} {shown.matchedLinks} · {t("References left inactive or omitted")} {shown.omittedReferences}</p>}
       {shown.review
         ? <button type="button" disabled={busy} onClick={() => void load("apply")}>{t("Copy page for Wiki managers")}</button>
         : <p>{t(actionMessages[shown.target.action] ?? "This page cannot be copied.")}</p>}

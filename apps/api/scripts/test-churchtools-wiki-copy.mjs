@@ -1,5 +1,17 @@
 import assert from "node:assert/strict";
 import { fetchGuestWiki, guestWikiCategories, guestWikiPages, guestWikiRevision } from "../src/modules/churchtools-sync/wiki-copy.ts";
+import { registerHooks } from "node:module";
+const hook = registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context); }
+  catch (error) {
+    if (error.code === "ERR_MODULE_NOT_FOUND" && specifier.startsWith("./") && specifier.endsWith(".js")) {
+      return next(specifier.slice(0,-3) + ".ts", context);
+    }
+    throw error;
+  }
+} });
+const { formatGuestWikiMarkdown } = await import("../src/modules/churchtools-sync/wiki-copy-format.ts");
+hook.deregister();
 
 const guid = "681f54e3-2eb7-40a4-84f0-eff8e8f05727";
 const row = { guid: guid.toUpperCase(), version: 12, title: "Help & reference", isMarkdown: true, redirectTo: null, wikiCategory: { id: 8 } };
@@ -12,12 +24,29 @@ assert.deepEqual(guestWikiPages(list([{ ...row, redirectTo: "Other page" }]), "8
 assert.deepEqual(guestWikiPages(list([row]), "9"), []);
 
 const page = (text, props = {}) => ({ data: { ...row, text, ...props } });
-assert.deepEqual(guestWikiRevision(page("\n# Our team's notes\n\n1. Read & discuss \"today\"\n"), "8", guid), {
-  guid, revision: "12", title: row.title, text: "\n# Our team's notes\n\n1. Read & discuss \"today\"\n",
-  html: "<pre><code>\n# Our team&#39;s notes\n\n1. Read &amp; discuss &quot;today&quot;\n</code></pre>",
+assert.deepEqual(guestWikiRevision(page("Raw body"), "8", guid), {
+  guid, revision: "12", title: row.title, text: "Raw body",
 });
-for (const text of ["", "<b>Legacy HTML</b>", "[Link](Wiki)", "![](relative.png)", "https://server.invalid/download?secret=abc", "Adjacent www.example.invalid", "data:payload", "abc\0", "a\u202e"]) {
-  assert.equal(guestWikiRevision(page(text), "8", guid), null);
+for (const text of ["", "abc\0", "a\u202e"]) assert.equal(guestWikiRevision(page(text), "8", guid), null);
+const input = [
+  "# Our team's notes", "", "1. Read & discuss \"today\"", "2. Bring **paper** and *pen*.", "",
+  "> Remember `notes`", "", "[Read this](https://server.invalid/download?secret=abc)", "![image](relative.png)", "", "[[Other]]",
+].join("\n");
+const format = formatGuestWikiMarkdown(input, new Map([["Other", guid]]));
+assert.deepEqual(format.titles, ["Other"]);
+assert.equal(format.matched, 1);
+assert.equal(format.omitted, 2);
+assert.match(format.html, /<h1>Our team&#39;s notes<\/h1>/);
+assert.match(format.html, /<ol><li>Read &amp; discuss &quot;today&quot;<\/li><li>Bring <strong>paper<\/strong> and <em>pen<\/em>.<\/li><\/ol>/);
+assert.match(format.html, /<blockquote>Remember <code>notes<\/code><\/blockquote>/);
+assert.match(format.html, /<a href="#" data-entity-type="wiki" data-entity-id="681f54e3-2eb7-40a4-84f0-eff8e8f05727">Other<\/a>/);
+assert.doesNotMatch(format.html, /server\.invalid|secret|relative\.png|<img/);
+assert.doesNotMatch(formatGuestWikiMarkdown(input, new Map([["Other", guid]]), true).html, /href|data-entity-id/);
+assert.equal(formatGuestWikiMarkdown("[[Other]]", new Map([["Other", "invalid"]])).html, "<p>Other</p>");
+assert.equal(formatGuestWikiMarkdown("[[Other]]").omitted, 1);
+assert.match(formatGuestWikiMarkdown("```txt\nplain & simple\n```").html, /<pre><code>plain &amp; simple<\/code><\/pre>/);
+for (const text of ["<b>Legacy HTML</b>", "https://server.invalid/download", "Adjacent www.example.invalid", "data:payload", "[bad](nested(path))", "[style](javascript:(x))", "[missing][reference]", "\\[[Other]]", "`[[Other]]`", "``[[Other]]``", "```\nunfinished"]) {
+  assert.equal(formatGuestWikiMarkdown(text), null);
 }
 assert.equal(guestWikiRevision(page("Good", { redirectTo: "Target" }), "8", guid), null);
 assert.equal(guestWikiRevision(page("Good", { isMarkdown: false }), "8", guid), null);

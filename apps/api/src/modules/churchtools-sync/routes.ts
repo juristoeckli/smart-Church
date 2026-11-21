@@ -31,7 +31,8 @@ import { readChurchToolsAbsencePreview } from "./absence-preview.js";
 import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
 import { isVisibleChurchToolsHistoryPerson, membershipHistoryCursor, membershipHistoryPageSize, personalChurchToolsId, readChurchToolsMembershipHistoryPage, readMembershipHistoryCursor } from "./membership-history.js";
-import { fetchGuestWiki, guestWikiCategories, guestWikiPages, guestWikiRevision, wikiGuid } from "./wiki-copy.js";
+import { fetchGuestWiki, guestWikiCategories, guestWikiIdentity, guestWikiPages, guestWikiRevision, wikiGuid } from "./wiki-copy.js";
+import { formatGuestWikiMarkdown } from "./wiki-copy-format.js";
 import { confirmsPublicStructureEdge, groupSourceGuid, groupSourceId, readStructureDefinition, readStructureGroup, singleVisibleParent } from "./group-structure.js";
 import { isSafeGroupParent, lockGroupHierarchy } from "../../group-hierarchy-parent.js";
 import { churchToolsPersonStatus, churchToolsPersonTags } from "./person-classification.js";
@@ -2475,6 +2476,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const signal = AbortSignal.timeout(20_000);
       let category: { id: string; name: string } | undefined;
       let page: ReturnType<typeof guestWikiRevision>;
+      let linkSources: { guid: string; revision: string; title: string }[] = [];
       try {
         const catalog = await fetchGuestWiki(config.instance_url, "categories", signal);
         const categories = catalog === null ? [] : guestWikiCategories(catalog);
@@ -2488,10 +2490,25 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           return { category, pages: guestWikiPages(listing, categoryId) };
         }
         page = guestWikiRevision(await fetchGuestWiki(config.instance_url, `${root}/${guid}`, signal), categoryId, guid);
-        if (!page) return reply.code(422).send({ error: "This page is unavailable to guests or cannot be copied as reference-free Markdown." });
+        if (!page) return reply.code(422).send({ error: "This page is unavailable to guests or has unsupported content." });
         const exact = guestWikiRevision(await fetchGuestWiki(config.instance_url, `${root}/${guid}/versions/${page.revision}`, signal), categoryId, guid);
         if (!exact || exact.revision !== page.revision || exact.title !== page.title || exact.text !== page.text) {
           return reply.code(409).send({ error: "ChurchTools did not confirm this exact Wiki revision. Start a fresh review." });
+        }
+        const format = formatGuestWikiMarkdown(page.text);
+        if (!format) return reply.code(422).send({ error: "This Wiki page uses Markdown content that could not be copied safely." });
+        if (format.titles.length) {
+          const listing = await fetchGuestWiki(config.instance_url, root, signal);
+          const sourcePages = listing === null ? [] : guestWikiPages(listing, categoryId);
+          linkSources = (await mapConcurrent(format.titles, 4, async (title) => {
+            const matches = sourcePages.filter((candidate) => candidate.title === title);
+            const candidate = matches[0];
+            if (matches.length !== 1 || candidate.guid === guid || title === "." || title === "..") return null;
+            const linked = guestWikiIdentity(
+              await fetchGuestWiki(config.instance_url, `${root}/${encodeURIComponent(title)}`, signal), categoryId, candidate.guid,
+            );
+            return linked && linked.title === title && linked.revision === candidate.revision ? linked : null;
+          })).filter((link): link is NonNullable<typeof link> => link !== null);
         }
       } catch {
         return reply.code(400).send({ error: "Could not verify public ChurchTools Wiki data. Check the connection and try again." });
@@ -2523,21 +2540,48 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         const collision = await db.query("SELECT 1 FROM wiki_categories WHERE department_id=$1 AND lower(name)=lower($2) LIMIT 1", [dept, category!.name]);
         return { action: collision.rowCount ? "category_name_conflict" : "create", id: null, name: category!.name };
       };
-      const signature = (target: Awaited<ReturnType<typeof destination>>) => createHash("sha256").update(JSON.stringify([
-        "wiki-copy", dept, config.instance_url, actor, categoryId, guid, sourceHash, target,
+      const localWikiLinks = async (db: Pick<PoolClient, "query">) => {
+        if (!linkSources.length) return new Map<string, string>();
+        const result = await db.query<{ source_guid: string; source_version: string; page_id: string }>(`SELECT receipt.source_guid::text,
+          receipt.source_version::text,target.id AS page_id
+          FROM churchtools_migration_wiki_pages receipt
+          JOIN churchtools_migration_wiki_categories binding USING (department_id,instance_url,source_category_id)
+          JOIN wiki_pages target ON target.id=receipt.page_id AND target.department_id=receipt.department_id
+            AND target.category_id=binding.category_id AND target.status='active' AND target.audience='managers'
+            AND target.redirect_page_id IS NULL AND target.redirect_url IS NULL
+          JOIN wiki_categories category ON category.id=binding.category_id AND category.department_id=binding.department_id
+            AND category.archived_at IS NULL
+          WHERE receipt.department_id=$1 AND receipt.instance_url=$2 AND receipt.source_category_id=$3 AND receipt.source_guid=ANY($4::uuid[])`,
+          [...scope, linkSources.map((link) => link.guid)]);
+        const mapped = new Map(result.rows.map((entry) => [entry.source_guid, entry]));
+        return new Map(linkSources.flatMap((link) => {
+          const entry = mapped.get(link.guid);
+          return entry?.source_version === link.revision ? [[link.title, entry.page_id] as const] : [];
+        }));
+      };
+      const signature = (target: Awaited<ReturnType<typeof destination>>, links: ReadonlyMap<string, string>) => createHash("sha256").update(JSON.stringify([
+        "wiki-copy-format", dept, config.instance_url, actor, categoryId, guid, sourceHash, target, [...links],
       ])).digest("hex");
       if (!(await wikiAvailable(pool!)).rowCount) return reply.code(409).send({ error: "Enable Wiki at this location before copying pages." });
       const target = await destination(pool!);
-      if (!review) return {
-        category, guid, revision: page.revision, title: page.title, text: page.text, target,
-        review: target.action === "create" ? encrypt(JSON.stringify({ binding: signature(target), expiresAt: Date.now() + 15 * 60_000 })) : null,
-      };
+      const links = await localWikiLinks(pool!);
+      if (!review) {
+        const preview = formatGuestWikiMarkdown(page.text, links, true);
+        if (!preview || !formatGuestWikiMarkdown(page.text, links)) {
+          return reply.code(422).send({ error: "The formatted Wiki page exceeds the destination size limit." });
+        }
+        return {
+          category, guid, revision: page.revision, title: page.title, previewHtml: preview.html,
+          matchedLinks: preview.matched, omittedReferences: preview.omitted, target,
+          review: target.action === "create" ? encrypt(JSON.stringify({ binding: signature(target, links), expiresAt: Date.now() + 15 * 60_000 })) : null,
+        };
+      }
       const stale = () => reply.code(409).send({ error: "The source revision or destination changed. Start a fresh review." });
       let binding: string;
       try {
         const proof = JSON.parse(decrypt(review));
         if (typeof proof.binding !== "string" || typeof proof.expiresAt !== "number" || proof.expiresAt <= Date.now()
-          || target.action !== "create" || proof.binding !== signature(target)) return stale();
+          || target.action !== "create" || proof.binding !== signature(target, links)) return stale();
         binding = proof.binding;
       } catch { return stale(); }
 
@@ -2553,7 +2597,10 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         if (!currentSettings.rowCount || !(await wikiAvailable(client, true)).rowCount) { await client.query("ROLLBACK"); return stale(); }
         await client.query("LOCK TABLE wiki_categories,wiki_pages IN SHARE ROW EXCLUSIVE MODE");
         const current = await destination(client);
-        if (current.action !== "create" || signature(current) !== binding) { await client.query("ROLLBACK"); return stale(); }
+        const currentLinks = await localWikiLinks(client);
+        if (current.action !== "create" || signature(current, currentLinks) !== binding) { await client.query("ROLLBACK"); return stale(); }
+        const formatted = formatGuestWikiMarkdown(page.text, currentLinks);
+        if (!formatted) { await client.query("ROLLBACK"); return stale(); }
         let destinationId = current.id;
         if (!destinationId) {
           destinationId = randomUUID();
@@ -2564,9 +2611,9 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         }
         pageId = randomUUID();
         await client.query(`INSERT INTO wiki_pages(id,department_id,category_id,title,content_html,audience,created_by,updated_by)
-          VALUES($1,$2,$3,$4,$5,'managers',$6,$6)`, [pageId, dept, destinationId, page.title, page.html, actor]);
+          VALUES($1,$2,$3,$4,$5,'managers',$6,$6)`, [pageId, dept, destinationId, page.title, formatted.html, actor]);
         await client.query(`INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id) VALUES($1,$2,$3,$4,$5,$6)`,
-          [randomUUID(), dept, pageId, page.title, page.html, actor]);
+          [randomUUID(), dept, pageId, page.title, formatted.html, actor]);
         await client.query(`INSERT INTO churchtools_migration_wiki_pages(department_id,instance_url,source_category_id,source_guid,source_version,source_hash,page_id)
           VALUES($1,$2,$3,$4,$5,$6,$7)`, [...scope, guid, page.revision, sourceHash, pageId]);
         await client.query("COMMIT");
