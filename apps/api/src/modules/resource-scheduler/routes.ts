@@ -191,9 +191,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (requireManager && !isManager(request)) { reply.code(403).send({ error: "Resource management access is required." }); return null; }
     return departmentId;
   }
-  async function audit(departmentId: string, actorId: string, action: string, details: Record<string, unknown>, seriesId: string | null = null, bookingId: string | null = null) {
-    await context.pool!.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)", [randomUUID(), departmentId, actorId, action, seriesId, bookingId, JSON.stringify(details)]);
-  }
   async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: { query: (sql: string, values?: unknown[]) => Promise<any> }) {
     const seriesResult = await queryable.query("SELECT * FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [seriesId, departmentId]);
     const series = seriesResult.rows[0];
@@ -709,13 +706,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!isManager(request) && (request.body.status !== "cancelled" || booking.requested_by !== request.authenticatedUser!.id)) return reply.code(403).send({ error: "Resource management access is required to change booking status." });
     if (request.body.status === "approved" && !isManager(request)) return reply.code(403).send({ error: "Resource management access is required to approve bookings." });
     let result: { rowCount: number | null };
-    try { result = await context.pool!.query("UPDATE resource_bookings SET status=$1,updated_at=now() WHERE id=$2 AND department_id=$3 AND status IN ('requested','approved') RETURNING id", [request.body.status, request.params.bookingId, departmentId]); }
+    try {
+      result = await context.pool!.query(`WITH changed AS (
+        UPDATE resource_bookings SET status=$1,updated_at=now()
+        WHERE id=$2 AND department_id=$3 AND status IN ('requested','approved')
+        RETURNING id,department_id,status
+      )
+      INSERT INTO resource_scheduler_audit (id,department_id,actor_user_id,action,booking_id,details)
+      SELECT $4,department_id,$5,$6,id,jsonb_build_object('status',status) FROM changed`,
+      [request.body.status, request.params.bookingId, departmentId, randomUUID(), request.authenticatedUser!.id, `booking_${request.body.status}`]);
+    }
     catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "This approval conflicts with another booking or exceeds the configured quantity." });
       throw error;
     }
     if (!result.rowCount) return reply.code(409).send({ error: "This booking is already closed." });
-    await audit(departmentId, request.authenticatedUser!.id, `booking_${request.body.status}`, {}, null, request.params.bookingId);
     context.realtime.publish("module:resource-scheduler:changed", departmentId, { bookingId: request.params.bookingId, action: request.body.status });
     return { status: request.body.status };
   });
@@ -745,6 +750,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
+  app.get<{ Params: { bookingId: string } }>("/api/modules/resource-scheduler/bookings/:bookingId/audit", {
+    schema: { params: { type: "object", required: ["bookingId"], properties: { bookingId: { type: "string", format: "uuid" } } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    const bookingId = request.params.bookingId;
+    const owner = await context.pool!.query("SELECT requested_by FROM resource_bookings WHERE id=$1 AND department_id=$2", [bookingId, departmentId]);
+    if (!owner.rowCount) return reply.code(404).send({ error: "Booking not found." });
+    if (!isManager(request) && owner.rows[0].requested_by !== request.authenticatedUser!.id) {
+      return reply.code(403).send({ error: "You can only view the history of your own bookings." });
+    }
+    const result = await context.pool!.query(`SELECT audit.id,audit.action,audit.details,audit.created_at AS "createdAt",actor.display_name AS "actorName"
+      FROM resource_scheduler_audit audit LEFT JOIN app_users actor ON actor.id=audit.actor_user_id
+      WHERE audit.department_id=$1 AND audit.booking_id=$2
+      ORDER BY audit.created_at DESC,audit.id DESC LIMIT 200`, [departmentId, bookingId]);
+    return reply.header("Cache-Control", "private, no-store").send(result.rows);
+  });
+
   app.get<{ Params: { seriesId: string } }>("/api/modules/resource-scheduler/series/:seriesId/audit", {
     schema: { params: { type: "object", required: ["seriesId"], properties: { seriesId: { type: "string", format: "uuid" } } } },
   }, async (request, reply) => {
@@ -755,6 +778,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!isManager(request) && owner.rows[0].requested_by !== request.authenticatedUser!.id) return reply.code(403).send({ error: "You can only view the history of your own booking series." });
     const result = await context.pool!.query(`SELECT audit.id,audit.action,audit.details,audit.created_at AS "createdAt",actor.display_name AS "actorName"
       FROM resource_scheduler_audit audit LEFT JOIN app_users actor ON actor.id=audit.actor_user_id WHERE audit.department_id=$1 AND audit.series_id=$2 ORDER BY audit.created_at DESC LIMIT 500`, [departmentId, request.params.seriesId]);
-    return result.rows;
+    return reply.header("Cache-Control", "private, no-store").send(result.rows);
   });
 }
