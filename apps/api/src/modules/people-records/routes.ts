@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
 import { randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { maxPersonAttachments, registerPersonAttachments } from "./attachments.js";
 
 const postalAddressLimits = { street: 160, additionalLine: 160, city: 100, region: 100, postalCode: 24, country: 100 } as const;
 type PostalAddress = Partial<Record<keyof typeof postalAddressLimits, string>>;
@@ -78,12 +79,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.register(async (routes) => {
     async function department(request: FastifyRequest, reply: FastifyReply, write = false) {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "People Records are unavailable because the database is not ready." }); return null; }
+      const departmentId = await resolveDepartmentId(request, reply, false, false, write ? "people_manage" : undefined);
+      if (!departmentId) return null;
       if (!write) {
         const permissions = request.activeDepartmentPermissions ?? [];
         if (request.activeDepartmentRole !== "site_admin" && !permissions.includes("people_view_private") && !permissions.includes("people_manage")) { reply.code(403).send({ error: "You need private People access to view records." }); return null; }
       }
-      return resolveDepartmentId(request, reply, false, false, write ? "people_manage" : undefined);
+      return departmentId;
     }
+    registerPersonAttachments(routes, context, department);
     async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[]):Promise<Array<{field:string;operator:string;value:unknown}>>{
       if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
       if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
@@ -157,6 +161,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                 to_regclass('public.team_members') IS NOT NULL AS "teamMembers"`,
       );
       const blockers: string[] = [];
+      const attachmentCount = await db.query<{ count: number }>("SELECT count(*)::int AS count FROM people_record_attachments WHERE department_id=$1 AND contact_id=ANY($2::uuid[])", [departmentId, [keeperId, sourceId]]);
+      if (attachmentCount.rows[0].count > maxPersonAttachments) blockers.push(`The combined profile would have more than ${maxPersonAttachments} attachments.`);
       if(source.sourceSystem||source.sourceId||source.elvantoSourceId)blockers.push("The source person is linked to a ChurchTools or Elvanto sync identity. Disconnect or reconcile that external identity before merging so the sync does not recreate the source record.");
       if (installed.rows[0]?.groups) {
         const automaticStatusDifference=installed.rows[0]?.groupAutoManaged?",CASE WHEN source.auto_managed IS DISTINCT FROM keeper.auto_managed THEN 'automatic status' END":"";
