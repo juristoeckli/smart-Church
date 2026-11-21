@@ -12,9 +12,12 @@ export function pngForPdf(data: Buffer) {
   const colorType = data[25];
   const indexed = colorType === 3;
   const channels = [1, 0, 3, 1, 2, 0, 4][colorType] ?? 0;
+  const validDepths = colorType === 0 ? [1, 2, 4, 8, 16] : indexed ? [1, 2, 4, 8] : [8, 16];
   if (!width || !height || width * height > 4_000_000 || !channels
-      || (indexed ? ![1, 2, 4, 8].includes(depth) : depth !== 8)
+      || !validDepths.includes(depth)
       || data[26] || data[27] || data[28]) return null;
+  const alpha = colorType === 4 || colorType === 6;
+  const maxSample = 2 ** depth - 1;
   const compressed: Buffer[] = [];
   let palette: Buffer | undefined;
   let transparency: Buffer | undefined;
@@ -26,13 +29,17 @@ export function pngForPdf(data: Buffer) {
     if (end > data.length || crc32(data.subarray(offset + 4, end - 4)) !== data.readUInt32BE(end - 4)) return null;
     const chunk = data.toString("ascii", offset + 4, offset + 8);
     if (chunk === "PLTE") {
-      if (palette || compressed.length || length < 3 || length > 768 || length % 3
+      if (colorType === 0 || colorType === 4 || palette || transparency || compressed.length || length < 3 || length > 768 || length % 3
           || (indexed && length / 3 > 2 ** depth)) return null;
       palette = data.subarray(offset + 8, end - 4);
     }
     if (chunk === "tRNS") {
-      if (!indexed || !palette || transparency || compressed.length || !length || length > palette.length / 3) return null;
+      if (alpha || transparency || compressed.length || !length) return null;
+      if (indexed ? !palette || length > palette.length / 3 : length !== channels * 2) return null;
       transparency = data.subarray(offset + 8, end - 4);
+      if (!indexed) for (let c = 0; c < channels; c++) {
+        if (transparency.readUInt16BE(c * 2) > maxSample) return null;
+      }
     }
     if (chunk === "IDAT") {
       if (imageDataClosed || (indexed && !palette)) return null;
@@ -46,6 +53,7 @@ export function pngForPdf(data: Buffer) {
   }
   if (!ended || !compressed.length) return null;
   const stride = Math.ceil(width * channels * depth / 8);
+  const filterBytes = Math.ceil(channels * depth / 8);
   const expectedLength = (stride + 1) * height;
   let rows: Buffer;
   try {
@@ -55,8 +63,10 @@ export function pngForPdf(data: Buffer) {
   }
   if (rows.length !== expectedLength) return null;
 
-  const alpha = colorType === 4 || colorType === 6;
   const colors = indexed ? 3 : alpha ? channels - 1 : channels;
+  const transparentColor = transparency && !indexed
+    ? Array.from({ length: channels }, (_, c) => transparency.readUInt16BE(c * 2))
+    : undefined;
   const pixels = Buffer.alloc(width * height * colors);
   let position = 0;
   for (let y = 0; y < height; y++) {
@@ -64,9 +74,9 @@ export function pngForPdf(data: Buffer) {
     const filter = rows[start - 1];
     if (filter > 4) return null;
     for (let x = 0; x < stride; x++) {
-      const left = x >= channels ? rows[start + x - channels] : 0;
+      const left = x >= filterBytes ? rows[start + x - filterBytes] : 0;
       const up = y ? rows[start + x - stride - 1] : 0;
-      const diagonal = y && x >= channels ? rows[start + x - stride - 1 - channels] : 0;
+      const diagonal = y && x >= filterBytes ? rows[start + x - stride - 1 - filterBytes] : 0;
       let predictor = 0;
       if (filter === 1) predictor = left;
       if (filter === 2) predictor = up;
@@ -93,10 +103,18 @@ export function pngForPdf(data: Buffer) {
       }
       continue;
     }
-    for (let x = 0; x < stride; x += channels) {
-      const opacity = alpha ? rows[start + x + colors] / 255 : 1;
+    const sampleAt = (sample: number) => {
+      if (depth === 16) return rows.readUInt16BE(start + sample * 2);
+      if (depth === 8) return rows[start + sample];
+      const bit = sample * depth;
+      return (rows[start + (bit >> 3)] >> (8 - depth - (bit & 7))) & maxSample;
+    };
+    for (let x = 0; x < width; x++) {
+      const sample = x * channels;
+      const opacity = alpha ? sampleAt(sample + colors) / maxSample
+        : transparentColor?.every((value, c) => sampleAt(sample + c) === value) ? 0 : 1;
       for (let c = 0; c < colors; c++) {
-        pixels[position++] = Math.round(rows[start + x + c] * opacity + 255 * (1 - opacity));
+        pixels[position++] = Math.round(255 * (sampleAt(sample + c) / maxSample * opacity + 1 - opacity));
       }
     }
   }
