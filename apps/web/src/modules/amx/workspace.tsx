@@ -62,7 +62,7 @@ function labelFor(object: PanelObject) {
   if (typeof state?.text === "string") return state.text;
   if (state?.bitmap || (object.type === "general" && typeof object.channel === "number")) return "";
   const label = object.label ?? object.name;
-  return object.type === "general" && /^Button \\d+$/.test(label.trim()) ? "" : label;
+  return object.type === "general" && /^Button \d+$/.test(label.trim()) ? "" : label;
 }
 
 export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
