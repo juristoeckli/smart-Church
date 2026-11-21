@@ -5,7 +5,7 @@ import { audioPages } from "./audio-pages";
 import layoutJson from "../../../../api/src/modules/amx/tp4-layout.json";
 import "./amx.css";
 
-type PanelState = { number: number; style?: string; backgroundColor?: string; fontColor?: string; textColor?: string; fontId?: number; text?: string; bitmap?: string; bitmapX?: number; bitmapY?: number; textX?: number; textY?: number; iconX?: number; iconY?: number; justification?: number; textEffect?: number };
+type PanelState = { number: number; style?: string; backgroundColor?: string; fontColor?: string; textColor?: string; fontId?: number; text?: string; bitmap?: string; bitmapX?: number; bitmapY?: number; textX?: number; textY?: number; iconId?: number; iconX?: number; iconY?: number; justification?: number; textEffect?: number };
 type PanelObject = { id: number; type: string; name: string; x: number; y: number; width: number; height: number; z: number; channel?: number | null; channelPort?: number | null; level?: number | null; levelPort?: number | null; rangeLow?: number; rangeHigh?: number; pageFlip?: string | null; label?: string; states?: PanelState[] };
 type PanelPage = { id: number; name: string; kind: string; group?: string | null; canvas: { x?: number | null; y?: number | null; width: number; height: number }; objects: PanelObject[] };
 type PanelLayout = { project: { screen: { width: number; height: number } }; pages: PanelPage[]; palette?: Array<{ name: string; rgba: string }>; fonts?: Array<{ id: number; name: string; subfamily: string; size: number }> };
@@ -38,6 +38,13 @@ for (const action of [...roomActions, ...systemActions, ...audioPages.flatMap((p
   actionIndex.set(`${action.port ?? 2}:${action.channel}`, action);
 }
 const palette: Record<string, string> = { Grey2: "#d9d9d9", Grey5: "#898989", Black: "#000000", White: "#ffffff", Red: "#d92828", Transparent: "transparent", VeryLightYellow: "#e4e1c1", LightBlue: "#b9d8e8", MediumMint: "#acd5bb", ...Object.fromEntries((panel.palette ?? []).filter((item) => item.name).map((item) => [item.name, item.rgba])) };
+const bitmapDimensions: Record<string, [number, number]> = {
+  "!.png": [34, 38], "48_24b_t_microphone_on.png": [68, 68], "48_24b_t_speaker.png": [48, 48], "Cancel.png": [38, 38],
+  "cinch_2_kl.png": [65, 34], "Copy of ledOff.png": [15, 15], "gfc_logo_780.png": [780, 146], "header.jpg": [710, 100],
+  "help.png": [34, 38], "IP_Link_Error.png": [17, 17], "IP_Link_Ok1.png": [17, 17], "IP_Link_Ok2.png": [17, 17],
+  "ledOnGreen.png": [15, 15], "ledOnRed.png": [15, 15], "Rahmen_oben.png": [800, 40], "schloss09.png": [30, 45],
+  "Signaluebertragung.png": [40, 233], "Spacer.PNG": [2, 18], "StatusBar.PNG": [800, 25], "Taskliste.png": [800, 31], "zurueck.png": [23, 20],
+};
 const toCssColor = (color?: string) => !color ? undefined : color.startsWith("#") ? color : palette[color] ?? undefined;
 const roomPrefix: Record<string, string> = { "Gemeindesaal quer": "Que", "Gemeindesaal längs": "Lan", "Konferenzsaal 1": "Kon", "Bibliothek": "Bib" };
 const findPage = (name: string) => panel.pages.find((page) => page.name === name);
@@ -304,10 +311,26 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       fontSize: font ? `${font.size / 8}cqw` : "1.75cqw",
       fontWeight: font?.subfamily.toLocaleLowerCase().includes("bold") ? 700 : 400,
       fontStyle: font?.subfamily.toLocaleLowerCase().includes("italic") ? "italic" : "normal",
+      backgroundImage: background && background !== "transparent" ? "none" : undefined,
     };
+    const bitmapSize = state?.bitmap ? bitmapDimensions[state.bitmap] : undefined;
+    const bitmapStyle: CSSProperties | undefined = bitmap && bitmapSize ? {
+      left: `${(state?.bitmapX ?? 0) / object.width * 100}%`, top: `${(state?.bitmapY ?? 0) / object.height * 100}%`,
+      width: `${bitmapSize[0] / object.width * 100}%`, height: `${bitmapSize[1] / object.height * 100}%`, objectFit: "contain",
+    } : undefined;
+    const positionedText = typeof state?.textX === "number" && typeof state?.textY === "number";
+    const labelStyle: CSSProperties | undefined = positionedText ? {
+      position: "absolute", left: `${state!.textX! / object.width * 100}%`, top: `${state!.textY! / object.height * 100}%`,
+      maxWidth: `${Math.max(0, object.width - state!.textX!) / object.width * 100}%`, maxHeight: `${Math.max(0, object.height - state!.textY!) / object.height * 100}%`,
+      textAlign: state?.justification === 1 ? "center" : state?.justification === 2 ? "right" : "left",
+    } : undefined;
+    const iconStyle: CSSProperties | undefined = typeof state?.iconId === "number" && typeof state.iconX === "number" && typeof state.iconY === "number" ? {
+      left: `${state.iconX / object.width * 100}%`, top: `${state.iconY / object.height * 100}%`,
+    } : undefined;
     const inner = <>
-      {bitmap && <img className="amx-object-image" src={bitmap} alt="" />}
-      {text && text !== "header" && text !== "StatusBar" && <span className={`amx-object-label${levelValue !== undefined ? " amx-level-value" : ""}`}>{text}</span>}
+      {bitmap && <img className="amx-object-image" style={bitmapStyle} src={bitmap} alt="" />}
+      {(state?.iconId === 130 || state?.iconId === 131) && iconStyle && <span className="amx-object-icon" style={iconStyle} aria-hidden="true">×</span>}
+      {text && text !== "header" && text !== "StatusBar" && <span className={`amx-object-label${positionedText ? " amx-object-label-positioned" : ""}${levelValue !== undefined ? " amx-level-value" : ""}`} style={labelStyle}>{text}</span>}
     </>;
     if (!button && object.type === "bargraph") {
       return <div key={`${page.id}-${object.id}`} className={`amx-panel-object amx-object-bargraph${page.name === "PWR_COUNT" ? " amx-progress-bar" : ""}`} style={style} aria-label={levelPercent === undefined ? "Level feedback unavailable" : `Level ${Math.round(levelPercent)} percent`}>

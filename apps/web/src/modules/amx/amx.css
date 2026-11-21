@@ -81,6 +81,8 @@
 .amx-panel-button:active:not(:disabled),.amx-panel-button.is-active{background-color:#07599e!important;background-image:linear-gradient(180deg,#0a70bd,#004882);box-shadow:inset 0 2px 5px #002b56;color:#fff;transform:translateY(1px)}
 .amx-panel-button:disabled{cursor:wait;filter:saturate(.45);opacity:.74}
 .amx-object-image~.amx-object-label{z-index:2}
+.amx-object-label-positioned{right:auto;bottom:auto;overflow:hidden;text-overflow:clip;white-space:pre-line}
+.amx-object-icon{position:absolute;z-index:3;display:grid;place-items:center;width:2.25cqw;height:2.25cqw;box-sizing:border-box;border:1px solid #fff;background:#f22a1f;color:#fff;font:700 1.75cqw/1 Arial,sans-serif;text-shadow:0 1px 1px #333;box-shadow:0 0 0 1px #2228;pointer-events:none}
 .amx-object-bargraph,.amx-object-multiBargraph{border:1px solid #6a6a61;border-radius:3px;background:linear-gradient(90deg,#777,#b2b2a5 45%,#777);box-shadow:inset 0 0 4px #2228}
 .amx-level-fill{position:absolute;inset:auto 0 0;z-index:0;background:linear-gradient(90deg,#0872b7,#33a7df 48%,#0872b7);opacity:.82;pointer-events:none}
 .amx-progress-bar .amx-level-fill{inset:0 auto 0 0;height:100%;transition:width .35s ease}
