@@ -1,3 +1,4 @@
+import { registerBulkGroupLifecycle } from "./group-bulk-lifecycle.js";
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
 import { canViewResource, hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingKey, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -225,6 +226,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       );
       return reply.header("Cache-Control", "private, no-store").send(result.rows);
     });
+
+    registerBulkGroupLifecycle(routes, dependencies, (request, reply) => department(request, reply, "groups_manage"));
 
     routes.patch<{ Body: { groupIds: string[]; groupType: string } }>("/api/groups/bulk-type", { schema: {
       body: { type: "object", additionalProperties: false, required: ["groupIds", "groupType"], properties: {

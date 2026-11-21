@@ -206,12 +206,16 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
   const [bulkType, setBulkType] = useState("");
   const [bulkSelection, setBulkSelection] = useState<string[]>([]);
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkLifecycleStatus, setBulkLifecycleStatus] = useState<"" | "active" | "archived">("");
+  const [statusNotice, setStatusNotice] = useState("");
   const localVisibleGroups = visibleGroups.filter((group) => !group.importedFrom);
   const bulkSelectedIds = localVisibleGroups.filter((group) => bulkSelection.includes(group.id)).map((group) => group.id);
 
   useEffect(() => {
     setBulkSelection([]);
     setBulkType("");
+    setBulkLifecycleStatus("");
+    setStatusNotice("");
   }, [departmentId]);
 
   async function updateSelectedGroupTypes(event: FormEvent<HTMLFormElement>) {
@@ -234,6 +238,37 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
       await loadGroups();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not update group types.");
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
+  async function updateSelectedGroupLifecycle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const status = bulkLifecycleStatus;
+    const selected = selectedDirectoryGroups;
+    if (!status || !canManage || bulkSaving || loadedDepartmentId !== departmentId
+      || !selected.length || selected.length > 100 || selected.some(group => group.importedFrom)) return;
+    const verb = status === "archived" ? "Archive" : "Activate";
+    if (!window.confirm(verb + " " + selected.length + " selected groups?")) return;
+    setError("");
+    setStatusNotice("");
+    setBulkSaving(true);
+    try {
+      const response = await fetch("/api/groups/bulk-lifecycle", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ groups: selected.map(group => ({ id: group.id, status: group.status })), status }),
+      });
+      const result = await response.json() as { error?: string; updated?: number; unchanged?: number };
+      if (!response.ok) throw new Error(result.error ?? "Could not update the selected groups.");
+      if (currentGroupDepartment.current !== departmentId) return;
+      setDirectorySelection(new Set());
+      setBulkLifecycleStatus("");
+      setStatusNotice((result.updated ?? 0) + " groups updated. " + (result.unchanged ?? 0) + " unchanged.");
+      await loadGroups();
+    } catch (reason) {
+      if (currentGroupDepartment.current === departmentId) setError(reason instanceof Error ? reason.message : "Could not update the selected groups.");
     } finally {
       setBulkSaving(false);
     }
@@ -605,6 +640,17 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
             </button>
             <button className="button button-secondary" type="button" onClick={() => setDirectorySelection(new Set())}>Clear selection</button>
           </>}
+            {canManage && displayMode === "table" && loadedDepartmentId === departmentId && selectedDirectoryGroups.length > 0 && <form className="community-inline-actions" onSubmit={updateSelectedGroupLifecycle}>
+              <label>Change group status<select value={bulkLifecycleStatus} disabled={bulkSaving} onChange={event => setBulkLifecycleStatus(event.target.value as typeof bulkLifecycleStatus)}>
+                <option value="">Choose status</option><option value="active">Active</option><option value="archived">Archived</option>
+              </select></label>
+              <button type="submit" className="button button-secondary" disabled={!bulkLifecycleStatus || bulkSaving || selectedDirectoryGroups.length > 100 || selectedDirectoryGroups.some(group => group.importedFrom)}>
+                Update selected group status
+              </button>
+              {selectedDirectoryGroups.some(group => group.importedFrom) && <p>Select local groups only.</p>}
+              {selectedDirectoryGroups.length > 100 && <p>Select up to 100 groups.</p>}
+            </form>}
+            {statusNotice && <p role="status">{statusNotice}</p>}
           <label className="community-group-status-filter">Layout
             <select value={displayMode} onChange={(event) => { setDisplayMode(event.target.value === "table" ? "table" : "list"); }}>
               <option value="list">List</option><option value="table">Table</option>
