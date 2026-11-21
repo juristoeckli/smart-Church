@@ -41,6 +41,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   const [activeIndex, setActiveIndex] = useState(0);
   const [recent, setRecent] = useState<string[]>(() => loadRecent(recentStorageKey));
   const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const resultListId = useId();
   const result = response?.query === query.trim() ? response.result : null;
   const categories = useMemo(() => {
@@ -101,7 +102,10 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
       } else if (event.key === "/" && !open && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement) && !(event.target instanceof HTMLElement && event.target.isContentEditable)) {
         event.preventDefault();
         setOpen(true);
-      } else if (event.key === "Escape" && open) hide();
+      } else if (event.key === "Escape" && open) {
+        hide();
+        triggerRef.current?.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -160,7 +164,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   }
 
   return <>
-    <button className="icon-button global-search-trigger" type="button" aria-label="Search records and actions" title="Search · Ctrl+K" onClick={show}><Search size={17} /><span>Search</span></button>
+    <button ref={triggerRef} className="icon-button global-search-trigger" type="button" aria-label="Search records and actions" title="Search · Ctrl+K" onClick={show}><Search size={17} /><span>Search</span></button>
     {open && <div className="global-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) hide(); }}>
       <section className="global-search-dialog" role="dialog" aria-modal="true" aria-label="Global search">
         <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded={resultRows.length > 0}
