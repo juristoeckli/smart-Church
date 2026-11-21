@@ -6,7 +6,7 @@ import type { ModuleContext } from "../../module-registry";
 type Category = { id: string; name: string; parentId: string | null; position: number; archivedAt: string | null };
 type WikiAudience = "location" | "group" | "managers";
 type GroupOption = { id: string; name: string };
-type WikiFile = { id: string; title: string; fileName: string; contentType: string; fileSize: number; createdAt: string; attachedAt?: string; attachedByName?: string | null };
+type WikiFile = { id: string; title: string; fileName: string; contentType: string; fileSize: number; createdAt: string; attachedAt?: string; attachedByName?: string | null; displayTitle?: string | null };
 type WikiLink = { id: string; title: string; url: string; created_at?: string };
 type WikiPage = { id: string; categoryId: string; title: string; contentHtml: string; status: "active" | "archived"; redirectPageId: string | null; isHomepage: boolean; audience: WikiAudience; audienceGroupId: string | null; createdAt: string; updatedAt: string; updatedBy: string | null; editorName?: string | null; links?: WikiLink[]; files?: WikiFile[] };
 type AudienceSnapshot = { audience: WikiAudience; groupId: string | null };
@@ -44,6 +44,8 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const [pages, setPages] = useState<WikiPage[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [selectedPage, setSelectedPage] = useState<WikiPage | null>(null);
+  const currentPageId = useRef<string | null>(null);
+  useEffect(() => { currentPageId.current = selectedPage?.id ?? null; }, [selectedPage?.id]);
   const [headings, setHeadings] = useState<Array<{ id: string; title: string; level: number }>>([]);
   const [bulkPageIds, setBulkPageIds] = useState<string[]>([]);
   const [bulkAudience, setBulkAudience] = useState<WikiAudience | "">("");
@@ -574,6 +576,22 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     if (!selectedPage) return;
     await run(async () => { await api(`/api/modules/wiki/pages/${selectedPage.id}/files`, "POST", { fileId }); const page = await api<WikiPage>(`/api/modules/wiki/pages/${selectedPage.id}`); setAttachedFiles(page.files ?? []); setAvailableFiles((current) => current.filter((file) => file.id !== fileId)); }, "File attached.");
   }
+  async function renameAttachment(file: WikiFile) {
+    if (!selectedPage || selectedPage.status !== "active") return;
+    const input = window.prompt("Attachment title on this page. Leave blank to use the original file title.", file.title);
+    if (input === null) return;
+    const displayTitle = input.trim() || null;
+    if (displayTitle === (file.displayTitle ?? null) || (file.displayTitle == null && displayTitle === file.title)) return;
+    await run(async () => {
+      const updated = await api<Pick<WikiFile, "title" | "displayTitle">>(
+        `/api/modules/wiki/pages/${selectedPage.id}/files/${file.id}`, "PATCH", { displayTitle },
+      );
+      if (currentPageId.current === selectedPage.id) {
+        setAttachedFiles((current) => current.map((attachment) => attachment.id === file.id ? { ...attachment, ...updated } : attachment));
+      }
+    }, displayTitle ? "Attachment renamed." : "Original attachment title restored.");
+  }
+
   async function detachFile(fileId: string) {
     if (!selectedPage) return;
     await run(async () => { await api(`/api/modules/wiki/pages/${selectedPage.id}/files/${fileId}`, "DELETE"); setAttachedFiles((current) => current.filter((file) => file.id !== fileId)); }, "File detached.");
@@ -743,7 +761,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
               Drop a file here to attach it to this page.
             </div>
           )}
-          {[...attachedFiles].sort((a,b) => attachmentSort === "title" ? a.title.localeCompare(b.title) : (b.attachedAt ?? b.createdAt).localeCompare(a.attachedAt ?? a.createdAt)).map((file) => <div className="wiki-file-row" key={file.id}><span><a href={`/api/modules/wiki/pages/${selectedPage.id}/files/${file.id}/download`} target="_blank" rel="noreferrer">{file.title}</a><small className="wiki-file-meta"> · {file.fileName} · {sizeLabel(file.fileSize)} · {humanDate(file.attachedAt ?? file.createdAt)}{file.attachedByName ? ` · Attached by ${file.attachedByName}` : ""}</small></span>{canManage && <button type="button" className="button button-quiet" onClick={() => void detachFile(file.id)} aria-label={`Remove ${file.title}`}><X size={14} /></button>}</div>)}{!attachedFiles.length && <p className="wiki-muted">No files attached.</p>}</section></div>
+          {[...attachedFiles].sort((a,b) => attachmentSort === "title" ? a.title.localeCompare(b.title) : (b.attachedAt ?? b.createdAt).localeCompare(a.attachedAt ?? a.createdAt)).map((file) => <div className="wiki-file-row" key={file.id}><span><a href={`/api/modules/wiki/pages/${selectedPage.id}/files/${file.id}/download`} target="_blank" rel="noreferrer">{file.title}</a><small className="wiki-file-meta"> · {file.fileName} · {sizeLabel(file.fileSize)} · {humanDate(file.attachedAt ?? file.createdAt)}{file.attachedByName ? ` · Attached by ${file.attachedByName}` : ""}</small></span>{canManage && <div className="wiki-actions">{selectedPage.status === "active" && <button type="button" className="button button-quiet" disabled={busy} onClick={() => void renameAttachment(file)} aria-label={`Rename ${file.title}`}><Pencil size={14} /> Rename</button>}<button type="button" className="button button-quiet" onClick={() => void detachFile(file.id)} aria-label={`Remove ${file.title}`}><X size={14} /></button></div>}</div>)}{!attachedFiles.length && <p className="wiki-muted">No files attached.</p>}</section></div>
       </> : <div className="wiki-empty"><BookOpenText size={28} /><h2>Welcome to Wiki</h2><p>Choose a page to read or create the first page for this location.</p>{canManage && categories.length > 0 && <button className="button button-primary" type="button" onClick={() => { setDraftCategory(selectedCategoryId || categories[0].id); setCreating(true); }}><Plus size={15} /> Create a page</button>}</div>}
     </main>
 

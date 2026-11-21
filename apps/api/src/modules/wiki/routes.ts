@@ -297,7 +297,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     pageResult.rows[0].content_html = await hideUnreadableWikiEntityLinks(pageResult.rows[0].content_html, request, departmentId);
     const [links, files] = await Promise.all([
       pool!.query("SELECT id,title,url,created_at FROM wiki_page_links WHERE department_id=$1 AND page_id=$2 ORDER BY created_at,id", [departmentId, request.params.id]),
-      pool!.query("SELECT stored.id,stored.title,stored.file_name AS \"fileName\",stored.content_type AS \"contentType\",stored.file_size AS \"fileSize\",stored.created_at AS \"createdAt\" FROM wiki_page_files link JOIN stored_files stored ON stored.id=link.file_id AND stored.department_id=link.department_id WHERE link.department_id=$1 AND link.page_id=$2 AND stored.deleted_at IS NULL ORDER BY link.created_at DESC", [departmentId, request.params.id]),
+      pool!.query(`SELECT stored.id,COALESCE(link.display_title,stored.title) AS title,
+        link.display_title AS "displayTitle",stored.file_name AS "fileName",stored.content_type AS "contentType",
+        stored.file_size AS "fileSize",stored.created_at AS "createdAt",link.created_at AS "attachedAt",
+        actor.display_name AS "attachedByName"
+        FROM wiki_page_files link JOIN stored_files stored ON stored.id=link.file_id AND stored.department_id=link.department_id
+        LEFT JOIN app_users actor ON actor.id=link.added_by
+        WHERE link.department_id=$1 AND link.page_id=$2 AND stored.deleted_at IS NULL ORDER BY link.created_at DESC,stored.id`,
+        [departmentId, request.params.id]),
     ]);
     const visibleLinks = await Promise.all(links.rows.map(async (link) => await canFollowWikiLink(String(link.url), request, departmentId) ? link : null));
     const redirectPageId = pageResult.rows[0].redirect_page_id;
@@ -672,6 +679,51 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     await pool!.query("INSERT INTO wiki_page_files(department_id,page_id,file_id,added_by) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", [departmentId, request.params.id, request.body.fileId, request.authenticatedUser!.id]);
     changed(departmentId, { action: "file-attached", pageId: request.params.id });
     return { attached: true };
+  });
+
+  app.patch<{ Params: { id: string; fileId: string }; Body: { displayTitle: string | null } }>("/api/modules/wiki/pages/:id/files/:fileId", {
+    schema: {
+      params: { type: "object", required: ["id", "fileId"], properties: { id: { type: "string", format: "uuid" }, fileId: { type: "string", format: "uuid" } } },
+      body: { type: "object", additionalProperties: false, required: ["displayTitle"], properties: {
+        displayTitle: { anyOf: [{ type: "string", minLength: 1, maxLength: 160 }, { type: "null" }] },
+      } },
+    },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await site(request, reply, true);
+    if (!departmentId) return reply;
+    const displayTitle = request.body.displayTitle?.trim() ?? null;
+    if (displayTitle !== null && (!displayTitle || /[\p{Cc}\p{Cf}]/u.test(displayTitle))) {
+      return reply.code(400).send({ error: "Enter an attachment title or use the original file title." });
+    }
+    const client = await pool!.connect();
+    let attachment: { title: string; displayTitle: string | null };
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only." });
+      }
+      const args = [departmentId, request.params.id, request.params.fileId];
+      const active = await client.query("SELECT 1 FROM wiki_pages WHERE department_id=$1 AND id=$2 AND status='active' FOR SHARE", args.slice(0, 2));
+      if (!active.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Active Wiki page not found." });
+      }
+      const result = await client.query<typeof attachment>(`UPDATE wiki_page_files link SET display_title=$4
+        FROM stored_files stored WHERE link.department_id=$1 AND link.page_id=$2 AND link.file_id=$3
+          AND stored.id=link.file_id AND stored.department_id=link.department_id AND stored.deleted_at IS NULL
+        RETURNING COALESCE(link.display_title,stored.title) AS title,link.display_title AS "displayTitle"`, [...args, displayTitle]);
+      if (!result.rows[0]) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Page attachment not found." });
+      }
+      attachment = result.rows[0];
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    changed(departmentId, { action: "file-title-updated", pageId: request.params.id });
+    return attachment;
   });
 
   app.delete<{ Params: { id: string; fileId: string } }>("/api/modules/wiki/pages/:id/files/:fileId", async (request, reply) => {
