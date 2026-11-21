@@ -1,6 +1,7 @@
+import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import type { PoolClient } from "pg";
 import { calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, localDateTime, wallDate, type Recurrence } from "../../calendar-occurrences.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
@@ -255,7 +256,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (occurrenceDateKey(startsAt, series.time_zone ?? null) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
     if (startsAt.getTime() < Date.now() - 60_000 || startsAt.getTime() > Date.now() + 366 * 86_400_000) return { error: "Choose an edit date and time in the next twelve months." } as const;
     if (input.recurrence.endsOn && (!isoDate(input.recurrence.endsOn) || input.recurrence.endsOn < input.fromDate)) return { error: "Choose a valid repeat end date on or after the edit date." } as const;
-    const resourceResult = await queryable.query("SELECT COALESCE(settings.total_units,1)::int AS total_units FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true", [series.resource_id, departmentId]);
+    const resourceResult = await queryable.query("SELECT resource.calendar_required,COALESCE(settings.total_units,1)::int AS total_units FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true", [series.resource_id, departmentId]);
     if (!resourceResult.rowCount) return { error: "The resource is no longer available in this location." } as const;
     if (input.quantity < 1 || input.quantity > Number(resourceResult.rows[0].total_units)) return { error: "Quantity exceeds this resource's available units." } as const;
     const dates = await queryable.query("SELECT occurrence_date::text AS date,date_type FROM resource_booking_series_dates WHERE series_id=$1", [seriesId]);
@@ -274,7 +275,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const requested = current.rows.filter((row: { status: string }) => row.status === "requested");
     const requestedDates = new Set(requested.map((row: { occurrenceDate: string }) => row.occurrenceDate));
     const retained = proposed.filter((item) => requestedDates.has(item.localDate)).length;
-    return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units) };
+    return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units), calendarRequired: resourceResult.rows[0].calendar_required === true };
   }
 
   app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string; search?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
@@ -285,7 +286,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const search = typeof request.query.search === "string" ? request.query.search.trim().slice(0, 100) : "";
     const [department, resources, bookings] = await Promise.all([
       context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
-      context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,
+      context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,resource.calendar_required AS "calendarRequired",
           ($4::text='' OR (strpos(lower(resource.name),lower($4))>0 OR strpos(lower(resource.category),lower($4))>0 OR strpos(lower(resource.location),lower($4))>0)) AS "matchesSearch",
           EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=resource.department_id AND mark.resource_id=resource.id AND mark.user_id=$3) AS marked,
           COALESCE(settings.total_units,1) AS "totalUnits",COALESCE(settings.default_lead_in_minutes,0) AS "defaultLeadInMinutes",COALESCE(settings.default_cleanup_minutes,0) AS "defaultCleanupMinutes"
@@ -372,25 +373,44 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   });
 
-  app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
-    schema: { params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["totalUnits", "defaultLeadInMinutes", "defaultCleanupMinutes"], properties: { totalUnits: { type: "integer", minimum: 1, maximum: 10000 }, defaultLeadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, defaultCleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 } } } },
+  app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number; calendarRequired?: boolean } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
+    schema: { params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["totalUnits", "defaultLeadInMinutes", "defaultCleanupMinutes"], properties: { totalUnits: { type: "integer", minimum: 1, maximum: 10000 }, defaultLeadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, defaultCleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 }, calendarRequired: { type: "boolean" } } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply, true);
     if (!departmentId) return reply;
     if (!context.validateMutation(request, reply)) return reply;
-    const exists = await context.pool!.query("SELECT id FROM bookable_resources WHERE id=$1 AND department_id=$2", [request.params.resourceId, departmentId]);
-    if (!exists.rowCount) return reply.code(404).send({ error: "Resource not found in this location." });
-    const peak = await context.pool!.query<{ peak_units: string }>(`WITH active AS (
-        SELECT starts_at-make_interval(mins=>lead_in_minutes) AS begins_at,ends_at+make_interval(mins=>cleanup_minutes) AS finishes_at,quantity
-          FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND status IN ('requested','approved')
-      ), points AS (SELECT begins_at AS point_at FROM active UNION SELECT finishes_at FROM active)
-      SELECT COALESCE(max((SELECT sum(quantity) FROM active WHERE begins_at<=points.point_at AND finishes_at>points.point_at)),0)::text AS peak_units FROM points`, [departmentId, request.params.resourceId]);
-    if (Number(peak.rows[0]?.peak_units ?? 0) > request.body.totalUnits) return reply.code(409).send({ error: "Available units cannot be lower than the units already reserved at the busiest time." });
-    const result = await context.pool!.query(`INSERT INTO resource_scheduler_settings(department_id,resource_id,total_units,default_lead_in_minutes,default_cleanup_minutes)
-      VALUES($1,$2,$3,$4,$5) ON CONFLICT(department_id,resource_id) DO UPDATE SET total_units=EXCLUDED.total_units,default_lead_in_minutes=EXCLUDED.default_lead_in_minutes,default_cleanup_minutes=EXCLUDED.default_cleanup_minutes,updated_at=now()
-      RETURNING total_units AS "totalUnits",default_lead_in_minutes AS "defaultLeadInMinutes",default_cleanup_minutes AS "defaultCleanupMinutes"`, [departmentId, request.params.resourceId, request.body.totalUnits, request.body.defaultLeadInMinutes, request.body.defaultCleanupMinutes]);
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { resourceId: request.params.resourceId, action: "settings-updated" });
-    return result.rows[0];
+    const client = await context.pool!.connect();
+    try {
+      await client.query("BEGIN");
+      const resource = await lockResourceBookingPolicy(client, departmentId, request.params.resourceId);
+      if (!resource) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Resource not found in this location." }); }
+      const peak = await client.query<{ peak_units: string }>(`WITH active AS (
+          SELECT starts_at-make_interval(mins=>lead_in_minutes) AS begins_at,ends_at+make_interval(mins=>cleanup_minutes) AS finishes_at,quantity
+            FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND status IN ('requested','approved')
+        ), points AS (SELECT begins_at AS point_at FROM active UNION SELECT finishes_at FROM active)
+        SELECT COALESCE(max((SELECT sum(quantity) FROM active WHERE begins_at<=points.point_at AND finishes_at>points.point_at)),0)::text AS peak_units FROM points`, [departmentId, request.params.resourceId]);
+      if (Number(peak.rows[0]?.peak_units ?? 0) > request.body.totalUnits) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Available units cannot be lower than the units already reserved at the busiest time." }); }
+      const result = await client.query(`INSERT INTO resource_scheduler_settings(department_id,resource_id,total_units,default_lead_in_minutes,default_cleanup_minutes)
+        VALUES($1,$2,$3,$4,$5) ON CONFLICT(department_id,resource_id) DO UPDATE SET total_units=EXCLUDED.total_units,default_lead_in_minutes=EXCLUDED.default_lead_in_minutes,default_cleanup_minutes=EXCLUDED.default_cleanup_minutes,updated_at=now()
+        RETURNING total_units AS "totalUnits",default_lead_in_minutes AS "defaultLeadInMinutes",default_cleanup_minutes AS "defaultCleanupMinutes"`, [departmentId, request.params.resourceId, request.body.totalUnits, request.body.defaultLeadInMinutes, request.body.defaultCleanupMinutes]);
+      const calendarRequired = request.body.calendarRequired ?? resource.calendar_required;
+      if (calendarRequired && !resource.calendar_required) {
+        const calendar = await client.query("SELECT 'church-calendar'=ANY(enabled_modules) AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available FROM departments WHERE id=$1", [departmentId]);
+        if (!isServerModuleEnabled("church-calendar") || !calendar.rows[0]?.available) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Enable General Calendar before requiring an appointment for this resource." });
+        }
+      }
+      if (calendarRequired !== resource.calendar_required) {
+        await client.query("UPDATE bookable_resources SET calendar_required=$3,updated_at=now() WHERE department_id=$1 AND id=$2", [departmentId, resource.id, calendarRequired]);
+      }
+      await client.query("COMMIT");
+      context.realtime.publish("module:resource-scheduler:changed", departmentId, { resourceId: resource.id, action: "settings-updated" });
+      return { ...result.rows[0], calendarRequired };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
   });
 
   app.post<{ Body: SeriesInput }>("/api/modules/resource-scheduler/series", {
@@ -427,22 +447,22 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     if (appointmentId) {
       if (!isManager(request)) return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
-      const exists = await context.pool!.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
+      const exists = await context.pool!.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AND to_regclass('public.church_calendar_calendars') IS NOT NULL AND (NOT $1::boolean OR (to_regclass('public.church_calendar_appointment_exceptions') IS NOT NULL AND to_regclass('public.church_calendar_extra_dates') IS NOT NULL)) AS available", [Boolean(occurrenceStart)]);
       if (!exists.rows[0]?.available) return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
     }
     const quantity = request.body.quantity ?? 1;
     if (quantity > resource.total_units) return reply.code(400).send({ error: "Quantity exceeds this resource's available units." });
     const leadInMinutes = request.body.leadInMinutes ?? resource.default_lead_in_minutes;
     const cleanupMinutes = request.body.cleanupMinutes ?? resource.default_cleanup_minutes;
-    const zoneResult = await context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+    const zoneResult = await context.pool!.query<{ time_zone: string; calendar_enabled: boolean }>("SELECT time_zone,'church-calendar'=ANY(enabled_modules) AS calendar_enabled FROM departments WHERE id=$1", [departmentId]);
     const timeZone = zoneResult.rows[0]?.time_zone ?? "UTC";
     if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
     const instances = occurrenceStart
       ? [{ startsAt, endsAt, localDate: occurrenceDateKey(startsAt, timeZone) }]
       : seriesDates(startsAt, endsAt, repeat, extraDates, excludedDates, timeZone);
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
-    const status = resource.requires_approval && !isManager(request) ? "requested" : "approved";
     const seriesId = randomUUID(); const client = await context.pool!.connect(); const bookingIds: string[] = [];
+    let status: "requested" | "approved";
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -463,7 +483,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
       }
-      await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.body.resourceId]);
+      const policy = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
+      if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+      if (policy.calendar_required && (!appointmentId || !occurrenceStart || !isServerModuleEnabled("church-calendar") || !zoneResult.rows[0]?.calendar_enabled)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: resourceCalendarRequired });
+      }
+      status = policy.requires_approval && !isManager(request) ? "requested" : "approved";
       await client.query(`INSERT INTO resource_booking_series(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,time_zone,recurrence,quantity,lead_in_minutes,cleanup_minutes,initial_status,linked_appointment_id)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13,$14)`, [seriesId, departmentId, request.body.resourceId, request.authenticatedUser!.id, request.body.purpose.trim(), startsAt, endsAt, timeZone, JSON.stringify(repeat), quantity, leadInMinutes, cleanupMinutes, status, occurrenceStart ? null : appointmentId]);
       for (const day of new Set(extraDates)) await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [seriesId, day, request.authenticatedUser!.id]);
@@ -506,7 +532,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (access.rows[0].requested_by !== request.authenticatedUser!.id && !isManager(request)) return reply.code(403).send({ error: "Only the series owner or a resource manager can edit future occurrences." });
     const result = await calculateFutureEdit(departmentId, request.params.seriesId, request.body, context.pool!);
     if ("error" in result) return reply.code(400).send({ error: result.error });
-    return { fromDate: request.body.fromDate, occurrenceCount: result.proposed.length, addedCount: result.addedCount, updatedCount: result.updatedCount, cancelledCount: result.cancelledCount, approvedCount: result.approvedCount, blocked: result.approvedCount > 0 };
+    return { fromDate: request.body.fromDate, occurrenceCount: result.proposed.length, addedCount: result.addedCount, updatedCount: result.updatedCount, cancelledCount: result.cancelledCount, approvedCount: result.approvedCount, blocked: result.approvedCount > 0 || (result.calendarRequired && result.addedCount > 0), calendarRequired: result.calendarRequired && result.addedCount > 0 };
   });
   app.put<{ Params: { seriesId: string }; Body: FutureEditInput }>("/api/modules/resource-scheduler/series/:seriesId/edit-future", {
     schema: { params: { type: "object", required: ["seriesId"], properties: { seriesId: { type: "string", format: "uuid" } } }, body: futureEditSchema },
@@ -535,6 +561,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await client.query("ROLLBACK");
           return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
         }
+      }
+      if (plan.addedCount > 0) {
+        const policy = await lockResourceBookingPolicy(client, departmentId, plan.series.resource_id);
+        if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+        if (policy.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
       }
       const input = request.body;
       const currentByDate = new Map<string, { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }>(plan.requested.map((row: { id: string; occurrenceStartsAt: Date; occurrenceDate: string; hasOccurrenceOverride: boolean }) => [row.occurrenceDate, row] as const));
@@ -684,6 +715,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!series) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking series not found." }); }
       if (!isManager(request) && series.requested_by !== request.authenticatedUser!.id) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You can only edit your own booking series." }); }
       if (request.body.date < occurrenceDateKey(new Date(), series.time_zone ?? null)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a future date." }); }
+      const policy = await lockResourceBookingPolicy(client, departmentId, series.resource_id);
+      if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+      if (policy.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
       const { startsAt, endsAt } = occurrenceAtDate(new Date(series.starts_at), new Date(series.ends_at), request.body.date, series.time_zone ?? null);
       await client.query("DELETE FROM resource_booking_series_dates WHERE series_id=$1 AND occurrence_date=$2 AND date_type='excluded'", [series.id, request.body.date]);
       await client.query("INSERT INTO resource_booking_series_dates(series_id,occurrence_date,date_type,created_by) VALUES($1,$2,'extra',$3) ON CONFLICT DO NOTHING", [series.id, request.body.date, request.authenticatedUser!.id]);

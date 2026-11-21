@@ -1,3 +1,4 @@
+import { lockResourceBookingPolicy, resourceCalendarRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -16,7 +17,7 @@ const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 
 type BookableResourceRow = {
   id: string; name: string; category: BookableResource["category"]; description: string; location: string;
-  capacity: number | null; requires_approval: boolean; active: boolean; source_system?: string | null;
+  capacity: number | null; requires_approval: boolean; calendar_required: boolean; active: boolean; source_system?: string | null;
 };
 
 type BookingRow = {
@@ -29,8 +30,8 @@ function mapGroup(row: { id: string; name: string; description: string; group_ty
   return { id: row.id, name: row.name, description: row.description, ...(row.group_type?.trim() ? { groupType: row.group_type.trim() } : {}), status: row.status ?? "active", startsOn: row.starts_on ? String(row.starts_on).slice(0, 10) : null, endsOn: row.ends_on ? String(row.ends_on).slice(0, 10) : null, memberCount: Number(row.member_count), memberIds: row.member_ids ?? [], memberDetails, createdAt: new Date(row.created_at).toISOString(), publicSignupEnabled: row.public_signup_enabled ?? false, ...(row.public_signup_token ? { publicSignupToken: row.public_signup_token } : {}), ...(row.source_system === "churchtools" || row.source_system === "elvanto" ? { importedFrom: row.source_system } : {}) };
 }
 
-function mapBookableResource(row: BookableResourceRow): BookableResource {
-  return { id: row.id, name: row.name, category: row.category, description: row.description, location: row.location, ...(row.capacity ? { capacity: row.capacity } : {}), requiresApproval: row.requires_approval, active: row.active, ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
+function mapBookableResource(row: BookableResourceRow): BookableResource & { calendarRequired: boolean } {
+  return { id: row.id, name: row.name, category: row.category, description: row.description, location: row.location, ...(row.capacity ? { capacity: row.capacity } : {}), requiresApproval: row.requires_approval, calendarRequired: row.calendar_required, active: row.active, ...(row.source_system === "churchtools" ? { importedFrom: "churchtools" as const } : {}) };
 }
 
 function mapBooking(row: BookingRow): ResourceBooking {
@@ -1042,7 +1043,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query<BookableResourceRow>(
-        `SELECT id, name, category, description, location, capacity, requires_approval, active, source_system
+        `SELECT id, name, category, description, location, capacity, requires_approval, calendar_required, active, source_system
            FROM bookable_resources WHERE department_id = $1 ${request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage") ? "" : "AND active = true"}
           ORDER BY active DESC, category, lower(name)`,
         [departmentId],
@@ -1059,7 +1060,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         const result = await pool!.query<BookableResourceRow>(
           `INSERT INTO bookable_resources (id, department_id, name, category, description, location, capacity, requires_approval, active)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           RETURNING id, name, category, description, location, capacity, requires_approval, active`,
+           RETURNING id, name, category, description, location, capacity, requires_approval, calendar_required, active`,
           [randomUUID(), departmentId, name, request.body.category, request.body.description?.trim() ?? "", request.body.location?.trim() ?? "", request.body.capacity ?? null, request.body.requiresApproval, request.body.active],
         );
         return reply.code(201).send(mapBookableResource(result.rows[0]));
@@ -1082,7 +1083,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       try {
         const result = await pool!.query<BookableResourceRow>(
           `UPDATE bookable_resources SET name=$3, category=$4, description=$5, location=$6, capacity=$7, requires_approval=$8, active=$9, updated_at=now()
-            WHERE id=$1 AND department_id=$2 RETURNING id, name, category, description, location, capacity, requires_approval, active, source_system`,
+            WHERE id=$1 AND department_id=$2 RETURNING id, name, category, description, location, capacity, requires_approval, calendar_required, active, source_system`,
           [request.params.id, departmentId, name, request.body.category, request.body.description?.trim() ?? "", request.body.location?.trim() ?? "", request.body.capacity ?? null, request.body.requiresApproval, request.body.active],
         );
         if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
@@ -1130,10 +1131,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [departmentId, request.body.resourceId]);
-        const resourceResult = await client.query("SELECT id, name, requires_approval FROM bookable_resources WHERE id=$1 AND department_id=$2 AND active=true", [request.body.resourceId, departmentId]);
-        const resource = resourceResult.rows[0];
-        if (!resource) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This resource is not available for booking." }); }
+        const resource = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
+        if (!resource?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This resource is not available for booking." }); }
+        if (resource.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
         const conflicts = await client.query(
           `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND status IN ('requested','approved')
              AND starts_at < $4 AND ends_at > $3 LIMIT 1`,
