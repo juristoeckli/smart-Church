@@ -305,7 +305,7 @@ const english = {
 
 export type TranslationKey = keyof typeof english;
 
-const dictionaries: Record<UserLanguage, Record<TranslationKey, string>> = {
+const dictionaries: Record<UserLanguage, Partial<Record<TranslationKey, string>>> = {
   en: english,
   de: { ...eventGerman,
     "module.loadFailedTitle": "Dieses Modul konnte nicht geöffnet werden",

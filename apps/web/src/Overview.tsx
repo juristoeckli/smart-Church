@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowRight, ArrowUp, Building2, CalendarDays, ContactRound, Settings2, UsersRound, X } from "lucide-react";
 import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
 import { formatUserDate } from "./date-format";
-import { getActiveLanguage, translate } from "./i18n";
+import { getActiveLanguage, translate, type TranslationKey } from "./i18n";
 import { translateModuleUiOverrideMessage } from "./modules/ui-translation-overrides";
 
 type OverviewPage = "People" | "Services & events" | "Groups" | "Resources";
@@ -14,7 +14,7 @@ type RecentEventFact = { eventDate: string; title: string; adults: number; child
 const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "recentEventFacts"] as const;
 type DashboardWidgetId = typeof dashboardWidgetIds[number];
 const defaultDashboardWidgets = { order: [...dashboardWidgetIds], visible: [...dashboardWidgetIds] };
-const dashboardWidgetLabels: Record<DashboardWidgetId, string> = {
+const dashboardWidgetLabels: Record<DashboardWidgetId, TranslationKey> = {
   stats: "overview.widgetStats", events: "overview.widgetEvents", birthdays: "overview.widgetBirthdays",
   anniversaries: "overview.widgetAnniversaries", groupAppointments: "overview.widgetGroupAppointments",
   currentBookings: "overview.widgetCurrentBookings", recentEventFacts: "overview.widgetRecentEventFacts",
