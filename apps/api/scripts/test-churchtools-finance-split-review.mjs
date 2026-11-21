@@ -8,7 +8,7 @@ const hooks = registerHooks({ resolve(specifier, context, next) {
     throw error;
   }
 } });
-const { readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } = await import("../src/modules/churchtools-sync/finance-split-review.ts");
+const { readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup, planReviewedSplitDrafts } = await import("../src/modules/churchtools-sync/finance-split-review.ts");
 const { selectChurchToolsJournalRow } = await import("../src/modules/churchtools-sync/finance-journal-dry-run.ts");
 hooks.deregister();
 const scope = { startDate: "2026-10-01", endDate: "2026-10-31" };
@@ -47,4 +47,14 @@ assert.ok(preview(payload(signed, 1100), signed).reasons.includes("nonpositive_o
 assert.equal(readChurchToolsSplitGroup(payload([raw[0], { ...raw[1], documentDate: "2026-11-01" }]), "5", scope), null);
 assert.throws(() => readChurchToolsSplitGroup(payload([raw[0], raw[0]]), "5", scope), /repeated/);
 assert.throws(() => readChurchToolsSplitGroup(payload(), "6", scope), /invalid/);
+const approved = { targetYear: 2026, blockedBy: [], groups: [{ parentId: "5", state: "available", review: ordinary }] };
+const draft = planReviewedSplitDrafts(approved, ["5"]);
+assert.equal(draft.rows[0].sourceId, "split:5");
+assert.deepEqual(draft.rows[0].split.children.map(({ sourceId, signedMinor }) => [sourceId, signedMinor]), [["21", "1200"], ["22", "800"]]);
+assert.throws(() => planReviewedSplitDrafts(approved, ["5", "5"]), /only once/);
+assert.throws(() => planReviewedSplitDrafts({ ...approved, blockedBy: ["closed_local_period"] }, ["5"]), /period or currency/);
+assert.throws(() => planReviewedSplitDrafts({ ...approved, groups: [{ parentId: "5", state: "available", review: withTax }] }, ["5"]), /already imported/);
+assert.throws(() => planReviewedSplitDrafts({ ...approved, groups: [{ parentId: "5", state: "available", review: {
+  ...ordinary, proposedTargetLines: ordinary.proposedTargetLines.slice(1),
+} }] }, ["5"]), /balanced/);
 console.log("ChurchTools split parent, signed grouping, generated tax and balanced local proposal tests passed.");

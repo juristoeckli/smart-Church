@@ -1,6 +1,7 @@
 import { financeDay, financeSourceId } from "./finance-preview.js";
 import { selectChurchToolsJournalRow } from "./finance-journal-dry-run.js";
 import type { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
+import { ChurchToolsFinanceReviewError } from "./finance-masterdata.js";
 
 type JournalRow = ReturnType<typeof selectChurchToolsJournalRow>;
 type Mapping = ReturnType<typeof buildChurchToolsFinanceMapping>;
@@ -109,4 +110,41 @@ export function reconcileChurchToolsSplitGroup(group: Group, journal: JournalRow
     proposedTargetLines: [...targetLines.values()].sort((first, second) => first.accountCode.localeCompare(second.accountCode))
       .map((line) => ({ accountId: line.accountId, accountCode: line.accountCode, debitMinor: line.debit.toString(), creditMinor: line.credit.toString() })),
   };
+}
+
+export function planReviewedSplitDrafts(preview: {
+  targetYear: number | null; blockedBy: string[];
+  groups: Array<{ parentId: string; state: string; review: ReturnType<typeof reconcileChurchToolsSplitGroup> | null }>;
+}, parentIds: string[]) {
+  if (preview.blockedBy.length || preview.targetYear === null) throw new ChurchToolsFinanceReviewError("The journal period or currency does not permit split draft creation.");
+  if (!parentIds.length || new Set(parentIds).size !== parentIds.length) throw new ChurchToolsFinanceReviewError("Select each split parent only once.");
+  const groups = new Map(preview.groups.map((group) => [group.parentId, group]));
+  const usedChildren = new Set<string>();
+  const rows = parentIds.map((parentId) => {
+    const group = groups.get(parentId);
+    const review = group?.review;
+    if (group?.state !== "available" || !review?.documentNumber || review.reasons.length
+      || review.proposedTargetLines.length < 2 || review.proposedTargetLines.length > 100
+      || !/^[1-9][0-9]{0,15}$/.test(review.parentSignedMinor)) {
+      throw new ChurchToolsFinanceReviewError("A selected split group still needs review or was already imported.");
+    }
+    const gross = BigInt(review.parentSignedMinor);
+    const valid = gross <= maxAmount && new Set(review.proposedTargetLines.map((line) => line.accountId)).size === review.proposedTargetLines.length
+      && review.proposedTargetLines.every((line) => (
+        line.debitMinor === "0" && /^[1-9][0-9]{0,15}$/.test(line.creditMinor)
+        || line.creditMinor === "0" && /^[1-9][0-9]{0,15}$/.test(line.debitMinor)
+      ));
+    if (!valid || review.proposedTargetLines.reduce((sum, line) => sum + BigInt(line.debitMinor), 0n) !== gross
+      || review.proposedTargetLines.reduce((sum, line) => sum + BigInt(line.creditMinor), 0n) !== gross) {
+      throw new ChurchToolsFinanceReviewError("A selected split group no longer has balanced local lines.");
+    }
+    const children = review.children.map(({ sourceId, documentNumber, signedMinor, sourceDebitAccountId, sourceCreditAccountId }) => {
+      if (usedChildren.has(sourceId)) throw new ChurchToolsFinanceReviewError("A split child occurs in more than one selected parent.");
+      usedChildren.add(sourceId);
+      return { sourceId, documentNumber, signedMinor, sourceDebitAccountId, sourceCreditAccountId };
+    });
+    return { sourceId: `split:${parentId}`, date: review.date, documentNumber: review.documentNumber,
+      lines: review.proposedTargetLines, split: { parentId, children } };
+  });
+  return { targetYear: preview.targetYear, rows };
 }

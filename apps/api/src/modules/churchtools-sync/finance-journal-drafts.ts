@@ -7,6 +7,10 @@ type Preview = ReturnType<typeof buildChurchToolsFinanceJournalDryRun>;
 type Scope = { departmentId: string; instanceUrl: string; periodId: string };
 type Result = { created: number; drafts: Array<{ sourceId: string; transactionId: string }> };
 type Queryable = Pick<PoolClient, "query">;
+type DraftRow = { sourceId: string; date: string; documentNumber: string;
+  lines: Array<{ accountId: string; debitMinor: string; creditMinor: string }>;
+  split?: { parentId: string; children: Array<{ sourceId: string; documentNumber: string | null; signedMinor: string | null; sourceDebitAccountId: string | null; sourceCreditAccountId: string | null }> };
+};
 
 export function journalDraftBatchId(reviewHash: string, sourceIds: string[], scope: { startDate: string; endDate: string; sourceCurrency: string }) {
   return financeMappingHash([reviewHash, scope.startDate, scope.endDate, scope.sourceCurrency, [...sourceIds].sort()]);
@@ -36,23 +40,42 @@ export function planReviewedJournalDrafts(preview: Preview, sourceIds: string[])
   return { targetYear: preview.targetYear, rows };
 }
 
-export async function createReviewedJournalDrafts(db: Queryable, scope: Scope, actorId: string | null, batchId: string, plan: ReturnType<typeof planReviewedJournalDrafts>): Promise<Result> {
+export function createReviewedJournalDrafts(db: Queryable, scope: Scope, actorId: string | null, batchId: string, plan: ReturnType<typeof planReviewedJournalDrafts>) {
+  return createFinanceDraftBatch(db, scope, actorId, batchId, {
+    targetYear: plan.targetYear, rows: plan.rows.map((row) => ({
+      sourceId: row.sourceId, date: row.date, documentNumber: row.documentNumber, lines: [row.debit, row.credit],
+    })),
+  });
+}
+
+export async function createFinanceDraftBatch(db: Queryable, scope: Scope, actorId: string | null, batchId: string, plan: { targetYear: number; rows: DraftRow[] }): Promise<Result> {
   const { departmentId, instanceUrl, periodId } = scope;
   const drafts: Result["drafts"] = [];
   for (const row of plan.rows) {
     const transactionId = randomUUID();
     await db.query(`INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,status,created_by)
       VALUES($1,$2,$3,$4,$5,$6,'draft',$7)`,
-    [transactionId, departmentId, row.date, plan.targetYear, row.documentNumber, `ChurchTools journal draft #${row.sourceId}`, actorId]);
+    [transactionId, departmentId, row.date, plan.targetYear, row.documentNumber,
+      row.split ? `ChurchTools split journal draft #${row.split.parentId}` : `ChurchTools journal draft #${row.sourceId}`, actorId]);
     await db.query(`INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,debit_cents,credit_cents)
-      VALUES($1,$3,$4,1,$5,$7::bigint,0),($2,$3,$4,2,$6,0,$7::bigint)`,
-    [randomUUID(), randomUUID(), departmentId, transactionId, row.debit.accountId, row.credit.accountId, row.debit.debitMinor]);
+      SELECT line.id,$1,$2,line.position,line.account_id,line.debit,line.credit
+      FROM jsonb_to_recordset($3::jsonb) AS line(id uuid,position integer,account_id uuid,debit bigint,credit bigint)`,
+    [departmentId, transactionId, JSON.stringify(row.lines.map((line, index) => ({
+      id: randomUUID(), position: index + 1, account_id: line.accountId, debit: line.debitMinor, credit: line.creditMinor,
+    })))]);
     const link = await db.query(`INSERT INTO churchtools_migration_finance_journal_links(department_id,instance_url,period_id,source_id,target_id)
       VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`, [departmentId, instanceUrl, periodId, row.sourceId, transactionId]);
     if (!link.rowCount) throw new ChurchToolsFinanceReviewError("A selected ChurchTools journal row was already linked.");
+    if (row.split) {
+      const childLinks = await db.query(`INSERT INTO churchtools_migration_finance_split_draft_children(department_id,instance_url,period_id,source_id,parent_link_id)
+        SELECT $1,$2,$3,child.source_id,$4 FROM unnest($5::text[]) child(source_id) ON CONFLICT DO NOTHING`,
+      [departmentId, instanceUrl, periodId, row.sourceId, row.split.children.map((child) => child.sourceId)]);
+      if (childLinks.rowCount !== row.split.children.length) throw new ChurchToolsFinanceReviewError("A selected split child was already linked.");
+    }
     await db.query(`INSERT INTO finance_audit(id,department_id,actor_user_id,action,record_kind,record_id,details)
-      VALUES($1,$2,$3,'churchtools-journal-draft-created','transaction',$4,$5::jsonb)`,
-    [randomUUID(), departmentId, actorId, transactionId, JSON.stringify({ instanceUrl, periodId, sourceId: row.sourceId, accountingYear: plan.targetYear })]);
+      VALUES($1,$2,$3,$4,'transaction',$5,$6::jsonb)`,
+    [randomUUID(), departmentId, actorId, row.split ? "churchtools-journal-split-draft-created" : "churchtools-journal-draft-created", transactionId,
+      JSON.stringify({ instanceUrl, periodId, sourceId: row.sourceId, accountingYear: plan.targetYear, ...(row.split ? { sourceParentId: row.split.parentId, sourceChildren: row.split.children } : {}) })]);
     drafts.push({ sourceId: row.sourceId, transactionId });
   }
   const result = { created: drafts.length, drafts };

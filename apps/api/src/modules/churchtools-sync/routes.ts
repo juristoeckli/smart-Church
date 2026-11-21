@@ -12,8 +12,8 @@ import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCu
 import { ChurchToolsFinanceRangeError, compareChurchToolsFinanceCodes, financeDay, readChurchToolsFinanceCodes, readChurchToolsFinanceJournal, readChurchToolsFinancePeriods } from "./finance-preview.js";
 import { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
 import { buildChurchToolsFinanceJournalDryRun, isTwoDecimalFinanceCurrency, selectChurchToolsJournalRow } from "./finance-journal-dry-run.js";
-import { createReviewedJournalDrafts, journalDraftBatchId, planReviewedJournalDrafts, readJournalDraftReceipt } from "./finance-journal-drafts.js";
-import { readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
+import { createFinanceDraftBatch, createReviewedJournalDrafts, journalDraftBatchId, planReviewedJournalDrafts, readJournalDraftReceipt } from "./finance-journal-drafts.js";
+import { planReviewedSplitDrafts, readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -900,6 +900,8 @@ async function evaluateReviewedJournal(db: Pick<Pool, "query">, departmentId: st
       db.query<Inputs["links"][number]>(`SELECT kind,source_id,target_id FROM churchtools_migration_finance_links
         WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`, [departmentId, instanceUrl, scope.periodId]),
       db.query<{ source_id: string }>(`SELECT source_id FROM churchtools_migration_finance_journal_links
+        WHERE department_id=$1 AND instance_url=$2 AND period_id=$3 AND source_id=ANY($4::text[])
+        UNION SELECT source_id FROM churchtools_migration_finance_split_draft_children
         WHERE department_id=$1 AND instance_url=$2 AND period_id=$3 AND source_id=ANY($4::text[])`, [departmentId, instanceUrl, scope.periodId, rows.map((row) => row.sourceId)]),
     ]);
     localPeriod = periods.rows.length === 1 && periods.rows[0].startDate === source.period.startDate && periods.rows[0].endDate === source.period.endDate ? periods.rows[0] : null;
@@ -918,6 +920,68 @@ async function evaluateReviewedJournal(db: Pick<Pool, "query">, departmentId: st
   });
   const review = { formatVersion: 1, periodId: scope.periodId, sourceInstance: instanceUrl, ...preview };
   return { ...review, reviewHash: financeMappingHash(review) };
+}
+
+async function readReviewedSplitGroups(config: Settings, scope: JournalScope) {
+  const journal = await readReviewedJournalSource(config, scope);
+  if (!journal) return null;
+  const parentIds = [...new Set(journal.rows.flatMap((row) => row.splitParentId ? [row.splitParentId] : []))];
+  if (parentIds.length > 25) throw new ChurchToolsFinanceRangeError("The selected range contains more than 25 split groups. Choose a narrower date range.");
+  const token = decrypt(config.encrypted_login_token);
+  const groups = await mapConcurrent(parentIds, 5, async (parentId) => {
+    try {
+      const payload = await get(config.instance_url, token, `finance/splittransactions/${encodeURIComponent(parentId)}`);
+      const group = readChurchToolsSplitGroup(payload, parentId, scope);
+      return group ? { parentId, state: "available" as const, group } : { parentId, state: "outside_selected_dates" as const, group: null };
+    } catch (error) {
+      if (error instanceof ChurchToolsReadError && error.status === 403) return { parentId, state: "restricted" as const, group: null };
+      if (error instanceof ChurchToolsReadError && error.status === 404) return { parentId, state: "missing" as const, group: null };
+      throw error;
+    }
+  });
+  if (groups.reduce((sum, entry) => sum + (entry.group?.children.length ?? 0), 0) > 1000) {
+    throw new ChurchToolsFinanceRangeError("The selected split groups contain more than 1,000 child rows. Choose a narrower date range.");
+  }
+  return { journal, groups };
+}
+
+async function evaluateReviewedSplits(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, scope: JournalScope,
+  { journal, groups }: NonNullable<Awaited<ReturnType<typeof readReviewedSplitGroups>>>, lockRows = false) {
+  const mapping = await reviewFinanceMapping(db, departmentId, instanceUrl, journal.source, lockRows);
+  const preview = await evaluateReviewedJournal(db, departmentId, instanceUrl, scope, journal, lockRows, mapping);
+  const parentCount = new Map<string, number>();
+  for (const { group } of groups) if (group?.documentNumber) parentCount.set(group.documentNumber, (parentCount.get(group.documentNumber) ?? 0) + 1);
+  const sourceNumbers = [...parentCount.keys()];
+  const duplicates = new Set(preview.rows.filter((row) => row.reasons.includes("duplicate_local_document")).map((row) => row.sourceId));
+  const linkedChildren = new Set(preview.rows.filter((row) => row.reasons.includes("source_already_linked")).map((row) => row.sourceId));
+  const [linkedRows, imported, targetNumbers] = await Promise.all([
+    mapping.targetFinanceAvailable ? db.query<Parameters<typeof reconcileChurchToolsSplitGroup>[3][number]>(`
+      SELECT kind,source_id,target_id FROM churchtools_migration_finance_links WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`,
+    [departmentId, instanceUrl, scope.periodId]) : null,
+    mapping.targetFinanceAvailable ? db.query<{ source_id: string }>(`SELECT source_id FROM churchtools_migration_finance_journal_links
+      WHERE department_id=$1 AND instance_url=$2 AND period_id=$3 AND source_id=ANY($4::text[])`,
+    [departmentId, instanceUrl, scope.periodId, groups.map(({ parentId }) => `split:${parentId}`)]) : null,
+    preview.targetYear !== null && sourceNumbers.length ? db.query<{ receipt_number: string }>(`
+      SELECT DISTINCT receipt_number FROM finance_transactions WHERE department_id=$1 AND accounting_year=$2 AND receipt_number=ANY($3::text[])`,
+    [departmentId, preview.targetYear, sourceNumbers]) : null,
+  ]);
+  const existingParentNumbers = new Set(targetNumbers?.rows.map((row) => row.receipt_number));
+  const existingParents = new Set(imported?.rows.map((row) => row.source_id));
+  const reviewed = groups.map(({ parentId, state, group }) => {
+    if (!group) return { parentId, state, review: null };
+    const savedParent = existingParents.has(`split:${parentId}`);
+    const savedChild = group.children.some((row) => linkedChildren.has(row.sourceId));
+    const blockers = savedParent || savedChild ? [...preview.blockedBy, "split_records_already_linked"] : preview.blockedBy;
+    const conflictingReceipt = existingParentNumbers.has(group.documentNumber) || group.children.some((row) => duplicates.has(row.sourceId));
+    const review = reconcileChurchToolsSplitGroup(group, journal.rows, mapping, linkedRows?.rows ?? [], blockers,
+      conflictingReceipt, (parentCount.get(group.documentNumber) ?? 0) > 1);
+    if (savedParent) review.reasons.push("split_parent_already_linked");
+    if (savedChild) review.reasons.push("split_child_already_linked");
+    return { parentId, state, review };
+  });
+  const report = { formatVersion: 1, sourceInstance: instanceUrl, ...scope, targetCurrency: preview.targetCurrency, targetYear: preview.targetYear,
+    blockedBy: preview.blockedBy, groups: reviewed };
+  return { ...report, reviewHash: financeMappingHash(report) };
 }
 async function listChurchToolsBookingHistory(config: Settings, token: string, resources: JsonObject[], startDate: string, endDate: string) {
   const ids = [...new Set(resources.map((resource) => bookingSourceId(idOf(resource))))];
@@ -1857,56 +1921,74 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const invalid = journalScopeError(scope);
       if (invalid) return reply.code(400).send({ error: invalid });
       try {
-        const journal = await readReviewedJournalSource(config, scope);
-        if (!journal) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
-        const parentIds = [...new Set(journal.rows.flatMap((row) => row.splitParentId ? [row.splitParentId] : []))];
-        if (parentIds.length > 25) return reply.code(413).send({ error: "The selected range contains more than 25 split groups. Choose a narrower date range." });
-        const mapping = await reviewFinanceMapping(pool!, dept, config.instance_url, journal.source);
-        const preview = await evaluateReviewedJournal(pool!, dept, config.instance_url, scope, journal, false, mapping);
-        const token = decrypt(config.encrypted_login_token);
-        const groups = await mapConcurrent(parentIds, 5, async (parentId) => {
-          try {
-            const payload = await get(config.instance_url, token, `finance/splittransactions/${encodeURIComponent(parentId)}`);
-            const group = readChurchToolsSplitGroup(payload, parentId, scope);
-            return group ? { parentId, state: "available" as const, group } : { parentId, state: "outside_selected_dates" as const, group: null };
-          } catch (error) {
-            if (error instanceof ChurchToolsReadError && error.status === 403) return { parentId, state: "restricted" as const, group: null };
-            if (error instanceof ChurchToolsReadError && error.status === 404) return { parentId, state: "missing" as const, group: null };
-            throw error;
-          }
-        });
-        if (groups.reduce((sum, entry) => sum + (entry.group?.children.length ?? 0), 0) > 1000) {
-          return reply.code(413).send({ error: "The selected split groups contain more than 1,000 child rows. Choose a narrower date range." });
-        }
-        const parentCount = new Map<string, number>();
-        const sourceNumbers = [...new Set(groups.flatMap(({ group }) => {
-          if (!group?.documentNumber) return [];
-          parentCount.set(group.documentNumber, (parentCount.get(group.documentNumber) ?? 0) + 1);
-          return [group.documentNumber];
-        }))];
-        const duplicates = new Set(preview.rows.filter((row) => row.reasons.includes("duplicate_local_document")).map((row) => row.sourceId));
-        const linkedRows = mapping.targetFinanceAvailable ? await pool!.query<Parameters<typeof reconcileChurchToolsSplitGroup>[3][number]>(`
-          SELECT kind,source_id,target_id FROM churchtools_migration_finance_links WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`,
-        [dept, config.instance_url, scope.periodId]) : null;
-        const targetNumbers = preview.targetYear !== null && sourceNumbers.length ? await pool!.query<{ receipt_number: string }>(`
-          SELECT DISTINCT receipt_number FROM finance_transactions WHERE department_id=$1 AND accounting_year=$2 AND receipt_number=ANY($3::text[])`,
-        [dept, preview.targetYear, sourceNumbers]) : null;
-        const existingParentNumbers = new Set(targetNumbers?.rows.map((row) => row.receipt_number));
-        const reviewed = groups.map(({ parentId, state, group }) => {
-          if (!group) return { parentId, state, review: null };
-          const conflictingReceipt = existingParentNumbers.has(group.documentNumber) || group.children.some((row) => duplicates.has(row.sourceId));
-          const review = reconcileChurchToolsSplitGroup(group, journal.rows, mapping, linkedRows?.rows ?? [], preview.blockedBy,
-            conflictingReceipt, (parentCount.get(group.documentNumber) ?? 0) > 1);
-          return { parentId, state, review };
-        });
-        return reply.header("Cache-Control", "private, no-store").send({
-          formatVersion: 1, sourceInstance: config.instance_url, ...scope, targetCurrency: preview.targetCurrency, targetYear: preview.targetYear,
-          blockedBy: preview.blockedBy, groups: reviewed,
-        });
+        const source = await readReviewedSplitGroups(config, scope);
+        if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        return reply.header("Cache-Control", "private, no-store").send(await evaluateReviewedSplits(pool!, dept, config.instance_url, scope, source));
       } catch (error) {
         const status = error instanceof ChurchToolsFinanceRangeError ? 413
           : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools split journal review." });
+      }
+    });
+    routes.post<{ Body: JournalScope & { reviewHash: string; parentIds: string[] } }>("/api/modules/sync/churchtools/finance/split-drafts", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency", "reviewHash", "parentIds"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
+        sourceCurrency: { type: "string", pattern: "^[A-Z]{3}$" }, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        parentIds: { type: "array", minItems: 1, maxItems: 25, uniqueItems: true, items: { type: "string", pattern: "^[1-9][0-9]{0,15}$" } },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (!deps.validateMutation(request, reply)) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const { periodId, startDate, endDate, sourceCurrency, reviewHash, parentIds } = request.body;
+      const scope = { periodId, startDate, endDate, sourceCurrency };
+      const invalid = journalScopeError(scope);
+      if (invalid) return reply.code(400).send({ error: invalid });
+      const linkScope = { departmentId: dept, instanceUrl: config.instance_url, periodId };
+      const batchId = journalDraftBatchId(reviewHash, parentIds.map((id) => "split:" + id), scope);
+      try {
+        const previous = await readJournalDraftReceipt(pool!, linkScope, batchId);
+        if (previous) return reply.header("Cache-Control", "private, no-store").send({ ...previous, replayed: true });
+        const source = await readReviewedSplitGroups(config, scope);
+        if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        const db = await pool!.connect();
+        try {
+          await db.query("BEGIN");
+          await db.query("SET LOCAL lock_timeout = '5s'");
+          await db.query("SELECT id FROM departments WHERE id=$1 FOR NO KEY UPDATE", [dept]);
+          if (!await deps.lockDepartmentForWrite(db, dept)) {
+            await db.query("ROLLBACK");
+            return reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
+          }
+          const current = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE",
+            [dept, config.instance_url, config.encrypted_login_token]);
+          if (!current.rowCount) throw new ChurchToolsFinanceReviewError("The ChurchTools connection changed. Run a fresh split review.");
+          const replay = await readJournalDraftReceipt(db, linkScope, batchId);
+          if (replay) {
+            await db.query("COMMIT");
+            return reply.header("Cache-Control", "private, no-store").send({ ...replay, replayed: true });
+          }
+          const enabled = await db.query("SELECT 1 FROM departments d JOIN installation_modules m ON m.installation_id=d.installation_id WHERE d.id=$1 AND m.module_id='finance' AND m.enabled FOR SHARE OF m", [dept]);
+          if (!enabled.rowCount) throw new ChurchToolsFinanceReviewError("Enable the local Finance module before creating drafts.");
+          await db.query("SELECT accounting_year FROM finance_accounting_years WHERE department_id=$1 AND start_date<=$3 AND end_date>=$2 FOR SHARE",
+            [dept, source.journal.source.period.startDate, source.journal.source.period.endDate]);
+          await db.query("LOCK TABLE finance_transactions IN SHARE ROW EXCLUSIVE MODE");
+          await db.query("LOCK TABLE finance_settings IN SHARE MODE");
+          const report = await evaluateReviewedSplits(db, dept, config.instance_url, scope, source, true);
+          if (report.reviewHash !== reviewHash) throw new ChurchToolsFinanceReviewError("The split journal or its local mappings changed after review. Run a fresh split review.");
+          const result = await createFinanceDraftBatch(db, linkScope, request.authenticatedUser?.id ?? null, batchId, planReviewedSplitDrafts(report, parentIds));
+          await db.query("COMMIT");
+          return reply.code(201).header("Cache-Control", "private, no-store").send({ ...result, replayed: false });
+        } catch (error) {
+          await db.query("ROLLBACK");
+          if (error && typeof error === "object" && "code" in error && error.code === "55P03") throw new ChurchToolsFinanceReviewError("The local journal is busy. Retry the reviewed split draft batch.");
+          throw error;
+        } finally { db.release(); }
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceReviewError ? 409 : error instanceof ChurchToolsFinanceRangeError ? 413
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not create the reviewed ChurchTools split journal drafts." });
       }
     });
     routes.post<{ Body: JournalScope & { reviewHash: string; sourceIds: string[] } }>("/api/modules/sync/churchtools/finance/journal-drafts", {
