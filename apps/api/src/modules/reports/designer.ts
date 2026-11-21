@@ -2,7 +2,7 @@ import { exportFormatQuery, sendReportWorkbook, type ExportFormatQuery } from ".
 import type { Pool, PoolClient } from "pg";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { canManagePeopleFields } from "../people-records/field-privacy.js";
 
 type FieldType = "text" | "number" | "date";
@@ -61,7 +61,7 @@ function permitted(request: DesignerAccess, permission: DataSet["permission"]) {
   if (permission === "people") return grants.includes("people_view_private") || grants.includes("people_manage");
   if (permission === "groups") return grants.includes("groups_manage");
   if (permission === "events") return grants.includes("events_manage");
-  if (permission === "resources") return grants.includes("resources_manage") || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
+  if (permission === "resources") return grants.includes("resources_manage") || (isServerModuleEnabled("resource-scheduler") && (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage"));
   const finance = request.activeDepartmentModulePermissions?.finance ?? [];
   return finance.includes("view") || finance.includes("manage");
 }

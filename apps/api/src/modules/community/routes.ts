@@ -1,5 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
-import { hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
+import { canViewResource, hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -1043,13 +1043,14 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     routes.get("/api/resources", async (request, reply) => {
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
+      const canManageBookings = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
       const result = await pool!.query<BookableResourceRow>(
         `SELECT id, name, category, description, location, capacity, requires_approval, calendar_required, manager_booking_only, active, source_system
-           FROM bookable_resources WHERE department_id = $1 ${request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage") ? "" : "AND active = true"}
-          ORDER BY active DESC, category, lower(name)`,
-        [departmentId],
+           FROM bookable_resources WHERE department_id=$1 AND (active OR $3)
+             AND can_view_bookable_resource(department_id,visibility_group_id,$2,$3)
+           ORDER BY active DESC, category, lower(name)`,
+        [departmentId, request.authenticatedUser!.id, canManageBookings],
       );
-      const canManageBookings = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
       return result.rows.map((row) => ({
         ...mapBookableResource(row), canRequestBooking: !row.manager_booking_only || canManageBookings,
       }));
@@ -1117,7 +1118,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
                 b.purpose, b.starts_at, b.ends_at, b.status, b.created_at
            FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id JOIN app_users u ON u.id=b.requested_by
           WHERE b.department_id=$1 AND b.ends_at > now() - interval '30 days' AND b.starts_at < now() + interval '6 months'
-          ORDER BY b.starts_at, r.name`, [departmentId]);
+            AND (b.requested_by=$2 OR can_view_bookable_resource(r.department_id,r.visibility_group_id,$2,$3))
+          ORDER BY b.starts_at, r.name`, [departmentId, request.authenticatedUser!.id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))]);
       return result.rows.map(mapBooking);
     });
 
@@ -1137,6 +1139,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         await client.query("BEGIN");
         const resource = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
         if (!resource?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This resource is not available for booking." }); }
+        if (!await canViewResource(client, departmentId, resource.visibility_group_id, request.authenticatedUser!.id,
+          isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")))) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "This resource is not available for booking." });
+        }
         if (resource.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
         if (resource.manager_booking_only && !isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))) {
           await client.query("ROLLBACK");

@@ -1,3 +1,4 @@
+import { isResourceBookingManager } from "./resource-booking-policy.js";
 import { registerEventVolunteerAbsenceRoutes } from "./event-volunteer-absences.js";
 import { registerRegistrationReceiptRoutes } from "./event-registration-notices.js";
 import { completedCheckInError, writeCoreEventAttendance } from "./event-attendance.js";
@@ -746,7 +747,16 @@ async function validatePositionQualifications(departmentId: string, positions: N
   return null;
 }
 
-async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent, client?: PoolClient) {
+async function visibleServiceResourceIds(departmentId: string, assets: string[], request: FastifyRequest, db: Pick<PoolClient, "query">, active = false) {
+  if (!assets.length) return new Set<string>();
+  const result = await db.query<{ id: string }>(
+    "SELECT id FROM bookable_resources WHERE department_id=$1 AND id=ANY($2::uuid[]) AND (NOT $5 OR active) AND can_view_bookable_resource(department_id,visibility_group_id,$3,$4)",
+    [departmentId, assets, request.authenticatedUser!.id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")), active],
+  );
+  return new Set(result.rows.map((resource) => resource.id));
+}
+
+async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent, request: FastifyRequest, client?: PoolClient) {
   if (event.responsibleContactId) {
     const responsible = await (client ?? pool!).query(
       "SELECT id FROM contacts WHERE id=$1 AND department_id=$2" + (client ? " FOR KEY SHARE" : ""),
@@ -758,8 +768,8 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
   if ((event.timePlan ?? []).some((item) => item.position && !positionNames.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   const assets = [...new Set(event.assetIds ?? [])];
   if (assets.length) {
-    const available = await pool!.query("SELECT id FROM bookable_resources WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[])", [departmentId, assets]);
-    if (available.rowCount !== assets.length) return "One or more selected resources are unavailable for this site.";
+    const available = await visibleServiceResourceIds(departmentId, assets, request, client ?? pool!, true);
+    if (available.size !== assets.length) return "One or more selected resources are unavailable for this site.";
   }
   const contacts = [...new Set((event.positions ?? []).flatMap((position) => position.contactId ? [position.contactId] : []))];
   if (contacts.length) {
@@ -2732,9 +2742,10 @@ app.get("/api/events", async (request, reply): Promise<ServiceEvent[] | { error:
   ) : { rows: [] };
   const linkedContact = await pool.query<{ contact_id: string | null }>("SELECT contact_id FROM department_memberships WHERE user_id=$1 AND department_id=$2", [request.authenticatedUser?.id, selectedDepartmentId]);
   const currentContactId = linkedContact.rows[0]?.contact_id ?? null;
+  const visibleAssets = await visibleServiceResourceIds(selectedDepartmentId, [...new Set(result.rows.flatMap((row) => row.asset_ids ?? []))], request, pool);
   const responsesByPosition = new Map(responseRows.rows.map((row) => [`${row.event_id}:${row.position_index}`, row]));
   return result.rows.map((row) => {
-    const event = mapServiceEvent(row);
+    const event = mapServiceEvent({ ...row, asset_ids: (row.asset_ids ?? []).filter((id) => visibleAssets.has(id)) });
     const canManageRegistrations = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
     const visibleEvent = canManageRegistrations ? event : (({ registrationToken: _registrationToken, ...safeEvent }) => safeEvent)(event);
     return {
@@ -2867,7 +2878,7 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   };
   const validationError = validateServiceEvent(event);
   if (validationError) return reply.code(400).send({ error: validationError });
-  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
+  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event, request);
   if (assignmentError) return reply.code(400).send({ error: assignmentError });
 
   const dates = event.recurrence ? recurrenceDates(event.eventDate, event.recurrence.endDate, event.recurrence.interval) : [event.eventDate];
@@ -2875,7 +2886,7 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
+    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, request, client);
     if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const rows: ServiceEventRow[] = [];
     for (const date of dates) {
@@ -2921,7 +2932,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
   };
   const validationError = validateServiceEvent(event);
   if (validationError) return reply.code(400).send({ error: validationError });
-  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
+  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event, request);
   if (assignmentError) return reply.code(400).send({ error: assignmentError });
 
   const client = await pool.connect();
@@ -2933,12 +2944,17 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
     );
     if (!previousPositionsResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     if (previousPositionsResult.rows[0].cancelled_at) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "This event has been cancelled. Restore it before editing assignments." }); }
-    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
+    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, request, client);
     if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
         SET title = $3, kind = $4, event_date = $5, is_all_day = $6, start_time = $7, end_time = $8,
-            location = $9, description = $10, room = $11, asset_ids = $12, positions = $13::jsonb, time_plan = $14::jsonb,
+            location = $9, description = $10, room = $11, asset_ids=$12::uuid[] || ARRAY(
+              SELECT saved.asset_id FROM unnest(service_events.asset_ids) saved(asset_id)
+              JOIN bookable_resources resource ON resource.id=saved.asset_id AND resource.department_id=$2
+              WHERE NOT (saved.asset_id=ANY($12::uuid[]))
+                AND NOT can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$20,$21)
+            ), positions = $13::jsonb, time_plan = $14::jsonb,
             registration_enabled = $15, registration_capacity = $16,
             registration_token = CASE WHEN $15 THEN COALESCE(registration_token, $17::uuid) ELSE NULL END,
             responsible_contact_id = CASE WHEN $19::boolean THEN $18::uuid ELSE responsible_contact_id END, updated_at = now()
@@ -2948,12 +2964,12 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
                 location, description, room, asset_ids, positions, time_plan, attendance_adults, attendance_children, attendance_recorded_at, recurrence_id, source_system,
                  registration_enabled, registration_capacity, registration_token, responsible_contact_id, cancelled_at, cancellation_reason,
                 (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
-    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null, event.responsibleContactId ?? null, event.responsibleContactId !== undefined],
+    [request.params.id, selectedDepartmentId, event.title, event.kind, event.eventDate, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.registrationEnabled ? randomUUID() : null, event.responsibleContactId ?? null, event.responsibleContactId !== undefined, request.authenticatedUser!.id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))],
   );
     if (!result.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
     await syncEventPositionResponses(client, request.params.id, event.positions, previousPositionsResult.rows[0].positions);
     await client.query("COMMIT");
-    return mapServiceEvent(result.rows[0]);
+    return mapServiceEvent({ ...result.rows[0], asset_ids: event.assetIds ?? [] });
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
@@ -2974,7 +2990,7 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
   const event = { ...request.body, title: request.body.title.trim(), location: request.body.location.trim(), endTime: request.body.endTime?.trim() || undefined, description: request.body.description?.trim() || undefined };
   const validationError = validateServiceEvent({ ...event, recurrence: undefined });
   if (validationError) return reply.code(400).send({ error: validationError });
-  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event);
+  const assignmentError = await validateServiceAssignments(selectedDepartmentId, event, request);
   if (assignmentError) return reply.code(400).send({ error: assignmentError });
   const dayDelta = Math.round((Date.parse(`${event.eventDate}T00:00:00Z`) - Date.parse(`${source.rows[0].event_date}T00:00:00Z`)) / 86400000);
   const client = await pool.connect();
@@ -2988,11 +3004,16 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
       await client.query("ROLLBACK");
       return reply.code(409).send({ error: "This recurring series contains cancelled gatherings. Restore all cancelled gatherings before editing the series." });
     }
-    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
+    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, request, client);
     if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, is_all_day=$6, start_time=$7, end_time=$8,
-       location=$9, description=$10, room=$11, asset_ids=$12, positions=$13::jsonb, time_plan=$14::jsonb,
+       location=$9, description=$10, room=$11, asset_ids=$12::uuid[] || ARRAY(
+              SELECT saved.asset_id FROM unnest(service_events.asset_ids) saved(asset_id)
+              JOIN bookable_resources resource ON resource.id=saved.asset_id AND resource.department_id=$1
+              WHERE NOT (saved.asset_id=ANY($12::uuid[]))
+                AND NOT can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$19,$20)
+            ), positions=$13::jsonb, time_plan=$14::jsonb,
        registration_enabled=$15, registration_capacity=$16,
        registration_token=CASE WHEN $15 THEN COALESCE(registration_token, gen_random_uuid()) ELSE NULL END,
        responsible_contact_id=CASE WHEN $18::boolean THEN $17::uuid ELSE responsible_contact_id END, updated_at=now()
@@ -3002,12 +3023,12 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
        location,description,room,asset_ids,positions,time_plan,attendance_adults,attendance_children,attendance_recorded_at,recurrence_id,source_system,
        registration_enabled,registration_capacity,registration_token,responsible_contact_id,cancelled_at,cancellation_reason,
        (SELECT count(*)::int FROM event_registrations registration WHERE registration.event_id=service_events.id AND registration.status='registered') AS registration_count`,
-    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.responsibleContactId ?? null, event.responsibleContactId !== undefined],
+    [selectedDepartmentId, source.rows[0].recurrence_id, dayDelta, event.title, event.kind, event.isAllDay ?? false, event.isAllDay ? "00:00" : event.startTime, event.isAllDay ? null : event.endTime ?? null, event.location, event.description ?? null, event.room?.trim() ?? "", event.assetIds ?? [], JSON.stringify(event.positions ?? []), JSON.stringify(event.timePlan ?? []), event.registrationEnabled ?? false, event.registrationCapacity ?? null, event.responsibleContactId ?? null, event.responsibleContactId !== undefined, request.authenticatedUser!.id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))],
   );
     const previousPositionsByEvent = new Map(previousSeries.rows.map((row) => [row.id, row.positions]));
     for (const row of result.rows) await syncEventPositionResponses(client, row.id, event.positions, previousPositionsByEvent.get(row.id));
     await client.query("COMMIT");
-    return result.rows.map(mapServiceEvent);
+    return result.rows.map((row) => mapServiceEvent({ ...row, asset_ids: event.assetIds ?? [] }));
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });
@@ -3214,7 +3235,7 @@ app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array
       nextPositions[assignment.positionIndex] = { ...position, contactId: request.body.contactId };
     }
     const nextEvent = { ...event, positions: nextPositions };
-    const assignmentError = await validateServiceAssignments(departmentId, nextEvent, client);
+    const assignmentError = await validateServiceAssignments(departmentId, { ...nextEvent, assetIds: [] }, request, client);
     if (assignmentError) { await client.query("ROLLBACK"); return reply.code(400).send({ error: assignmentError }); }
     const updated = await client.query<ServiceEventRow>(
       `UPDATE service_events SET positions=$3::jsonb,updated_at=now()
@@ -3227,8 +3248,9 @@ app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array
       [request.params.id, departmentId, JSON.stringify(nextPositions)],
     );
     await syncEventPositionResponses(client, request.params.id, nextPositions, event.positions);
+    const visibleAssets = await visibleServiceResourceIds(departmentId, updated.rows[0].asset_ids ?? [], request, client);
     await client.query("COMMIT");
-    return mapServiceEvent(updated.rows[0]);
+    return mapServiceEvent({ ...updated.rows[0], asset_ids: (updated.rows[0].asset_ids ?? []).filter((id) => visibleAssets.has(id)) });
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
 });

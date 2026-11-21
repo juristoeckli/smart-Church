@@ -52,7 +52,7 @@ function hasPermission(request: ReportAccess, permission: "people" | "groups" | 
   if (permission === "people") return location.includes("people_view_private") || location.includes("people_manage");
   if (permission === "groups") return location.includes("groups_manage");
   if (permission === "events") return location.includes("events_manage");
-  if (permission === "resources") return location.includes("resources_manage") || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
+  if (permission === "resources") return location.includes("resources_manage") || (isServerModuleEnabled("resource-scheduler") && (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage"));
   const finance = request.activeDepartmentModulePermissions?.finance ?? [];
   return finance.includes("view") || finance.includes("manage");
 }

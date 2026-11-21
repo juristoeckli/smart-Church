@@ -29,6 +29,7 @@ export function BookableResources({ departmentId, userId, canManage, navigationT
   const [error, setError] = useState("");
   const selected = resources.find((item) => item.id === selectedId) ?? null;
   const visibleResources = useMemo(() => resources.filter((item) => canManage || item.active), [resources, canManage]);
+  const otherOwnedBookings = bookings.filter((booking) => booking.requestedBy === userId && !visibleResources.some((resource) => resource.id === booking.resourceId));
   const selectedBookings = useMemo(() => bookings.filter((item) => item.resourceId === selectedId), [bookings, selectedId]);
 
   async function load(signal?: AbortSignal) {
@@ -131,6 +132,22 @@ export function BookableResources({ departmentId, userId, canManage, navigationT
       <div className="community-resource-detail">
         {canManage && !selected?.importedFrom && <section className="directory-card"><div className="directory-heading"><div><h2>{t(selected ? "Resource details" : "Add a resource")}</h2><p>{t(selected ? selected.active ? "Edit availability and booking preferences." : "Archived resource · it can be made available again." : "List a space, vehicle, or other shared item.")}</p></div>{selected?.active && <button className="button button-danger" type="button" onClick={() => void archiveResource(selected)}><Trash2 size={14} />{t("Archive")}</button>}</div>{resourceForm(!selected)}</section>}
         {selected?.active && <section className="directory-card"><div className="directory-heading"><div><h2>{t("Request a booking")}</h2><p>{selected.importedFrom ? t("Imported from ChurchTools · read-only details · ") : ""}{selected.location || t("Church resource")}{selected.capacity ? " · " + t("Capacity ") + selected.capacity : ""}</p></div></div>{selected.canRequestBooking === false ? <p>{t("Only resource managers can make new bookings for this resource.")}</p> : selected.calendarRequired ? <p>{t("Book this resource from a saved appointment in Calendar.")}</p> : <form className="community-booking-form" onSubmit={bookResource}><label>{t("What is it for?")}<input required maxLength={240} value={purpose} onChange={(event) => setPurpose(event.target.value)} placeholder={t("Meeting, event, or purpose")} /></label><label>{t("Starts")}<input required type="datetime-local" min={localDateTime(new Date().toISOString())} value={startsAt} onChange={(event) => setStartsAt(event.target.value)} /></label><label>{t("Ends")}<input required type="datetime-local" min={startsAt || localDateTime(new Date().toISOString())} value={endsAt} onChange={(event) => setEndsAt(event.target.value)} /></label><button className="button button-primary" type="submit" disabled={saving || !startsAt || !endsAt}><CalendarDays size={15} />{t("Request")}</button></form>}</section>}
+        {otherOwnedBookings.length > 0 && <section className="directory-card">
+          <div className="directory-heading"><div><h2>{t("Your other bookings")}</h2></div></div>
+          <div className="community-booking-list">{otherOwnedBookings.map((booking) =>
+            <article className="community-booking-row" data-booking-id={booking.id} data-focused={focusedBookingId === booking.id || undefined} key={booking.id}>
+              <span className="community-resource-icon"><Clock3 size={17} /></span>
+              <div className="community-resource-title">
+                <strong>{booking.resourceName} · {booking.purpose}</strong>
+                <small>{displayDate(booking.startsAt)}–{displayDate(booking.endsAt)}</small>
+                <span className={"community-booking-status status-" + booking.status}>
+                  {t(booking.status === "requested" ? "Requested" : booking.status === "approved" ? "Approved" : booking.status === "declined" ? "Declined" : "Cancelled")}
+                </span>
+              </div>
+              {(booking.status === "requested" || booking.status === "approved") && <button className="community-row-action" aria-label={t("Cancel booking")} title={t("Cancel")} type="button" onClick={() => void changeBooking(booking, "cancelled")}>×</button>}
+            </article>
+          )}</div>
+        </section>}
         {selected && <section className="directory-card"><div className="directory-heading"><div><h2>{t("Bookings")}</h2><p>{t("Requests and reservations for")} {selected.name}.</p></div></div>{selectedBookings.length ? <div className="community-booking-list">{selectedBookings.map((booking) => <article className="community-booking-row" data-booking-id={booking.id} data-focused={focusedBookingId === booking.id || undefined} key={booking.id}><span className="community-resource-icon"><Clock3 size={17} /></span><div className="community-resource-title"><strong>{booking.purpose}</strong><small>{displayDate(booking.startsAt)}–{displayDate(booking.endsAt)} · {booking.requesterName}</small><span className={"community-booking-status status-" + booking.status}>{t(booking.status === "requested" ? "Requested" : booking.status === "approved" ? "Approved" : booking.status === "declined" ? "Declined" : "Cancelled")}</span></div>{canManage && booking.status === "requested" && <><button className="community-row-action" aria-label={t("Approve booking")} title={t("Approve")} type="button" onClick={() => void changeBooking(booking, "approved")}><Check size={16} /></button><button className="community-row-action community-row-delete" aria-label={t("Decline booking")} title={t("Decline")} type="button" onClick={() => void changeBooking(booking, "declined")}><Trash2 size={15} /></button></>}{(canManage || booking.requestedBy === userId) && <button className="community-row-action" aria-label={t("Cancel booking")} title={t("Cancel")} type="button" onClick={() => void changeBooking(booking, "cancelled")}>×</button>}</article>)}</div> : <p className="community-empty">{t("No upcoming bookings.")}</p>}</section>}
       </div>
     </section>

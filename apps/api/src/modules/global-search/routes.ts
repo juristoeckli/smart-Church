@@ -1,5 +1,6 @@
+import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { ModuleServerContext } from "../module-sdk.js";
+import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 
 type SearchResult = { id: string; type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking"; title: string; detail?: string };
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -109,21 +110,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ).then((result) => result.rows) : Promise.resolve([]),
       state.communityEnabled && (localUuidQuery || !validIdQuery || state.migrationLinksReady) ? pool.query<{ id: string; title: string; detail: string }>(
         localUuidQuery
-          ? `SELECT id,name AS title,concat(category,' · ',nullif(location,'')) AS detail FROM bookable_resources WHERE department_id=$1 AND id=$2 AND (active=true OR $3::boolean)`
+          ? `SELECT id,name AS title,concat(category,' · ',nullif(location,'')) AS detail FROM bookable_resources WHERE department_id=$1 AND id=$2 AND (active=true OR $3::boolean) AND can_view_bookable_resource(department_id,visibility_group_id,$4,$3)`
           : validIdQuery
             ? `SELECT resource.id,resource.name AS title,concat(resource.category,' · ',nullif(resource.location,'')) AS detail
                  FROM churchtools_migration_links link JOIN bookable_resources resource ON resource.id=link.local_record_id AND resource.department_id=link.department_id
-                WHERE link.department_id=$1 AND link.area='resource' AND link.source_id=$2 AND (resource.active=true OR $3::boolean) LIMIT 6`
-            : `SELECT id,name AS title,concat(category,' · ',nullif(location,'')) AS detail FROM bookable_resources WHERE department_id=$1 AND name ILIKE $2 AND (active=true OR $3::boolean) ORDER BY lower(name),id LIMIT 6`,
-        localUuidQuery || !validIdQuery ? [...values, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")] : [departmentId, id, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")],
+                WHERE link.department_id=$1 AND link.area='resource' AND link.source_id=$2 AND (resource.active=true OR $3::boolean) AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$4,$3) LIMIT 6`
+            : `SELECT id,name AS title,concat(category,' · ',nullif(location,'')) AS detail FROM bookable_resources WHERE department_id=$1 AND name ILIKE $2 AND (active=true OR $3::boolean) AND can_view_bookable_resource(department_id,visibility_group_id,$4,$3) ORDER BY lower(name),id LIMIT 6`,
+        localUuidQuery || !validIdQuery ? [...values, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")), request.authenticatedUser!.id] : [departmentId, id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")), request.authenticatedUser!.id],
       ).then((result) => result.rows) : Promise.resolve([]),
       state.communityEnabled ? pool.query<{ id: string; title: string; detail: string }>(
         localUuidQuery
-          ? `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND booking.id=$2 AND booking.ends_at>now()-interval '30 days' AND booking.starts_at<now()+interval '6 months' AND (resource.active=true OR $3::boolean)`
+          ? `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND booking.id=$2 AND booking.ends_at>now()-interval '30 days' AND booking.starts_at<now()+interval '6 months' AND (resource.active=true OR $3::boolean) AND (booking.requested_by=$4 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$4,$3))`
           : validIdQuery
             ? `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND false`
-            : `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND (booking.purpose ILIKE $2 OR resource.name ILIKE $2) AND booking.ends_at>now()-interval '30 days' AND booking.starts_at<now()+interval '6 months' AND (resource.active=true OR $3::boolean) ORDER BY booking.starts_at,resource.name LIMIT 6`,
-        validIdQuery && !localUuidQuery ? [departmentId] : localUuidQuery ? [...values, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")] : [...values, request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")],
+            : `SELECT booking.id,booking.purpose AS title,concat(resource.name,' · ',to_char(booking.starts_at,'YYYY-MM-DD HH24:MI'),' · ',booking.status) AS detail FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id WHERE booking.department_id=$1 AND (booking.purpose ILIKE $2 OR resource.name ILIKE $2) AND booking.ends_at>now()-interval '30 days' AND booking.starts_at<now()+interval '6 months' AND (resource.active=true OR $3::boolean) AND (booking.requested_by=$4 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$4,$3)) ORDER BY booking.starts_at,resource.name LIMIT 6`,
+        validIdQuery && !localUuidQuery ? [departmentId] : localUuidQuery ? [...values, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")), request.authenticatedUser!.id] : [...values, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")), request.authenticatedUser!.id],
       ).then((result) => result.rows) : Promise.resolve([]),
     ]);
 

@@ -1,3 +1,4 @@
+import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -133,9 +134,13 @@ async function lockCalendarSeries(db: PoolClient, id: string, departmentId: stri
   return row?.recurrence ? { ...row, recurrence: row.recurrence } : null;
 }
 
-async function updateCalendarSeriesResources(db: Pick<PoolClient, "query">, id: string, resourceIds: string[], actor: string) {
-  await db.query(`DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL
-    AND NOT (resource_booking_id=ANY($2::uuid[]))`, [id, resourceIds]);
+async function updateCalendarSeriesResources(db: Pick<PoolClient, "query">, id: string, resourceIds: string[], actor: string, canManageResources: boolean) {
+  await db.query(`DELETE FROM church_calendar_resource_links link
+    USING resource_bookings booking, bookable_resources resource
+    WHERE link.appointment_id=$1 AND link.occurrence_start IS NULL AND booking.id=link.resource_booking_id
+      AND resource.id=booking.resource_id AND resource.department_id=booking.department_id
+      AND NOT (link.resource_booking_id=ANY($2::uuid[]))
+      AND (resource.visibility_group_id IS NULL OR booking.requested_by=$3 OR $4)`, [id, resourceIds, actor, canManageResources]);
   if (resourceIds.length) await db.query(
     `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
      SELECT $1,booking_id,$3 FROM unnest($2::uuid[]) booking(booking_id) ON CONFLICT DO NOTHING`, [id, resourceIds, actor],
@@ -383,7 +388,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ORDER BY church_group.name LIMIT 500`, [departmentId]);
     const events = await context.pool.query<{ id: string; title: string; event_date: string }>(
       "SELECT id,title,event_date::text FROM service_events WHERE department_id=$1 ORDER BY event_date DESC,title LIMIT 250", [departmentId]);
-    const canSeeAllBookings = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage");
+    const canSeeAllBookings = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
     const bookings = await context.pool.query<{ id: string; purpose: string; starts_at: string }>(
       `SELECT id,purpose,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at FROM resource_bookings WHERE department_id=$1 AND status='approved' AND starts_at >= now()-interval '90 days' AND ($3 OR requested_by=$2) ORDER BY starts_at LIMIT 250`, [departmentId, userId(request), canSeeAllBookings]);
     const templatesInstalled = await context.pool.query<{ present: boolean }>("SELECT to_regclass('public.service_plan_templates') IS NOT NULL AS present");
@@ -717,7 +722,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN resource_bookings booking ON booking.id=link.resource_booking_id AND booking.department_id=$2
          JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=$2
         WHERE link.appointment_id=ANY($1::uuid[])
-        ORDER BY resource.name,booking.starts_at,link.resource_booking_id`, [ids, departmentId],
+          AND (booking.requested_by=$3 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3,$4))
+        ORDER BY resource.name,booking.starts_at,link.resource_booking_id`, [ids, departmentId, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))],
     );
     const exceptionMap = new Map(exceptions.rows.map((row) => [`${row.appointment_id}:${row.original_start}`, row]));
     const movedStarts = new Map<string, string[]>();
@@ -1249,8 +1255,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
     if (resourceIds.length) {
-      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")
-        || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
+      const canManageResources = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
       const found = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
       if (found.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
     }
@@ -1347,8 +1352,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const occurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
     const resourceIds = [...new Set(normalized.resourceBookingIds ?? [])];
     if (updateSeriesLinks && resourceIds.length) {
-      const canManageResources = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("resources_manage")
-        || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("manage");
+      const canManageResources = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
       const resourceRows = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
       if (resourceRows.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
     }
@@ -1435,7 +1439,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
            SELECT $2,resource_booking_id,created_by FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL`, [row.id, newId],
         );
-        if (updateSeriesLinks) await updateCalendarSeriesResources(client, newId, resourceIds, userId(request));
+        if (updateSeriesLinks) await updateCalendarSeriesResources(client, newId, resourceIds, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")));
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
@@ -1456,7 +1460,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
       );
     }
-    if (updateSeriesLinks) await updateCalendarSeriesResources(context.pool, row.id, resourceIds, userId(request));
+    if (updateSeriesLinks) await updateCalendarSeriesResources(context.pool, row.id, resourceIds, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")));
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, scope });
     return { updated: true };
   });

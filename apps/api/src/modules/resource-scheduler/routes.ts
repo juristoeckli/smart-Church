@@ -1,5 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision, resourceBookingReviewers } from "../../resource-booking-notices.js";
-import { isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
+import { canViewResource, isResourceBookingManager as isManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
@@ -297,7 +297,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (occurrenceDateKey(startsAt, series.time_zone ?? null) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
     if (startsAt.getTime() < Date.now() - 60_000 || startsAt.getTime() > Date.now() + 366 * 86_400_000) return { error: "Choose an edit date and time in the next twelve months." } as const;
     if (input.recurrence.endsOn && (!isoDate(input.recurrence.endsOn) || input.recurrence.endsOn < input.fromDate)) return { error: "Choose a valid repeat end date on or after the edit date." } as const;
-    const resourceResult = await queryable.query("SELECT resource.calendar_required,resource.manager_booking_only,COALESCE(settings.total_units,1)::int AS total_units FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true", [series.resource_id, departmentId]);
+    const resourceResult = await queryable.query("SELECT resource.calendar_required,resource.manager_booking_only,resource.visibility_group_id,COALESCE(settings.total_units,1)::int AS total_units FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true", [series.resource_id, departmentId]);
     if (!resourceResult.rowCount) return { error: "The resource is no longer available in this location." } as const;
     if (input.quantity < 1 || input.quantity > Number(resourceResult.rows[0].total_units)) return { error: "Quantity exceeds this resource's available units." } as const;
     const dates = await queryable.query("SELECT occurrence_date::text AS date,date_type FROM resource_booking_series_dates WHERE series_id=$1", [seriesId]);
@@ -316,7 +316,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const requested = current.rows.filter((row: { status: string }) => row.status === "requested");
     const requestedDates = new Set(requested.map((row: { occurrenceDate: string }) => row.occurrenceDate));
     const retained = proposed.filter((item) => requestedDates.has(item.localDate)).length;
-    return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units), calendarRequired: resourceResult.rows[0].calendar_required === true, managerBookingOnly: resourceResult.rows[0].manager_booking_only === true };
+    return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units), calendarRequired: resourceResult.rows[0].calendar_required === true, managerBookingOnly: resourceResult.rows[0].manager_booking_only === true, visibilityGroupId: resourceResult.rows[0].visibility_group_id as string | null };
   }
 
   app.get<{ Querystring: { from?: string; to?: string; status?: string; resourceId?: string; markedOnly?: string; search?: string } }>("/api/modules/resource-scheduler/bootstrap", async (request, reply) => {
@@ -326,15 +326,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const to = request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
     const search = typeof request.query.search === "string" ? request.query.search.trim().slice(0, 100) : "";
     const canManage = isManager(request);
-    const [department, resources, bookings, responsiblePeople] = await Promise.all([
+    const [department, resources, bookings, responsiblePeople, visibilityGroups] = await Promise.all([
       context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,resource.calendar_required AS "calendarRequired",resource.manager_booking_only AS "managerBookingOnly",
           CASE WHEN $2 THEN resource.responsible_user_id END AS "responsibleUserId",
+          CASE WHEN $2 THEN resource.visibility_group_id END AS "visibilityGroupId",
           ($4::text='' OR (strpos(lower(resource.name),lower($4))>0 OR strpos(lower(resource.category),lower($4))>0 OR strpos(lower(resource.location),lower($4))>0)) AS "matchesSearch",
           EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=resource.department_id AND mark.resource_id=resource.id AND mark.user_id=$3) AS marked,
           COALESCE(settings.total_units,1) AS "totalUnits",COALESCE(settings.default_lead_in_minutes,0) AS "defaultLeadInMinutes",COALESCE(settings.default_cleanup_minutes,0) AS "defaultCleanupMinutes"
         FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.resource_id=resource.id AND settings.department_id=resource.department_id
-        WHERE resource.department_id=$1 AND ($2 OR resource.active=true) ORDER BY resource.location,resource.category,resource.name`, [departmentId, isManager(request), request.authenticatedUser!.id, search]),
+        WHERE resource.department_id=$1 AND ($2 OR resource.active=true)
+          AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3,$2) ORDER BY resource.location,resource.category,resource.name`, [departmentId, isManager(request), request.authenticatedUser!.id, search]),
       context.pool!.query(`SELECT booking.id,booking.resource_id AS "resourceId",resource.name AS "resourceName",resource.location,
           booking.requested_by AS "requestedBy",requester.display_name AS "requesterName",booking.purpose,
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
@@ -352,11 +354,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($4::text IS NULL OR booking.status=$4) AND ($5::uuid IS NULL OR booking.resource_id=$5)
           AND (NOT $8::boolean OR EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=booking.department_id AND mark.resource_id=booking.resource_id AND mark.user_id=$6))
           AND ($7::boolean OR resource.active=true)
+          AND (booking.requested_by=$6 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$6,$7))
           AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
         ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search]),
       canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
+      canManage ? context.pool!.query<{ id: string; name: string }>(
+        "SELECT id,name FROM church_groups WHERE department_id=$1 AND status='active' ORDER BY lower(name),id", [departmentId],
+      ).then((result) => result.rows) : Promise.resolve([]),
     ]);
-    return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
+    return { resources: resources.rows, bookings: bookings.rows, canManage, responsiblePeople, visibilityGroups, timeZone: department.rows[0]?.time_zone ?? "UTC", from, to };
   });
 
   app.get("/api/modules/resource-scheduler/home-bookings", async (request, reply) => {
@@ -396,7 +402,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(409).send({ error: "This location is read-only on this installation." });
       }
       const resourceId = request.params.resourceId;
-      const resource = await client.query("SELECT id FROM bookable_resources WHERE id=$1 AND department_id=$2 AND (active OR $3) FOR SHARE", [resourceId, departmentId, isManager(request)]);
+      const resource = await client.query("SELECT id FROM bookable_resources WHERE id=$1 AND department_id=$2 AND (active OR $3) AND can_view_bookable_resource(department_id,visibility_group_id,$4,$3) FOR SHARE", [resourceId, departmentId, isManager(request), request.authenticatedUser!.id]);
       if (!resource.rowCount) {
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Resource not found in this location." });
@@ -417,8 +423,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
   });
 
-  app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number; calendarRequired?: boolean; responsibleUserId?: string | null; managerBookingOnly?: boolean } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
-    schema: { params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["totalUnits", "defaultLeadInMinutes", "defaultCleanupMinutes"], properties: { totalUnits: { type: "integer", minimum: 1, maximum: 10000 }, defaultLeadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, defaultCleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 }, calendarRequired: { type: "boolean" }, managerBookingOnly: { type: "boolean" }, responsibleUserId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } } },
+  app.put<{ Params: { resourceId: string }; Body: { totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number; calendarRequired?: boolean; responsibleUserId?: string | null; managerBookingOnly?: boolean; visibilityGroupId?: string | null } }>("/api/modules/resource-scheduler/resources/:resourceId/settings", {
+    schema: { params: { type: "object", required: ["resourceId"], properties: { resourceId: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["totalUnits", "defaultLeadInMinutes", "defaultCleanupMinutes"], properties: { totalUnits: { type: "integer", minimum: 1, maximum: 10000 }, defaultLeadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, defaultCleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 }, calendarRequired: { type: "boolean" }, managerBookingOnly: { type: "boolean" }, visibilityGroupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] }, responsibleUserId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] } } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply, true);
     if (!departmentId) return reply;
@@ -453,13 +459,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(400).send({ error: "Choose someone who can manage resource bookings in this location." });
       }
       const managerBookingOnly = request.body.managerBookingOnly ?? resource.manager_booking_only;
-      if (calendarRequired !== resource.calendar_required || responsibleUserId !== resource.responsible_user_id || managerBookingOnly !== resource.manager_booking_only) {
-        await client.query("UPDATE bookable_resources SET calendar_required=$3,responsible_user_id=$4,manager_booking_only=$5,updated_at=now() WHERE department_id=$1 AND id=$2",
-          [departmentId, resource.id, calendarRequired, responsibleUserId, managerBookingOnly]);
+      const visibilityGroupId = request.body.visibilityGroupId === undefined
+        ? resource.visibility_group_id : request.body.visibilityGroupId?.toLowerCase() ?? null;
+      if (visibilityGroupId && visibilityGroupId !== resource.visibility_group_id) {
+        const group = await client.query("SELECT id FROM church_groups WHERE id=$1 AND department_id=$2 AND status='active' FOR SHARE",
+          [visibilityGroupId, departmentId]);
+        if (!group.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Choose an active group in this location." });
+        }
+      }
+      if (calendarRequired !== resource.calendar_required || responsibleUserId !== resource.responsible_user_id
+          || managerBookingOnly !== resource.manager_booking_only || visibilityGroupId !== resource.visibility_group_id) {
+        await client.query("UPDATE bookable_resources SET calendar_required=$3,responsible_user_id=$4,manager_booking_only=$5,visibility_group_id=$6,updated_at=now() WHERE department_id=$1 AND id=$2",
+          [departmentId, resource.id, calendarRequired, responsibleUserId, managerBookingOnly, visibilityGroupId]);
       }
       await client.query("COMMIT");
-      context.realtime.publish("module:resource-scheduler:changed", departmentId, { resourceId: resource.id, action: "settings-updated" });
-      return { ...result.rows[0], calendarRequired, responsibleUserId, managerBookingOnly };
+      context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
+      return { ...result.rows[0], calendarRequired, responsibleUserId, managerBookingOnly, visibilityGroupId };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -502,6 +519,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               greatest(COALESCE(settings.total_units,1)-usage.peak,0)::int AS "availableUnits"
          FROM proposed
          JOIN bookable_resources resource ON resource.id=proposed.resource_id AND resource.department_id=$1 AND resource.active
+           AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$5,$6)
          LEFT JOIN resource_scheduler_settings settings ON settings.resource_id=resource.id AND settings.department_id=resource.department_id
          CROSS JOIN LATERAL (
            WITH occupied AS (
@@ -521,7 +539,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            SELECT COALESCE(max((SELECT COALESCE(sum(quantity),0) FROM occupied
                                 WHERE begins_at<=points.point_at AND finishes_at>points.point_at)),0) AS peak
              FROM points
-         ) AS usage`, [departmentId, startsAt, endsAt, JSON.stringify(resources)],
+         ) AS usage`, [departmentId, startsAt, endsAt, JSON.stringify(resources), request.authenticatedUser!.id, isManager(request)],
     );
     if (result.rows.length !== ids.size) return reply.code(404).send({ error: "One of the selected resources is no longer available in this location." });
     return { resources: result.rows };
@@ -619,8 +637,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesIds: created.map((booking) => booking.seriesId), action: "series-created" });
-    context.realtime.publish("module:church-calendar:changed", departmentId, { appointmentId, action: "resource-linked" });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
+    context.realtime.publish("module:church-calendar:changed", departmentId, {});
     return reply.code(201).send({ bookings: created });
   });
 
@@ -648,7 +666,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT resource.id,resource.name,resource.requires_approval,COALESCE(settings.total_units,1)::int AS total_units,
               COALESCE(settings.default_lead_in_minutes,0)::int AS default_lead_in_minutes,COALESCE(settings.default_cleanup_minutes,0)::int AS default_cleanup_minutes
          FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id
-        WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true`, [request.body.resourceId, departmentId]);
+        WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true
+          AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3,$4)`, [request.body.resourceId, departmentId, request.authenticatedUser!.id, isManager(request)]);
     const resource = resourceResult.rows[0];
     if (!resource) return reply.code(404).send({ error: "Choose an active resource in this location." });
     const appointmentId = request.body.linkedAppointmentId ?? null;
@@ -696,6 +715,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       const policy = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
       if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+      if (!await canViewResource(client, departmentId, policy.visibility_group_id, request.authenticatedUser!.id, isManager(request))) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Choose an active resource in this location." });
+      }
       if (policy.manager_booking_only && !isManager(request)) {
         await client.query("ROLLBACK");
         return reply.code(403).send({ error: resourceManagerRequired });
@@ -717,8 +740,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) return reply.code(409).send({ error: error instanceof Error ? error.message : "A booking conflicts with resource availability." });
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: created.seriesId, action: "series-created" });
-    if (appointmentId) context.realtime.publish("module:church-calendar:changed", departmentId, { appointmentId, action: "resource-linked" });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
+    if (appointmentId) context.realtime.publish("module:church-calendar:changed", departmentId, {});
     return reply.code(201).send({ ...created, occurrenceCount: instances.length, status });
   });
 
@@ -739,10 +762,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const result = await calculateFutureEdit(departmentId, request.params.seriesId, request.body, context.pool!);
     if ("error" in result) return reply.code(400).send({ error: result.error });
     const calendarRequired = result.calendarRequired && result.addedCount > 0;
+    const visibilityRequired = result.addedCount > 0 && !await canViewResource(context.pool!, departmentId,
+      result.visibilityGroupId, request.authenticatedUser!.id, isManager(request));
     const managerRequired = result.managerBookingOnly && result.addedCount > 0 && !isManager(request);
     return { fromDate: request.body.fromDate, occurrenceCount: result.proposed.length, addedCount: result.addedCount,
       updatedCount: result.updatedCount, cancelledCount: result.cancelledCount, approvedCount: result.approvedCount,
-      blocked: result.approvedCount > 0 || calendarRequired || managerRequired, calendarRequired, managerRequired };
+      blocked: result.approvedCount > 0 || calendarRequired || managerRequired || visibilityRequired, calendarRequired, managerRequired, visibilityRequired };
 
   });
   app.put<{ Params: { seriesId: string }; Body: FutureEditInput }>("/api/modules/resource-scheduler/series/:seriesId/edit-future", {
@@ -776,6 +801,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (plan.addedCount > 0) {
         const policy = await lockResourceBookingPolicy(client, departmentId, plan.series.resource_id);
         if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+        if (!await canViewResource(client, departmentId, policy.visibility_group_id, request.authenticatedUser!.id, isManager(request))) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Choose an active resource in this location." });
+        }
         if (policy.manager_booking_only && !isManager(request)) {
           await client.query("ROLLBACK");
           return reply.code(403).send({ error: resourceManagerRequired });
@@ -826,7 +855,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) return reply.code(409).send({ error: "The proposed future occurrences conflict with resource availability. No changes were made." });
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: request.params.seriesId, action: "series-future-edited" });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
     return { ok: true, ...summary };
   });
 
@@ -874,7 +903,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "The new time or quantity conflicts with resource availability." });
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: request.params.seriesId, action: "occurrence-overridden" });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
     return { ok: true };
   });
 
@@ -911,7 +940,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "The series default time or quantity conflicts with resource availability." });
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: request.params.seriesId, action: "occurrence-override-reset" });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
     return { ok: true };
   });
 
@@ -932,6 +961,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (request.body.date < occurrenceDateKey(new Date(), series.time_zone ?? null)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a future date." }); }
       const policy = await lockResourceBookingPolicy(client, departmentId, series.resource_id);
       if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+      if (!await canViewResource(client, departmentId, policy.visibility_group_id, request.authenticatedUser!.id, isManager(request))) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Choose an active resource in this location." });
+      }
       if (policy.manager_booking_only && !isManager(request)) {
         await client.query("ROLLBACK");
         return reply.code(403).send({ error: resourceManagerRequired });
@@ -951,7 +984,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,true) ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET is_extra_date=true", [randomUUID(), departmentId, series.id, finalBookingId, startsAt]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'extra_date_added',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.id, finalBookingId, JSON.stringify({ date: request.body.date })]);
       await client.query("COMMIT");
-      context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: series.id, action: "extra-date-added" });
+      context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
       return reply.code(201).send({ bookingId: finalBookingId, startsAt, endsAt });
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
@@ -1011,7 +1044,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (date.rows[0].booking_id) await client.query("UPDATE resource_booking_series_occurrences SET is_extra_date=false WHERE series_id=$1 AND resource_booking_id=$2 AND department_id=$3", [series.id, date.rows[0].booking_id, departmentId]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'extra_date_removed',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.id, date.rows[0].booking_id, JSON.stringify({ date: request.params.date })]);
       await client.query("COMMIT");
-      context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: series.id, action: "extra-date-removed" });
+      context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
       return { removed: true };
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
@@ -1037,7 +1070,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(parent.time_zone,'UTC'))::date=$3::date AND booking.status IN ('requested','approved') RETURNING booking.id`, [series.rows[0].id, departmentId, request.body.date]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'date_excluded',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.rows[0].id, JSON.stringify({ date: request.body.date, cancelledBookings: cancelled.rowCount })]);
       await client.query("COMMIT");
-      context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: series.rows[0].id, action: "date-excluded" });
+      context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
       return { excluded: true, cancelledBookings: cancelled.rowCount };
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
@@ -1076,7 +1109,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "This approval conflicts with another booking or exceeds the configured quantity." });
       throw error;
     } finally { client.release(); }
-    context.realtime.publish("module:resource-scheduler:changed", departmentId, { bookingId: request.params.bookingId, action: request.body.status });
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
     return { status: request.body.status };
   });
 
@@ -1099,7 +1132,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND occurrence.department_id=$2 AND booking.status IN ('requested','approved') RETURNING booking.id`, [series.id, departmentId]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_archived',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.id, JSON.stringify({ cancelledBookings: cancelled.rowCount })]);
       await client.query("COMMIT");
-      context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: series.id, action: "series-archived" });
+      context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
       return { archived: true, cancelledBookings: cancelled.rowCount };
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
