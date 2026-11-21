@@ -1,5 +1,6 @@
 import { financePdf } from "./pdf.js";
 import { financeWorkbook } from "./workbook.js";
+import { registerChurchToolsDraftPromotion } from "./draft-promotion-routes.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -139,6 +140,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   async function audit(client: PoolClient, departmentId: string, request: FastifyRequest, action: string, recordKind: string, recordId: string, details: Record<string, unknown> = {}) {
     await client.query("INSERT INTO finance_audit(id,department_id,actor_user_id,action,record_kind,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)", [randomUUID(), departmentId, request.authenticatedUser?.id ?? null, action, recordKind, recordId, JSON.stringify(details)]);
   }
+
+  registerChurchToolsDraftPromotion(app, context, department, audit);
 
   function publish(departmentId: string, action: string, recordId: string) {
     realtime.publish("module:finance:changed", departmentId, { action, recordId, changedAt: new Date().toISOString() });
