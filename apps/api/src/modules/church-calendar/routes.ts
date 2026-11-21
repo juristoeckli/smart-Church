@@ -15,7 +15,7 @@ type AppointmentRow = {
   id: string; calendar_id: string; title: string; subtitle: string; description: string; starts_at: string; ends_at: string;
   all_day: boolean; place: string; url: string; internal_only: boolean; tags: string[]; recurrence: Recurrence | null;
   linked_event_id: string | null; created_by: string; calendar_scope: CalendarScope; calendar_name: string; responsible_contact_id?: string | null; responsible_name?: string | null;
-  owner_user_id: string | null; group_id: string | null; signup_group_id?: string | null; signup_token?: string | null; signup_group_name?: string | null; has_image?: boolean;
+  owner_user_id: string | null; group_id: string | null; signup_group_id?: string | null; has_image?: boolean;
   time_zone?: string | null; location_time_zone?: string;
 };
 type Occurrence = Record<string, unknown> & { appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string };
@@ -423,12 +423,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
               appointment.all_day,appointment.place,appointment.url,appointment.internal_only,appointment.tags,appointment.recurrence,appointment.time_zone,department.time_zone AS location_time_zone,
               appointment.linked_event_id,appointment.responsible_contact_id,appointment.created_by,calendar.scope AS calendar_scope,calendar.name AS calendar_name,
-              calendar.owner_user_id,calendar.group_id,appointment.signup_group_id,CASE WHEN signup_group.public_signup_enabled THEN signup_group.public_signup_token END AS signup_token,signup_group.name AS signup_group_name,
+              calendar.owner_user_id,calendar.group_id,appointment.signup_group_id,
               EXISTS(SELECT 1 FROM church_calendar_appointment_images image WHERE image.appointment_id=appointment.id AND image.department_id=appointment.department_id) AS has_image
          FROM church_calendar_appointments appointment
          JOIN departments department ON department.id=appointment.department_id
          JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
-         LEFT JOIN church_groups signup_group ON signup_group.id=appointment.signup_group_id AND signup_group.department_id=appointment.department_id
         WHERE appointment.department_id=$1 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
           AND appointment.starts_at <= $3::timestamp
           AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $2::timestamp)
@@ -471,6 +470,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       "SELECT id,name,public_signup_enabled,public_signup_token FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, signupGroupIds],
     ) : { rows: [] as Array<{ id: string; name: string; public_signup_enabled: boolean; public_signup_token: string | null }> };
     const signupGroupsById = new Map(signupGroups.rows.map((group) => [group.id, group]));
+    const eventIds = [...new Set([
+      ...appointments.map((row) => row.linked_event_id),
+      ...exceptions.rows.filter((row) => !row.cancelled).map((row) => row.overrides?.linkedEventId),
+    ].filter((id): id is string => typeof id === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)).map((id) => id.toLowerCase()))];
+    const linkedEvents = new Map(eventIds.length ? (await context.pool.query<{
+      id: string; cancelled: boolean; token: string | null; capacity: number | null; open: boolean; registered: number; waitlisted: number;
+    }>(
+      `SELECT event.id,event.cancelled_at IS NOT NULL AS cancelled,
+              CASE WHEN event.registration_enabled AND event.cancelled_at IS NULL THEN event.registration_token END AS token,
+              event.registration_capacity AS capacity,event.event_date>=CURRENT_DATE AS open,
+              count(registration.id) FILTER (WHERE registration.status='registered')::int AS registered,
+              count(registration.id) FILTER (WHERE registration.status='waitlisted')::int AS waitlisted
+         FROM service_events event
+         LEFT JOIN event_registrations registration ON registration.event_id=event.id AND event.registration_enabled AND event.cancelled_at IS NULL
+        WHERE event.department_id=$1 AND event.id=ANY($2::uuid[])
+        GROUP BY event.id`, [departmentId, eventIds],
+    )).rows.map((event) => [event.id, event] as const) : []);
     const extraMap = new Map<string, Array<{ startsAt: string; endsAt: string }>>();
     for (const row of extraDates.rows) extraMap.set(row.appointment_id, [...(extraMap.get(row.appointment_id) ?? []), { startsAt: row.starts_at.replace(" ", "T"), endsAt: row.ends_at.replace(" ", "T") }]);
     const links = new Map<string, string[]>();
@@ -491,6 +507,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (exception?.cancelled) continue;
         const override = exception?.overrides ?? {};
         const signupGroupId = Object.prototype.hasOwnProperty.call(override, "signupGroupId") ? override.signupGroupId as string | null : row.signup_group_id;
+        const effectiveEventId = Object.prototype.hasOwnProperty.call(override, "linkedEventId") ? override.linkedEventId : row.linked_event_id;
+        const linkedEvent = typeof effectiveEventId === "string" ? linkedEvents.get(effectiveEventId.toLowerCase()) : undefined;
+        const internalOnly = (override.internalOnly ?? row.internal_only) === true;
+        const eventRegistration = linkedEvent?.token && row.calendar_scope === "community" && !row.internal_only && !internalOnly
+          ? { token: linkedEvent.token, capacity: linkedEvent.capacity, open: linkedEvent.open, registered: linkedEvent.registered, waitlisted: linkedEvent.waitlisted }
+          : null;
         const rawResponsibleContactId = Object.prototype.hasOwnProperty.call(override, "responsibleContactId") ? override.responsibleContactId : row.responsible_contact_id;
         const responsibleContactId = typeof rawResponsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(rawResponsibleContactId) ? rawResponsibleContactId : null;
         const signupGroup = signupGroupId ? signupGroupsById.get(signupGroupId) : undefined;
@@ -508,9 +530,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           calendarName: row.calendar_name, calendarScope: row.calendar_scope, groupId: row.group_id,
           title: override.title ?? row.title, subtitle: override.subtitle ?? row.subtitle, description: override.description ?? row.description,
           allDay: override.allDay ?? row.all_day, place: override.place ?? row.place, url: override.url ?? row.url,
-          internalOnly: override.internalOnly ?? row.internal_only, tags: override.tags ?? row.tags,
-          recurrence: row.recurrence, linkedEventId: Object.prototype.hasOwnProperty.call(override, "linkedEventId") ? override.linkedEventId as string | null : row.linked_event_id, resourceBookingIds: links.get(row.id) ?? [],
-          signupGroupId, signupGroupName: signupGroup?.name ?? row.signup_group_name ?? null,
+          internalOnly, tags: override.tags ?? row.tags,
+          recurrence: row.recurrence, linkedEventId: linkedEvent?.id ?? null, linkedEventCancelled: linkedEvent?.cancelled ?? false, eventRegistration, resourceBookingIds: links.get(row.id) ?? [],
+          signupGroupId, signupGroupName: signupGroup?.name ?? null,
           signupToken: signupGroup?.public_signup_enabled ? signupGroup.public_signup_token : null,
           responsibleContactId: canViewResponsiblePeople && responsibleContactId && responsibleNames.has(responsibleContactId) ? responsibleContactId : null,
           responsiblePersonName: canViewResponsiblePeople && responsibleContactId ? responsibleNames.get(responsibleContactId) ?? null : null,
