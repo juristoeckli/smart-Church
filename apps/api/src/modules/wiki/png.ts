@@ -8,25 +8,44 @@ export function pngForPdf(data: Buffer) {
       || crc32(data.subarray(12, 29)) !== data.readUInt32BE(29)) return null;
   const width = data.readUInt32BE(16);
   const height = data.readUInt32BE(20);
+  const depth = data[24];
   const colorType = data[25];
-  const channels = [1, 0, 3, 0, 2, 0, 4][colorType] ?? 0;
-  if (!width || !height || width * height > 4_000_000 || !channels || data[24] !== 8
+  const indexed = colorType === 3;
+  const channels = [1, 0, 3, 1, 2, 0, 4][colorType] ?? 0;
+  if (!width || !height || width * height > 4_000_000 || !channels
+      || (indexed ? ![1, 2, 4, 8].includes(depth) : depth !== 8)
       || data[26] || data[27] || data[28]) return null;
   const compressed: Buffer[] = [];
+  let palette: Buffer | undefined;
+  let transparency: Buffer | undefined;
+  let imageDataClosed = false;
   let ended = false;
   for (let offset = 33; offset + 12 <= data.length;) {
     const length = data.readUInt32BE(offset);
     const end = offset + 12 + length;
     if (end > data.length || crc32(data.subarray(offset + 4, end - 4)) !== data.readUInt32BE(end - 4)) return null;
     const chunk = data.toString("ascii", offset + 4, offset + 8);
-    if (chunk === "IDAT") compressed.push(data.subarray(offset + 8, end - 4));
-    if (chunk === "tRNS") return null;
-    if (chunk === "IEND") { ended = length === 0; break; }
+    if (chunk === "PLTE") {
+      if (palette || compressed.length || length < 3 || length > 768 || length % 3
+          || (indexed && length / 3 > 2 ** depth)) return null;
+      palette = data.subarray(offset + 8, end - 4);
+    }
+    if (chunk === "tRNS") {
+      if (!indexed || !palette || transparency || compressed.length || !length || length > palette.length / 3) return null;
+      transparency = data.subarray(offset + 8, end - 4);
+    }
+    if (chunk === "IDAT") {
+      if (imageDataClosed || (indexed && !palette)) return null;
+      compressed.push(data.subarray(offset + 8, end - 4));
+    } else if (compressed.length) {
+      imageDataClosed = true;
+    }
+    if (chunk === "IEND") { ended = length === 0 && end === data.length; break; }
     if ((data[offset + 4] & 32) === 0 && chunk !== "IDAT" && chunk !== "PLTE") return null;
     offset = end;
   }
   if (!ended || !compressed.length) return null;
-  const stride = width * channels;
+  const stride = Math.ceil(width * channels * depth / 8);
   const expectedLength = (stride + 1) * height;
   let rows: Buffer;
   try {
@@ -37,7 +56,7 @@ export function pngForPdf(data: Buffer) {
   if (rows.length !== expectedLength) return null;
 
   const alpha = colorType === 4 || colorType === 6;
-  const colors = alpha ? channels - 1 : channels;
+  const colors = indexed ? 3 : alpha ? channels - 1 : channels;
   const pixels = Buffer.alloc(width * height * colors);
   let position = 0;
   for (let y = 0; y < height; y++) {
@@ -60,6 +79,19 @@ export function pngForPdf(data: Buffer) {
         predictor = a <= b && a <= c ? left : b <= c ? up : diagonal;
       }
       rows[start + x] = (rows[start + x] + predictor) & 255;
+    }
+    if (indexed && palette) {
+      for (let x = 0; x < width; x++) {
+        const bit = x * depth;
+        const index = (rows[start + (bit >> 3)] >> (8 - depth - (bit & 7))) & ((1 << depth) - 1);
+        const entry = index * 3;
+        if (entry >= palette.length) return null;
+        const opacity = (transparency?.[index] ?? 255) / 255;
+        for (let c = 0; c < 3; c++) {
+          pixels[position++] = Math.round(palette[entry + c] * opacity + 255 * (1 - opacity));
+        }
+      }
+      continue;
     }
     for (let x = 0; x < stride; x += channels) {
       const opacity = alpha ? rows[start + x + colors] / 255 : 1;
