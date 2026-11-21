@@ -48,9 +48,9 @@ const bitmapDimensions: Record<string, [number, number]> = {
 const toCssColor = (color?: string) => !color ? undefined : color.startsWith("#") ? color : palette[color] ?? undefined;
 const roomPrefix: Record<string, string> = { "Gemeindesaal quer": "Que", "Gemeindesaal längs": "Lan", "Konferenzsaal 1": "Kon", "Bibliothek": "Bib" };
 const findPage = (name: string) => panel.pages.find((page) => page.name === name);
-const portForObject = (page: PanelPage, object: PanelObject) => object.channelPort && object.channelPort > 0
-  ? object.channelPort
-  : page.kind === "page" || page.name.startsWith("PWR_") ? 1 : 2;
+// Control actions target virtual device 34001, whose channels are on port 1.
+// TP4 channelPort values remain relevant only to feedback from panel 10001.
+const portForObject = (_page: PanelPage, _object: PanelObject) => 1;
 const mainAudioPage = (room: string, label: string) => {
   const prefix = roomPrefix[room] ?? (room === "Konferenz gross" || room === "Konferenzsaal" ? "Kon" : undefined);
   const suffix = label === "Volumen" ? "Volume" : label === "Mikrofon" ? "Mik" : "Lautsprecher";

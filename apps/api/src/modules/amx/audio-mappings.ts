@@ -40,16 +40,14 @@ function pageLabel(name: string) {
   return name.startsWith("Detail_") || name.startsWith("Detail_Auton_") ? `Detail · ${title}` : title;
 }
 
-function defaultPort(page: Tp4Page) {
-  return page.kind === "page" || page.name.startsWith("PWR_") ? 1 : 2;
-}
-
 function makeAction(page: Tp4Page, object: Tp4Object): AmxMappedAction | null {
   // TP4 stores status LEDs as general objects with a channel too. Only objects
   // that have a button style should send input-channel pulses.
   if (object.type !== "general" || !object.states?.some((state) => Boolean(state.style?.trim()))
     || !Number.isInteger(object.channel) || !object.channel || object.channel < 1 || object.channel > 65535) return null;
-  const port = object.channelPort && object.channelPort > 0 ? object.channelPort : defaultPort(page);
+  // TP4 channelPort describes the panel endpoint. Smart-Church targets the
+  // dedicated NetLinx device 34001, which exposes control channels on port 1.
+  const port = 1;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   return {
     id: `tp4-${page.id}-${object.id}`,
