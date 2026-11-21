@@ -7,6 +7,18 @@ import { registerGroupOperationsReplication } from "./replication.js";
 
 const uuid = { type: "string", format: "uuid" };
 const date = { type: "string", format: "date" };
+function followUpAudience(manager: string, userId: string) {
+  return `(${manager} OR (
+    group_row.status IN ('active','ended')
+    AND group_row.source_system IS DISTINCT FROM 'churchtools' AND group_row.source_system IS DISTINCT FROM 'elvanto'
+    AND EXISTS (
+      SELECT 1 FROM department_memberships account
+      JOIN group_members member ON member.contact_id=account.contact_id AND member.group_id=task.group_id AND member.status='active'
+      WHERE account.user_id=${userId} AND account.department_id=task.department_id AND account.contact_id=task.assigned_contact_id
+    )
+  ))`;
+}
+
 function certificateIssueAudience(isManager: string, userId: string) {
   return `(${isManager} OR EXISTS (
     SELECT 1 FROM department_memberships membership
@@ -402,20 +414,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get<{ Querystring: { groupId?: string; status?: "open" | "completed"; assignedContactId?: string } }>("/api/modules/group-operations/follow-ups", {
     schema: { querystring: { type: "object", additionalProperties: false, properties: { groupId: uuid, status: { type: "string", enum: ["open", "completed"] }, assignedContactId: uuid } } },
   }, async (request, reply) => {
-    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
+    const manager = canManage(request);
     if (request.query.groupId && !(await existsInLocation("church_groups", request.query.groupId, departmentId))) return reply.code(400).send({ error: "Choose a group from this location." });
-    if (request.query.assignedContactId && !(await existsInLocation("contacts", request.query.assignedContactId, departmentId))) return reply.code(400).send({ error: "Choose an assignee from this location." });
+    if (manager && request.query.assignedContactId && !(await existsInLocation("contacts", request.query.assignedContactId, departmentId))) return reply.code(400).send({ error: "Choose an assignee from this location." });
     const result = await pool!.query(`SELECT task.id,task.group_id AS "groupId",group_row.name AS "groupName",task.contact_id AS "contactId",
         concat_ws(' ',person.first_name,person.last_name) AS "personName",task.assigned_contact_id AS "assignedContactId",
-        concat_ws(' ',assignee.first_name,assignee.last_name) AS "assignedName",task.subject,task.note,task.due_date::text AS "dueDate",
+        concat_ws(' ',assignee.first_name,assignee.last_name) AS "assignedName",task.subject,CASE WHEN $5 THEN task.note ELSE '' END AS note,task.due_date::text AS "dueDate",
+        CASE WHEN task.status='completed' THEN 'completed'
+             WHEN task.due_date=local_day.today THEN 'due'
+             WHEN task.due_date<local_day.today THEN 'overdue' ELSE 'upcoming' END AS "dueState",
         task.status,task.created_at AS "createdAt",task.completed_at AS "completedAt"
       FROM group_follow_up_tasks task JOIN church_groups group_row ON group_row.id=task.group_id AND group_row.department_id=task.department_id
+      JOIN departments site ON site.id=task.department_id
+      LEFT JOIN pg_timezone_names zone ON zone.name=site.time_zone
+      CROSS JOIN LATERAL (SELECT (current_timestamp AT TIME ZONE COALESCE(zone.name,'UTC'))::date AS today) local_day
       JOIN contacts person ON person.id=task.contact_id AND person.department_id=task.department_id
       LEFT JOIN contacts assignee ON assignee.id=task.assigned_contact_id AND assignee.department_id=task.department_id
       WHERE task.department_id=$1 AND ($2::uuid IS NULL OR task.group_id=$2) AND ($3::text IS NULL OR task.status=$3)
-        AND ($4::uuid IS NULL OR task.assigned_contact_id=$4)
+        AND ($4::uuid IS NULL OR task.assigned_contact_id=$4) AND ${followUpAudience("$5", "$6")}
       ORDER BY (task.status='open') DESC,task.due_date,lower(group_row.name),lower(person.last_name),lower(person.first_name) LIMIT 3000`,
-    [departmentId, request.query.groupId ?? null, request.query.status ?? null, request.query.assignedContactId ?? null]);
+    [departmentId, request.query.groupId ?? null, request.query.status ?? null, request.query.assignedContactId ?? null, manager, request.authenticatedUser?.id ?? null]);
+    reply.header("cache-control", "private, no-store");
     return result.rows;
   });
 
@@ -442,25 +462,69 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.code(201).send({ id });
   });
 
-  app.patch<{ Params: { id: string }; Body: { status: "open" | "completed"; note: string } }>("/api/modules/group-operations/follow-ups/:id", {
-    schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } }, body: { type: "object", additionalProperties: false, required: ["status", "note"], properties: { status: { type: "string", enum: ["open", "completed"] }, note: { type: "string", maxLength: 2000 } } } },
+  app.patch<{ Params: { id: string }; Body: { status?: "open" | "completed"; note?: string; dueDate?: string; expectedDueDate?: string } }>("/api/modules/group-operations/follow-ups/:id", {
+    schema: {
+      params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } },
+      body: { type: "object", additionalProperties: false, anyOf: [{ required: ["status"] }, { required: ["note"] }, { required: ["dueDate"] }],
+        properties: { status: { type: "string", enum: ["open", "completed"] }, note: { type: "string", maxLength: 2000 }, dueDate: date, expectedDueDate: date },
+      },
+    },
   }, async (request, reply) => {
-    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
+    const departmentId = await department(request, reply); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
-    const client = await pool!.connect(); let groupId = "";
+    const manager = canManage(request);
+    const actor = request.authenticatedUser?.id ?? null;
+    const { status, note, dueDate, expectedDueDate } = request.body;
+    if (!manager && note !== undefined) return reply.code(403).send({ error: "Only a group manager can edit private follow-up notes." });
+    const client = await pool!.connect();
+    let transition: { groupId: string; action: string } | undefined;
     try {
       await client.query("BEGIN");
-      const updated = await client.query<{ group_id: string }>(`UPDATE group_follow_up_tasks SET status=$3,note=$4,
-        completed_by=CASE WHEN $3='completed' THEN $5 ELSE NULL END,completed_at=CASE WHEN $3='completed' THEN COALESCE(completed_at,now()) ELSE NULL END,updated_at=now()
-        WHERE id=$1 AND department_id=$2 RETURNING group_id`, [request.params.id, departmentId, request.body.status, request.body.note.trim(), request.authenticatedUser?.id ?? null]);
-      if (!updated.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Follow-up not found." }); }
-      groupId = updated.rows[0].group_id;
-      await client.query("INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)", [randomUUID(), departmentId, groupId, request.authenticatedUser?.id ?? null, request.body.status === "completed" ? "follow_up_completed" : "follow_up_reopened", request.params.id, JSON.stringify({ status: request.body.status })]);
+      const result = await client.query<{ group_id: string; status: "open" | "completed"; note: string; due_date: string }>(
+        `SELECT task.group_id,task.status,task.note,task.due_date::text AS due_date
+           FROM group_follow_up_tasks task
+           JOIN church_groups group_row ON group_row.id=task.group_id AND group_row.department_id=task.department_id
+          WHERE task.id=$1 AND task.department_id=$2 AND ${followUpAudience("$3", "$4")}
+          FOR UPDATE OF task`,
+        [request.params.id, departmentId, manager, actor],
+      );
+      const before = result.rows[0];
+      if (!before) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Follow-up not found." }); }
+      const nextStatus = status ?? before.status;
+      const nextDate = dueDate ?? before.due_date;
+      const nextNote = note === undefined ? before.note : note.trim();
+      if (dueDate && expectedDueDate && expectedDueDate !== before.due_date) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The due date changed. Reload the follow-up before rescheduling." });
+      }
+      if (nextDate !== before.due_date && nextStatus === "completed") {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Reopen this follow-up before changing its due date." });
+      }
+      if (nextStatus !== before.status || nextDate !== before.due_date || nextNote !== before.note) {
+        const updated = await client.query(`UPDATE group_follow_up_tasks AS task SET status=$3::varchar,due_date=$4,note=$5,
+            completed_by=CASE WHEN $3::varchar='open' THEN NULL WHEN task.status='open' THEN $6 ELSE completed_by END,
+            completed_at=CASE WHEN $3::varchar='open' THEN NULL WHEN task.status='open' THEN now() ELSE completed_at END,updated_at=now()
+          FROM church_groups group_row
+          WHERE task.id=$1 AND task.department_id=$2 AND group_row.id=task.group_id AND group_row.department_id=task.department_id
+            AND ${followUpAudience("$7", "$6")}
+          RETURNING task.id`, [request.params.id, departmentId, nextStatus, nextDate, nextNote, actor, manager]);
+        if (!updated.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Follow-up not found." }); }
+        const action = nextStatus !== before.status ? (nextStatus === "completed" ? "follow_up_completed" : "follow_up_reopened")
+          : nextDate !== before.due_date ? "follow_up_rescheduled" : "follow_up_note_updated";
+        const details = nextDate === before.due_date ? { status: nextStatus } : { status: nextStatus, previousDueDate: before.due_date, dueDate: nextDate };
+        await client.query(
+          "INSERT INTO group_operations_audit(id,department_id,group_id,actor_user_id,action,record_id,details) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",
+          [randomUUID(), departmentId, before.group_id, actor, action, request.params.id, JSON.stringify(details)],
+        );
+        transition = { groupId: before.group_id, action };
+      }
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
-    realtime.publish("module:group-operations:changed", departmentId, { action: request.body.status === "completed" ? "follow_up_completed" : "follow_up_reopened", groupId, recordId: request.params.id });
+    if (transition) realtime.publish("module:group-operations:changed", departmentId, { ...transition, recordId: request.params.id });
     return { updated: true };
   });
+
 
   app.get("/api/modules/group-operations/certificates", async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;

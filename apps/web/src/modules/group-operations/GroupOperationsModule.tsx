@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Award, Check, Download, ClipboardCheck, Play, Plus, RotateCcw } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import "./group-operations.css";
+import { FollowUpRow, type FollowUp } from "./GroupFollowUpRow";
 
 type Group = { id: string; name: string; description: string };
 type Routine = { id: string; groupId: string; groupName: string; name: string; description: string; cadence: string; active: boolean };
@@ -11,7 +12,6 @@ type Issue = { id: string; certificateId: string; groupId: string; contactId: st
 type Member = { id: string; firstName: string; lastName: string; email: string | null; role: string };
 type Rule = { id: string; groupId: string; groupName: string; name: string; contactStatus: "member" | "visitor"; enabled: boolean };
 type Preview = { rule: Rule; matches: Array<{ id: string; firstName: string; lastName: string; email: string | null }>; capped: boolean; applyEnabled: boolean };
-type FollowUp = { id: string; groupId: string; groupName: string; contactId: string; personName: string; assignedContactId: string | null; assignedName: string | null; subject: string; note: string; dueDate: string; status: "open" | "completed"; completedAt: string | null };
 type FeedbackMeeting = { id: string; date: string; title: string; guestCount: number | null; completedAt: string | null };
 type LeaderFeedback = { answers: Record<string, string>; updatedBy: string; comment: string; guestCount: number | null };
 type FeedbackQuestion = { id: string; prompt: string; required?: boolean };
@@ -26,7 +26,11 @@ function getAnonymousResponseToken(groupId: string, meetingId: string) {
   return token;
 }
 
-export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext) {
+export function GroupOperationsModule(context: ModuleContext) {
+  return <GroupOperationsWorkspace key={context.departmentId} {...context} />;
+}
+
+function GroupOperationsWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [routines, setRoutines] = useState<Routine[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -93,7 +97,7 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
         request<Run[]>("/api/modules/group-operations/routine-runs"),
         request<{ definitions: Certificate[]; issues: Issue[] }>("/api/modules/group-operations/certificates"),
         request<Rule[]>("/api/modules/group-operations/membership-rules"),
-        bootstrap.canManage ? request<FollowUp[]>("/api/modules/group-operations/follow-ups") : Promise.resolve([] as FollowUp[]),
+        request<FollowUp[]>("/api/modules/group-operations/follow-ups"),
       ]);
       setGroups(bootstrap.groups); setCanManage(bootstrap.canManage); setRoutines(nextRoutines); setRuns(nextRuns); setCertificates(nextCertificates.definitions); setIssues(nextCertificates.issues); setRules(nextRules); setFollowUps(nextFollowUps);
       setGroupId((current) => bootstrap.groups.some((group) => group.id === current) ? current : bootstrap.groups[0]?.id ?? "");
@@ -216,7 +220,37 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
   }
 
   async function revoke(issue: Issue) { const reason = window.prompt("Reason for revoking this certificate?"); if (!reason?.trim()) return; await mutate(`/api/modules/group-operations/certificates/${issue.id}/revoke`, "POST", { reason: reason.trim() }, "Certificate revoked."); }
-  async function updateFollowUp(task: FollowUp) { await mutate(`/api/modules/group-operations/follow-ups/${task.id}`, "PATCH", { status: task.status === "open" ? "completed" : "open", note: task.note }, task.status === "open" ? "Follow-up completed." : "Follow-up reopened."); }
+  async function updateFollowUp(task: FollowUp) {
+    await mutate(`/api/modules/group-operations/follow-ups/${task.id}`, "PATCH", { status: task.status === "open" ? "completed" : "open" },
+      task.status === "open" ? "Follow-up completed." : "Follow-up reopened.");
+  }
+
+  async function refreshFollowUps() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try { setFollowUps(await request<FollowUp[]>("/api/modules/group-operations/follow-ups")); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Could not refresh follow-ups."); }
+    finally { setBusy(false); }
+  }
+
+  async function rescheduleFollowUp(task: FollowUp, dueDate: string) {
+    if (busy) return false;
+    setBusy(true);
+    setError("");
+    setMessage("");
+    try {
+      await request(`/api/modules/group-operations/follow-ups/${task.id}`, {
+        method: "PATCH", body: JSON.stringify({ dueDate, expectedDueDate: task.dueDate }),
+      });
+      setMessage("Follow-up rescheduled.");
+      setFollowUps(await request<FollowUp[]>("/api/modules/group-operations/follow-ups"));
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not reschedule this follow-up.");
+      return false;
+    } finally { setBusy(false); }
+  }
   async function saveFeedbackTemplate(event: FormEvent) {
     event.preventDefault();
     const questions = feedbackQuestionDraft.split("\n").map((prompt, index) => ({ prompt: prompt.trim(), required: feedbackRequiredDraft[index] ?? false })).filter((question) => question.prompt);
@@ -285,15 +319,22 @@ export function GroupOperationsModule({ departmentId, csrfToken }: ModuleContext
   const visibleCertificates = certificates.filter((cert) => !groupId || cert.groupId === groupId);
   const visibleIssues = canManage ? issues.filter((issue) => !groupId || issue.groupId === groupId) : issues;
   const visibleRules = rules.filter((rule) => !groupId || rule.groupId === groupId);
-  const visibleFollowUps = followUps.filter((task) => (!groupId || task.groupId === groupId) && (followUpStatus === "all" || task.status === followUpStatus) && (!followUpAssignee || task.assignedContactId === followUpAssignee));
+  const scopedFollowUps = followUps.filter((task) => !canManage || ((!groupId || task.groupId === groupId) && (!followUpAssignee || task.assignedContactId === followUpAssignee)));
+  const visibleFollowUps = scopedFollowUps.filter((task) => followUpStatus === "all" || task.status === followUpStatus);
+  const dueFollowUps = scopedFollowUps.filter((task) => task.dueState === "due").length;
+  const overdueFollowUps = scopedFollowUps.filter((task) => task.dueState === "overdue").length;
 
   return <main className="group-operations">
     <header className="go-heading"><div><span className="eyebrow">GROUP MANAGEMENT</span><h1>Group operations</h1><p>Track routines, member follow-ups, certificates, and reviewed membership rules.</p></div><label>Group<select value={groupId} onChange={(event) => { setGroupId(event.target.value); setPreview(null); setFeedbackMeetingId(""); }}><option value="">All groups</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label></header>
     {error && <p className="go-alert" role="alert">{error}</p>}{message && <p className="go-success" role="status">{message}</p>}
-    <nav className="go-tabs" aria-label="Group operations">{(["routines", ...(canManage ? ["followups"] as const : []), "certificates", "membership", ...(groupId && (isGroupLeader || canSubmitFeedback) ? ["feedback"] as const : [])] as const).map((item) => <button key={item} className={section === item ? "active" : ""} onClick={() => setSection(item)}>{item === "routines" ? <><ClipboardCheck size={16}/> Routines</> : item === "followups" ? <>Follow-ups</> : item === "certificates" ? <><Award size={16}/> Certificates</> : item === "feedback" ? <>Meeting feedback</> : <>Membership rules</>}</button>)}</nav>
+    <nav className="go-tabs" aria-label="Group operations">{(["routines", "followups", "certificates", "membership", ...(groupId && (isGroupLeader || canSubmitFeedback) ? ["feedback"] as const : [])] as const).map((item) => <button key={item} className={section === item ? "active" : ""} onClick={() => setSection(item)}>{item === "routines" ? <><ClipboardCheck size={16}/> Routines</> : item === "followups" ? <>{canManage ? "Follow-ups" : "My follow-ups"}</> : item === "certificates" ? <><Award size={16}/> Certificates</> : item === "feedback" ? <>Meeting feedback</> : <>Membership rules</>}</button>)}</nav>
     {section === "routines" && <div className="go-layout"><section className="go-panel"><h2>Routine definitions</h2><form onSubmit={(event) => void createRoutine(event)} className="go-form"><label>Name<input required maxLength={120} value={routineDraft.name} onChange={(event) => setRoutineDraft({ ...routineDraft, name: event.target.value })}/></label><label>Description<input maxLength={1000} value={routineDraft.description} onChange={(event) => setRoutineDraft({ ...routineDraft, description: event.target.value })}/></label><label>Cadence<select value={routineDraft.cadence} onChange={(event) => setRoutineDraft({ ...routineDraft, cadence: event.target.value })}><option value="manual">Manual</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annually">Annually</option></select></label><button className="button button-primary" disabled={busy || !groupId}><Plus size={15}/> Add routine</button></form><div className="go-list">{visibleRoutines.map((routine) => <article key={routine.id}><div><strong>{routine.name}</strong><small>{routine.groupName} · {routine.cadence} · {routine.active ? "Active" : "Archived"}</small>{routine.description && <p>{routine.description}</p>}</div><button className="button button-secondary" disabled={busy || !routine.active} onClick={() => { setGroupId(routine.groupId); setRunDraft({ ...runDraft, routineId: routine.id }); }}>Schedule run</button></article>)}</div></section>
       <section className="go-panel"><h2>Schedule a routine run</h2><form onSubmit={(event) => void createRun(event)} className="go-form"><label>Routine<select required value={runDraft.routineId} onChange={(event) => setRunDraft({ ...runDraft, routineId: event.target.value })}><option value="">Choose routine</option>{visibleRoutines.filter((routine) => routine.active).map((routine) => <option key={routine.id} value={routine.id}>{routine.name}</option>)}</select></label><label>Date<input type="date" required value={runDraft.runDate} onChange={(event) => setRunDraft({ ...runDraft, runDate: event.target.value })}/></label><label>Assignee (optional)<select value={runDraft.assignedContactId} onChange={(event) => setRunDraft({ ...runDraft, assignedContactId: event.target.value })}><option value="">Unassigned</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName}</option>)}</select></label><label>Notes<input maxLength={2000} value={runDraft.notes} onChange={(event) => setRunDraft({ ...runDraft, notes: event.target.value })}/></label><button className="button button-primary" disabled={busy || !runDraft.routineId}><Plus size={15}/> Create run</button></form><h3>Recent runs</h3><div className="go-list">{visibleRuns.map((run) => <article key={run.id}><div><strong>{run.routineName}</strong><small>{run.runDate}{run.assignedName ? ` · ${run.assignedName}` : " · Unassigned"} · {run.status}</small>{run.notes && <p>{run.notes}</p>}</div><button className="button button-secondary" disabled={busy} onClick={() => void updateRun(run)}>{run.status === "open" ? <><Check size={14}/> Complete</> : <><RotateCcw size={14}/> Reopen</>}</button></article>)}{!visibleRuns.length && <p className="go-empty">No routine runs yet.</p>}</div></section></div>}
-    {section === "followups" && canManage && <div className="go-layout"><section className="go-panel"><h2>Assign a member follow-up</h2><form onSubmit={(event) => void createFollowUp(event)} className="go-form"><label>Member<select required value={followUpDraft.contactId} onChange={(event) => setFollowUpDraft({ ...followUpDraft, contactId: event.target.value })}><option value="">Choose member</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName} · {member.role}</option>)}</select></label><label>Assigned to (optional)<select value={followUpDraft.assignedContactId} onChange={(event) => setFollowUpDraft({ ...followUpDraft, assignedContactId: event.target.value })}><option value="">Unassigned</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName}</option>)}</select></label><label>Subject<input required maxLength={160} value={followUpDraft.subject} onChange={(event) => setFollowUpDraft({ ...followUpDraft, subject: event.target.value })}/></label><label>Due date<input type="date" required value={followUpDraft.dueDate} onChange={(event) => setFollowUpDraft({ ...followUpDraft, dueDate: event.target.value })}/></label><label>Note<input maxLength={2000} value={followUpDraft.note} onChange={(event) => setFollowUpDraft({ ...followUpDraft, note: event.target.value })}/></label><button className="button button-primary" disabled={busy || !groupId || !followUpDraft.contactId || !followUpDraft.subject.trim()}><Plus size={15}/> Create follow-up</button></form></section><section className="go-panel"><div className="go-section-heading"><h2>Member follow-ups</h2><div className="go-followup-filters"><label>Assigned to<select value={followUpAssignee} onChange={(event) => setFollowUpAssignee(event.target.value)}><option value="">Everyone</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName}</option>)}</select></label><label>Status<select value={followUpStatus} onChange={(event) => setFollowUpStatus(event.target.value as typeof followUpStatus)}><option value="open">Open</option><option value="completed">Completed</option><option value="all">All</option></select></label></div></div><div className="go-list">{visibleFollowUps.map((task) => <article key={task.id}><div><strong>{task.subject} · {task.personName}</strong><small>{task.groupName} · Due {task.dueDate}{task.assignedName ? ` · Assigned to ${task.assignedName}` : " · Unassigned"} · {task.status}</small>{task.note && <p>{task.note}</p>}</div><button className="button button-secondary" disabled={busy} onClick={() => void updateFollowUp(task)}>{task.status === "open" ? <><Check size={14}/> Complete</> : <><RotateCcw size={14}/> Reopen</>}</button></article>)}{!visibleFollowUps.length && <p className="go-empty">No follow-ups match this filter.</p>}</div></section></div>}
+    {section === "followups" && <div className="go-layout">{canManage && <section className="go-panel"><h2>Assign a member follow-up</h2><form onSubmit={(event) => void createFollowUp(event)} className="go-form"><label>Member<select required value={followUpDraft.contactId} onChange={(event) => setFollowUpDraft({ ...followUpDraft, contactId: event.target.value })}><option value="">Choose member</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName} · {member.role}</option>)}</select></label><label>Assigned to (optional)<select value={followUpDraft.assignedContactId} onChange={(event) => setFollowUpDraft({ ...followUpDraft, assignedContactId: event.target.value })}><option value="">Unassigned</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName}</option>)}</select></label><label>Subject<input required maxLength={160} value={followUpDraft.subject} onChange={(event) => setFollowUpDraft({ ...followUpDraft, subject: event.target.value })}/></label><label>Due date<input type="date" required value={followUpDraft.dueDate} onChange={(event) => setFollowUpDraft({ ...followUpDraft, dueDate: event.target.value })}/></label><label>Private manager note<input maxLength={2000} value={followUpDraft.note} onChange={(event) => setFollowUpDraft({ ...followUpDraft, note: event.target.value })}/></label><button className="button button-primary" disabled={busy || !groupId || !followUpDraft.contactId || !followUpDraft.subject.trim()}><Plus size={15}/> Create follow-up</button></form></section>}<section className="go-panel"><div className="go-section-heading"><h2>{canManage ? "Member follow-ups" : "My follow-ups"}</h2><div className="go-followup-filters">{canManage && <label>Assigned to<select value={followUpAssignee} onChange={(event) => setFollowUpAssignee(event.target.value)}><option value="">Everyone</option>{members.map((member) => <option key={member.id} value={member.id}>{member.firstName} {member.lastName}</option>)}</select></label>}<label>Status<select value={followUpStatus} onChange={(event) => setFollowUpStatus(event.target.value as typeof followUpStatus)}><option value="open">Open</option><option value="completed">Completed</option><option value="all">All</option></select></label></div></div><div className="go-section-heading"><p role="status">{dueFollowUps} due today · {overdueFollowUps} overdue</p>
+        <button className="button button-secondary" type="button" disabled={busy} onClick={() => void refreshFollowUps()}>Refresh</button>
+      </div>
+      <div className="go-list">{visibleFollowUps.map((task) => <FollowUpRow key={task.id + ":" + task.dueDate + ":" + task.status}
+        task={task} busy={busy} onStatus={updateFollowUp} onReschedule={rescheduleFollowUp} />)}{!visibleFollowUps.length && <p className="go-empty">No follow-ups match this filter.</p>}</div></section></div>}
     {section === "certificates" && <div className="go-layout">
       {canManage && <section className="go-panel">
         <h2>Certificate definitions</h2>
