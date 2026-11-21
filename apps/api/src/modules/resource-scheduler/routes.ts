@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type Frequency = "once" | "daily" | "weekly" | "monthly" | "yearly";
@@ -67,8 +67,8 @@ function isoDate(value: string) {
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
-  const unavailable = (reply: { code: (status: number) => { send: (body: object) => unknown } }) => reply.code(503).send({ error: "Resource scheduling is unavailable." });
-  async function location(request: FastifyRequest, reply: Parameters<typeof unavailable>[0], requireManager = false) {
+  const unavailable = (reply: FastifyReply) => reply.code(503).send({ error: "Resource scheduling is unavailable." });
+  async function location(request: FastifyRequest, reply: FastifyReply, requireManager = false) {
     if (!context.pool || !context.isDatabaseReady()) { unavailable(reply); return null; }
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return null;

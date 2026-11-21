@@ -26,7 +26,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return id;
   }
   async function existsInLocation(table: "church_groups" | "contacts", id: string, departmentId: string) {
-    return (await pool!.query(`SELECT id FROM ${table} WHERE id=$1 AND department_id=$2`, [id, departmentId])).rowCount > 0;
+    const db = pool as NonNullable<typeof pool>;
+    if (!db) return false;
+    const result = await db!.query(`SELECT id FROM ${table} WHERE id=$1 AND department_id=$2`, [id, departmentId]);
+    return (result?.rowCount ?? 0) > 0;
   }
   async function canManageGroup(request: FastifyRequest, groupId: string, departmentId: string) {
     if (canManage(request)) return true;

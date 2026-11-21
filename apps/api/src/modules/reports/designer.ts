@@ -116,7 +116,7 @@ function applyDefinition(inputRows: Array<Record<string, unknown>>, definition: 
       const numbers = rawNumbers.map((value) => Number(value));
       const exactIntegerInputs = rawNumbers.every((value) => /^-?\d+$/.test(String(value)));
       const aggregateValue = definition.aggregate!.operation === "count" ? records.length
-        : definition.aggregate!.operation === "sum" && exactIntegerInputs ? rawNumbers.reduce((sum, value) => sum + BigInt(String(value)), 0n).toString()
+        : definition.aggregate!.operation === "sum" && exactIntegerInputs ? rawNumbers.reduce<bigint>((sum, value) => sum + BigInt(String(value)), 0n).toString()
         : definition.aggregate!.operation === "sum" ? numbers.reduce((sum, value) => sum + value, 0)
           : numbers.length ? numbers.reduce((sum, value) => sum + value, 0) / numbers.length : 0;
       return { [groupField.key]: key, aggregate: aggregateValue };
