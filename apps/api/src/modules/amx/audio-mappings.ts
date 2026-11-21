@@ -4,7 +4,7 @@ export type AmxMappedAction = { id: string; name: string; channel: number; port:
 export type AmxMappedControl = { id: string; name: string; actions?: AmxMappedAction[] };
 export type AmxMappedPage = { id: string; room: string; page: string; controls: AmxMappedControl[] };
 
-type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; addressPort?: number; states?: Array<{ style?: string }> };
+type Tp4Object = { id: number; type: string; name?: string; label?: string; channel?: number; channelPort?: number; states?: Array<{ style?: string }> };
 type Tp4Page = { id: number; name: string; kind: string; objects: Tp4Object[] };
 
 const pages = tp4Layout.pages as Tp4Page[];
@@ -49,7 +49,7 @@ function makeAction(page: Tp4Page, object: Tp4Object): AmxMappedAction | null {
   // that have a button style should send input-channel pulses.
   if (object.type !== "general" || !object.states?.some((state) => Boolean(state.style?.trim()))
     || !Number.isInteger(object.channel) || !object.channel || object.channel < 1 || object.channel > 65535) return null;
-  const port = object.addressPort ?? defaultPort(page);
+  const port = object.channelPort && object.channelPort > 0 ? object.channelPort : defaultPort(page);
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   return {
     id: `tp4-${page.id}-${object.id}`,

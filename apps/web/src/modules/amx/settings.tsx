@@ -63,7 +63,7 @@ export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) 
       {roomActions.map((action) => <div className="amx-action-editor" key={action.id}><strong>{action.name}</strong><label>Verified NetLinx channel<input aria-label={`${action.name} verified NetLinx channel`} value={action.command} readOnly /></label></div>)}
       <p>All six room channel mappings were verified from the TPDesign Home page and are read-only.</p>
       <h4>Audio pages</h4>
-      <p>Gemeindesaal quer volume and microphone controls use fixed, verified momentary input mappings in the workspace. Their mappings are not editable here. Other panel audio pages remain unavailable.</p>
+      <p>Audio and system control buttons across the TP4 pages use fixed channel mappings derived from the panel project. Meter graphics and status indicators are display-only; level feedback is not available through the NetLinx Telnet input.</p>
       <button className="button button-primary" type="submit" disabled={saving || !departmentId}>{saving ? "Saving…" : "Save AMX settings"}</button>
       {feedback && <p className={failed ? "amx-error" : "amx-feedback"} role="status">{feedback}</p>}
     </form>}

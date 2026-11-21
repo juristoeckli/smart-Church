@@ -106,15 +106,14 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
 
   async function handleObject(object: PanelObject) {
     const label = labelFor(object);
+    if (label.trim().toLocaleLowerCase() === "zurück" || label.trim().toLocaleLowerCase() === "back") {
+      goBack();
+      return;
+    }
     const channel = object.channel ?? 0;
     const port = object.channelPort ?? (currentPage.kind === "page" || currentPage.name.startsWith("PWR_") ? 1 : 2);
     const action = actionIndex.get(`${port}:${channel}`);
-    let sent = true;
-    if (action) sent = await send(action);
-    else if (object.pageFlip && !["n/a", "PWR_ASK", "PWR_OFF_ASK"].includes(object.pageFlip)) {
-      const direct = findPage(object.pageFlip);
-      if (direct) navigate(direct.name);
-    }
+    const sent = action ? await send(action) : true;
     if (!sent) return;
 
     if (currentPage.name === "Home" && roomChannels[channel]) {
@@ -142,7 +141,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     }
     if (object.pageFlip) {
       const target = findPage(object.pageFlip);
-      if (target) navigate(target.name);
+      if (target?.name === currentPage.name) goBack();
+      else if (target) navigate(target.name);
       else if (object.pageFlip === "DetailPopup" || object.pageFlip === "EQ") setPopupGroup(object.pageFlip);
       else if (object.pageFlip === "PWR_OFF_ASK") navigate("PWR_OFF_ASK");
     }
@@ -159,7 +159,8 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     const baseText = labelFor(object);
     const text = /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
     const isStyledChannelButton = object.type === "general" && typeof object.channel === "number" && object.channel > 0 && Boolean(state?.style);
-    const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip));
+    const isBackButton = object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()) && Boolean(state?.style);
+    const button = object.type === "general" && (isStyledChannelButton || Boolean(object.pageFlip) || isBackButton);
     const port = object.channelPort ?? (currentPage.kind === "page" || currentPage.name.startsWith("PWR_") ? 1 : 2);
     const background = toCssColor(state?.backgroundColor);
     const foreground = toCssColor(state?.textColor) ?? toCssColor(state?.fontColor) ?? "#111";
@@ -178,18 +179,19 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
     </>;
     if (!button) return <div key={`${currentPage.id}-${object.id}`} className={`amx-panel-object amx-object-${object.type}`} style={style}>{inner}</div>;
     const mapped = actionIndex.has(`${port}:${object.channel}`);
-    const isPageChange = Boolean(object.pageFlip) || currentPage.name === "Home" || currentPage.name.startsWith("PWR_") || currentPage.name === "Modus";
-    return <button key={`${currentPage.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped ? "This TP4 channel has no confirmed send mapping." : !configured ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !isPageChange && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
+    const localNavigation = isBackButton || (!object.channel && Boolean(object.pageFlip));
+    return <button key={`${currentPage.id}-${object.id}`} type="button" className={`amx-panel-object amx-panel-button${state?.style?.includes("Inset") ? " is-active" : ""}`} style={style} disabled={busy !== "" || (!configured && mapped)} title={!mapped && !localNavigation ? "This TP4 channel has no confirmed send mapping." : !configured && mapped ? "Set the NetLinx host in AMX module settings." : undefined} onClick={() => void handleObject(object)}>{inner}{mapped && busy === actionIndex.get(`${port}:${object.channel}`)?.id && <i className="amx-button-busy" />}{!mapped && !localNavigation && <span className="amx-unmapped-mark" aria-label="Mapping unavailable">!</span>}</button>;
   };
 
   const visibleObjects = currentPage.objects;
+  const hasPanelBackButton = visibleObjects.some((object) => object.type === "general" && ["zurück", "back"].includes(labelFor(object).trim().toLocaleLowerCase()));
   const screenStyle: CSSProperties = { ...pageScale, backgroundImage: currentPage.name === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
 
   return <section className="amx-workspace" aria-label="AMX room control">
     <div className="amx-panel-frame">
       <div className="amx-panel-screen" style={screenStyle}>
         {visibleObjects.map(renderObject)}
-        {currentPage.name !== "Home" && <button className="amx-panel-back" type="button" onClick={goBack} aria-label="Zurück">‹ Zurück</button>}
+        {currentPage.name !== "Home" && !hasPanelBackButton && <button className="amx-panel-back" type="button" onClick={goBack} aria-label="Zurück">‹ Zurück</button>}
         {popupGroup && <div className="amx-panel-popup" role="dialog" aria-label="Select a control page"><div>{panel.pages.filter((page) => page.group === popupGroup).map((page) => <button key={page.id} type="button" onClick={() => navigate(page.name)}>{page.name.replaceAll("_", " · ")}</button>)}<button type="button" onClick={() => setPopupGroup("")}>Schliessen</button></div></div>}
         {feedback && <p className={`amx-toast${failed ? " amx-toast-error" : ""}`} role="status" aria-live="polite">{feedback}</p>}
       </div>
