@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { maxPersonAttachments, registerPersonAttachments } from "./attachments.js";
 import { canManagePeopleFields, customFieldVisibilities, type CustomFieldVisibility } from "./field-privacy.js";
+import { accessiblePeopleGroups, canManageMembershipHistory, registerPeopleHistoryTimeline, visibleProfileHistory } from "./profile-history.js";
 
 const postalAddressLimits = { street: 160, additionalLine: 160, city: 100, region: 100, postalCode: 24, country: 100 } as const;
 type PostalAddress = Partial<Record<keyof typeof postalAddressLimits, string>>;
@@ -89,6 +90,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return departmentId;
     }
     registerPersonAttachments(routes, context, department);
+    registerPeopleHistoryTimeline(routes, context, department);
     async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[],canManage:boolean):Promise<Array<{field:string;operator:string;value:unknown}>>{
       if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
       if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
@@ -824,17 +826,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const contact = await pool!.query("SELECT 1 FROM contacts WHERE department_id=$1 AND id=$2", [departmentId, request.params.contactId]);
       if (!contact.rowCount) return reply.code(404).send({ error: "Person not found at this location." });
 
-      const manageGroups = request.activeDepartmentRole === "site_admin"
-        || (request.activeDepartmentPermissions ?? []).includes("groups_manage")
-        || (request.activeDepartmentModulePermissions?.["group-hierarchy"] ?? []).includes("manage");
-      const accessibleGroups = `SELECT g.id,g.name,g.status FROM church_groups g WHERE g.department_id=$1
-        AND ($3::boolean OR EXISTS (
-          SELECT 1 FROM department_memberships account
-          JOIN group_members own ON own.contact_id=account.contact_id AND own.group_id=g.id
-          WHERE account.department_id=g.department_id AND account.user_id=$4 AND own.status='active'
-            AND regexp_replace(lower(own.role),'[^a-z]','','g') IN ('leader','coleader','groupowner','groupmanager')
-        ))`;
-      const params = [departmentId, request.params.contactId, manageGroups, request.authenticatedUser!.id];
+      const accessibleGroups = accessiblePeopleGroups(3, 4);
+      const params = [departmentId, request.params.contactId, canManageMembershipHistory(request), request.authenticatedUser!.id];
       const current = await pool!.query(
         `WITH accessible_groups AS (${accessibleGroups})
          SELECT g.id AS "groupId",g.name AS "groupName",g.status AS "groupStatus",
@@ -869,11 +862,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const result = await pool!.query(
         `SELECT h.id,h.action,h.subject,h.before_value AS "beforeValue",h.after_value AS "afterValue",h.created_at AS "createdAt"
            FROM people_record_history h WHERE h.department_id=$1 AND h.contact_id=$2
-            AND ($3::boolean OR h.action<>'field_updated' OR EXISTS (
-              SELECT 1 FROM people_record_fields field
-               WHERE field.department_id=h.department_id AND field.visibility='private_people'
-                 AND h.subject IN (field.id::text,field.field_key,'bulk:'||field.field_key)
-            )) ORDER BY h.created_at DESC LIMIT 300`,
+            AND ${visibleProfileHistory} ORDER BY h.created_at DESC LIMIT 300`,
         [d, request.params.contactId, canManagePeopleFields(request)],
       );
       return result.rows;

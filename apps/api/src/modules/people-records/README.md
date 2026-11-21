@@ -60,6 +60,8 @@ People managers can add optional first contact date, nationality, and marital st
 
 People managers can restrict an individual custom field to People managers at that location. Existing fields retain visibility to private People readers until explicitly changed. The rule applies to the field definition, profile and directory values, filters, CSV, merge previews, field history, and ad hoc Reports. Saved views and reports that reference restricted fields remain stored and are available only to users who can see those fields. The setting applies to custom fields.
 
+The profile History tab combines the person's recorded changes with accessible group membership changes. It filters by category and location-local dates, shows the actor and before/after information when available, and loads older entries in pages of 50. The timeline uses the same restrictions as custom fields and the profile's group memberships panel. The original history endpoint keeps its existing response format.
+
 Managers with People and Groups management permissions can add selected active contacts to an active local group from the directory. The action takes a role and membership status, preserves existing memberships, and records new memberships through the installed group audit trigger.
 
 People tags use optional yes/no custom fields with keys that start with `tag_`. Create tags under Custom fields, then require one or more tags in Directory or add and remove a tag for selected active people. Tag filters are saved and exported through the existing custom-field filter workflow. Tag values use the existing custom-field history and CSV columns.
