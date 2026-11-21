@@ -11,7 +11,7 @@ import { applyAppointmentTemplate } from "./appointment-template-draft";
 
 type Scope = "community" | "group" | "personal";
 type View = "day" | "week" | "month" | "year" | "list";
-type Calendar = { id: string; name: string; scope: Scope; groupId: string | null; groupName?: string; ownerUserId: string | null; color: string; isOwner?: boolean; canManage?: boolean; hasPublicFeed?: boolean; canSubscribe?: boolean; hasSubscription?: boolean };
+type Calendar = { id: string; name: string; scope: Scope; groupId: string | null; groupName?: string; ownerUserId: string | null; color: string; sortOrder?: number; isOwner?: boolean; canManage?: boolean; hasPublicFeed?: boolean; canSubscribe?: boolean; hasSubscription?: boolean };
 type Frequency = "daily" | "weekly" | "monthly" | "monthly_weekday" | "yearly" | "manual";
 type Recurrence = { frequency: Frequency; interval: number; weekdays: number[]; weekday?: number; weekOfMonth?: number; endsOn?: string; count?: number; dates?: string[] };
 type EventRegistration = { token: string; capacity: number | null; open: boolean; registered: number; waitlisted: number };
@@ -120,7 +120,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [showCalendarForm, setShowCalendarForm] = useState(false);
-  const [calendarEdit, setCalendarEdit] = useState<{ departmentId: string; id: string; name: string; color: string } | null>(null);
+  const [calendarEdit, setCalendarEdit] = useState<{ departmentId: string; id: string; name: string; color: string; sortOrder: string } | null>(null);
   const [showArchive, setShowArchive] = useState(false);
   const [editing, setEditing] = useState<Appointment | null>(null);
   const [reminderLead, setReminderLead] = useState(30);
@@ -129,6 +129,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [scope, setScope] = useState<"occurrence" | "future" | "series">("occurrence");
   const [draft, setDraft] = useState<Draft>(initialDraft());
   const [calendarName, setCalendarName] = useState("");
+  const [calendarSortOrder, setCalendarSortOrder] = useState("0");
   const [calendarScope, setCalendarScope] = useState<Scope>("personal");
   const [groupId, setGroupId] = useState("");
   const [attendance, setAttendance] = useState<{ departmentId: string; target: GroupMeetingTarget }>();
@@ -432,8 +433,8 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     event.preventDefault(); if (busy) return;
     setBusy(true); setError("");
     try {
-      const created = await api<Calendar>("/api/modules/church-calendar/calendars", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ name: calendarName, scope: calendarScope, ...(calendarScope === "group" ? { groupId } : {}), color: calendarColor }) });
-      setCalendarName(""); setGroupId(""); setShowCalendarForm(false); await load(); setSelectedCalendarIds((current) => [...new Set([...current, created.id])]);
+      const created = await api<Calendar>("/api/modules/church-calendar/calendars", { method: "POST", headers: mutationHeaders, body: JSON.stringify({ name: calendarName, scope: calendarScope, ...(calendarScope === "group" ? { groupId } : {}), color: calendarColor, sortOrder: Number(calendarSortOrder) }) });
+      setCalendarName(""); setGroupId(""); setCalendarSortOrder("0"); setShowCalendarForm(false); await load(); setSelectedCalendarIds((current) => [...new Set([...current, created.id])]);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create this calendar."); }
     finally { setBusy(false); }
   }
@@ -443,9 +444,9 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     if (busy || calendarEdit?.departmentId !== departmentId || !calendarEdit.name.trim()) return;
     setBusy(true); setError(""); setNotice("");
     try {
-      const { id, name, color } = calendarEdit;
+      const { id, name, color, sortOrder } = calendarEdit;
       await api(`/api/modules/church-calendar/calendars/${id}`, {
-        method: "PATCH", headers: mutationHeaders, body: JSON.stringify({ name, color }),
+        method: "PATCH", headers: mutationHeaders, body: JSON.stringify({ name, color, sortOrder: Number(sortOrder) }),
       });
       setCalendarEdit(null);
       setNotice("Calendar details saved.");
@@ -618,7 +619,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
       <h2>My calendars</h2><div className="church-calendar-list">{calendars.map((calendar) => <div className="church-calendar-list-row" key={calendar.id}><label><input type="checkbox" checked={selectedCalendarIds.includes(calendar.id)} onChange={(event) => setSelectedCalendarIds((current) => event.target.checked ? [...current, calendar.id] : current.filter((id) => id !== calendar.id))} /><i style={{ background: calendar.color }} /><span>{calendar.name}</span><small>{calendar.scope === "personal" ? "Personal" : calendar.scope === "group" ? calendar.groupName ?? "Group" : "Community"}</small></label>
         {calendar.canManage && selectionLocation.current === departmentId && <button type="button" className="icon-button"
           aria-label={`Edit calendar ${calendar.name}`} disabled={busy} onClick={() => {
-            setCalendarEdit({ departmentId, id: calendar.id, name: calendar.name, color: calendar.color });
+            setCalendarEdit({ departmentId, id: calendar.id, name: calendar.name, color: calendar.color, sortOrder: String(calendar.sortOrder ?? 0) });
             setError(""); setNotice("");
           }}><Pencil size={14} /></button>}</div>)}</div>{canManageShared && calendars.filter((calendar) => calendar.scope === "community").length > 0 && <section className="church-calendar-public-feed-settings"><h2>Public calendar feeds</h2>{calendars.filter((calendar) => calendar.scope === "community").map((calendar) => <div key={calendar.id}><span>{calendar.name}</span>{calendar.hasPublicFeed ? <><small>Feed enabled</small><button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Rotate link</button><button type="button" className="church-calendar-feed-button" onClick={() => void revokePublicFeed(calendar)} disabled={busy}>Revoke</button></> : <button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Create feed link</button>}</div>)}</section>}{calendars.some((calendar) => calendar.canSubscribe || calendar.hasSubscription) && <section className="church-calendar-public-feed-settings">
         <h2>My calendar subscriptions</h2>
@@ -648,11 +649,13 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
         <form onSubmit={(event) => void saveCalendarDetails(event)}>
           <label>Calendar name<input required maxLength={120} value={calendarEdit.name} onChange={(event) => setCalendarEdit({ ...calendarEdit, name: event.target.value })} /></label>
           <label>Color<input type="color" value={calendarEdit.color} onChange={(event) => setCalendarEdit({ ...calendarEdit, color: event.target.value })} /></label>
+          <label>Sort order<input type="number" required min={0} max={2_147_483_647} value={calendarEdit.sortOrder} onChange={(event) => setCalendarEdit({ ...calendarEdit, sortOrder: event.target.value })} /><small>Lower numbers appear first within the calendar type.</small></label>
           <footer><button type="button" className="button button-secondary" onClick={() => setCalendarEdit(null)}>Cancel</button>
             <button type="submit" className="button button-primary" disabled={busy || !calendarEdit.name.trim()}>Save changes</button></footer>
         </form>
       </section></div>}
-    {showCalendarForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal" role="dialog" aria-modal="true" aria-labelledby="calendar-create-heading"><header><div><span className="eyebrow">CALENDAR SETUP</span><h2 id="calendar-create-heading">New calendar</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowCalendarForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void createCalendar(event)}><label>Calendar name<input required maxLength={120} value={calendarName} onChange={(event) => setCalendarName(event.target.value)} /></label><label>Calendar type<select value={calendarScope} onChange={(event) => setCalendarScope(event.target.value as Scope)}><option value="personal">Personal</option>{canManageShared && <><option value="community">Community</option><option value="group">Group</option></>}</select></label>{calendarScope === "group" && <label>Group<select required value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">Choose group</option>{choices.groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}<label>Color<input type="color" value={calendarColor} onChange={(event) => setCalendarColor(event.target.value)} /></label><footer><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(false)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy || !calendarName.trim()}><Plus size={15} /> Create calendar</button></footer></form></section></div>}
+    {showCalendarForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal" role="dialog" aria-modal="true" aria-labelledby="calendar-create-heading"><header><div><span className="eyebrow">CALENDAR SETUP</span><h2 id="calendar-create-heading">New calendar</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowCalendarForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void createCalendar(event)}><label>Calendar name<input required maxLength={120} value={calendarName} onChange={(event) => setCalendarName(event.target.value)} /></label><label>Calendar type<select value={calendarScope} onChange={(event) => setCalendarScope(event.target.value as Scope)}><option value="personal">Personal</option>{canManageShared && <><option value="community">Community</option><option value="group">Group</option></>}</select></label>{calendarScope === "group" && <label>Group<select required value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">Choose group</option>{choices.groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}<label>Color<input type="color" value={calendarColor} onChange={(event) => setCalendarColor(event.target.value)} /></label>
+      <label>Sort order<input type="number" required min={0} max={2_147_483_647} value={calendarSortOrder} onChange={(event) => setCalendarSortOrder(event.target.value)} /><small>Lower numbers appear first within the calendar type.</small></label><footer><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(false)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy || !calendarName.trim()}><Plus size={15} /> Create calendar</button></footer></form></section></div>}
     {showForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal church-calendar-appointment-modal" role="dialog" aria-modal="true" aria-labelledby="appointment-heading"><header><div><span className="eyebrow">{editing ? "APPOINTMENT DETAILS" : "NEW APPOINTMENT"}</span><h2 id="appointment-heading">{editing ? "Edit appointment" : "Create appointment"}</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void saveAppointment(event)}><div className="church-calendar-form-grid">
       {editing && (editing.reminder || canScheduleReminder) && <div className="church-calendar-extra-date wide">
         <strong>Remind me about this occurrence</strong>
