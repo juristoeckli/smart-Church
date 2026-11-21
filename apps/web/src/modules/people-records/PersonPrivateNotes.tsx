@@ -28,6 +28,7 @@ export function PersonPrivateNotes({ contactId, archived, request }: {
   const [edit, setEdit] = useState<Note | null>(null);
   const [body, setBody] = useState("");
   const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -44,13 +45,15 @@ export function PersonPrivateNotes({ contactId, archived, request }: {
     setBody("");
   }
 
-  async function mutate(url: string, method: "POST" | "PUT", value: object, restartPage = false) {
+  async function mutate(url: string, method: "POST" | "PUT", value: object, options?: { restartPage?: boolean; notice?: string }) {
     setSaving(true);
     setWriteError("");
+    setNotice("");
     try {
       await request(url, { method, body: JSON.stringify(value) });
       clearEditor();
-      if (restartPage) setPage(0);
+      if (options?.restartPage) setPage(0);
+      setNotice(options?.notice ?? "");
       setRefresh(current => current + 1);
     } catch (error) {
       setWriteError(error instanceof Error ? error.message : "Could not save changes to the note.");
@@ -60,11 +63,16 @@ export function PersonPrivateNotes({ contactId, archived, request }: {
     }
   }
 
+  function setNoteArchived(note: Note, archive: boolean) {
+    return mutate(path + "/" + note.id + (archive ? "/archive" : "/restore"), "POST", { revision: note.revision },
+      { notice: archive ? "Note archived." : "Note restored to active notes." });
+  }
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving || !body.trim()) return;
     if (edit) void mutate(path + "/" + edit.id, "PUT", { body, revision: edit.revision });
-    else void mutate(path, "POST", { body }, true);
+    else void mutate(path, "POST", { body }, { restartPage: true });
   }
 
   return <section aria-label="Private profile notes">
@@ -76,10 +84,12 @@ export function PersonPrivateNotes({ contactId, archived, request }: {
         setPage(0);
         clearEditor();
         setWriteError("");
+        setNotice("");
       }}>{showArchived ? "Show active notes" : "Show archived notes"}</button>
     </div>
     {loadError && <p role="alert">{loadError} <button type="button" onClick={() => setRefresh(current => current + 1)}>Retry</button></p>}
     {writeError && <p role="alert">{writeError}</p>}
+    {notice && <p role="status">{notice}</p>}
     {!data && !loadError && <p>Loading notes…</p>}
     {data?.notes.length === 0 && <p>No {showArchived ? "archived" : "active"} notes on this page.</p>}
     {data?.notes.map(note => <article className="people-record-detail" key={note.id}>
@@ -87,9 +97,13 @@ export function PersonPrivateNotes({ contactId, archived, request }: {
       <small>Added by {note.createdBy ?? "Unknown"} on {new Date(note.createdAt).toLocaleString()}</small>
       {note.editedAt && <small>Edited by {note.editedBy ?? "Unknown"} on {new Date(note.editedAt).toLocaleString()}</small>}
       {note.archivedAt && <small>Archived by {note.archivedBy ?? "Unknown"} on {new Date(note.archivedAt).toLocaleString()}</small>}
-      {!archived && !showArchived && <div className="module-toolbar">
-        <button type="button" disabled={saving} onClick={() => { setEdit(note); setBody(note.body); setWriteError(""); }}>Edit note</button>
-        <button type="button" disabled={saving || Boolean(edit)} onClick={() => void mutate(path + "/" + note.id + "/archive", "POST", { revision: note.revision })}>Archive note</button>
+      {!archived && <div className="module-toolbar">
+        {note.archivedAt
+          ? <button type="button" disabled={saving} onClick={() => void setNoteArchived(note, false)}>Restore note</button>
+          : <>
+            <button type="button" disabled={saving} onClick={() => { setEdit(note); setBody(note.body); setWriteError(""); setNotice(""); }}>Edit note</button>
+            <button type="button" disabled={saving || Boolean(edit)} onClick={() => void setNoteArchived(note, true)}>Archive note</button>
+          </>}
       </div>}
     </article>)}
     {(page > 0 || data?.hasMore) && <nav aria-label="Private notes pages" className="module-toolbar">

@@ -110,14 +110,19 @@ export function registerPrivatePersonNotes(routes: FastifyInstance, context: Mod
     }, 200);
   });
 
-  routes.post<{ Params: NoteParams; Body: { revision: number } }>(`${path}/:noteId/archive`, {
-    schema: { params: noteParams, body: { type: "object", additionalProperties: false, required: ["revision"], properties: { revision: revisionField } } },
-  }, async (request, reply) => changeNote(request, reply, async (client, departmentId, contactId, actorId) => {
-    const result = await client.query(
-      `UPDATE people_record_private_notes SET revision=revision+1,archived_at=now(),archived_by=$5
-        WHERE department_id=$1 AND contact_id=$2 AND id=$3 AND revision=$4 AND archived_at IS NULL`,
-      [departmentId, contactId, request.params.noteId, request.body.revision, actorId],
-    );
-    return Boolean(result.rowCount);
-  }, 200));
+  for (const action of ["archive", "restore"] as const) {
+    routes.post<{ Params: NoteParams; Body: { revision: number } }>(`${path}/:noteId/${action}`, {
+      schema: { params: noteParams, body: { type: "object", additionalProperties: false, required: ["revision"], properties: { revision: revisionField } } },
+    }, async (request, reply) => changeNote(request, reply, async (client, departmentId, contactId, actorId) => {
+      const result = await client.query(
+        `UPDATE people_record_private_notes
+            SET revision=revision+1,archived_at=CASE WHEN $6 THEN now() END,
+                archived_by=CASE WHEN $6 THEN $5::uuid END
+          WHERE department_id=$1 AND contact_id=$2 AND id=$3 AND revision=$4
+            AND (archived_at IS NOT NULL)<>$6`,
+        [departmentId, contactId, request.params.noteId, request.body.revision, actorId, action === "archive"],
+      );
+      return Boolean(result.rowCount);
+    }, 200));
+  }
 }
