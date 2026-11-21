@@ -55,6 +55,11 @@ const detailBackgrounds: Array<[RegExp, string]> = [
   [/^Detail_(?:Auton_)?Bib_/, "bibliothek.png"],
   [/^Detail_(?:Auton_)?Geb_/, "Gebetsaal2.png"],
 ];
+const pageBackgroundMaps: Record<string, { image: string; x: number; y: number; width: number; height: number }> = {
+  // The TP4's Gemeindesaal speaker page places this compact floor plan behind
+  // its speaker controls and room-routing list.
+  Que_Lautsprecher: { image: "Gemeindesaal_kleinst.png", x: 0, y: 60, width: 525, height: 394 },
+};
 function detailBackground(page: PanelPage) {
   return detailBackgrounds.find(([pattern]) => pattern.test(page.name))?.[1];
 }
@@ -374,6 +379,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   const renderPageBackdrop = (page: PanelPage, layer: number): ReactNode => {
     if (page.kind !== "subpage") return null;
     const image = detailBackground(page);
+    const roomMap = pageBackgroundMaps[page.name];
     const backgroundColor = page.group === "ModusPopup" ? "#fffed3"
       : page.group === "Power" || page.group === "EQ" ? "#d0d0d0"
         : "#fffed3";
@@ -383,7 +389,12 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       left: `${x / panel.project.screen.width * 100}%`, top: `${y / panel.project.screen.height * 100}%`,
       width: `${page.canvas.width / panel.project.screen.width * 100}%`, height: `${page.canvas.height / panel.project.screen.height * 100}%`,
       zIndex: layer * 1000, backgroundColor, backgroundImage: image ? `url("${imageUrl(image) ?? ""}")` : undefined,
-    }} />;
+    }}>
+      {roomMap && <img alt="Gemeindesaal floor plan" src={imageUrl(roomMap.image)} style={{
+        position: "absolute", left: `${roomMap.x / page.canvas.width * 100}%`, top: `${roomMap.y / page.canvas.height * 100}%`,
+        width: `${roomMap.width / page.canvas.width * 100}%`, height: `${roomMap.height / page.canvas.height * 100}%`, objectFit: "fill",
+      }} />}
+    </div>;
   };
 
   const screenStyle: CSSProperties = { ...pageScale, backgroundImage: basePageName === "Home" ? `url("${imageUrl("Copy of CS_Background.png") ?? ""}")` : undefined };
