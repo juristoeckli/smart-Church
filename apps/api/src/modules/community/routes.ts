@@ -7,6 +7,7 @@ import { completionFeedbackSchema, groupFeedbackEnabled, readGroupLeaderFeedback
 import { attendanceReportQuery, sendGroupAttendanceReport, type AttendanceReportQuery } from "./attendance-report.js";
 import { groupMemberDraftSchema, groupMembershipState, groupWaitlist, type GroupMembershipDraft } from "./group-waitlist.js";
 import { captureSignupAnswers, prepareSignupQuestions, readSignupForm, signupAnswerFields, signupSettingsSchema, type SignupSettings } from "./signup-form.js";
+import { defaultSignupPolicy, editableSignupPolicy, normalizeSignupPolicy, signupState } from "./signup-policy.js";
 import { registerCommunityReplication } from "./replication.js";
 
 const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
@@ -433,8 +434,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
 
     const signupFormParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
     function getSignupGroup(db: typeof pool | PoolClient, departmentId: string, groupId: string, lock = false) {
-      return db!.query<{ source_system: string | null }>(
-        "SELECT source_system FROM church_groups WHERE department_id=$1 AND id=$2" + (lock ? " FOR UPDATE" : ""), [departmentId, groupId],
+      return db!.query<{ source_system: string | null; time_zone: string }>(
+        `SELECT church_group.source_system,site.time_zone FROM church_groups church_group
+           JOIN departments site ON site.id=church_group.department_id
+          WHERE church_group.department_id=$1 AND church_group.id=$2` + (lock ? " FOR UPDATE OF church_group" : ""), [departmentId, groupId],
       );
     }
 
@@ -445,7 +448,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!group) return reply.code(404).send({ error: "Group not found." });
       if (group.source_system === "churchtools" || group.source_system === "elvanto") return reply.code(403).send({ error: "This signup form is managed in the source system." });
       reply.header("cache-control", "private, no-store");
-      return readSignupForm(pool!, departmentId, request.params.id);
+      const form = await readSignupForm(pool!, departmentId, request.params.id);
+      return { ...form, policy: editableSignupPolicy(form.policy, group.time_zone) };
     });
 
     routes.put<{ Params: { id: string }; Body: SignupSettings }>("/api/groups/:id/signup-form", {
@@ -471,18 +475,23 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "The signup form changed. Reload it before saving." });
         }
-        const revision = questions.length ? randomUUID() : null;
+        const policy = request.body.policy ? normalizeSignupPolicy(request.body.policy, group.time_zone) : previous.policy;
+        if (typeof policy === "string") { await client.query("ROLLBACK"); return reply.code(400).send({ error: policy }); }
+        const hasPolicy = policy.opensAt || policy.closesAt || policy.heading || policy.defaultRole !== defaultSignupPolicy.defaultRole;
+        const revision = questions.length || hasPolicy ? randomUUID() : null;
         if (revision) {
           await client.query(
-            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions) VALUES($1,$2,$3,$4::jsonb)
-             ON CONFLICT(group_id) DO UPDATE SET revision=EXCLUDED.revision,questions=EXCLUDED.questions
+            `INSERT INTO group_signup_forms (department_id,group_id,revision,questions,opens_at,closes_at,default_role,heading)
+             VALUES($1,$2,$3,$4::jsonb,$5,$6,$7,$8)
+             ON CONFLICT(group_id) DO UPDATE SET revision=EXCLUDED.revision,questions=EXCLUDED.questions,opens_at=EXCLUDED.opens_at,
+               closes_at=EXCLUDED.closes_at,default_role=EXCLUDED.default_role,heading=EXCLUDED.heading
              WHERE group_signup_forms.department_id=EXCLUDED.department_id`,
-            [departmentId, groupId, revision, JSON.stringify(questions)],
+            [departmentId, groupId, revision, JSON.stringify(questions), policy.opensAt, policy.closesAt, policy.defaultRole, policy.heading],
           );
         } else await client.query("DELETE FROM group_signup_forms WHERE department_id=$1 AND group_id=$2", [departmentId, groupId]);
         await client.query("COMMIT");
         realtime.publish("core:groups:changed", departmentId, { groupId, action: "group-signup-form-updated" });
-        return { revision, questions };
+        return { revision, questions, policy: editableSignupPolicy(policy, group.time_zone) };
       } catch (error) { await client.query("ROLLBACK"); throw error; }
       finally { client.release(); }
     });
@@ -494,7 +503,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply, "groups_manage");
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT id,group_id AS "groupId",first_name AS "firstName",last_name AS "lastName",email,status,answer_snapshot AS "answers",created_at AS "createdAt"
+        `SELECT id,group_id AS "groupId",first_name AS "firstName",last_name AS "lastName",email,status,answer_snapshot AS "answers",created_at AS "createdAt",
+                  COALESCE((SELECT default_role FROM group_signup_forms WHERE group_id=$1 AND department_id=$2),'Member') AS "defaultRole"
            FROM group_join_requests WHERE group_id=$1 AND department_id=$2 AND status='pending'
           ORDER BY created_at,id`,
         [request.params.id, departmentId],
@@ -541,12 +551,13 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
             }
           }
           const waitlisted = decision === "waitlisted";
+          const form = await readSignupForm(client, departmentId, request.params.id);
           await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
           const inserted = await client.query(
             `INSERT INTO group_members (group_id,contact_id,role,status,joined_on,waitlisted_at)
-             VALUES($1,$2,'Member',$3,CASE WHEN $3='active' THEN CURRENT_DATE END,CASE WHEN $3='waitlist' THEN statement_timestamp() END)
+             VALUES($1,$2,$4,$3,CASE WHEN $3='active' THEN CURRENT_DATE END,CASE WHEN $3='waitlist' THEN statement_timestamp() END)
              ON CONFLICT (group_id,contact_id) DO NOTHING RETURNING contact_id`,
-            [request.params.id, contactId, waitlisted ? "waitlist" : "active"],
+            [request.params.id, contactId, waitlisted ? "waitlist" : "active", form.policy.defaultRole],
           );
           if (waitlisted && !inserted.rowCount) {
             const membership = await client.query<{ status: string }>(
@@ -573,17 +584,21 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       params: { type: "object", required: ["token"], properties: { token: { type: "string", format: "uuid" } } },
     } }, async (request, reply) => {
       if (!isDatabaseReady() || !pool) { reply.code(503).send({ error: "Group registration is temporarily unavailable." }); return reply; }
-      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[] }>(
-        `SELECT church_group.name,church_group.description,form.revision,COALESCE(form.questions,'[]'::jsonb) AS questions
-           FROM church_groups church_group
+      const result = await pool!.query<{ name: string; description: string; revision: string | null; questions: unknown[]; heading: string; opensAt: Date | null; closesAt: Date | null; timeZone: string }>(
+        `SELECT church_group.name,church_group.description,
+                CASE WHEN jsonb_array_length(form.questions)>0 THEN form.revision ELSE NULL END AS revision,
+                COALESCE(form.questions,'[]'::jsonb) AS questions, COALESCE(form.heading,'') AS heading,
+                form.opens_at AS "opensAt",form.closes_at AS "closesAt",site.time_zone AS "timeZone"
+           FROM church_groups church_group JOIN departments site ON site.id=church_group.department_id
            LEFT JOIN group_signup_forms form ON form.group_id=church_group.id AND form.department_id=church_group.department_id
           WHERE church_group.public_signup_token=$1 AND church_group.public_signup_enabled=true
             AND church_group.status='active' AND church_group.source_system IS NULL`,
         [request.params.token],
       );
       if (!result.rowCount) return reply.code(404).send({ error: "This group registration link is unavailable." });
+      const form = result.rows[0];
       reply.header("cache-control", "private, no-store");
-      return result.rows[0];
+      return { ...form, timeZone: editableSignupPolicy(defaultSignupPolicy, form.timeZone).timeZone, signupState: signupState(form.opensAt, form.closesAt) };
     });
 
     routes.post<{ Params: { token: string }; Body: { firstName: string; lastName: string; email: string; formRevision?: string; answers?: Record<string, string> } }>("/api/public/group-signups/:token", { schema: {
@@ -606,6 +621,11 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         groupDepartmentId = group.rows[0].department_id;
         if (!await dependencies.lockDepartmentForWrite(client, groupDepartmentId)) { await client.query("ROLLBACK"); return reply.code(423).send({ error: "This group's location is read-only while it is a redundancy standby or fenced site." }); }
         const form = await readSignupForm(client, groupDepartmentId, groupId);
+        const state = signupState(form.policy.opensAt, form.policy.closesAt);
+        if (state !== "open") {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ code: "group_signup_window_closed", error: "This group is not accepting applications right now." });
+        }
         const captured = captureSignupAnswers(form, request.body.formRevision, request.body.answers);
         if ("error" in captured) {
           await client.query("ROLLBACK");

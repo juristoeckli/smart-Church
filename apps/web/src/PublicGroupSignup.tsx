@@ -3,7 +3,7 @@ import { Check, ContactRound } from "lucide-react";
 import type { SignupQuestion } from "./GroupSignupFormEditor";
 import { publicErrorText, publicLanguage, publicText } from "./public-translations";
 
-type PublicGroup = { name: string; description: string; revision?: string | null; questions?: SignupQuestion[] };
+type PublicGroup = { name: string; description: string; revision?: string | null; questions?: SignupQuestion[]; heading?: string; signupState?: "scheduled" | "open" | "closed"; opensAt?: string | null; timeZone?: string };
 
 export function PublicGroupSignup({ token }: { token: string }) {
   const language = publicLanguage();
@@ -43,7 +43,8 @@ export function PublicGroupSignup({ token }: { token: string }) {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ firstName: String(values.get("firstName")).trim(), lastName: String(values.get("lastName")).trim(), email: String(values.get("email")).trim(), ...(group.revision ? { formRevision: group.revision, answers } : {}) }),
       });
-      const result = await response.json() as { status?: string; error?: string };
+      const result = await response.json() as { status?: string; error?: string; code?: string };
+      if (result.code === "group_signup_window_closed") setReload((value) => value + 1);
       if (response.status === 409 && result.error === "The signup questions changed. Reload the form before submitting.") setFormChanged(true);
       if (!response.ok || result.status !== "pending") throw new Error(publicErrorText(language, result.error ?? "Could not send your request."));
       setSubmitted(true);
@@ -55,9 +56,15 @@ export function PublicGroupSignup({ token }: { token: string }) {
     <span className="eyebrow">{publicText(language, "groupEyebrow")}</span>
     {loading && !group ? <p className="public-registration-message">{publicText(language, "groupLoading")}</p> : !group ? <><h1>{publicText(language, "groupUnavailable")}</h1><p className="public-registration-message">{error}</p></> : <>
       <span className="public-registration-group-icon"><ContactRound size={22} /></span>
-      <h1>{group.name}</h1>
+      <h1>{group.heading || group.name}</h1>
+      {group.heading && <p>{group.name}</p>}
       {group.description && <p className="public-registration-description">{group.description}</p>}
-      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, "groupRequestSent")}</h2><p>{publicText(language, "groupRequestHelp")}</p></div></div> : <form className="public-registration-form" onSubmit={(event) => void submit(event)}>
+      {submitted ? <div className="public-registration-success"><span className="public-registration-check"><Check size={20} /></span><div><h2>{publicText(language, "groupRequestSent")}</h2><p>{publicText(language, "groupRequestHelp")}</p></div></div> : group.signupState === "closed" || group.signupState === "scheduled" ? <div className="public-registration-message">
+        <p>{publicText(language, group.signupState === "scheduled" ? "groupSignupScheduled" : "groupSignupClosed")}</p>
+        {group.signupState === "scheduled" && group.opensAt && <p><time dateTime={group.opensAt}>
+          {new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short", timeZone: group.timeZone }).format(new Date(group.opensAt))}
+        </time>{group.timeZone ? " · " + group.timeZone : ""}</p>}
+      </div> : <form className="public-registration-form" onSubmit={(event) => void submit(event)}>
         <p>{publicText(language, "groupRequestIntro")}</p>
         <div className="form-row"><label>{publicText(language, "firstName")}<input name="firstName" autoComplete="given-name" maxLength={80} required /></label><label>{publicText(language, "lastName")}<input name="lastName" autoComplete="family-name" maxLength={80} required /></label></div>
         <label>{publicText(language, "email")}<input type="email" name="email" autoComplete="email" maxLength={254} required /></label>

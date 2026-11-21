@@ -1,13 +1,16 @@
 import { useEffect, useState, type FormEvent } from "react";
 
 export type SignupQuestion = { id: string; label: string; type: "text" | "choice"; required: boolean; options?: string[] };
-type SignupForm = { revision: string | null; questions: SignupQuestion[] };
+type SignupPolicy = { opensAt: string | null; closesAt: string | null; defaultRole: string; heading: string; timeZone: string };
+type SignupForm = { revision: string | null; questions: SignupQuestion[]; policy: SignupPolicy };
+const emptyPolicy: SignupPolicy = { opensAt: null, closesAt: null, defaultRole: "Member", heading: "", timeZone: "UTC" };
 type QuestionDraft = Omit<SignupQuestion, "options"> & { optionText: string };
 
 export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { departmentId: string; groupId: string; csrfToken: string }) {
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [revision, setRevision] = useState<string | null>(null);
+  const [policy, setPolicy] = useState(emptyPolicy);
   const [draft, setDraft] = useState<QuestionDraft[]>([]);
   const [reload, setReload] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -17,6 +20,7 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
 
   function apply(result: SignupForm) {
     setRevision(result.revision);
+    setPolicy(result.policy ?? emptyPolicy);
     setDraft(result.questions.map(({ options, ...question }) => ({ ...question, optionText: options?.join("\n") ?? "" })));
   }
 
@@ -48,11 +52,13 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
     setError("");
     setNotice("");
     try {
+      const { timeZone, ...policyDraft } = policy;
       const response = await fetch(path, {
         method: "PUT",
         headers: { "x-department-id": departmentId, "x-csrf-token": csrfToken, "content-type": "application/json" },
         body: JSON.stringify({
           expectedRevision: revision,
+          policy: policyDraft,
           questions: draft.map(({ label, type, required, optionText }) => ({
             label, type, required, ...(type === "choice" ? { options: optionText.split("\n").map((option) => option.trim()).filter(Boolean) } : {}),
           })),
@@ -61,21 +67,27 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
       const result = await response.json() as SignupForm & { error?: string };
       if (!response.ok || !Array.isArray(result.questions)) throw new Error(result.error ?? "Could not save signup questions.");
       apply(result);
-      setNotice("Signup questions saved.");
+      setNotice("Signup settings saved.");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save signup questions."); }
     finally { setBusy(false); }
   }
 
   return <div className="group-attendance-section">
     <div className="community-members-heading">
-      <h3>Signup questions</h3>
-      <button className="button button-secondary" type="button" aria-expanded={open} disabled={busy} onClick={() => setOpen((value) => !value)}>{open ? "Close questions" : "Edit questions"}</button>
+      <h3>Signup settings</h3>
+      <button className="button button-secondary" type="button" aria-expanded={open} disabled={busy} onClick={() => setOpen((value) => !value)}>{open ? "Close settings" : "Edit settings"}</button>
     </div>
     {open && <div className="group-join-request-list">
       {error && <p role="alert">{error} <button type="button" className="button button-secondary" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload questions</button></p>}
       {notice && <p role="status">{notice}</p>}
       {!loaded && !error && <p role="status">Loading signup questions…</p>}
       {loaded && <form onSubmit={(event) => void save(event)} className="community-group-form">
+        <label>Public signup heading<input maxLength={120} value={policy.heading} onChange={(event) => setPolicy({ ...policy, heading: event.target.value })} /></label>
+        <label>Open signup ({policy.timeZone})<input type="datetime-local" step={1} value={policy.opensAt ?? ""} onChange={(event) => setPolicy({ ...policy, opensAt: event.target.value || null })} /></label>
+        <label>Close signup ({policy.timeZone})<input type="datetime-local" step={1} value={policy.closesAt ?? ""} onChange={(event) => setPolicy({ ...policy, closesAt: event.target.value || null })} /></label>
+        <label>Default role for new admissions<input required maxLength={80} value={policy.defaultRole} onChange={(event) => setPolicy({ ...policy, defaultRole: event.target.value })} /></label>
+        <p>Signup must be enabled to use the schedule. Each application still needs review.</p>
+        <h4>Signup questions</h4>
         <p>Applicants see these questions. Group managers can read the answers when reviewing the application.</p>
         {draft.map((question, index) => <fieldset key={question.id} disabled={busy}>
           <legend>Question {index + 1}</legend>
@@ -91,7 +103,7 @@ export function GroupSignupFormEditor({ departmentId, groupId, csrfToken }: { de
           <button className="button button-secondary" type="button" disabled={busy || draft.length >= 8} onClick={() => setDraft((current) => [
             ...current, { id: crypto.randomUUID(), label: "", type: "text", required: false, optionText: "" },
           ])}>Add question</button>
-          <button className="button button-primary" type="submit" disabled={busy}>Save questions</button>
+          <button className="button button-primary" type="submit" disabled={busy}>Save signup settings</button>
         </div>
       </form>}
     </div>}

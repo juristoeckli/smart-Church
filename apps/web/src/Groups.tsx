@@ -13,7 +13,7 @@ import { translateModuleMessage } from "./modules/translations";
 
 type GroupMeeting = { id: string; date: string; title: string; attendeeCount: number; presentCount: number; completedAt?: string | null };
 
-type GroupJoinRequest = { id: string; groupId: string; firstName: string; lastName: string; email: string; status: "pending"; createdAt: string; answers?: { questionId: string; label: string; value: string }[] };
+type GroupJoinRequest = { id: string; groupId: string; firstName: string; lastName: string; email: string; status: "pending"; createdAt: string; defaultRole?: string; answers?: { questionId: string; label: string; value: string }[] };
 type GroupStatusFilter = "all" | GroupLifecycleStatus;
 type GroupSourceFilter = "all" | "local" | NonNullable<ChurchGroup["importedFrom"]>;
 type GroupSortOrder = "name_asc" | "name_desc" | "members_desc" | "start_desc";
@@ -646,7 +646,7 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
           {canManage && !selected.importedFrom && loadedDepartmentId === departmentId && <GroupTypeHistory key={departmentId + ":" + selected.id} departmentId={departmentId} groupId={selected.id} groupType={selected.groupType} />}
           {canManage && !selected.importedFrom && <section className="group-join-requests"><div className="community-members-heading"><div><h3>{translate("groups.joinRequests")}</h3><p>{translate("groups.waitingReview").replace("{count}", String(joinRequests.length))}</p></div></div>{joinRequests.length ? <div className="group-join-request-list">{joinRequests.map((joinRequest) => {
             const matches = contacts.filter((person) => person.email?.trim().toLocaleLowerCase() === joinRequest.email.toLocaleLowerCase());
-            return <article className="group-join-request" key={joinRequest.id}><div><strong>{joinRequest.firstName} {joinRequest.lastName}</strong><small>{joinRequest.email} · {formatUserDate(joinRequest.createdAt, true)}</small></div>{joinRequest.answers && joinRequest.answers.length > 0 && <dl>
+            return <article className="group-join-request" key={joinRequest.id}><div><strong>{joinRequest.firstName} {joinRequest.lastName}</strong><small>{joinRequest.email} · {formatUserDate(joinRequest.createdAt, true)}</small><small>New membership role: {joinRequest.defaultRole ?? "Member"}</small></div>{joinRequest.answers && joinRequest.answers.length > 0 && <dl>
               {joinRequest.answers.map((answer) => <div key={answer.questionId}><dt>{answer.label}</dt><dd>{answer.value}</dd></div>)}
             </dl>}{matches.length > 1 && <label>{translate("groups.matchPerson")}<select value={requestContactIds[joinRequest.id] ?? ""} onChange={(event) => setRequestContactIds((current) => ({ ...current, [joinRequest.id]: event.target.value }))}><option value="">{translate("groups.choosePerson")}</option>{matches.map((person) => <option key={person.id} value={person.id}>{person.firstName} {person.lastName}</option>)}</select></label>}{matches.length === 0 && <small>Approving or waitlisting creates a visitor record if no existing person matches.</small>}<div className="group-join-request-actions"><button className="button button-secondary" type="button" disabled={saving || waitlistPending || memberListChanged} onClick={() => void reviewJoinRequest(joinRequest, "declined")}>{translate("groups.decline")}</button><button className="button button-secondary" type="button"
               disabled={saving || waitlistPending || memberListChanged || (matches.length > 1 && !requestContactIds[joinRequest.id])}

@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { defaultSignupPolicy, signupPolicySchema, type SignupPolicyDraft } from "./signup-policy.js";
 
 type QuestionDraft = { label: string; type: "text" | "choice"; required: boolean; options?: string[] };
 export type SignupQuestion = QuestionDraft & { id: string };
-export type SignupForm = { revision: string | null; questions: SignupQuestion[] };
-export type SignupSettings = { expectedRevision: string | null; questions: QuestionDraft[] };
+export type SignupForm = { revision: string | null; questions: SignupQuestion[]; policy: SignupPolicyDraft };
+export type SignupSettings = { expectedRevision: string | null; questions: QuestionDraft[]; policy?: SignupPolicyDraft };
 
 const uuid = { type: "string", format: "uuid" } as const;
 export const signupSettingsSchema = {
   type: "object", additionalProperties: false, required: ["expectedRevision", "questions"], properties: {
     expectedRevision: { type: ["string", "null"], format: "uuid" },
+    policy: signupPolicySchema,
     questions: { type: "array", maxItems: 8, items: {
       type: "object", additionalProperties: false, required: ["label", "type", "required"], properties: {
         label: { type: "string", minLength: 1, maxLength: 120 },
@@ -39,16 +41,22 @@ export function prepareSignupQuestions(drafts: QuestionDraft[]) {
 }
 
 export async function readSignupForm(db: Pool | PoolClient, departmentId: string, groupId: string): Promise<SignupForm> {
-  const result = await db.query<SignupForm>(
-    "SELECT revision,questions FROM group_signup_forms WHERE department_id=$1 AND group_id=$2",
+  const result = await db.query<SignupForm & SignupPolicyDraft>(
+    `SELECT revision,questions,
+       to_char(opens_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "opensAt",
+       to_char(closes_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS "closesAt",
+       default_role AS "defaultRole",heading FROM group_signup_forms WHERE department_id=$1 AND group_id=$2`,
     [departmentId, groupId],
   );
-  return result.rows[0] ?? { revision: null, questions: [] };
+  const row = result.rows[0];
+  return row ? { revision: row.revision, questions: row.questions, policy: {
+    opensAt: row.opensAt, closesAt: row.closesAt, defaultRole: row.defaultRole, heading: row.heading,
+  } } : { revision: null, questions: [], policy: defaultSignupPolicy };
 }
 
 type SignupAnswer = { questionId: string; label: string; value: string };
 export function captureSignupAnswers(form: SignupForm, revision: string | undefined, answers: Record<string, string> = {}): { error: string; status: 400 | 409 } | { saved: SignupAnswer[] } {
-  if (form.revision !== (revision ?? null)) return { error: "The signup questions changed. Reload the form before submitting.", status: 409 } as const;
+  if ((form.questions.length ? form.revision : null) !== (revision ?? null)) return { error: "The signup questions changed. Reload the form before submitting.", status: 409 } as const;
   const validIds = new Set(form.questions.map((question) => question.id));
   if (Object.keys(answers).some((id) => !validIds.has(id))) return { error: "These answers do not match the signup questions.", status: 400 } as const;
   const saved: SignupAnswer[] = [];
