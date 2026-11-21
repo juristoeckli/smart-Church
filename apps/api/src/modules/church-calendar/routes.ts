@@ -964,13 +964,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const validItem = (item: unknown): item is Record<string, unknown> => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return false;
         const value = item as Record<string, unknown>;
-        const allowed = new Set(["title", "startTime", "durationMinutes", "notes", "songId", "arrangementId", "position"]);
+        const allowed = new Set(["title", "startTime", "durationMinutes", "notes", "songId", "arrangementId", "position", "section"]);
         if (Object.keys(value).some((key) => !allowed.has(key))) return false;
         return typeof value.title === "string" && value.title.trim().length > 0 && value.title.length <= 160
           && (value.startTime === undefined || (typeof value.startTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.startTime)))
           && (value.durationMinutes === undefined || (Number.isInteger(value.durationMinutes) && Number(value.durationMinutes) >= 1 && Number(value.durationMinutes) <= 1440))
           && (value.notes === undefined || (typeof value.notes === "string" && value.notes.length <= 500))
           && (value.songId === undefined || (typeof value.songId === "string" && /^[0-9a-f-]{36}$/i.test(value.songId)))
+          && (value.section === undefined || (typeof value.section === "string" && value.section.length <= 80))
           && (value.arrangementId === undefined || (typeof value.arrangementId === "string" && /^[0-9a-f-]{36}$/i.test(value.arrangementId)))
           && (value.position === undefined || (typeof value.position === "string" && value.position.length <= 80));
       };

@@ -37,6 +37,7 @@ export interface ServicePosition {
 }
 
 export interface ServicePlanItem {
+  section?: string;
   title: string;
   startTime?: string;
   durationMinutes?: number;
