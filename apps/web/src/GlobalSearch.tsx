@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Search, X } from "lucide-react";
 import "./global-search.css";
 
@@ -41,6 +41,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   const [activeIndex, setActiveIndex] = useState(0);
   const [recent, setRecent] = useState<string[]>(() => loadRecent(recentStorageKey));
   const inputRef = useRef<HTMLInputElement>(null);
+  const resultListId = useId();
   const result = response?.query === query.trim() ? response.result : null;
   const categories = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
@@ -82,6 +83,12 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
     return groups;
   }, [query, result, navigationActions, quickCreateActions, onQuickCreate, fullSearchDestinations, onFullSearch]);
   const resultRows = categories.flatMap((category) => category.items);
+  const activeRowIndex = Math.min(activeIndex, resultRows.length - 1);
+  const activeOptionId = activeRowIndex >= 0 ? resultListId + "-" + activeRowIndex : undefined;
+
+  useEffect(() => {
+    if (open && activeOptionId) document.getElementById(activeOptionId)?.scrollIntoView({ block: "nearest" });
+  }, [open, activeOptionId]);
 
   function show() { setOpen(true); setQuery(""); setResponse(null); setError(""); setActiveIndex(0); }
   function hide() { setOpen(false); setQuery(""); setResponse(null); setError(""); }
@@ -141,22 +148,32 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   }
 
   function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
-    if (event.key === "ArrowDown" && resultRows.length) { event.preventDefault(); setActiveIndex((current) => (current + 1) % resultRows.length); }
-    else if (event.key === "ArrowUp" && resultRows.length) { event.preventDefault(); setActiveIndex((current) => (current - 1 + resultRows.length) % resultRows.length); }
-    else if (event.key === "Enter" && resultRows[activeIndex]) { event.preventDefault(); navigate(resultRows[activeIndex]); }
+    if (event.nativeEvent.isComposing || !resultRows.length) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setActiveIndex((activeRowIndex + step + resultRows.length) % resultRows.length);
+    } else if (event.key === "Enter" && resultRows[activeRowIndex]) {
+      event.preventDefault();
+      navigate(resultRows[activeRowIndex]);
+    }
   }
 
   return <>
     <button className="icon-button global-search-trigger" type="button" aria-label="Search records and actions" title="Search · Ctrl+K" onClick={show}><Search size={17} /><span>Search</span></button>
     {open && <div className="global-search-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) hide(); }}>
       <section className="global-search-dialog" role="dialog" aria-modal="true" aria-label="Global search">
-        <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search records, actions or # ID" aria-label="Search records, actions or ID" autoComplete="off" maxLength={100} /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
+        <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded={resultRows.length > 0}
+          aria-controls={resultRows.length > 0 ? resultListId : undefined} aria-activedescendant={activeOptionId} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search records, actions or # ID" aria-label="Search records, actions or ID" autoComplete="off" maxLength={100} /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
         <div className="global-search-body">
           {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly.</p>{quickCreateActions.length > 0 && onQuickCreate && <section className="global-search-quick-create"><strong>Quick create</strong>{quickCreateActions.map((action) => <button type="button" key={action.type} onClick={() => { hide(); onQuickCreate(action.type); }}><span><b>{action.label}</b><small>{action.description}</small></span></button>)}</section>}{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
           {query.trim() && !query.trim().startsWith("#") && query.trim().length < 2 && <p className="global-search-hint">Type at least two characters, or enter # followed by a record ID.</p>}
           {loading && <p className="global-search-status" role="status">Searching…</p>}
           {error && <p className="global-search-status global-search-error" role="alert">{error}</p>}
-          {categories.map((category, index) => <SearchCategory key={category.title} {...category} activeIndex={activeIndex} onOpen={navigate} offset={categories.slice(0, index).reduce((total, previous) => total + previous.items.length, 0)} />)}
+          {resultRows.length > 0 && <div id={resultListId} role="listbox" aria-label="Search results">
+            {categories.map((category, index) => <SearchCategory key={category.title} {...category} listId={resultListId}
+              activeIndex={activeRowIndex} onOpen={navigate} offset={categories.slice(0, index).reduce((total, previous) => total + previous.items.length, 0)} />)}
+          </div>}
           {result && !categories.some((category) => category.title !== "More results" && category.items.length > 0)
             && <p className="global-search-status">No suggested records or actions match this search.</p>}
         </div>
@@ -166,13 +183,15 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   </>;
 }
 
-function SearchCategory({ title, items, activeIndex, onOpen, offset }: {
+function SearchCategory({ title, items, listId, activeIndex, onOpen, offset }: {
   title: string;
   items: ResultRow[];
+  listId: string;
   activeIndex: number;
   onOpen: (result: ResultRow) => void;
   offset: number;
 }) {
   if (!items.length) return null;
-  return <section className="global-search-category"><h2>{title}</h2>{items.map((item, index) => <button className={`global-search-result${activeIndex === offset + index ? " is-active" : ""}`} type="button" key={`${item.type}:${item.id}`} onClick={() => onOpen(item)}><span className="global-search-result-icon">{title.slice(0, 1)}</span><span><strong>{item.title}</strong>{item.detail && <small>{item.detail}</small>}</span>{item.type !== "action" && <code>#{item.id}</code>}</button>)}</section>;
+  return <section className="global-search-category" role="group" aria-label={title}><h2 aria-hidden="true">{title}</h2>{items.map((item, index) => <button id={listId + "-" + (offset + index)}
+    role="option" aria-selected={activeIndex === offset + index} tabIndex={-1} className={`global-search-result${activeIndex === offset + index ? " is-active" : ""}`} type="button" key={`${item.type}:${item.id}`} onClick={() => onOpen(item)}><span className="global-search-result-icon">{title.slice(0, 1)}</span><span><strong>{item.title}</strong>{item.detail && <small>{item.detail}</small>}</span>{item.type !== "action" && <code>#{item.id}</code>}</button>)}</section>;
 }
