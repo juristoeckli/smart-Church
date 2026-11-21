@@ -12,6 +12,7 @@ import { readChurchToolsMembershipFieldDefinitions, type ChurchToolsMembershipCu
 import { ChurchToolsFinanceRangeError, compareChurchToolsFinanceCodes, financeDay, readChurchToolsFinanceCodes, readChurchToolsFinanceJournal, readChurchToolsFinancePeriods } from "./finance-preview.js";
 import { buildChurchToolsFinanceMapping } from "./finance-mapping.js";
 import { buildChurchToolsFinanceJournalDryRun, isTwoDecimalFinanceCurrency, selectChurchToolsJournalRow } from "./finance-journal-dry-run.js";
+import { createReviewedJournalDrafts, journalDraftBatchId, planReviewedJournalDrafts, readJournalDraftReceipt } from "./finance-journal-drafts.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -832,7 +833,7 @@ async function readFinanceMappingSource(config: Settings, periodId: string) {
   return { period, chart: { accounts, costCenters, groups, classes, types } };
 }
 
-async function reviewFinanceMapping(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, source: NonNullable<Awaited<ReturnType<typeof readFinanceMappingSource>>>) {
+async function reviewFinanceMapping(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, source: NonNullable<Awaited<ReturnType<typeof readFinanceMappingSource>>>, lockRows = false) {
   const financeTables = await db.query<{ installed: boolean; can_apply: boolean }>(`SELECT to_regclass('public.finance_accounts') IS NOT NULL
     AND to_regclass('public.finance_cost_centers') IS NOT NULL AS installed,to_regclass('public.finance_audit') IS NOT NULL
     AND EXISTS(SELECT 1 FROM departments d JOIN installation_modules m ON m.installation_id=d.installation_id
@@ -842,7 +843,7 @@ async function reviewFinanceMapping(db: Pick<Pool, "query">, departmentId: strin
   if (financeTables.rows[0]?.installed) {
     const [accounts, costCenters] = await Promise.all([
       db.query<Chart["accounts"][number]>(`SELECT id,code,name,active,account_type AS "accountType"
-        FROM finance_accounts WHERE department_id=$1`, [departmentId]),
+        FROM finance_accounts WHERE department_id=$1${lockRows ? " FOR SHARE" : ""}`, [departmentId]),
       db.query<Chart["costCenters"][number]>("SELECT id,code,name,active FROM finance_cost_centers WHERE department_id=$1", [departmentId]),
     ]);
     local = { accounts: accounts.rows, costCenters: costCenters.rows };
@@ -850,6 +851,70 @@ async function reviewFinanceMapping(db: Pick<Pool, "query">, departmentId: strin
   const mapping = buildChurchToolsFinanceMapping(source.period.periodId, source.chart, local);
   const review = { formatVersion: 1, sourceInstance: instanceUrl, period: source.period, targetFinanceAvailable: local !== null,
     canApply: local !== null && financeTables.rows[0]?.can_apply === true, ...mapping };
+  return { ...review, reviewHash: financeMappingHash(review) };
+}
+
+type JournalScope = { periodId: string; startDate: string; endDate: string; sourceCurrency: string };
+function journalScopeError({ startDate, endDate, sourceCurrency }: JournalScope) {
+  if (!financeDay(startDate) || !financeDay(endDate) || startDate > endDate) return "Choose a valid finance preview date range.";
+  if (!isTwoDecimalFinanceCurrency(sourceCurrency)) return "Confirm a valid source currency that uses two decimal places.";
+  return null;
+}
+async function readReviewedJournalSource(config: Settings, scope: JournalScope) {
+  const { periodId, startDate, endDate } = scope;
+  const source = await readFinanceMappingSource(config, periodId);
+  if (!source) return null;
+  if (startDate < source.period.startDate || endDate > source.period.endDate) throw new Error("The preview dates must stay within the selected ChurchTools accounting period.");
+  const token = decrypt(config.encrypted_login_token);
+  const accounts = readChurchToolsFinanceCodes(source.chart.accounts, periodId, "account");
+  const costCenters = readChurchToolsFinanceCodes(source.chart.costCenters, periodId, "cost center");
+  const rows: ReturnType<typeof selectChurchToolsJournalRow>[] = [];
+  await readChurchToolsFinanceJournal((page, limit) => {
+    const query = new URLSearchParams({ accounting_period_id: periodId, start_date: startDate, end_date: endDate,
+      order_by: "date", order_direction: "ASC", page: String(page), limit: String(limit) });
+    return get(config.instance_url, token, `finance/transactions?${query}`);
+  }, accounts, costCenters, startDate, endDate, { maxPages: 5, inspectRow: (row) => rows.push(selectChurchToolsJournalRow(row)) });
+  return { source, rows };
+}
+
+async function evaluateReviewedJournal(db: Pick<Pool, "query">, departmentId: string, instanceUrl: string, scope: JournalScope,
+  { source, rows }: NonNullable<Awaited<ReturnType<typeof readReviewedJournalSource>>>, lockRows = false) {
+  const mapping = await reviewFinanceMapping(db, departmentId, instanceUrl, source, lockRows);
+  const ledgerTables = await db.query<{ installed: boolean }>(`SELECT to_regclass('public.finance_settings') IS NOT NULL
+    AND to_regclass('public.finance_accounting_years') IS NOT NULL AND to_regclass('public.finance_transactions') IS NOT NULL
+    AND to_regclass('public.finance_transaction_lines') IS NOT NULL AS installed`);
+  const targetAvailable = mapping.canApply && ledgerTables.rows[0]?.installed === true;
+  type Inputs = Parameters<typeof buildChurchToolsFinanceJournalDryRun>[1];
+  let localPeriod: Inputs["localPeriod"] = null;
+  let targetCurrency: string | null = null;
+  let links: Inputs["links"] = [];
+  const existingDocumentNumbers = new Set<string>();
+  const existingSourceIds = new Set<string>();
+  if (targetAvailable) {
+    const [periods, currency, crosswalk, imported] = await Promise.all([
+      db.query<NonNullable<Inputs["localPeriod"]>>(`SELECT accounting_year AS year,start_date::text AS "startDate",end_date::text AS "endDate",status
+        FROM finance_accounting_years WHERE department_id=$1 AND start_date<=$3::date AND end_date>=$2::date${lockRows ? " FOR SHARE" : ""}`, [departmentId, source.period.startDate, source.period.endDate]),
+      db.query<{ currency: string }>("SELECT currency_code AS currency FROM finance_settings WHERE department_id=$1", [departmentId]),
+      db.query<Inputs["links"][number]>(`SELECT kind,source_id,target_id FROM churchtools_migration_finance_links
+        WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`, [departmentId, instanceUrl, scope.periodId]),
+      db.query<{ source_id: string }>(`SELECT source_id FROM churchtools_migration_finance_journal_links
+        WHERE department_id=$1 AND instance_url=$2 AND period_id=$3 AND source_id=ANY($4::text[])`, [departmentId, instanceUrl, scope.periodId, rows.map((row) => row.sourceId)]),
+    ]);
+    localPeriod = periods.rows.length === 1 && periods.rows[0].startDate === source.period.startDate && periods.rows[0].endDate === source.period.endDate ? periods.rows[0] : null;
+    targetCurrency = currency.rows[0]?.currency.trim() ?? "CHF";
+    links = crosswalk.rows;
+    for (const row of imported.rows) existingSourceIds.add(row.source_id);
+    const numbers = [...new Set(rows.map((row) => row.documentNumber).filter(Boolean))];
+    if (localPeriod && numbers.length) {
+      const duplicates = await db.query<{ receipt_number: string }>(`SELECT DISTINCT receipt_number FROM finance_transactions
+        WHERE department_id=$1 AND accounting_year=$2 AND receipt_number=ANY($3::text[])`, [departmentId, localPeriod.year, numbers]);
+      for (const duplicate of duplicates.rows) existingDocumentNumbers.add(duplicate.receipt_number);
+    }
+  }
+  const preview = buildChurchToolsFinanceJournalDryRun(rows, {
+    ...scope, targetCurrency, sourcePeriod: source.period, localPeriod, targetAvailable, existingDocumentNumbers, existingSourceIds, mapping, links,
+  });
+  const review = { formatVersion: 1, periodId: scope.periodId, sourceInstance: instanceUrl, ...preview };
   return { ...review, reviewHash: financeMappingHash(review) };
 }
 async function listChurchToolsBookingHistory(config: Settings, token: string, resources: JsonObject[], startDate: string, endDate: string) {
@@ -1755,7 +1820,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not preview ChurchTools finance data." });
       }
     });
-    routes.get<{ Querystring: { periodId: string; startDate: string; endDate: string; sourceCurrency: string } }>("/api/modules/sync/churchtools/finance/journal-dry-run", {
+    routes.get<{ Querystring: JournalScope }>("/api/modules/sync/churchtools/finance/journal-dry-run", {
       schema: { querystring: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency"], properties: {
         periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
         sourceCurrency: { type: "string", pattern: "^[A-Z]{3}$" },
@@ -1764,57 +1829,82 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       const dept = await department(request, reply, true); if (!dept) return reply;
       const config = await settings(dept);
       if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
-      const { periodId, startDate, endDate, sourceCurrency } = request.query;
-      if (!financeDay(startDate) || !financeDay(endDate) || startDate > endDate) return reply.code(400).send({ error: "Choose a valid finance preview date range." });
-      if (!isTwoDecimalFinanceCurrency(sourceCurrency)) return reply.code(400).send({ error: "Confirm a valid source currency that uses two decimal places." });
+      const scope = request.query;
+      const invalid = journalScopeError(scope);
+      if (invalid) return reply.code(400).send({ error: invalid });
       try {
-        const source = await readFinanceMappingSource(config, periodId);
+        const source = await readReviewedJournalSource(config, scope);
         if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
-        if (startDate < source.period.startDate || endDate > source.period.endDate) return reply.code(400).send({ error: "The preview dates must stay within the selected ChurchTools accounting period." });
-        const token = decrypt(config.encrypted_login_token);
-        const mapping = await reviewFinanceMapping(pool!, dept, config.instance_url, source);
-        const accounts = readChurchToolsFinanceCodes(source.chart.accounts, periodId, "account");
-        const costCenters = readChurchToolsFinanceCodes(source.chart.costCenters, periodId, "cost center");
-        const rows: ReturnType<typeof selectChurchToolsJournalRow>[] = [];
-        await readChurchToolsFinanceJournal((page, limit) => {
-          const query = new URLSearchParams({ accounting_period_id: periodId, start_date: startDate, end_date: endDate,
-            order_by: "date", order_direction: "ASC", page: String(page), limit: String(limit) });
-          return get(config.instance_url, token, `finance/transactions?${query}`);
-        }, accounts, costCenters, startDate, endDate, { maxPages: 5, inspectRow: (row) => rows.push(selectChurchToolsJournalRow(row)) });
-        const ledgerTables = await pool!.query<{ installed: boolean }>(`SELECT to_regclass('public.finance_settings') IS NOT NULL
-          AND to_regclass('public.finance_accounting_years') IS NOT NULL AND to_regclass('public.finance_transactions') IS NOT NULL AS installed`);
-        const targetAvailable = mapping.canApply && ledgerTables.rows[0]?.installed === true;
-        type Inputs = Parameters<typeof buildChurchToolsFinanceJournalDryRun>[1];
-        let localPeriod: Inputs["localPeriod"] = null;
-        let targetCurrency: string | null = null;
-        let links: Inputs["links"] = [];
-        const existingDocumentNumbers = new Set<string>();
-        if (targetAvailable) {
-          const [periods, currency, crosswalk] = await Promise.all([
-            pool!.query<NonNullable<Inputs["localPeriod"]>>(`SELECT accounting_year AS year,start_date::text AS "startDate",end_date::text AS "endDate",status
-              FROM finance_accounting_years WHERE department_id=$1 AND start_date<=$3::date AND end_date>=$2::date`, [dept, source.period.startDate, source.period.endDate]),
-            pool!.query<{ currency: string }>("SELECT currency_code AS currency FROM finance_settings WHERE department_id=$1", [dept]),
-            pool!.query<Inputs["links"][number]>(`SELECT kind,source_id,target_id FROM churchtools_migration_finance_links
-              WHERE department_id=$1 AND instance_url=$2 AND period_id=$3`, [dept, config.instance_url, periodId]),
-          ]);
-          localPeriod = periods.rows.length === 1 && periods.rows[0].startDate === source.period.startDate && periods.rows[0].endDate === source.period.endDate ? periods.rows[0] : null;
-          targetCurrency = currency.rows[0]?.currency.trim() ?? "CHF";
-          links = crosswalk.rows;
-          const numbers = [...new Set(rows.map((row) => row.documentNumber).filter(Boolean))];
-          if (localPeriod && numbers.length) {
-            const duplicates = await pool!.query<{ receipt_number: string }>(`SELECT DISTINCT receipt_number FROM finance_transactions
-              WHERE department_id=$1 AND accounting_year=$2 AND receipt_number=ANY($3::text[])`, [dept, localPeriod.year, numbers]);
-            for (const duplicate of duplicates.rows) existingDocumentNumbers.add(duplicate.receipt_number);
-          }
-        }
-        const preview = buildChurchToolsFinanceJournalDryRun(rows, {
-          sourceCurrency, targetCurrency, startDate, endDate, sourcePeriod: source.period, localPeriod, targetAvailable, existingDocumentNumbers, mapping, links,
-        });
-        return reply.header("Cache-Control", "private, no-store").send({ formatVersion: 1, periodId, sourceInstance: config.instance_url, ...preview });
+        return reply.header("Cache-Control", "private, no-store").send(await evaluateReviewedJournal(pool!, dept, config.instance_url, scope, source));
       } catch (error) {
         const status = error instanceof ChurchToolsFinanceRangeError ? 413
           : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not prepare the ChurchTools journal dry-run." });
+      }
+    });
+    routes.post<{ Body: JournalScope & { reviewHash: string; sourceIds: string[] } }>("/api/modules/sync/churchtools/finance/journal-drafts", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["periodId", "startDate", "endDate", "sourceCurrency", "reviewHash", "sourceIds"], properties: {
+        periodId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" },
+        sourceCurrency: { type: "string", pattern: "^[A-Z]{3}$" }, reviewHash: { type: "string", pattern: "^[a-f0-9]{64}$" },
+        sourceIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: { type: "string", pattern: "^[1-9][0-9]{0,15}$" } },
+      } } },
+    }, async (request, reply) => {
+      const dept = await department(request, reply, true); if (!dept) return reply;
+      if (!deps.validateMutation(request, reply)) return reply;
+      const config = await settings(dept);
+      if (!config) return reply.code(404).send({ error: "Configure ChurchTools before reviewing its finance data." });
+      const { periodId, startDate, endDate, sourceCurrency, reviewHash, sourceIds } = request.body;
+      const scope = { periodId, startDate, endDate, sourceCurrency };
+      const invalid = journalScopeError(scope);
+      if (invalid) return reply.code(400).send({ error: invalid });
+      const linkScope = { departmentId: dept, instanceUrl: config.instance_url, periodId };
+      const batchId = journalDraftBatchId(reviewHash, sourceIds, scope);
+      try {
+        const existing = await readJournalDraftReceipt(pool!, linkScope, batchId);
+        if (existing) return reply.header("Cache-Control", "private, no-store").send({ ...existing, replayed: true });
+        const source = await readReviewedJournalSource(config, scope);
+        if (!source) return reply.code(404).send({ error: "ChurchTools did not return the selected accounting period." });
+        const db = await pool!.connect();
+        try {
+          await db.query("BEGIN");
+          await db.query("SET LOCAL lock_timeout = '5s'");
+          await db.query("SELECT id FROM departments WHERE id=$1 FOR NO KEY UPDATE", [dept]);
+          if (!await deps.lockDepartmentForWrite(db, dept)) {
+            await db.query("ROLLBACK");
+            return reply.code(423).send({ error: "This location is read-only while it is a redundancy standby or fenced site." });
+          }
+          const current = await db.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 AND encrypted_login_token=$3 FOR SHARE",
+            [dept, config.instance_url, config.encrypted_login_token]);
+          if (!current.rowCount) throw new ChurchToolsFinanceReviewError("The ChurchTools connection changed. Run a fresh journal dry-run.");
+          const replay = await readJournalDraftReceipt(db, linkScope, batchId);
+          if (replay) {
+            await db.query("COMMIT");
+            return reply.header("Cache-Control", "private, no-store").send({ ...replay, replayed: true });
+          }
+          const enabled = await db.query("SELECT 1 FROM departments d JOIN installation_modules m ON m.installation_id=d.installation_id WHERE d.id=$1 AND m.module_id='finance' AND m.enabled FOR SHARE OF m", [dept]);
+          if (!enabled.rowCount) throw new ChurchToolsFinanceReviewError("Enable the local Finance module before creating drafts.");
+          await db.query("SELECT accounting_year FROM finance_accounting_years WHERE department_id=$1 AND start_date<=$3 AND end_date>=$2 FOR SHARE",
+            [dept, source.source.period.startDate, source.source.period.endDate]);
+          // Native receipt numbers are not globally unique. Freeze journal writes while checking conflicts and creating this batch.
+          await db.query("LOCK TABLE finance_transactions IN SHARE ROW EXCLUSIVE MODE");
+          await db.query("LOCK TABLE finance_settings IN SHARE MODE");
+          const preview = await evaluateReviewedJournal(db, dept, config.instance_url, scope, source, true);
+          if (preview.reviewHash !== reviewHash) throw new ChurchToolsFinanceReviewError("The journal or its local mappings changed after review. Run a fresh journal dry-run.");
+          const plan = planReviewedJournalDrafts(preview, sourceIds);
+          const result = await createReviewedJournalDrafts(db, linkScope, request.authenticatedUser?.id ?? null, batchId, plan);
+          await db.query("COMMIT");
+          return reply.code(201).header("Cache-Control", "private, no-store").send({ ...result, replayed: false });
+        } catch (error) {
+          await db.query("ROLLBACK");
+          if (error && typeof error === "object" && "code" in error && error.code === "55P03") {
+            throw new ChurchToolsFinanceReviewError("The local journal is busy. Retry the reviewed draft batch.");
+          }
+          throw error;
+        } finally { db.release(); }
+      } catch (error) {
+        const status = error instanceof ChurchToolsFinanceReviewError ? 409 : error instanceof ChurchToolsFinanceRangeError ? 413
+          : error instanceof ChurchToolsReadError && [401, 403].includes(error.status) ? 403 : 400;
+        return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not create the reviewed ChurchTools journal drafts." });
       }
     });
     routes.get<{ Querystring: { offset?: number; query?: string } }>("/api/modules/sync/churchtools/membership-details", {

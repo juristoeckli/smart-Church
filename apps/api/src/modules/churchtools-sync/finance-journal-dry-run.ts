@@ -13,6 +13,7 @@ type Input = {
   localPeriod: LocalPeriod | null;
   targetAvailable: boolean;
   existingDocumentNumbers: ReadonlySet<string>;
+  existingSourceIds?: ReadonlySet<string>;
   mapping: Mapping;
   links: Link[];
 };
@@ -84,6 +85,7 @@ export function buildChurchToolsFinanceJournalDryRun(rows: JournalRow[], input: 
     if (!row.documentNumber) reasons.push("unsupported_document_number");
     if (row.documentNumber && (receiptCounts.get(row.documentNumber) ?? 0) > 1) reasons.push("duplicate_source_document");
     if (input.existingDocumentNumbers.has(row.documentNumber)) reasons.push("duplicate_local_document");
+    if (input.existingSourceIds?.has(row.sourceId)) reasons.push("source_already_linked");
     if (row.amount === null || row.amount === 0 || Math.abs(row.amount) > targetAmountLimit) reasons.push("unsupported_amount");
     else if (row.amount < 0) reasons.push("negative_amount_review");
     for (const [flag, active] of Object.entries(row.flags)) if (active) reasons.push(`source_${flag}`);
