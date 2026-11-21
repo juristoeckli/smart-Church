@@ -167,7 +167,7 @@ function parseDeviceStatus(body: string, address: DeviceAddress) {
       }
       continue;
     }
-    const activeList = line.match(/\b(?:active\s+)?channels?\b\s*[:=]\s*(.*)$/i);
+    const activeList = line.match(/^\s*(?:active\s+)?channels?\s*[:=]\s*(.*)$/i);
     if (activeList) {
       sawChannelStatus = true;
       if (!/^(?:none|off|0)\b/i.test(activeList[1]!.trim())) {
