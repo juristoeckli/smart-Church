@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { registerGroupOperationsReplication } from "./replication.js";
 
 const uuid = { type: "string", format: "uuid" };
 const date = { type: "string", format: "date" };
@@ -18,6 +19,7 @@ function anonymousResponseToken(request: FastifyRequest) {
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation, realtime } = context;
+  registerGroupOperationsReplication(context);
   const unavailable = (reply: FastifyReply) => reply.code(503).send({ error: "Group operations are unavailable." });
   function canManage(request: FastifyRequest) {
     return request.activeDepartmentRole === "site_admin"

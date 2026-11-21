@@ -14,6 +14,7 @@ export type ModuleReplicationAdapter = {
   exportSnapshot: (client: PoolClient, departmentId: string) => Promise<unknown>;
   prepareSnapshotForPeer?: (snapshot: unknown, sealForPeer: (plaintext: string) => string) => Promise<unknown>;
   restoreSnapshotFromPeer?: (snapshot: unknown, openForLocal: (envelope: string) => string) => Promise<unknown>;
+  prepareRestore?: (client: PoolClient, departmentId: string, snapshot?: unknown) => Promise<void>;
   restoreSnapshot: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<{ recordCount: number }>;
   verifySnapshot: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationRestoreContext) => Promise<{ ready: boolean; blockers: string[] }>;
 };

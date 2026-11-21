@@ -2,7 +2,7 @@ import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypt
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
-import type { ModuleReplicationAdapter, ModuleServerContext } from "../module-sdk.js";
+import type { ModuleReplicationAdapter, ModuleServerContext, ReplicationRestoreContext } from "../module-sdk.js";
 import { canonicalRequest, canonicalResponse, fingerprintPublicKey, getIdentity, openFromPeer, protocolVersion, sealForPeer, signBytes, verifyBytes, type FederationIdentity } from "./federation-crypto.js";
 import { FederationChannels } from "./federation-channel.js";
 
@@ -317,6 +317,44 @@ async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Aw
   return { contentType: response.headers["content-type"]?.split(";", 1)[0] ?? "", bytes };
 }
 
+async function restoreSiteModules(
+  client: PoolClient,
+  departmentId: string,
+  modules: Record<string, unknown>,
+  manifest: RedundancyModuleManifestEntry[],
+  adapters: Map<string, ModuleReplicationAdapter>,
+  openForLocal: (envelope: string) => string,
+  restoreContext: ReplicationRestoreContext,
+) {
+  const entries = [...manifest].sort((left, right) => left.moduleId === "core-site" ? -1 : right.moduleId === "core-site" ? 1 : left.moduleId.localeCompare(right.moduleId));
+  if (entries.some((entry) => !Object.hasOwn(modules, entry.moduleId)) || Object.keys(modules).length !== entries.length) {
+    throw new Error("The snapshot does not contain exactly the modules in its signed manifest.");
+  }
+  const prepared = new Map<string, { adapter: ModuleReplicationAdapter; snapshot: unknown }>();
+  for (const entry of entries) {
+    const adapter = adapters.get(entry.moduleId);
+    if (!adapter || await adapterSchemaVersion(adapter, departmentId) !== entry.schemaVersion) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
+    const encoded = modules[entry.moduleId];
+    const snapshot = adapter.restoreSnapshotFromPeer
+      ? await adapter.restoreSnapshotFromPeer(encoded, openForLocal)
+      : encoded;
+    prepared.set(entry.moduleId, { adapter, snapshot });
+  }
+  // Clear module-owned dependents before core replaces the referenced rows.
+  // Adapters can also guard existing module data when the incoming manifest omits it.
+  for (const adapter of adapters.values()) {
+    await adapter.prepareRestore?.(client, departmentId, prepared.get(adapter.moduleId)?.snapshot);
+  }
+  const restoredSnapshots: Record<string, unknown> = {};
+  for (const [moduleId, { adapter, snapshot }] of prepared) {
+    await adapter.restoreSnapshot(client, departmentId, snapshot, restoreContext);
+    const verified = await adapter.verifySnapshot(client, departmentId, snapshot, restoreContext);
+    if (!verified.ready) throw new Error(`${adapter.moduleName} restore verification failed: ${verified.blockers.join(" ")}`);
+    restoredSnapshots[moduleId] = await adapter.exportSnapshot(client, departmentId);
+  }
+  return restoredSnapshots;
+}
+
 async function applyRedundancySnapshot(
   app: FastifyInstance,
   pool: import("pg").Pool,
@@ -347,25 +385,12 @@ async function applyRedundancySnapshot(
       || (sourceEpoch === Number(current.site_epoch) && BigInt(sourceSnapshotRevision) <= BigInt(current.snapshot_revision))) throw new Error("The standby relationship, source epoch, or snapshot revision changed during the restore; stale snapshots are rejected.");
     const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
     if (!moduleManifest.some((module) => module.moduleId === "core-site") || !await manifestSupportedByAdapters(moduleManifest, adapters, targetDepartmentId)) throw new Error("The standby does not have compatible data adapters for the source snapshot.");
-    const entries = [...moduleManifest].sort((left, right) => left.moduleId === "core-site" ? -1 : right.moduleId === "core-site" ? 1 : left.moduleId.localeCompare(right.moduleId));
-    if (entries.some((entry) => !(entry.moduleId in modules)) || Object.keys(modules).length !== entries.length) throw new Error("The snapshot does not contain exactly the modules in its signed manifest.");
     const restoreContext = {
       userIdMap: new Map<string, string>(),
       onCommit: (callback: () => Promise<void>) => commitCallbacks.push(callback),
       onRollback: (callback: () => Promise<void>) => rollbackCallbacks.push(callback),
     };
-    const restoredSnapshots: Record<string, unknown> = {};
-    for (const entry of entries) {
-      const adapter = adapters.get(entry.moduleId);
-      if (!adapter || await adapterSchemaVersion(adapter, targetDepartmentId) !== entry.schemaVersion) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
-      const moduleSnapshot = adapter.restoreSnapshotFromPeer
-        ? await adapter.restoreSnapshotFromPeer(modules[entry.moduleId], (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, String(envelope)))
-        : modules[entry.moduleId];
-      await adapter.restoreSnapshot(client, targetDepartmentId, moduleSnapshot, restoreContext);
-      const verified = await adapter.verifySnapshot(client, targetDepartmentId, moduleSnapshot, restoreContext);
-      if (!verified.ready) throw new Error(`${adapter.moduleName} restore verification failed: ${verified.blockers.join(" ")}`);
-      restoredSnapshots[entry.moduleId] = await adapter.exportSnapshot(client, targetDepartmentId);
-    }
+    const restoredSnapshots = await restoreSiteModules(client, targetDepartmentId, modules, moduleManifest, adapters, (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, envelope), restoreContext);
     const digest = replicationDigest(restoredSnapshots);
     await client.query("UPDATE sync_site_redundancy SET primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,site_epoch=$3,snapshot_revision=$4,last_snapshot_id=$5,last_replica_digest=$6,last_source_digest=$7,last_replica_manifest=$8::jsonb,last_snapshot_at=now(),last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1", [targetDepartmentId, sourceInstallationId, sourceEpoch, sourceSnapshotRevision, snapshotId, digest, sourceDigest, JSON.stringify(moduleManifest)]);
     await client.query("INSERT INTO sync_redundancy_audit(id,department_id,action,new_epoch,source_installation_id,note) VALUES($1,$2,'snapshot_applied',$3,$4,'Verified module-owned full-site snapshot applied.')", [randomUUID(), targetDepartmentId, sourceEpoch, sourceInstallationId]);
@@ -1297,24 +1322,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (site.rows[0]?.role !== "standby" || site.rows[0].upstream_installation_id !== sender.installationId || site.rows[0].upstream_department_id !== imported.source_department_id || Number(imported.source_epoch) < Number(site.rows[0].site_epoch) || (Number(imported.source_epoch) === Number(site.rows[0].site_epoch) && BigInt(imported.source_snapshot_revision) <= BigInt(site.rows[0].snapshot_revision))) throw new Error("The standby relationship, source epoch, or snapshot revision changed during the restore; stale snapshots are rejected.");
       const adapters = new Map(context.replication.list().map((adapter) => [adapter.moduleId, adapter]));
       if (!imported.module_manifest?.length || !imported.module_manifest.some((module) => module.moduleId === "core-site") || !await manifestSupportedByAdapters(imported.module_manifest, adapters, imported.target_department_id)) throw new Error("The standby no longer has compatible data adapters for the source snapshot.");
-      const entries = [...imported.module_manifest].sort((left, right) => left.moduleId === "core-site" ? -1 : right.moduleId === "core-site" ? 1 : left.moduleId.localeCompare(right.moduleId));
       const restoreContext = {
         userIdMap: new Map<string, string>(),
         onCommit: (callback: () => Promise<void>) => commitCallbacks.push(callback),
         onRollback: (callback: () => Promise<void>) => rollbackCallbacks.push(callback),
       };
-      const restoredSnapshots: Record<string, unknown> = {};
-      for (const entry of entries) {
-        const adapter = adapters.get(entry.moduleId);
-        if (!adapter || await adapterSchemaVersion(adapter, imported.target_department_id) !== entry.schemaVersion || !(entry.moduleId in payload.modules)) throw new Error(`The ${entry.moduleId} snapshot adapter is missing or incompatible.`);
-        const moduleSnapshot = adapter.restoreSnapshotFromPeer
-          ? await adapter.restoreSnapshotFromPeer(payload.modules[entry.moduleId], (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, envelope))
-          : payload.modules[entry.moduleId];
-        await adapter.restoreSnapshot(client, imported.target_department_id, moduleSnapshot, restoreContext);
-        const verified = await adapter.verifySnapshot(client, imported.target_department_id, moduleSnapshot, restoreContext);
-        if (!verified.ready) throw new Error(`${adapter.moduleName} restore verification failed: ${verified.blockers.join(" ")}`);
-        restoredSnapshots[entry.moduleId] = await adapter.exportSnapshot(client, imported.target_department_id);
-      }
+      const restoredSnapshots = await restoreSiteModules(client, imported.target_department_id, payload.modules, imported.module_manifest, adapters, (envelope) => openFromPeer(identity.encryptionPrivateKeyPem, envelope), restoreContext);
       const digest = replicationDigest(restoredSnapshots);
       const sourceDigest = payload.sourceDigest ?? sourceSnapshotDigest(payload.modules);
       await client.query("UPDATE sync_site_redundancy SET primary_installation_id=$2,former_standby_installation_id=NULL,former_standby_department_id=NULL,site_epoch=$3,snapshot_revision=$4,last_snapshot_id=$5,last_replica_digest=$6,last_source_digest=$7,last_replica_manifest=$8::jsonb,last_snapshot_at=now(),last_verified_at=now(),last_error=NULL,updated_at=now() WHERE department_id=$1", [imported.target_department_id, sender.installationId, imported.source_epoch, imported.source_snapshot_revision, request.params.snapshotId, digest, sourceDigest, JSON.stringify(imported.module_manifest)]);
