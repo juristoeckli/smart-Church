@@ -19,8 +19,13 @@ export async function canViewResource(client: Pick<PoolClient, "query">, departm
   return Boolean(rows[0]?.allowed);
 }
 
+export async function lockResourceBookingKey(client: PoolClient, departmentId: string, resourceId: string) {
+  // Match the capacity trigger's canonical UUID text even when input uses uppercase.
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1::uuid::text),hashtext($2::uuid::text))", [departmentId, resourceId]);
+}
+
 export async function lockResourceBookingPolicy(client: PoolClient, departmentId: string, resourceId: string) {
-  await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, resourceId]);
+  await lockResourceBookingKey(client, departmentId, resourceId);
   const result = await client.query<{ id: string; name: string; requires_approval: boolean; calendar_required: boolean; active: boolean; responsible_user_id: string | null; manager_booking_only: boolean; visibility_group_id: string | null }>(
     "SELECT id,name,requires_approval,calendar_required,active,responsible_user_id,manager_booking_only,visibility_group_id FROM bookable_resources WHERE id=$1 AND department_id=$2",
     [resourceId, departmentId],

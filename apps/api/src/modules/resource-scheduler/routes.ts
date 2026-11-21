@@ -196,13 +196,23 @@ function isoDate(value: string) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-async function calendarLinkStorageAvailable(client: Pick<PoolClient, "query">, occurrence: boolean) {
+async function calendarLinkingAvailable(client: Pick<PoolClient, "query">, departmentId: string, occurrence: boolean) {
+  if (!isServerModuleEnabled("church-calendar")) return false;
   const result = await client.query<{ available: boolean }>(
-    `SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL
+    `SELECT 'church-calendar'=ANY(enabled_modules)
+       AND to_regclass('public.church_calendar_appointments') IS NOT NULL
        AND to_regclass('public.church_calendar_calendars') IS NOT NULL
-       AND to_regclass('public.church_calendar_resource_links') IS NOT NULL
+       AND EXISTS (
+         SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.church_calendar_resource_links')
+           AND attname='occurrence_start' AND NOT attisdropped
+       )
        AND (NOT $1::boolean OR (to_regclass('public.church_calendar_appointment_exceptions') IS NOT NULL
-           AND to_regclass('public.church_calendar_extra_dates') IS NOT NULL)) AS available`, [occurrence],
+           AND to_regclass('public.church_calendar_extra_dates') IS NOT NULL
+           AND EXISTS (
+             SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.church_calendar_appointments')
+               AND attname='time_zone' AND NOT attisdropped
+           ))) AS available
+       FROM departments WHERE id=$2`, [occurrence, departmentId],
   );
   return Boolean(result.rows[0]?.available);
 }
@@ -445,8 +455,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         RETURNING total_units AS "totalUnits",default_lead_in_minutes AS "defaultLeadInMinutes",default_cleanup_minutes AS "defaultCleanupMinutes"`, [departmentId, request.params.resourceId, request.body.totalUnits, request.body.defaultLeadInMinutes, request.body.defaultCleanupMinutes]);
       const calendarRequired = request.body.calendarRequired ?? resource.calendar_required;
       if (calendarRequired && !resource.calendar_required) {
-        const calendar = await client.query("SELECT 'church-calendar'=ANY(enabled_modules) AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available FROM departments WHERE id=$1", [departmentId]);
-        if (!isServerModuleEnabled("church-calendar") || !calendar.rows[0]?.available) {
+        if (!await calendarLinkingAvailable(client, departmentId, true)) {
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "Enable General Calendar before requiring an appointment for this resource." });
         }
@@ -594,10 +603,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "This location is read-only on this installation." });
       }
-      const site = (await client.query<{ time_zone: string; calendar_enabled: boolean }>(
-        "SELECT time_zone,'church-calendar'=ANY(enabled_modules) AS calendar_enabled FROM departments WHERE id=$1", [departmentId],
-      )).rows[0];
-      if (!isServerModuleEnabled("church-calendar") || !site?.calendar_enabled || !await calendarLinkStorageAvailable(client, true)) {
+      const site = (await client.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId])).rows[0];
+      if (!site || !await calendarLinkingAvailable(client, departmentId, true)) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
       }
@@ -675,15 +682,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (request.body.linkedOccurrenceStartAt !== undefined && (!appointmentId || !occurrenceStart || repeat.frequency !== "once" || extraDates.length || excludedDates.length)) {
       return reply.code(400).send({ error: "Choose one saved calendar occurrence for this booking." });
     }
-    if (appointmentId) {
-      if (!isManager(request)) return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
-      if (!await calendarLinkStorageAvailable(context.pool!, Boolean(occurrenceStart))) return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
+    if (appointmentId && !isManager(request)) {
+      return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
     }
     const quantity = request.body.quantity ?? 1;
     if (quantity > resource.total_units) return reply.code(400).send({ error: "Quantity exceeds this resource's available units." });
     const leadInMinutes = request.body.leadInMinutes ?? resource.default_lead_in_minutes;
     const cleanupMinutes = request.body.cleanupMinutes ?? resource.default_cleanup_minutes;
-    const zoneResult = await context.pool!.query<{ time_zone: string; calendar_enabled: boolean }>("SELECT time_zone,'church-calendar'=ANY(enabled_modules) AS calendar_enabled FROM departments WHERE id=$1", [departmentId]);
+    const zoneResult = await context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
     const timeZone = zoneResult.rows[0]?.time_zone ?? "UTC";
     if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
     const instances = occurrenceStart
@@ -698,6 +704,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
+      if (appointmentId && !await calendarLinkingAvailable(client, departmentId, Boolean(occurrenceStart))) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
       }
       if (appointmentId && occurrenceStart) {
         const window = await lockOccurrenceWindow(client, request, departmentId, appointmentId, occurrenceStart, timeZone);
@@ -723,7 +733,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(403).send({ error: resourceManagerRequired });
       }
-      if (policy.calendar_required && (!appointmentId || !occurrenceStart || !isServerModuleEnabled("church-calendar") || !zoneResult.rows[0]?.calendar_enabled)) {
+      if (policy.calendar_required && (!appointmentId || !occurrenceStart)) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: resourceCalendarRequired });
       }
@@ -792,8 +802,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           await client.query("ROLLBACK");
           return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
         }
-        const links = await client.query("SELECT to_regclass('public.church_calendar_appointments') IS NOT NULL AND to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
-        if (!links.rows[0]?.available || !await lockLinkableAppointment(client, request, departmentId, plan.series.linked_appointment_id)) {
+        if (!await calendarLinkingAvailable(client, departmentId, false)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "The General Calendar module must be active to link an appointment." });
+        }
+        if (!await lockLinkableAppointment(client, request, departmentId, plan.series.linked_appointment_id)) {
           await client.query("ROLLBACK");
           return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
         }

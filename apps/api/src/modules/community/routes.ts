@@ -1,5 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
-import { canViewResource, hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
+import { canViewResource, hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingKey, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
@@ -1204,7 +1204,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           return reply.code(403).send({ error: "Resource management permission is required to approve or decline a pending request." });
         }
         if (request.body.status === "approved" && !await hasResourceSchedulerCapacityGuard(client)) {
-          await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", [departmentId, booking.resource_id]);
+          await lockResourceBookingKey(client, departmentId, booking.resource_id);
           const conflict = await client.query(
             `SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND id<>$3 AND status='approved'
                AND starts_at < (SELECT ends_at FROM resource_bookings WHERE id=$3) AND ends_at > (SELECT starts_at FROM resource_bookings WHERE id=$3) LIMIT 1`,
