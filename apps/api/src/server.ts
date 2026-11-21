@@ -1,4 +1,5 @@
 import { registerRegistrationReceiptRoutes } from "./event-registration-notices.js";
+import { completedCheckInError, writeCoreEventAttendance } from "./event-attendance.js";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import { createReadStream } from "node:fs";
 import { readFile, stat, statfs } from "node:fs/promises";
@@ -3430,7 +3431,7 @@ app.put<{ Params: { id: string }; Body: { contactId: string; firstTimeVisitor?: 
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
-  const result = await pool.query<ServiceEventCheckIn>(
+  const result = await writeCoreEventAttendance(pool, selectedDepartmentId, request.params.id, request.body.contactId, (client) => client.query<ServiceEventCheckIn>(
     `INSERT INTO event_attendance_checkins (event_id,contact_id,first_time_visitor,follow_up_status)
      SELECT gathering.id,person.id,$4,COALESCE($5,CASE WHEN $4 THEN 'needed' ELSE 'not_needed' END)
        FROM service_events gathering JOIN contacts person ON person.id=$2 AND person.department_id=gathering.department_id
@@ -3438,9 +3439,12 @@ app.put<{ Params: { id: string }; Body: { contactId: string; firstTimeVisitor?: 
      ON CONFLICT (event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,follow_up_status=EXCLUDED.follow_up_status,updated_at=now()
      RETURNING contact_id AS "contactId",first_time_visitor AS "firstTimeVisitor",follow_up_status AS "followUpStatus",checked_in_at AS "checkedInAt"`,
     [request.params.id, request.body.contactId, selectedDepartmentId, request.body.firstTimeVisitor ?? false, request.body.followUpStatus ?? null],
-  );
-  if (!result.rowCount) return reply.code(404).send({ error: "The gathering or person could not be found in this location." });
-  return result.rows[0];
+  ));
+  if (result.state === "completed") return reply.code(409).send({ error: completedCheckInError });
+  if (result.state === "released") return reply.code(409).send({ error: "This attendee has already been released." });
+  if (result.state !== "changed" || !result.value.rowCount) return reply.code(404).send({ error: "The gathering or person could not be found in this location." });
+  realtime.publish("module:check-in:changed", selectedDepartmentId, { eventId: request.params.id, contactId: request.body.contactId, present: true });
+  return result.value.rows[0];
 });
 
 app.delete<{ Params: { id: string; contactId: string } }>("/api/events/:id/check-ins/:contactId", {
@@ -3449,13 +3453,16 @@ app.delete<{ Params: { id: string; contactId: string } }>("/api/events/:id/check
   if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
   const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
   if (!selectedDepartmentId) return reply;
-  const result = await pool.query(
+  const result = await writeCoreEventAttendance(pool, selectedDepartmentId, request.params.id, request.params.contactId, (client) => client.query(
     `DELETE FROM event_attendance_checkins checkin USING service_events gathering, contacts person
       WHERE checkin.event_id=gathering.id AND checkin.contact_id=person.id AND gathering.id=$1 AND person.id=$2
         AND gathering.department_id=$3 AND person.department_id=$3 AND (gathering.source_system IS NULL OR gathering.source_system NOT IN ('churchtools','elvanto'))`,
     [request.params.id, request.params.contactId, selectedDepartmentId],
-  );
-  if (!result.rowCount) return reply.code(404).send({ error: "This check-in could not be found in the selected location." });
+  ));
+  if (result.state === "completed") return reply.code(409).send({ error: completedCheckInError });
+  if (result.state === "released") return reply.code(409).send({ error: "This attendee has already been released." });
+  if (result.state !== "changed" || !result.value.rowCount) return reply.code(404).send({ error: "This check-in could not be found in the selected location." });
+  realtime.publish("module:check-in:changed", selectedDepartmentId, { eventId: request.params.id, contactId: request.params.contactId, present: false });
   return { checkedIn: false };
 });
 

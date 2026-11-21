@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
+import { completedCheckInError, isCheckInComplete, lockCheckInEvent } from "../../event-attendance.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -39,11 +40,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }, async (request, reply) => {
     const departmentId = await scope(request, reply, true); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
-    const event = await pool!.query("SELECT id FROM service_events WHERE id=$1 AND department_id=$2", [request.params.eventId, departmentId]);
-    if (!event.rowCount) return reply.code(404).send({ error: "Meeting not found in this location." });
-    if (request.body.complete) await pool!.query(`INSERT INTO check_in_sessions(department_id,event_id,completed_by) VALUES($1,$2,$3)
-      ON CONFLICT(department_id,event_id) DO UPDATE SET completed_by=EXCLUDED.completed_by,completed_at=now(),updated_at=now()`, [departmentId, request.params.eventId, request.authenticatedUser?.id ?? null]);
-    else await pool!.query("DELETE FROM check_in_sessions WHERE department_id=$1 AND event_id=$2", [departmentId, request.params.eventId]);
+    const eventId = request.params.eventId;
+    const client = await pool!.connect();
+    try {
+      await client.query("BEGIN");
+      if (!await lockCheckInEvent(client, departmentId, eventId)) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Meeting not found in this location." });
+      }
+      if (request.body.complete) {
+        await client.query(`INSERT INTO check_in_sessions(department_id,event_id,completed_by) VALUES($1,$2,$3)
+          ON CONFLICT(department_id,event_id) DO NOTHING`, [departmentId, eventId, request.authenticatedUser?.id ?? null]);
+      } else {
+        await client.query("DELETE FROM check_in_sessions WHERE department_id=$1 AND event_id=$2", [departmentId, eventId]);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
     realtime.publish("module:check-in:changed", departmentId, { eventId: request.params.eventId, complete: request.body.complete });
     return { complete: request.body.complete };
   });
@@ -259,7 +274,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
-      await client.query("SELECT id FROM service_events WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.eventId]);
+      if (!await lockCheckInEvent(client, departmentId, request.params.eventId)) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "Meeting not found in this location." });
+      }
+      if (await isCheckInComplete(client, departmentId, request.params.eventId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: completedCheckInError });
+      }
       const release = await client.query("SELECT 1 FROM check_in_event_pickups WHERE department_id=$1 AND event_id=$2 AND child_contact_id=$3 AND released_at IS NOT NULL", [departmentId, request.params.eventId, request.params.contactId]);
       if (release.rowCount) {
         await client.query("ROLLBACK");
