@@ -127,8 +127,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { updated: true, parentId: request.body.parentId };
   });
 
-  app.get<{ Params: { id: string } }>("/api/modules/group-hierarchy/groups/:id/history", {
-    schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },
+  app.get<{ Params: { id: string }; Querystring: { entityKind?: "membership" } }>("/api/modules/group-hierarchy/groups/:id/history", {
+    schema: {
+      params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      querystring: { type: "object", properties: { entityKind: { type: "string", enum: ["membership"] } } },
+    },
   }, async (request, reply) => {
     if (!pool || !isDatabaseReady()) return unavailable(reply);
     const departmentId = await resolveDepartmentId(request, reply);
@@ -140,9 +143,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               history.before_data AS "beforeData",history.after_data AS "afterData",history.created_at AS "createdAt",
               COALESCE(actor.display_name,'System or imported update') AS "actorName"
          FROM group_hierarchy_history history LEFT JOIN app_users actor ON actor.id=history.actor_user_id
-        WHERE history.department_id=$1 AND history.group_id=$2 ORDER BY history.created_at DESC,history.id DESC LIMIT 200`,
-      [departmentId, request.params.id],
+        WHERE history.department_id=$1 AND history.group_id=$2
+          AND ($3::text IS NULL OR history.entity_kind=$3)
+        ORDER BY history.created_at DESC,history.id DESC LIMIT 200`,
+      [departmentId, request.params.id, request.query.entityKind ?? null],
     );
+    reply.header("Cache-Control", "private, no-store");
     return result.rows;
   });
 

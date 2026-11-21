@@ -2,6 +2,8 @@
 
 Group administration manages group trees, membership roles, custom membership values, invitations, and change history for the active location.
 
+Group history can show membership changes only. The filter applies before the 200-entry limit. Membership entries show the name when the contact is still on the roster and summarize changes to role, status, join date, and custom values. The original change details remain available.
+
 Group leaders and managers can review the latest 200 invitations for a group, including recipient, creation/expiry dates and pending, accepted, revoked or expired status. They can revoke pending invitations. Invitation tokens are never included in the history response; a newly created token is returned once so the creator can share the link. Invitation emails are not sent automatically.
 
 ## Group leadership roster

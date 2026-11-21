@@ -4,16 +4,37 @@ import "./styles.css";
 
 type Group = { id: string; name: string; description: string; parentId: string | null; memberCount: number; activeCount: number; subgroupCount: number; imported: boolean };
 type Member = { contactId: string; firstName: string; lastName: string; email: string | null; role: string; status: "active" | "paused" | "waitlist"; joinedOn: string | null; customFields: Record<string, string | number | boolean | null> };
-type History = { id: string; entityKind: string; action: string; beforeData: unknown; afterData: unknown; createdAt: string; actorName: string };
+type History = { id: string; entityKind: string; entityId: string; action: string; beforeData: unknown; afterData: unknown; createdAt: string; actorName: string };
 type Leader = { groupId: string; groupName: string; groupDescription: string; parentGroupName: string | null; contactId: string; firstName: string; lastName: string; email: string | null; role: string; joinedOn: string | null };
 type GroupNote = { id: string; title: string; body: string; createdAt: string; updatedAt: string; authorName: string; canArchive: boolean };
 type GroupInvitation = { id: string; contactId: string; firstName: string; lastName: string; createdAt: string; expiresAt: string; acceptedAt: string | null; revokedAt: string | null; status: "pending" | "accepted" | "revoked" | "expired" };
+
+function historyRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function membershipChanges(entry: History) {
+  const before = historyRecord(entry.beforeData);
+  const after = historyRecord(entry.afterData);
+  const fields = [
+    { label: "Role", before: before.role, after: after.role },
+    { label: "Status", before: before.status, after: after.status },
+    { label: "Join date", before: before.joinedOn ?? before.joined_on, after: after.joinedOn ?? after.joined_on },
+  ];
+  const beforeCustom = historyRecord(before.customFields);
+  const afterCustom = historyRecord(after.customFields);
+  for (const key of new Set([...Object.keys(beforeCustom), ...Object.keys(afterCustom)])) {
+    fields.push({ label: key, before: beforeCustom[key], after: afterCustom[key] });
+  }
+  return fields.filter((field) => (field.before ?? null) !== (field.after ?? null));
+}
 
 export function GroupHierarchyModule({ departmentId, csrfToken, language }: ModuleContext) {
   const [groups, setGroups] = useState<Group[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
   const [history, setHistory] = useState<History[]>([]);
+  const [membershipHistoryOnly, setMembershipHistoryOnly] = useState(false);
   const [notes, setNotes] = useState<GroupNote[]>([]);
   const [canManageNotes, setCanManageNotes] = useState(false);
   const [noteDraft, setNoteDraft] = useState({ title: "", body: "" });
@@ -43,7 +64,7 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
     if (!id) { setMembers([]); setHistory([]); setNotes([]); setCanManageNotes(false); setInvitations([]); setCanManageInvitations(false); return; }
     const [memberResponse, historyResponse, ruleResponse, noteResponse, invitationResponse] = await Promise.all([
       fetch(`/api/modules/group-hierarchy/groups/${id}/members`, { headers }),
-      fetch(`/api/modules/group-hierarchy/groups/${id}/history`, { headers }),
+      fetch(`/api/modules/group-hierarchy/groups/${id}/history${membershipHistoryOnly ? "?entityKind=membership" : ""}`, { headers }),
       fetch(`/api/modules/group-hierarchy/groups/${id}/membership-rules`, { headers }),
       fetch(`/api/modules/group-hierarchy/groups/${id}/notes`, { headers }),
       fetch(`/api/modules/group-hierarchy/groups/${id}/invitations`, { headers }),
@@ -59,7 +80,7 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
     setInvitations(invitationData.invitations);
     setCanManageInvitations(invitationData.canManage);
     setParentId(groups.find((group) => group.id === id)?.parentId ?? "");
-  }, [groups, headers]);
+  }, [groups, headers, membershipHistoryOnly]);
   useEffect(() => { void load().catch((reason: Error) => setError(reason.message)); }, [load]);
   useEffect(() => { void loadDetails(selectedId).catch((reason: Error) => setError(reason.message)); }, [loadDetails, selectedId]);
   const mutate = async (path: string, method: string, body: unknown) => {
@@ -145,7 +166,21 @@ export function GroupHierarchyModule({ departmentId, csrfToken, language }: Modu
           {canManageNotes && <form className="gh-note-form" onSubmit={(event) => { event.preventDefault(); void addNote(); }}><label>Title<input required maxLength={160} value={noteDraft.title} onChange={(event) => setNoteDraft({ ...noteDraft, title: event.target.value })} /></label><label>Note<textarea required maxLength={10000} rows={4} value={noteDraft.body} onChange={(event) => setNoteDraft({ ...noteDraft, body: event.target.value })} /></label><button disabled={!noteDraft.title.trim() || !noteDraft.body.trim()}>Add note</button></form>}
           {notes.length ? notes.map((note) => <article className="gh-history" key={note.id}><strong>{note.title}</strong><small>{note.authorName} · {new Date(note.createdAt).toLocaleString()}</small><p className="gh-note-body">{note.body}</p>{note.canArchive && <button className="gh-note-archive" onClick={() => void archiveNote(note)}>Archive note</button>}</article>) : <p>No group notes yet.</p>}
         </div>
-        <div className="gh-panel"><h2>{text.history}</h2>{history.length ? history.map((entry) => <article className="gh-history" key={entry.id}><strong>{entry.entityKind} {entry.action}</strong><small>{new Date(entry.createdAt).toLocaleString()} · {entry.actorName}</small><details><summary>Change details</summary><pre>{JSON.stringify({ before: entry.beforeData, after: entry.afterData }, null, 2)}</pre></details></article>) : <p>No recorded changes yet.</p>}</div>
+        <div className="gh-panel">
+          <h2>{text.history}</h2>
+          <label className="gh-check"><input type="checkbox" checked={membershipHistoryOnly} onChange={(event) => setMembershipHistoryOnly(event.target.checked)} /> Membership changes only</label>
+          {history.filter((entry) => !membershipHistoryOnly || entry.entityKind === "membership").map((entry) => {
+            const member = entry.entityKind === "membership" ? members.find((person) => person.contactId === entry.entityId) : undefined;
+            const changes = entry.entityKind === "membership" ? membershipChanges(entry) : [];
+            return <article className="gh-history" key={entry.id}>
+              <strong>{entry.entityKind} {entry.action}{member ? ` · ${member.firstName} ${member.lastName}` : ""}</strong>
+              <small>{new Date(entry.createdAt).toLocaleString()} · {entry.actorName}</small>
+              {changes.length > 0 && <ul>{changes.map((field, index) => <li key={index}><strong>{field.label}:</strong> {String(field.before ?? "—")} → {String(field.after ?? "—")}</li>)}</ul>}
+              <details><summary>Change details</summary><pre>{JSON.stringify({ before: entry.beforeData, after: entry.afterData }, null, 2)}</pre></details>
+            </article>;
+          })}
+          {!history.some((entry) => !membershipHistoryOnly || entry.entityKind === "membership") && <p>No recorded changes yet.</p>}
+        </div>
       </> : <div className="gh-panel"><p>{text.empty}</p></div>}</section></div>
     {edit && <div className="gh-modal-backdrop" role="presentation"><section className="gh-modal" role="dialog" aria-modal="true" aria-labelledby="gh-edit-title"><h2 id="gh-edit-title">Edit membership · {edit.firstName} {edit.lastName}</h2><label>Role<input value={edit.role} onChange={(event) => setEdit({ ...edit, role: event.target.value })} /></label><label>Status<select value={edit.status} onChange={(event) => setEdit({ ...edit, status: event.target.value as Member["status"] })}><option value="active">Active</option><option value="paused">Paused</option><option value="waitlist">Waitlist</option></select></label><label>Joined on<input type="date" value={edit.joinedOn?.slice(0, 10) ?? ""} onChange={(event) => setEdit({ ...edit, joinedOn: event.target.value || null })} /></label><label>Custom fields (JSON)<textarea rows={7} value={customText} onChange={(event) => setCustomText(event.target.value)} /></label><div className="gh-actions"><button onClick={() => setEdit(null)}>Cancel</button><button onClick={() => void saveMember()}>Save membership</button></div></section></div>}
   </main>;
