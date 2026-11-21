@@ -295,8 +295,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return groups.rows;
     });
     type MembershipStatus = "active" | "paused" | "waitlist";
-    routes.post<{ Body: { groupId: string; contactIds: string[]; role: string; status: MembershipStatus } }>("/api/people-records/bulk-group-membership", {
+    routes.post<{ Body: { groupId: string; contactIds: string[]; role: string; status: MembershipStatus; operation?: "add" | "update" } }>("/api/people-records/bulk-group-membership", {
       schema: { body: { type: "object", additionalProperties: false, required: ["groupId", "contactIds", "role", "status"], properties: {
+        operation: { type: "string", enum: ["add", "update"] },
         groupId: uuid,
         contactIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: uuid },
         role: { type: "string", minLength: 1, maxLength: 80 },
@@ -306,14 +307,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const departmentId = await department(request, reply, true);
       if (!departmentId || !validateMutation(request, reply)) return reply;
       if (request.activeDepartmentRole !== "site_admin" && !(request.activeDepartmentPermissions ?? []).includes("groups_manage")) {
-        return reply.code(403).send({ error: "You need group management permission to assign memberships." });
+        return reply.code(403).send({ error: "You need group management permission to change memberships." });
       }
-      const { groupId, status } = request.body;
+      const { groupId, status, operation = "add" } = request.body;
       const role = request.body.role.trim();
       const contactIds = [...new Set(request.body.contactIds.map(id => id.toLowerCase()))].sort();
       if (!role) return reply.code(400).send({ error: "Enter a group role." });
       const client = await pool!.connect();
-      let added = 0;
+      let changedCount = 0;
       try {
         await client.query("BEGIN");
         if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -337,13 +338,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(409).send({ error: "Some selected people are no longer active in this location. Refresh the directory and try again." });
         }
         await client.query("SELECT set_config('smart_church.actor_id',$1,true),set_config('smart_church.department_id',$2,true)", [request.authenticatedUser!.id, departmentId]);
-        const result = await client.query(
+        const result = operation === "update" ? await client.query(
+          "UPDATE group_members SET role=$3,status=$4 WHERE group_id=$1 AND contact_id=ANY($2::uuid[]) AND (role IS DISTINCT FROM $3 OR status IS DISTINCT FROM $4)",
+          [groupId, contactIds, role, status],
+        ) : await client.query(
           `INSERT INTO group_members(group_id,contact_id,role,status,joined_on)
            SELECT $1,person_id,$3,$4,CURRENT_DATE FROM unnest($2::uuid[]) AS selected(person_id)
            ON CONFLICT (group_id,contact_id) DO NOTHING`,
           [groupId, contactIds, role, status],
         );
-        added = result.rowCount ?? 0;
+        changedCount = result.rowCount ?? 0;
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
@@ -351,11 +355,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       } finally {
         client.release();
       }
-      if (added) {
+      if (changedCount) {
         changed(departmentId);
-        realtime.publish("core:groups:changed", departmentId, { groupId, action: "membership-bulk-assigned" });
+        realtime.publish("core:groups:changed", departmentId, { groupId, action: operation === "update" ? "membership-bulk-updated" : "membership-bulk-assigned" });
       }
-      return { added, unchanged: contactIds.length - added };
+      return operation === "update"
+        ? { updated: changedCount, unchanged: contactIds.length - changedCount }
+        : { added: changedCount, unchanged: contactIds.length - changedCount };
     });
     routes.get<{ Querystring: { q?: string; status?: string; field?: string; value?: string; filters?:string;relationshipFilters?:string;groupRole?:string;groupType?:string;groupId?:string;sort?:DirectorySort;archived?:boolean;includeStatistics?:boolean;page?:number;pageSize?:number } }>("/api/people-records/directory",{schema:{querystring:{type:"object",additionalProperties:false,properties:{q:{type:"string",maxLength:120},status:{type:"string",enum:["member","visitor"]},field:{type:"string",pattern:"^[a-z][a-z0-9_]{0,39}$"},value:{type:"string",maxLength:200},filters:{type:"string",maxLength:3000},relationshipFilters:{type:"string",maxLength:2000},groupRole:{type:"string",minLength:1,maxLength:80},groupType:{type:"string",minLength:1,maxLength:120},groupId:uuid,sort:directorySortSchema,archived:{type:"boolean"},includeStatistics:{type:"boolean"},page:{type:"integer",minimum:1,maximum:2147483647},pageSize:{type:"integer",minimum:1,maximum:500}}}}}, async (request, reply) => {
       const d=await department(request,reply); if(!d)return reply; const {q="",status}=request.query;
