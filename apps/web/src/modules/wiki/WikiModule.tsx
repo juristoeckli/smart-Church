@@ -8,7 +8,8 @@ type GroupOption = { id: string; name: string };
 type WikiFile = { id: string; title: string; fileName: string; contentType: string; fileSize: number; createdAt: string };
 type WikiLink = { id: string; title: string; url: string; created_at?: string };
 type WikiPage = { id: string; categoryId: string; title: string; contentHtml: string; status: "active" | "archived"; redirectPageId: string | null; isHomepage: boolean; audience: WikiAudience; audienceGroupId: string | null; createdAt: string; updatedAt: string; updatedBy: string | null; editorName?: string | null; links?: WikiLink[]; files?: WikiFile[] };
-type PageVersion = { id: string; title: string; contentHtml: string; createdAt: string; editorId: string | null; editorName: string | null };
+type AudienceSnapshot = { audience: WikiAudience; groupId: string | null };
+type PageVersion = { id: string; title: string; contentHtml: string; createdAt: string; editorId: string | null; editorName: string | null; audienceChange?: { from: AudienceSnapshot; to: AudienceSnapshot } | null };
 type VersionComparison = { left: PageVersion; right: PageVersion };
 type EntityType = "person" | "group" | "wiki" | "song";
 type WikiEntityMatch = { id: string; title: string; detail?: string };
@@ -28,6 +29,9 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const [pages, setPages] = useState<WikiPage[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
   const [selectedPage, setSelectedPage] = useState<WikiPage | null>(null);
+  const [bulkPageIds, setBulkPageIds] = useState<string[]>([]);
+  const [bulkAudience, setBulkAudience] = useState<WikiAudience | "">("");
+  const [bulkGroupId, setBulkGroupId] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"active" | "archived">("active");
@@ -75,6 +79,13 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
   const canSearchPeople = department.role === "site_admin" || (department.permissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
   const flatCategories = useMemo(() => categoryTree(categories), [categories]);
   const visiblePages = useMemo(() => pages.filter((page) => !selectedCategoryId || page.categoryId === selectedCategoryId), [pages, selectedCategoryId]);
+  const bulkIds = visiblePages.filter((page) => page.status === "active" && bulkPageIds.includes(page.id)).map((page) => page.id);
+  useEffect(() => { setBulkPageIds([]); setBulkAudience(""); setBulkGroupId(""); }, [departmentId, selectedCategoryId, search, status]);
+
+  function audienceLabel(value: AudienceSnapshot) {
+    if (value.audience === "group") return groups.find((group) => group.id === value.groupId)?.name ?? "Restricted group";
+    return value.audience === "managers" ? "Wiki managers only" : "Everyone in this location";
+  }
   const inlineImageFiles = attachedFiles.filter((file) => file.contentType === "image/jpeg" && file.fileSize >= 1 && file.fileSize <= 2_000_000);
 
   async function api<T>(path: string, method = "GET", body?: unknown, headers: Record<string, string> = {}): Promise<T> {
@@ -193,6 +204,18 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     try { await action(); setFeedback(success); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "The request could not be completed."); }
     finally { setBusy(false); }
+  }
+
+  async function applyBulkAudience(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canManage || busy || !bulkIds.length || !bulkAudience || (bulkAudience === "group" && !bulkGroupId)) return;
+    const audienceGroupId = bulkAudience === "group" ? bulkGroupId : null;
+    if (!window.confirm(`Change the audience for ${bulkIds.length} selected pages to ${audienceLabel({ audience: bulkAudience, groupId: audienceGroupId })}?`)) return;
+    await run(async () => {
+      await api("/api/modules/wiki/pages/bulk-audience", "POST", { pageIds: bulkIds, audience: bulkAudience, audienceGroupId });
+      setBulkPageIds([]);
+      await refresh();
+    }, "Audience updated for selected pages.");
   }
 
   async function createPage(event: FormEvent<HTMLFormElement>) {
@@ -361,7 +384,19 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     <aside className="wiki-panel" aria-label="Wiki pages">
       <div className="wiki-panel-head"><h2>Pages</h2><select className="wiki-select" aria-label="Page status" value={status} onChange={(event) => setStatus(event.target.value as "active" | "archived")}><option value="active">Active</option><option value="archived">Archived</option></select></div>
       <label className="wiki-search"><Search size={14} /><input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search pages" aria-label="Search Wiki pages" /></label>
-      <div className="wiki-page-list">{visiblePages.map((page) => <button type="button" className={`wiki-page-item ${selectedPage?.id === page.id ? "wiki-page-item-selected" : ""} ${page.status === "archived" ? "wiki-page-archived" : ""}`} key={page.id} aria-current={selectedPage?.id === page.id} onClick={() => { setEditing(false); void openPage(page.id); }}><strong>{page.isHomepage ? "⌂ " : ""}{page.title}</strong><small>{humanDate(page.updatedAt)}{page.editorName ? ` · ${page.editorName}` : ""}</small></button>)}</div>
+      {canManage && status === "active" && !editing && !creating && <form className="wiki-bulk-audience" onSubmit={applyBulkAudience}>
+        <label>Audience for selected pages<select className="wiki-select" value={bulkAudience} onChange={(event) => setBulkAudience(event.target.value as WikiAudience | "")}>
+          <option value="">Choose an audience</option><option value="location">Everyone in this location</option><option value="group">Members of one group</option><option value="managers">Wiki managers only</option>
+        </select></label>
+        {bulkAudience === "group" && <label>Group<select className="wiki-select" required value={bulkGroupId} onChange={(event) => setBulkGroupId(event.target.value)}>
+          <option value="">Choose a group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
+        </select></label>}
+        <button className="button button-secondary" type="submit" disabled={busy || !bulkIds.length || !bulkAudience || (bulkAudience === "group" && !bulkGroupId)}>Apply to {bulkIds.length} selected</button>
+      </form>}
+      <div className="wiki-page-list">{visiblePages.map((page) => <div className="wiki-bulk-page-row" key={page.id}>{canManage && status === "active" && !editing && !creating && <input type="checkbox" aria-label={`Select ${page.title}`} checked={bulkIds.includes(page.id)} disabled={busy || (!bulkIds.includes(page.id) && bulkIds.length >= 100)} onChange={(event) => {
+        const checked = event.target.checked;
+        setBulkPageIds((ids) => checked ? [...ids, page.id] : ids.filter((id) => id !== page.id));
+      }} />}<button type="button" className={`wiki-page-item ${selectedPage?.id === page.id ? "wiki-page-item-selected" : ""} ${page.status === "archived" ? "wiki-page-archived" : ""}`} aria-current={selectedPage?.id === page.id} onClick={() => { setEditing(false); void openPage(page.id); }}><strong>{page.isHomepage ? "⌂ " : ""}{page.title}</strong><small>{humanDate(page.updatedAt)}{page.editorName ? ` · ${page.editorName}` : ""}</small></button></div>)}</div>
       {!visiblePages.length && <p className="wiki-empty">{search ? "No pages match your search." : "No pages in this view."}</p>}
     </aside>
 
@@ -379,7 +414,7 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
       </> : <div className="wiki-empty"><BookOpenText size={28} /><h2>Welcome to Wiki</h2><p>Choose a page to read or create the first page for this location.</p>{canManage && categories.length > 0 && <button className="button button-primary" type="button" onClick={() => { setDraftCategory(selectedCategoryId || categories[0].id); setCreating(true); }}><Plus size={15} /> Create a page</button>}</div>}
     </main>
 
-    {showHistory && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHistory(false); }}><section className="wiki-modal" role="dialog" aria-modal="true" aria-labelledby="wiki-history-title"><div className="wiki-panel-head"><div><span className="wiki-muted">VERSION HISTORY</span><h2 id="wiki-history-title">{selectedPage?.title}</h2></div><button className="button button-quiet" type="button" onClick={() => setShowHistory(false)} aria-label="Close history"><X size={18} /></button></div>{canManage && versions.length > 1 && <div className="wiki-version-compare-controls"><label>Compare revision<select value={compareLeftId} onChange={(change) => setCompareLeftId(change.target.value)}>{versions.map((version) => <option key={version.id} value={version.id}>{version.title} · {humanDate(version.createdAt)}</option>)}</select></label><span>with</span><label>Revision<select value={compareRightId} onChange={(change) => setCompareRightId(change.target.value)}>{versions.map((version) => <option key={version.id} value={version.id}>{version.title} · {humanDate(version.createdAt)}</option>)}</select></label><button className="button button-primary" type="button" disabled={!compareLeftId || !compareRightId || compareLeftId === compareRightId || busy} onClick={() => void compareVersions()}><FileText size={14} /> Compare</button></div>}{versions.map((version) => <div className="wiki-version-item" key={version.id}><div><strong>{version.title}</strong><small className="wiki-muted">{humanDate(version.createdAt)}{version.editorName ? ` · ${version.editorName}` : ""}</small></div><div className="wiki-actions"><button className="button button-secondary" type="button" onClick={() => setPreviewVersion(version)}><FileText size={14} /> Preview</button><button className="button button-secondary" type="button" onClick={() => void restoreVersion(version)}><RotateCcw size={14} /> Restore</button></div></div>)}{!versions.length && <p className="wiki-empty">No saved versions yet.</p>}</section></div>}
+    {showHistory && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowHistory(false); }}><section className="wiki-modal" role="dialog" aria-modal="true" aria-labelledby="wiki-history-title"><div className="wiki-panel-head"><div><span className="wiki-muted">VERSION HISTORY</span><h2 id="wiki-history-title">{selectedPage?.title}</h2></div><button className="button button-quiet" type="button" onClick={() => setShowHistory(false)} aria-label="Close history"><X size={18} /></button></div>{canManage && versions.length > 1 && <div className="wiki-version-compare-controls"><label>Compare revision<select value={compareLeftId} onChange={(change) => setCompareLeftId(change.target.value)}>{versions.map((version) => <option key={version.id} value={version.id}>{version.title} · {humanDate(version.createdAt)}</option>)}</select></label><span>with</span><label>Revision<select value={compareRightId} onChange={(change) => setCompareRightId(change.target.value)}>{versions.map((version) => <option key={version.id} value={version.id}>{version.title} · {humanDate(version.createdAt)}</option>)}</select></label><button className="button button-primary" type="button" disabled={!compareLeftId || !compareRightId || compareLeftId === compareRightId || busy} onClick={() => void compareVersions()}><FileText size={14} /> Compare</button></div>}{versions.map((version) => <div className="wiki-version-item" key={version.id}><div><strong>{version.title}</strong><small className="wiki-muted">{humanDate(version.createdAt)}{version.editorName ? ` · ${version.editorName}` : ""}</small>{version.audienceChange && <small className="wiki-muted">Audience changed from {audienceLabel(version.audienceChange.from)} to {audienceLabel(version.audienceChange.to)}</small>}</div><div className="wiki-actions"><button className="button button-secondary" type="button" onClick={() => setPreviewVersion(version)}><FileText size={14} /> Preview</button><button className="button button-secondary" type="button" onClick={() => void restoreVersion(version)}><RotateCcw size={14} /> Restore</button></div></div>)}{!versions.length && <p className="wiki-empty">No saved versions yet.</p>}</section></div>}
     {comparison && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setComparison(null)}><section className="wiki-modal wiki-version-comparison" role="dialog" aria-modal="true" aria-labelledby="wiki-version-comparison-title"><div className="wiki-panel-head"><div><span className="wiki-muted">MANAGER REVISION COMPARISON</span><h2 id="wiki-version-comparison-title">{selectedPage?.title}</h2></div><button className="button button-quiet" type="button" onClick={() => setComparison(null)} aria-label="Close revision comparison"><X size={18} /></button></div><div className="wiki-version-comparison-columns">{([comparison.left, comparison.right] as const).map((version, index) => <section className="wiki-version-comparison-column" key={version.id}><header><strong>{index === 0 ? "Selected revision" : "Compared revision"}</strong><span>{version.title}</span><small className="wiki-muted">{humanDate(version.createdAt)}{version.editorName ? ` · ${version.editorName}` : ""}</small></header><article className="wiki-version-preview-content" dangerouslySetInnerHTML={{ __html: version.contentHtml }} /></section>)}</div><div className="wiki-modal-actions"><button className="button button-secondary" type="button" onClick={() => setComparison(null)}>Close comparison</button></div></section></div>}
     {previewVersion && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setPreviewVersion(null)}><section className="wiki-modal wiki-version-preview" role="dialog" aria-modal="true" aria-labelledby="wiki-version-preview-title"><div className="wiki-panel-head"><div><span className="wiki-muted">READ-ONLY REVISION PREVIEW · {humanDate(previewVersion.createdAt)}</span><h2 id="wiki-version-preview-title">{previewVersion.title}</h2><small className="wiki-muted">{previewVersion.editorName ? `Saved by ${previewVersion.editorName}` : "Saved revision"}</small></div><button className="button button-quiet" type="button" onClick={() => setPreviewVersion(null)} aria-label="Close revision preview"><X size={18} /></button></div><article className="wiki-version-preview-content" dangerouslySetInnerHTML={{ __html: previewVersion.contentHtml }} /><div className="wiki-modal-actions"><button className="button button-secondary" type="button" onClick={() => setPreviewVersion(null)}>Close preview</button>{canManage && <button className="button button-primary" type="button" onClick={() => { const version = previewVersion; setPreviewVersion(null); void restoreVersion(version); }}><RotateCcw size={14} /> Restore this version</button>}</div></section></div>}
     {showAttachments && <div className="wiki-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowAttachments(false); }}><section className="wiki-modal" role="dialog" aria-modal="true" aria-labelledby="wiki-files-title"><div className="wiki-panel-head"><h2 id="wiki-files-title">Attach a stored file</h2><button className="button button-quiet" type="button" onClick={() => setShowAttachments(false)} aria-label="Close"><X size={18} /></button></div>{availableFiles.map((file) => <div className="wiki-file-row" key={file.id}><span><strong>{file.title}</strong><small className="wiki-file-meta"> · {file.fileName} · {sizeLabel(file.fileSize)}</small></span><button className="button button-secondary" type="button" onClick={() => void attachFile(file.id)}><Plus size={14} /> Attach</button></div>)}{!availableFiles.length && <p className="wiki-empty">No other files are available in this location.</p>}</section></div>}

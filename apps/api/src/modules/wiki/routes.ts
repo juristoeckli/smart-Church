@@ -344,11 +344,70 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
+  app.post<{ Body: { pageIds: string[]; audience: WikiAudience; audienceGroupId?: string | null } }>("/api/modules/wiki/pages/bulk-audience", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["pageIds", "audience"], properties: {
+      pageIds: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", format: "uuid" } },
+      audience: { type: "string", enum: ["location", "group", "managers"] },
+      audienceGroupId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] },
+    } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await site(request, reply, true);
+    if (!departmentId) return reply;
+    const { pageIds, audience } = request.body;
+    const audienceGroupId = request.body.audienceGroupId ?? null;
+    if ((audience === "group") !== Boolean(audienceGroupId)) return reply.code(400).send({ error: "Select an active group for group-only visibility." });
+    const actorId = request.authenticatedUser!.id;
+    const client = await pool!.connect();
+    let changedIds: string[] = [];
+    try {
+      await client.query("BEGIN");
+      if (audienceGroupId) {
+        const group = await client.query("SELECT id FROM church_groups WHERE department_id=$1 AND id=$2 AND status='active' FOR SHARE", [departmentId, audienceGroupId]);
+        if (!group.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Choose an active group in this location." });
+        }
+      }
+      const pages = await client.query<WikiPageRow>(
+        "SELECT id,title,content_html,audience,audience_group_id FROM wiki_pages WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='active' ORDER BY id FOR UPDATE",
+        [departmentId, pageIds],
+      );
+      if (pages.rowCount !== pageIds.length) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "One or more selected pages are no longer active in this location." });
+      }
+      const changes = pages.rows.filter((page) => page.audience !== audience || page.audience_group_id !== audienceGroupId);
+      changedIds = changes.map((page) => page.id);
+      for (const page of changes) {
+        await client.query(
+          "INSERT INTO wiki_page_versions(id,department_id,page_id,title,content_html,editor_user_id,audience_change) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)",
+          [randomUUID(), departmentId, page.id, page.title, page.content_html, actorId, JSON.stringify({
+            from: { audience: page.audience, groupId: page.audience_group_id },
+            to: { audience, groupId: audienceGroupId },
+          })],
+        );
+      }
+      if (changedIds.length) {
+        await client.query(
+          "UPDATE wiki_pages SET audience=$3,audience_group_id=$4,updated_by=$5,updated_at=now() WHERE department_id=$1 AND id=ANY($2::uuid[])",
+          [departmentId, changedIds, audience, audienceGroupId, actorId],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+    if (changedIds.length) changed(departmentId, { action: "pages-audience-updated" });
+    return { updated: changedIds.length };
+  });
+
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/versions", async (request, reply) => {
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki page not found." });
-    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id]);
+    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\",CASE WHEN $3::boolean THEN version.audience_change END AS \"audienceChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id, isWikiManager(request)]);
     return Promise.all(result.rows.map(async (version) => ({ ...version, contentHtml: await hideUnreadableWikiEntityLinks(version.contentHtml, request, departmentId) })));
   });
 
