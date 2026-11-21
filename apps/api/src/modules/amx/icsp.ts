@@ -161,13 +161,35 @@ export async function pulseIcspChannel(host: string, address: Address, channel: 
   const data = channelData(address, channel);
   const session = await openIcspSession(host);
   let pushed = false;
+  let releaseSent = false;
+  const waitForAck = async (messageId: number) => {
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const frame = await session.nextFrame(Math.max(1, deadline - Date.now()));
+      if (frame.messageId !== messageId) continue;
+      if (frame.command === COMMAND_ACK) return;
+      if (frame.command === COMMAND_NAK) throw new Error("NetLinx rejected the ICSP channel event.");
+    }
+    throw new Error("NetLinx did not acknowledge the ICSP channel event.");
+  };
   try {
-    await session.sendCommand(COMMAND_CHANNEL_PUSH, data);
+    const pushMessageId = await session.sendCommand(COMMAND_CHANNEL_PUSH, data);
     pushed = true;
+    await waitForAck(pushMessageId);
     await new Promise((resolve) => setTimeout(resolve, 150));
+    const releaseMessageId = await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
+    releaseSent = true;
+    await waitForAck(releaseMessageId);
   } finally {
     try {
-      if (pushed && !session.socket.destroyed) await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
+      if (pushed && !releaseSent && !session.socket.destroyed) {
+        try {
+          const releaseMessageId = await session.sendCommand(COMMAND_CHANNEL_RELEASE, data);
+          await waitForAck(releaseMessageId);
+        } catch {
+          // Best effort: do not leave a held input if the PUSH acknowledgement failed.
+        }
+      }
     } finally {
       session.socket.destroy();
     }

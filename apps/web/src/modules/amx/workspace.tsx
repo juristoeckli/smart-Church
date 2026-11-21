@@ -187,11 +187,19 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
   useEffect(() => {
     if (!configured || currentPage.name !== "PWR_COUNT") return;
     let active = true;
+    let timedOut = false;
     let timer = 0;
+    const startedAt = Date.now();
     const controller = new AbortController();
     setLevelValues((current) => { const next = { ...current }; delete next["1"]; return next; });
     const pollProgress = async () => {
       try {
+        if (Date.now() - startedAt >= 120_000) {
+          timedOut = true;
+          setFeedback("Activation is taking longer than expected. Check the NetLinx controller before continuing.");
+          setFailed(true);
+          return;
+        }
         const values = await refreshPageLevels(currentPage, controller.signal);
         if (!active) return;
         if (values["1"] !== undefined && values["1"] >= 255) {
@@ -209,7 +217,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
           setFailed(true);
         }
       } finally {
-        if (active) timer = window.setTimeout(() => void pollProgress(), 2000);
+        if (active && !timedOut) timer = window.setTimeout(() => void pollProgress(), 2000);
       }
     };
     void pollProgress();
@@ -279,19 +287,31 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       return;
     }
     if (sourcePage.name === "PWR_ASK" && channel === 2) {
+      if (!action || !(await send(action, sourcePage, true))) return;
       navigate("PWR_COUNT");
-      if (action) void send(action, sourcePage, true);
       return;
     }
     if (sourcePage.name === "Modus" && object.pageFlip === "DetailPopup") {
       const mode = channel === 5 ? "Volumen" : channel === 6 ? "Mikrofon" : channel === 7 ? "Lautsprecher" : "";
       const target = mode ? mainAudioPage(selectedRoom, mode) : undefined;
-      if (target) navigate(target.name);
-      else { setFeedback("Select a room before opening its controls."); setFailed(true); }
+      const modeAction = systemActions.find((item) => item.channel === channel);
+      if (!target) {
+        setFeedback("Select a room before opening its controls.");
+        setFailed(true);
+      } else if (!modeAction) {
+        setFeedback("This AMX mode button has no confirmed controller mapping.");
+        setFailed(true);
+      } else {
+        if (await send(modeAction, sourcePage, true)) navigate(target.name);
+      }
       return;
     }
     if (sourcePage.name === "Modus" && channel === 8) {
-      navigate("Regie");
+      const modeAction = systemActions.find((item) => item.channel === channel);
+      if (!modeAction) {
+        setFeedback("This AMX mode button has no confirmed controller mapping.");
+        setFailed(true);
+      } else if (await send(modeAction, sourcePage, true)) navigate("Regie");
       return;
     }
     const sent = action ? await send(action, sourcePage) : true;
@@ -354,7 +374,7 @@ export function AmxWorkspace({ departmentId, csrfToken }: ModuleContext) {
       ? page.name === "PWR_COUNT" ? "" : levelPercent !== undefined ? `${Math.round(levelPercent)}%` : "—"
       : /^\d{1,2}:\d{2}$/.test(baseText) ? time : baseText;
     if (page.name === "PWR_COUNT" && object.name === "100 %") text = activationPercent === undefined ? "—" : `${Math.round(activationPercent)}%`;
-    if (page.name === "PWR_COUNT" && /wird aktiviert/i.test(baseText)) {
+    if ((page.name === "PWR_ASK" || page.name === "PWR_COUNT") && /wird aktiviert/i.test(baseText)) {
       const title = selectedRoom === "Gemeindesaal quer" ? "Quer Gemeindesaal" : selectedRoom === "Gemeindesaal längs" ? "Längs Gemeindesaal" : selectedRoom;
       text = title ? `"${title}" wird aktiviert` : "Betriebsmodus wird aktiviert";
     }
