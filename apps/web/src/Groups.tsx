@@ -148,6 +148,17 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
     ...savedViews.map((view) => view.statusFilter).filter((status): status is GroupLifecycleStatus => status !== "all"),
     ...(statusFilter === "all" ? [] : [statusFilter]),
   ])].sort(), [groups, savedViews, statusFilter]);
+  const directoryPageSize = 50;
+  const directoryPageCount = Math.max(1, Math.ceil(visibleGroups.length / directoryPageSize));
+  const directoryFilterKey = JSON.stringify([departmentId, directorySearch, statusFilter, groupTypeFilter, sortOrder]);
+  const [directoryPagination, setDirectoryPagination] = useState({ filterKey: "", page: 1 });
+  const directoryPage = directoryPagination.filterKey === directoryFilterKey
+    ? Math.min(directoryPagination.page, directoryPageCount)
+    : 1;
+  const directoryOffset = (directoryPage - 1) * directoryPageSize;
+  const pageGroups = visibleGroups.slice(directoryOffset, directoryOffset + directoryPageSize);
+  const changeDirectoryPage = (page: number) => setDirectoryPagination({ filterKey: directoryFilterKey, page });
+
   const selected = visibleGroups.find((group) => group.id === selectedId) ?? null;
   const memberListChanged = Boolean(selected && (
     memberDraft.length !== selected.memberIds.length || memberDraft.some((id) => !selected.memberIds.includes(id)) ||
@@ -522,13 +533,21 @@ export function Groups({ departmentId, contacts, canManage, csrfToken, navigatio
           <div className="table-scroll">
             <table className="people-table" aria-label="Groups directory">
               <thead><tr><th scope="col">Group</th>{displayedColumns.map(({ key, label }) => <th scope="col" key={key}>{label}</th>)}</tr></thead>
-              <tbody>{visibleGroups.map((group) => <tr key={group.id}>
+              <tbody>{pageGroups.map((group) => <tr key={group.id}>
                 <td><button type="button" className="button button-secondary" onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}>{group.name}</button></td>
                 {displayedColumns.map(({ key, value }) => <td key={key}>{value(group) ?? "—"}</td>)}
               </tr>)}</tbody>
             </table>
           </div>
-        ) : <div className="community-group-options">{visibleGroups.map((group) => <button type="button" key={group.id} className={`community-group-option${selectedId === group.id ? " is-active" : ""}`} onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}><span className="community-group-icon"><ContactRound size={17} /></span><span><strong>{group.name}</strong><small>{group.groupType ? `${group.groupType} · ` : ""}{group.memberCount} {group.memberCount === 1 ? translate("groups.person") : translate("groups.people")} · {group.status}</small></span></button>)}</div> : <p className="community-empty">{((directorySearch || statusFilter !== "all" || groupTypeFilter) ? "No groups match these filters." : translate("groups.none"))}</p>}
+        ) : <div className="community-group-options">{pageGroups.map((group) => <button type="button" key={group.id} className={`community-group-option${selectedId === group.id ? " is-active" : ""}`} onClick={() => { setSelectedId(group.id); setDetailsGroup(group); }}><span className="community-group-icon"><ContactRound size={17} /></span><span><strong>{group.name}</strong><small>{group.groupType ? `${group.groupType} · ` : ""}{group.memberCount} {group.memberCount === 1 ? translate("groups.person") : translate("groups.people")} · {group.status}</small></span></button>)}</div> : <p className="community-empty">{((directorySearch || statusFilter !== "all" || groupTypeFilter) ? "No groups match these filters." : translate("groups.none"))}</p>}
+        {!loading && loadedDepartmentId === departmentId && directoryPageCount > 1 && <nav className="table-footer" aria-label="Groups directory pages">
+          <span aria-live="polite">Showing {directoryOffset + 1}–{directoryOffset + pageGroups.length} of {visibleGroups.length} groups</span>
+          <div className="form-actions">
+            <button className="button button-secondary" type="button" disabled={directoryPage <= 1} onClick={() => changeDirectoryPage(directoryPage - 1)}>Previous</button>
+            <span>Page {directoryPage} of {directoryPageCount}</span>
+            <button className="button button-secondary" type="button" disabled={directoryPage >= directoryPageCount} onClick={() => changeDirectoryPage(directoryPage + 1)}>Next</button>
+          </div>
+        </nav>}
       </section>
       <section className="directory-card community-group-detail">
         {selected ? <>
