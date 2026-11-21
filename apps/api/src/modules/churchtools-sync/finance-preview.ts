@@ -8,10 +8,14 @@ export function financeDay(value: unknown): value is string {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-function financeRows(payload: unknown, label: string) {
+export function financeRows(payload: unknown, label: string) {
   const result = object(payload);
   if (!Array.isArray(result?.data) || object(result.meta)?.count !== result.data.length) throw new Error(`ChurchTools returned an incomplete finance ${label} list.`);
   return result.data;
+}
+
+export function isChurchToolsMappingCodeSupported(code: string) {
+  return Boolean(code.trim()) && code.length <= 32 && code === code.trim().replace(/\s+/g, " ") && !/[\u0000-\u001f\u007f]/.test(code);
 }
 
 export function readChurchToolsFinancePeriods(periodsPayload: unknown, clientsPayload: unknown) {
@@ -60,7 +64,7 @@ export function compareChurchToolsFinanceCodes(source: ReadonlyMap<string, strin
   for (const code of source.values()) sourceCounts.set(code, (sourceCounts.get(code) ?? 0) + 1);
   const summary = { activeMatches: 0, inactiveMatches: 0, unmatched: 0, ambiguous: 0, unsupported: 0 };
   for (const code of source.values()) {
-    if (!code.trim() || code.length > 32 || code !== code.trim() || /[\u0000-\u001f\u007f]/.test(code)) summary.unsupported += 1;
+    if (!isChurchToolsMappingCodeSupported(code)) summary.unsupported += 1;
     else if ((sourceCounts.get(code) ?? 0) > 1) summary.ambiguous += 1;
     else if (!targetCodes.has(code)) summary.unmatched += 1;
     else if (targetCodes.get(code)) summary.activeMatches += 1;

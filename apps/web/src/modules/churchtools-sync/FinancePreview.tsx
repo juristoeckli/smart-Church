@@ -67,6 +67,30 @@ export function FinancePreview({ departmentId, t }: { departmentId: string; t: (
     }
   }
 
+  async function downloadMapping() {
+    if (!period) return;
+    setBusy(true);
+    setError("");
+    try {
+      const query = new URLSearchParams({ periodId: period.periodId });
+      const response = await fetch(`${endpoint}/mapping?${query}`, { headers: { "x-department-id": departmentId } });
+      if (!response.ok) {
+        const result = await response.json() as { error?: string };
+        throw new Error(result.error ?? "Could not download ChurchTools finance mapping.");
+      }
+      const file = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = file;
+      link.download = `churchtools-finance-mapping-period-${period.periodId}.json`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(file), 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not download ChurchTools finance mapping.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <details className="directory-card sync-settings-card">
     <summary><strong>{t("ChurchTools finance migration preview")}</strong></summary>
     <p className="sync-help">{t("Review visible journal counts and how source account codes, cost centers, and accounting dates fit this location. The preview is read-only.")}</p>
@@ -82,7 +106,10 @@ export function FinancePreview({ departmentId, t }: { departmentId: string; t: (
         <label>{t("From")}<input type="date" required disabled={busy} min={period.startDate} max={endDate || period.endDate} value={startDate} onChange={(event) => { setStartDate(event.target.value); setPreview(null); }} /></label>
         <label>{t("Through")}<input type="date" required disabled={busy} min={startDate || period.startDate} max={period.endDate} value={endDate} onChange={(event) => { setEndDate(event.target.value); setPreview(null); }} /></label>
       </div>
-      <button type="submit" className="button button-secondary" disabled={busy || !startDate || !endDate || startDate > endDate}>{t("Preview finance mapping")}</button>
+      <div className="community-inline-actions">
+        <button type="submit" className="button button-secondary" disabled={busy || !startDate || !endDate || startDate > endDate}>{t("Preview finance mapping")}</button>
+        <button type="button" className="button button-secondary" disabled={busy} onClick={() => void downloadMapping()}>{t("Download account and cost-center mapping")}</button>
+      </div>
     </form>}
     {busy && <p role="status">{t("Reading ChurchTools finance data…")}</p>}
     {error && <p role="alert">{t(error)}</p>}
