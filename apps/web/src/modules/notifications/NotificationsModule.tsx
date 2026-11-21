@@ -36,6 +36,13 @@ type NotificationResponse = {
 
 type EmailTemplateKind = "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed";
 type EmailTemplate = { kind: EmailTemplateKind; subjectTemplate: string; bodyTemplate: string; updatedAt: string | null };
+type AnnouncementPreview = {
+  accountCount: number;
+  emailEligibleCount: number;
+  emailConfigured: boolean;
+  sampleEmail: { subject: string; text: string };
+};
+type NotificationMutationResult = { eventRemindersEnabled?: boolean; serviceRequestsEnabled?: boolean; followUpsEnabled?: boolean; emailEnabled?: boolean; recipientCount?: number };
 const emailTemplateKinds: Array<{ kind: EmailTemplateKind; label: string }> = [
   { kind: "announcement", label: "Church announcements" },
   { kind: "event_reminder", label: "Event reminders" },
@@ -70,6 +77,7 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
   const [announcementAudience, setAnnouncementAudience] = useState<"location" | "groups">("location");
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [announcementPreview, setAnnouncementPreview] = useState<{ departmentId: string; result: AnnouncementPreview }>();
   const unreadCount = notifications.filter((notification) => !notification.readAt).length;
 
   const load = useCallback(async () => {
@@ -129,7 +137,7 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     return () => { active = false; };
   }, [canSend, departmentId]);
 
-  async function mutate(path: string, method: string, body?: object) {
+  async function mutate<Result = NotificationMutationResult>(path: string, method: string, body?: object) {
     const response = await fetch(path, {
       method,
       headers: {
@@ -139,7 +147,7 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
-    const result = await response.json() as { error?: string; eventRemindersEnabled?: boolean; serviceRequestsEnabled?: boolean; followUpsEnabled?: boolean; emailEnabled?: boolean; recipientCount?: number };
+    const result = await response.json() as Result & { error?: string };
     if (!response.ok) throw new Error(result.error ?? "The request failed.");
     return result;
   }
@@ -190,8 +198,9 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     finally { setBusy(false); }
   }
 
-  async function sendAnnouncement(event: FormEvent<HTMLFormElement>) {
+  async function submitAnnouncement(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const preview = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") !== "send";
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
     const title = String(form.get("title") ?? "").trim();
@@ -200,15 +209,23 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     try {
       const groupIds = announcementAudience === "groups" ? selectedGroupIds : [];
       if (announcementAudience === "groups" && groupIds.length === 0) throw new Error("Select at least one group for this announcement.");
-      const result = await mutate("/api/modules/notifications/announcements", "POST", { title, body, audience: announcementAudience, groupIds });
+      const payload = { title, body, audience: announcementAudience, groupIds };
+      if (preview) {
+        setAnnouncementPreview(undefined);
+        const result = await mutate<AnnouncementPreview>("/api/modules/notifications/announcements/preview", "POST", payload);
+        setAnnouncementPreview({ departmentId, result });
+        return;
+      }
+      const result = await mutate("/api/modules/notifications/announcements", "POST", payload);
       const recipientCount = result.recipientCount ?? 0;
       setFeedback(format(recipientCount === 1 ? "Announcement sent to {count} person." : "Announcement sent to {count} people.", { count: String(recipientCount) }));
       setComposeOpen(false);
       setAnnouncementAudience("location");
       setSelectedGroupIds([]);
+      setAnnouncementPreview(undefined);
       formElement.reset();
       await load();
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not send the announcement."); }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : preview ? "Could not preview the announcement." : "Could not send the announcement."); }
     finally { setBusy(false); }
   }
 
@@ -217,19 +234,34 @@ export function NotificationsModule({ departmentId, csrfToken, language }: Modul
     <section className="page-heading notification-page-heading">
       <div><div className="eyebrow">STAY CONNECTED</div><h1>Notifications</h1><p className="page-subtitle">Announcements, event reminders, volunteer requests, and visitor follow-ups.</p></div>
       <div className="notification-heading-actions">
-        {canSend && <button className="button button-primary" type="button" onClick={() => setComposeOpen((open) => !open)}><Megaphone size={15} />{composeOpen ? "Close announcement" : "New announcement"}</button>}
+        {canSend && <button className="button button-primary" type="button" disabled={busy} onClick={() => { setAnnouncementPreview(undefined); setComposeOpen((open) => !open); }}><Megaphone size={15} />{composeOpen ? "Close announcement" : "New announcement"}</button>}
         <button className="button button-secondary" type="button" onClick={() => void markAllRead()} disabled={busy || unreadCount === 0}><CheckCheck size={15} />Mark all read</button>
       </div>
     </section>
 
     {composeOpen && canSend && <section className="directory-card notification-compose-card">
       <div className="directory-heading"><div><h2>Church announcement</h2><p>Send this message to everyone in the location or to active members of selected groups.</p></div></div>
-      <form className="notification-compose-form" onSubmit={sendAnnouncement}>
-        <fieldset className="announcement-audience"><legend>Audience</legend><label><input type="radio" name="announcementAudience" checked={announcementAudience === "location"} onChange={() => setAnnouncementAudience("location")} />Everyone in this location</label><label><input type="radio" name="announcementAudience" checked={announcementAudience === "groups"} onChange={() => setAnnouncementAudience("groups")} />Selected groups</label></fieldset>
-        {announcementAudience === "groups" && <fieldset className="announcement-group-picker"><legend>Select groups</legend>{groups.length ? groups.map((group) => <label key={group.id}><input type="checkbox" checked={selectedGroupIds.includes(group.id)} onChange={(event) => setSelectedGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /><span>{group.name}<small>{group.memberCount} people</small></span></label>) : <p>No groups are available in this location.</p>}</fieldset>}
-        <label>Title<input name="title" required maxLength={120} placeholder="A short announcement" /></label>
-        <label>Message<textarea name="body" required maxLength={2000} rows={4} placeholder="Write a message for your church community…" /></label>
-        <div className="form-actions"><button className="button button-primary" type="submit" disabled={busy || (announcementAudience === "groups" && selectedGroupIds.length === 0)}><Send size={14} />{busy ? "Sending…" : "Send announcement"}</button></div>
+      <form className="notification-compose-form" onSubmit={submitAnnouncement} onInput={() => setAnnouncementPreview(undefined)} aria-busy={busy}>
+        <fieldset className="announcement-audience" disabled={busy}><legend>Audience</legend><label><input type="radio" name="announcementAudience" checked={announcementAudience === "location"} onChange={() => setAnnouncementAudience("location")} />Everyone in this location</label><label><input type="radio" name="announcementAudience" checked={announcementAudience === "groups"} onChange={() => setAnnouncementAudience("groups")} />Selected groups</label></fieldset>
+        {announcementAudience === "groups" && <fieldset className="announcement-group-picker" disabled={busy}><legend>Select groups</legend>{groups.length ? groups.map((group) => <label key={group.id}><input type="checkbox" checked={selectedGroupIds.includes(group.id)} onChange={(event) => setSelectedGroupIds((current) => event.target.checked ? [...current, group.id] : current.filter((id) => id !== group.id))} /><span>{group.name}<small>{group.memberCount} people</small></span></label>) : <p>No groups are available in this location.</p>}</fieldset>}
+        <label>Title<input name="title" required maxLength={120} placeholder="A short announcement" disabled={busy} /></label>
+        <label>Message<textarea name="body" required maxLength={2000} rows={4} placeholder="Write a message for your church community…" disabled={busy} /></label>
+        {announcementPreview?.departmentId === departmentId && <section className="announcement-preview" aria-label="Announcement preview">
+          <h3>Announcement preview</h3>
+          <dl>
+            <div><dt>In-app recipients</dt><dd>{announcementPreview.result.accountCount}</dd></div>
+            <div><dt>Eligible for email</dt><dd>{announcementPreview.result.emailEligibleCount}</dd></div>
+          </dl>
+          {!announcementPreview.result.emailConfigured && <p>Email delivery is currently unavailable for this location.</p>}
+          <p>These counts reflect current membership and email preferences.</p>
+          <h4>Sample email in your language</h4>
+          <strong>{announcementPreview.result.sampleEmail.subject}</strong>
+          <pre>{announcementPreview.result.sampleEmail.text}</pre>
+        </section>}
+        <div className="form-actions">
+          <button className="button button-secondary" type="submit" value="preview" disabled={busy || (announcementAudience === "groups" && selectedGroupIds.length === 0)}>Preview announcement</button>
+          <button className="button button-primary" type="submit" value="send" disabled={busy || (announcementAudience === "groups" && selectedGroupIds.length === 0)}><Send size={14} />Send announcement</button>
+        </div>
       </form>
     </section>}
 

@@ -5,6 +5,10 @@
 .announcement-audience legend, .announcement-group-picker legend { padding: 0 0.35rem; color: var(--muted-foreground); font-size: 0.78rem; font-weight: 700; }
 .announcement-audience label, .announcement-group-picker label { display: flex; align-items: center; gap: 0.55rem; }
 .announcement-group-picker { display: grid; gap: 0.5rem; max-height: 240px; overflow-y: auto; }
+.announcement-preview{display:grid;gap:8px;padding:12px;border:1px solid var(--line);border-radius:8px}
+.announcement-preview dl{display:flex;flex-wrap:wrap;gap:16px}
+.announcement-preview dd{font-weight:700}
+.announcement-preview pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.5}
 .announcement-group-picker label { justify-content: space-between; padding: 0.35rem 0; }
 .announcement-group-picker label > span { display: flex; flex: 1; justify-content: space-between; gap: 1rem; }
 .announcement-group-picker small, .announcement-group-picker p { color: var(--muted-foreground); }

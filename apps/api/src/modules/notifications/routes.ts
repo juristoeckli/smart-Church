@@ -6,6 +6,7 @@ import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.j
 import { deliverCalendarReminders } from "../../calendar-reminders.js";
 import type { PoolClient } from "pg";
 import { renderNotificationEmail, type NotificationEmailTemplate } from "./email-templates.js";
+import { getAnnouncementAudienceCounts, getAnnouncementRecipientIds, type AnnouncementAudience } from "./announcement-audience.js";
 
 type NotificationRow = {
   id: string;
@@ -64,6 +65,8 @@ const announcementSchema = {
     },
   },
 };
+
+type Announcement = { title: string; body: string; audience: AnnouncementAudience; groupIds: string[] };
 
 const configurableEmailKinds = ["announcement", "event_reminder", "service_request", "follow_up_assignment", "follow_up_reminder", "community_feed"] as const;
 const emailTemplatePlaceholders = new Set(["title", "body", "open_url"]);
@@ -769,37 +772,65 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return { eventRemindersEnabled: request.body.eventRemindersEnabled, serviceRequestsEnabled: request.body.serviceRequestsEnabled, followUpsEnabled: request.body.followUpsEnabled, emailEnabled: request.body.emailEnabled };
     });
 
-    routes.post<{ Body: { title: string; body: string; audience: "location" | "groups"; groupIds: string[] } }>("/api/modules/notifications/announcements", { schema: announcementSchema }, async (request, reply) => {
-      if (!validateMutation(request, reply)) return reply;
+    async function resolveAnnouncement(request: FastifyRequest<{ Body: Announcement }>, reply: FastifyReply) {
+      if (!validateMutation(request, reply)) return null;
       const departmentId = await department(request, reply);
-      if (!departmentId) return reply;
-      if (request.activeDepartmentRole !== "site_admin") return reply.code(403).send({ error: "Only a site administrator can send a location announcement." });
+      if (!departmentId) return null;
+      if (request.activeDepartmentRole !== "site_admin") {
+        reply.code(403).send({ error: "Only a site administrator can send a location announcement." });
+        return null;
+      }
+      const { audience } = request.body;
       const title = request.body.title.trim();
       const body = request.body.body.trim();
-      if (!title || !body) return reply.code(400).send({ error: "Enter a title and message." });
-      const groupIds = [...new Set(request.body.groupIds)];
-      if (request.body.audience === "groups" && groupIds.length === 0) return reply.code(400).send({ error: "Select at least one group." });
-      let recipients;
-      if (request.body.audience === "groups") {
-        const groups = await pool!.query<{ id: string }>("SELECT id FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, groupIds]);
-        if (groups.rowCount !== groupIds.length) return reply.code(400).send({ error: "One or more selected groups are not in this location." });
-        recipients = await pool!.query<{ user_id: string }>(
-          `SELECT DISTINCT membership.user_id
-             FROM church_groups selected
-             JOIN group_members member ON member.group_id=selected.id AND member.status='active'
-             JOIN contacts person ON person.id=member.contact_id AND person.department_id=selected.department_id
-             JOIN department_memberships membership ON membership.department_id=selected.department_id AND membership.contact_id=person.id
-            WHERE selected.department_id=$1 AND selected.id=ANY($2::uuid[])`,
-          [departmentId, groupIds],
-        );
-      } else {
-        recipients = await pool!.query<{ user_id: string }>("SELECT user_id FROM department_memberships WHERE department_id=$1", [departmentId]);
+      if (!title || !body) {
+        reply.code(400).send({ error: "Enter a title and message." });
+        return null;
       }
+      const groupIds = audience === "groups" ? request.body.groupIds : [];
+      if (audience === "groups") {
+        if (!groupIds.length) {
+          reply.code(400).send({ error: "Select at least one group." });
+          return null;
+        }
+        const groups = await pool!.query<{ id: string }>("SELECT id FROM church_groups WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, groupIds]);
+        if (groups.rowCount !== groupIds.length) {
+          reply.code(400).send({ error: "One or more selected groups are not in this location." });
+          return null;
+        }
+      }
+      return { title, body, audience, departmentId, groupIds };
+    }
+
+    routes.post<{ Body: Announcement }>("/api/modules/notifications/announcements/preview", { schema: announcementSchema }, async (request, reply) => {
+      const announcement = await resolveAnnouncement(request, reply);
+      if (!announcement) return reply;
+      const { title, body, departmentId, audience, groupIds } = announcement;
+      const [counts, templates, emailConfigured] = await Promise.all([
+        getAnnouncementAudienceCounts(pool!, departmentId, audience, groupIds),
+        pool!.query<NotificationEmailTemplate>(
+          `SELECT subject_template AS "subjectTemplate", body_template AS "bodyTemplate"
+             FROM module_notification_email_templates WHERE department_id=$1 AND kind='announcement'`, [departmentId],
+        ),
+        context.email.isConfigured(departmentId),
+      ]);
+      const { subject, text } = renderNotificationEmail(title, body, process.env.SMART_CHURCH_WEB_ORIGIN,
+        request.authenticatedUser?.language ?? "en", templates.rows[0]);
+      return reply.header("Cache-Control", "private, no-store").send({
+        ...counts, emailConfigured, sampleEmail: { subject, text },
+      });
+    });
+
+    routes.post<{ Body: Announcement }>("/api/modules/notifications/announcements", { schema: announcementSchema }, async (request, reply) => {
+      const announcement = await resolveAnnouncement(request, reply);
+      if (!announcement) return reply;
+      const { title, body, departmentId, audience, groupIds } = announcement;
+      const recipients = await getAnnouncementRecipientIds(pool!, departmentId, audience, groupIds);
       const client = await pool!.connect();
       let recipientCount = 0;
       try {
         await client.query("BEGIN");
-        for (const recipient of recipients.rows) {
+        for (const recipient of recipients) {
           await client.query(
             `INSERT INTO module_notifications (id, department_id, recipient_user_id, sender_user_id, kind, title, body)
              VALUES ($1, $2, $3, $4, 'announcement', $5, $6)`,
@@ -812,7 +843,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         throw error;
       } finally { client.release(); }
-      return reply.code(201).send({ sent: true, recipientCount, audience: request.body.audience });
+      return reply.code(201).send({ sent: true, recipientCount, audience });
     });
   });
 }
