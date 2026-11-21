@@ -95,13 +95,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const excluded = dates.rows.filter((row: { date_type: string }) => row.date_type === "excluded").map((row: { date: string }) => row.date);
     const proposed = seriesDates(startsAt, endsAt, input.recurrence, extras, excluded).filter((item) => item.startsAt.toISOString().slice(0, 10) >= input.fromDate);
     if (!proposed.length) return { error: "This repeat rule has no future occurrences from the selected date." } as const;
-    const current = await queryable.query(`SELECT occurrence.resource_booking_id AS id,occurrence.occurrence_starts_at AS "occurrenceStartsAt",occurrence.is_extra_date AS "isExtraDate",booking.status
+    const current = await queryable.query(`SELECT occurrence.resource_booking_id AS id,occurrence.occurrence_starts_at AS "occurrenceStartsAt",occurrence.is_extra_date AS "isExtraDate",booking.status,
+        EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=occurrence.series_id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE 'UTC')::date) AS "hasOccurrenceOverride"
       FROM resource_booking_series_occurrences occurrence JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
       WHERE occurrence.department_id=$1 AND occurrence.series_id=$2 AND occurrence.occurrence_starts_at >= GREATEST($3::date::timestamptz,now()) ORDER BY occurrence.occurrence_starts_at`, [departmentId, seriesId, input.fromDate]);
     const approved = current.rows.filter((row: { status: string }) => row.status === "approved");
     const requested = current.rows.filter((row: { status: string }) => row.status === "requested");
-    const requestedKeys = new Set(requested.map((row: { occurrenceStartsAt: Date }) => new Date(row.occurrenceStartsAt).toISOString()));
-    const retained = proposed.filter((item) => requestedKeys.has(item.startsAt.toISOString())).length;
+    const requestedDates = new Set(requested.map((row: { occurrenceStartsAt: Date }) => new Date(row.occurrenceStartsAt).toISOString().slice(0, 10)));
+    const retained = proposed.filter((item) => requestedDates.has(item.startsAt.toISOString().slice(0, 10))).length;
     return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units) };
   }
 
@@ -120,6 +121,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,series.linked_appointment_id AS "linkedAppointmentId",occurrence.is_extra_date AS "isExtraDate",
+          EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE 'UTC')::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
           booking.created_at AS "createdAt",booking.updated_at AS "updatedAt"
         FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
@@ -259,26 +261,35 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if ("error" in plan) { await client.query("ROLLBACK"); return reply.code(400).send({ error: plan.error }); }
       if (plan.approvedCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `${plan.approvedCount} future occurrence(s) are already approved. No changes were made; handle those bookings individually before editing the series.` }); }
       const input = request.body;
-      const currentByDate = new Map<string, { id: string; occurrenceStartsAt: Date }>(plan.requested.map((row: { id: string; occurrenceStartsAt: Date }) => [new Date(row.occurrenceStartsAt).toISOString(), row] as const));
-      const proposedKeys = new Set(plan.proposed.map((item) => item.startsAt.toISOString()));
-      const canceledIds = plan.requested.filter((row: { occurrenceStartsAt: Date }) => !proposedKeys.has(new Date(row.occurrenceStartsAt).toISOString())).map((row: { id: string }) => row.id);
-      if (canceledIds.length) await client.query("UPDATE resource_bookings SET status='cancelled',updated_at=now() WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='requested'", [departmentId, canceledIds]);
+      const currentByDate = new Map<string, { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }>(plan.requested.map((row: { id: string; occurrenceStartsAt: Date; hasOccurrenceOverride: boolean }) => [new Date(row.occurrenceStartsAt).toISOString().slice(0, 10), row] as const));
+      const proposedDates = new Set(plan.proposed.map((item) => item.startsAt.toISOString().slice(0, 10)));
+      const canceledIds = plan.requested.filter((row: { occurrenceStartsAt: Date }) => !proposedDates.has(new Date(row.occurrenceStartsAt).toISOString().slice(0, 10))).map((row: { id: string }) => row.id);
+      if (canceledIds.length) {
+        await client.query("UPDATE resource_bookings SET status='cancelled',updated_at=now() WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='requested'", [departmentId, canceledIds]);
+        await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND resource_booking_id=ANY($2::uuid[])", [request.params.seriesId, canceledIds]);
+      }
       await client.query(`UPDATE resource_booking_series SET purpose=$3,starts_at=$4,ends_at=$5,recurrence=$6::jsonb,quantity=$7,lead_in_minutes=$8,cleanup_minutes=$9,updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.seriesId, departmentId, input.purpose.trim(), plan.startsAt, plan.endsAt, JSON.stringify(input.recurrence), input.quantity, input.leadInMinutes, input.cleanupMinutes]);
       let addedCount = 0; let updatedCount = 0;
       const extrasResult = await client.query("SELECT occurrence_date::text AS date FROM resource_booking_series_dates WHERE series_id=$1 AND date_type='extra'", [request.params.seriesId]);
       const extras = new Set(extrasResult.rows.map((row: { date: string }) => row.date));
       for (const occurrence of plan.proposed) {
-        const key = occurrence.startsAt.toISOString();
-        const existing = currentByDate.get(key) as { id: string } | undefined;
+        const date = occurrence.startsAt.toISOString().slice(0, 10);
+        const existing = currentByDate.get(date);
         if (existing) {
-          await client.query("UPDATE resource_bookings SET purpose=$3,starts_at=$4,ends_at=$5,quantity=$6,lead_in_minutes=$7,cleanup_minutes=$8,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [existing.id, departmentId, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes]);
+          if (existing.hasOccurrenceOverride) {
+            await client.query("UPDATE resource_bookings SET purpose=$3,lead_in_minutes=$4,cleanup_minutes=$5,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [existing.id, departmentId, input.purpose.trim(), input.leadInMinutes, input.cleanupMinutes]);
+          } else {
+            await client.query("UPDATE resource_bookings SET purpose=$3,starts_at=$4,ends_at=$5,quantity=$6,lead_in_minutes=$7,cleanup_minutes=$8,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [existing.id, departmentId, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes]);
+          }
+          await client.query("UPDATE resource_booking_series_occurrences SET occurrence_starts_at=$3 WHERE series_id=$1 AND resource_booking_id=$2 AND department_id=$4", [request.params.seriesId, existing.id, occurrence.startsAt, departmentId]);
           updatedCount++;
         } else {
+          await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND occurrence_date=$2::date", [request.params.seriesId, date]);
           const bookingId = randomUUID();
           await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes)
             VALUES($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9,$10)`, [bookingId, departmentId, plan.series.resource_id, plan.series.requested_by, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes]);
           await client.query(`INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)
-            ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,is_extra_date=EXCLUDED.is_extra_date`, [randomUUID(), departmentId, request.params.seriesId, bookingId, occurrence.startsAt, extras.has(key.slice(0, 10))]);
+            ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,is_extra_date=EXCLUDED.is_extra_date`, [randomUUID(), departmentId, request.params.seriesId, bookingId, occurrence.startsAt, extras.has(date)]);
           if (plan.series.linked_appointment_id) {
             const links = await client.query("SELECT to_regclass('public.church_calendar_resource_links') IS NOT NULL AS available");
             if (links.rows[0]?.available) await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", [plan.series.linked_appointment_id, bookingId, request.authenticatedUser!.id]);
@@ -296,6 +307,96 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } finally { client.release(); }
     context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: request.params.seriesId, action: "series-future-edited" });
     return { ok: true, ...summary };
+  });
+
+  app.put<{ Params: { seriesId: string; date: string }; Body: { startsAt: string; endsAt: string; quantity: number } }>("/api/modules/resource-scheduler/series/:seriesId/occurrences/:date", {
+    schema: {
+      params: { type: "object", required: ["seriesId", "date"], properties: { seriesId: { type: "string", format: "uuid" }, date: { type: "string", format: "date" } } },
+      body: { type: "object", additionalProperties: false, required: ["startsAt", "endsAt", "quantity"], properties: { startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" }, quantity: { type: "integer", minimum: 1, maximum: 10000 } } },
+    },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    if (!context.validateMutation(request, reply)) return reply;
+    if (!isoDate(request.params.date)) return reply.code(400).send({ error: "Choose a valid occurrence date." });
+    if (request.params.date < new Date().toISOString().slice(0, 10)) return reply.code(400).send({ error: "Only future occurrences can be edited." });
+    const startsAt = new Date(request.body.startsAt); const endsAt = new Date(request.body.endsAt);
+    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt
+      || startsAt.toISOString().slice(0, 10) !== request.params.date || endsAt.toISOString().slice(0, 10) !== request.params.date) {
+      return reply.code(400).send({ error: "Choose a valid start and end time on the selected UTC date." });
+    }
+    const client = await context.pool!.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.params.seriesId]);
+      const found = await client.query(`SELECT series.id,series.requested_by,series.resource_id,booking.id AS booking_id,booking.status,
+          booking.starts_at,booking.ends_at,booking.quantity,COALESCE(settings.total_units,1)::int AS total_units
+        FROM resource_booking_series series
+        JOIN resource_booking_series_occurrences occurrence ON occurrence.series_id=series.id AND occurrence.department_id=series.department_id
+        JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=series.department_id
+        JOIN bookable_resources resource ON resource.id=series.resource_id AND resource.department_id=series.department_id AND resource.active=true
+        LEFT JOIN resource_scheduler_settings settings ON settings.department_id=series.department_id AND settings.resource_id=series.resource_id
+        WHERE series.id=$1 AND series.department_id=$2 AND series.archived_at IS NULL
+          AND (occurrence.occurrence_starts_at AT TIME ZONE 'UTC')::date=$3::date
+        FOR UPDATE OF series,booking`, [request.params.seriesId, departmentId, request.params.date]);
+      const row = found.rows[0];
+      if (!row) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "No booking occurrence exists on this date." }); }
+      if (row.requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can edit this occurrence." }); }
+      if (row.status !== "requested") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only pending occurrences can be edited. Cancel or resolve a confirmed occurrence individually first." }); }
+      if (request.body.quantity > Number(row.total_units)) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Quantity exceeds this resource's available units." }); }
+      await client.query("UPDATE resource_bookings SET starts_at=$3,ends_at=$4,quantity=$5,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [row.booking_id, departmentId, startsAt, endsAt, request.body.quantity]);
+      await client.query(`INSERT INTO resource_booking_series_occurrence_overrides(series_id,occurrence_date,resource_booking_id,updated_by)
+        VALUES($1,$2,$3,$4) ON CONFLICT(series_id,occurrence_date) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,updated_by=EXCLUDED.updated_by,updated_at=now()`, [request.params.seriesId, request.params.date, row.booking_id, request.authenticatedUser!.id]);
+      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_overridden',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, next: { startsAt, endsAt, quantity: request.body.quantity } })]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "The new time or quantity conflicts with resource availability." });
+      throw error;
+    } finally { client.release(); }
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: request.params.seriesId, action: "occurrence-overridden" });
+    return { ok: true };
+  });
+
+  app.delete<{ Params: { seriesId: string; date: string } }>("/api/modules/resource-scheduler/series/:seriesId/occurrences/:date/override", {
+    schema: { params: { type: "object", required: ["seriesId", "date"], properties: { seriesId: { type: "string", format: "uuid" }, date: { type: "string", format: "date" } } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    if (!context.validateMutation(request, reply)) return reply;
+    if (!isoDate(request.params.date)) return reply.code(400).send({ error: "Choose a valid occurrence date." });
+    if (request.params.date < new Date().toISOString().slice(0, 10)) return reply.code(400).send({ error: "Only future occurrences can be reset." });
+    const client = await context.pool!.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.params.seriesId]);
+      const found = await client.query(`SELECT series.id,series.requested_by,series.starts_at AS series_starts_at,series.ends_at AS series_ends_at,series.quantity AS series_quantity,
+          series.lead_in_minutes,series.cleanup_minutes,booking.id AS booking_id,booking.status,booking.starts_at,booking.ends_at,booking.quantity
+        FROM resource_booking_series series
+        JOIN resource_booking_series_occurrence_overrides override ON override.series_id=series.id AND override.occurrence_date=$3::date
+        JOIN resource_booking_series_occurrences occurrence ON occurrence.series_id=series.id AND occurrence.department_id=series.department_id AND occurrence.resource_booking_id=override.resource_booking_id
+        JOIN resource_bookings booking ON booking.id=override.resource_booking_id AND booking.department_id=series.department_id
+        WHERE series.id=$1 AND series.department_id=$2 AND series.archived_at IS NULL FOR UPDATE OF series,booking`, [request.params.seriesId, departmentId, request.params.date]);
+      const row = found.rows[0];
+      if (!row) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "No occurrence override exists on this date." }); }
+      if (row.requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can reset this occurrence." }); }
+      if (row.status !== "requested") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only pending occurrences can be reset. Cancel or resolve a confirmed occurrence individually first." }); }
+      const templateStart = new Date(row.series_starts_at);
+      const startsAt = new Date(`${request.params.date}T00:00:00.000Z`);
+      startsAt.setUTCHours(templateStart.getUTCHours(), templateStart.getUTCMinutes(), templateStart.getUTCSeconds(), templateStart.getUTCMilliseconds());
+      const duration = new Date(row.series_ends_at).getTime() - templateStart.getTime();
+      const endsAt = new Date(startsAt.getTime() + duration);
+      await client.query("UPDATE resource_bookings SET starts_at=$3,ends_at=$4,quantity=$5,lead_in_minutes=$6,cleanup_minutes=$7,updated_at=now() WHERE id=$1 AND department_id=$2 AND status='requested'", [row.booking_id, departmentId, startsAt, endsAt, row.series_quantity, row.lead_in_minutes, row.cleanup_minutes]);
+      await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND occurrence_date=$2::date", [request.params.seriesId, request.params.date]);
+      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'occurrence_override_reset',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, row.booking_id, JSON.stringify({ date: request.params.date, previous: { startsAt: row.starts_at, endsAt: row.ends_at, quantity: row.quantity }, restored: { startsAt, endsAt, quantity: row.series_quantity } })]);
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (error && typeof error === "object" && "code" in error && error.code === "23P01") return reply.code(409).send({ error: "The series default time or quantity conflicts with resource availability." });
+      throw error;
+    } finally { client.release(); }
+    context.realtime.publish("module:resource-scheduler:changed", departmentId, { seriesId: request.params.seriesId, action: "occurrence-override-reset" });
+    return { ok: true };
   });
 
   app.post<{ Params: { seriesId: string }; Body: { date: string } }>("/api/modules/resource-scheduler/series/:seriesId/extra-dates", {

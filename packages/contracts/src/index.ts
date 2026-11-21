@@ -29,6 +29,7 @@ export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 export interface ServicePosition {
   name: string;
   contactId?: string;
+  qualificationIds?: string[];
   responseStatus?: "pending" | "accepted" | "declined";
   canRespond?: boolean;
 }

@@ -20,7 +20,7 @@ function categoryTree(categories: Category[], parentId: string | null = null, de
 function humanDate(value: string) { return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(value)); }
 function sizeLabel(bytes: number) { return bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 
-export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime }: ModuleContext) {
+export function WikiModule({ department, departmentId, csrfToken, canManageSite, realtime, onNavigateEntity }: ModuleContext) {
   const editor = useRef<HTMLDivElement>(null);
   const filePicker = useRef<HTMLInputElement>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -108,9 +108,18 @@ export function WikiModule({ department, departmentId, csrfToken, canManageSite,
     if (editing) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
-    const anchor = target.closest<HTMLAnchorElement>('a[data-entity-type="wiki"][data-entity-id]');
+    const anchor = target.closest<HTMLAnchorElement>('a[data-entity-type][data-entity-id]');
     if (!anchor) return;
-    const pageId = anchor.dataset.entityId?.trim();
+    const entityType = anchor.dataset.entityType;
+    const entityId = anchor.dataset.entityId?.trim();
+    if (!entityId || !/^[a-z0-9-]{1,80}$/i.test(entityId)) return;
+    if (entityType === "person" || entityType === "group" || entityType === "song") {
+      event.preventDefault();
+      onNavigateEntity?.(entityType, entityId);
+      return;
+    }
+    if (entityType !== "wiki") return;
+    const pageId = entityId;
     if (!pageId || pageId === selectedPage?.id || !/^[a-z0-9-]{1,80}$/i.test(pageId)) return;
     event.preventDefault();
     setEditing(false);

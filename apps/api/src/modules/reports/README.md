@@ -11,6 +11,7 @@ The optional Reports module combines a fixed catalog with a bounded ad-hoc desig
 - **Group summary** — per-group membership totals for active, paused and waitlist members.
 - **Group roster** — member names, role, membership status, join date and contact details for a selected group.
 - **Group meeting attendance** — present, absent and excused counts by meeting and group, with optional group and date filters.
+- **Group meeting feedback** — leader and attendee answers by meeting, question and response type, with optional group and meeting-date filters. Respondent identities and contact details are omitted; access requires Reports view plus Groups management permission, and results stay within the active location. Answers are free text and may contain sensitive information. If a feedback prompt was later removed or changed, its prior answer is labeled `Removed or renamed question`. The report is listed only when the group feedback, attendee response and meeting schemas are installed.
 - **Group lifecycle history** — dated group creation, updates, and deletion with selected before/after group metadata and actor; membership rows are omitted to avoid leaking private person records.
 - **Event attendance** — event date/title/type/location, recorded adult/child totals and individual check-in/first-time visitor counts; optional event date range.
 - **Event staffing** — service date/title, each volunteer role, assigned person, and pending/confirmed/declined response mapped from the existing service-position response records; optional event date range.

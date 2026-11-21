@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { registerReportDesigner } from "./designer.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-meeting-attendance" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string };
@@ -17,6 +17,7 @@ const catalog = [
   { key: "group-summary" as const, title: "Group summary", description: "Group membership counts by active, paused and waitlist status.", permission: "groups" as const },
   { key: "group-roster" as const, title: "Group roster", description: "Members, roles and membership dates for one group.", permission: "groups" as const },
   { key: "group-meeting-attendance" as const, title: "Group meeting attendance", description: "Present, absent and excused totals by group meeting.", permission: "groups" as const },
+  { key: "group-meeting-feedback" as const, title: "Group meeting feedback", description: "Leader and attendee answers by group meeting; respondent identities are omitted.", permission: "groups" as const },
   { key: "group-lifecycle" as const, title: "Group lifecycle history", description: "Group creation, edits, and deletion history with prior and updated names, descriptions, and parent links.", permission: "groups" as const },
   { key: "event-attendance" as const, title: "Event attendance", description: "Event dates, adult and child totals, and recorded check-ins.", permission: "events" as const },
   { key: "event-staffing" as const, title: "Event staffing", description: "Volunteer assignments and outstanding responses by service and role.", permission: "events" as const },
@@ -99,13 +100,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return id;
   }
   async function installedReports(request: FastifyRequest) {
-    const present = await pool!.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupLifecycle: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
+    const present = await pool!.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
       `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
               to_regclass('public.finance_budgets') IS NOT NULL AS "financeBudgets",
               to_regclass('public.finance_donors') IS NOT NULL AS "financeDonors",
               to_regclass('public.people_record_consents') IS NOT NULL AS "peopleConsents",
               to_regclass('public.people_record_history') IS NOT NULL AS "peopleHistory",
               to_regclass('public.group_meetings') IS NOT NULL AND to_regclass('public.group_meeting_attendance') IS NOT NULL AS "groupAttendance",
+              to_regclass('public.group_meetings') IS NOT NULL AND to_regclass('public.group_meeting_feedback_templates') IS NOT NULL AND to_regclass('public.group_meeting_feedback_responses') IS NOT NULL AND to_regclass('public.group_meeting_feedback_attendee_submissions') IS NOT NULL AS "groupFeedback",
               to_regclass('public.group_hierarchy_history') IS NOT NULL AS "groupLifecycle",
               to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.worship_songs') IS NOT NULL AS "eventServicePlan",
               to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.event_registrations') IS NOT NULL AS "eventRegistrations",
@@ -122,6 +124,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "finance-budget-vs-actual" || (state.finance && state.financeBudgets))
       && (item.key !== "finance-donor-giving" || (state.finance && state.financeDonors))
       && (item.key !== "group-meeting-attendance" || state.groupAttendance)
+      && (item.key !== "group-meeting-feedback" || state.groupFeedback)
       && (item.key !== "group-lifecycle" || state.groupLifecycle)
       && (item.key !== "event-service-plan" || state.eventServicePlan)
       && (!item.key.startsWith("event-registration-") || state.eventRegistrations)
@@ -212,6 +215,35 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHERE meeting.department_id=$1 AND ($2::date IS NULL OR meeting.meeting_date >= $2::date) AND ($3::date IS NULL OR meeting.meeting_date <= $3::date)
             AND ($4::uuid IS NULL OR meeting.group_id=$4) AND (attendance.contact_id IS NULL OR contact.id IS NOT NULL)
           GROUP BY meeting.id,church_group.name ORDER BY meeting.meeting_date DESC,church_group.name LIMIT 5000`,
+        [departmentId, filters.from ?? null, filters.to ?? null, filters.groupId ?? null],
+      );
+      rows = result.rows;
+    } else if (reportKey === "group-meeting-feedback") {
+      columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "formTitle", label: "Feedback form" }, { key: "responseType", label: "Response type" }, { key: "question", label: "Question" }, { key: "answer", label: "Answer" }, { key: "submittedAt", label: "Submitted" }];
+      const result = await pool!.query(
+        `WITH feedback_rows AS (
+           SELECT feedback.department_id,feedback.group_id,feedback.meeting_id,feedback.answers,'Leader'::text AS response_type,feedback.updated_at AS submitted_at
+             FROM group_meeting_feedback_responses feedback WHERE feedback.department_id=$1
+           UNION ALL
+           SELECT submission.department_id,submission.group_id,submission.meeting_id,submission.answers,'Attendee'::text AS response_type,submission.updated_at AS submitted_at
+             FROM group_meeting_feedback_attendee_submissions submission WHERE submission.department_id=$1
+         )
+         SELECT meeting.meeting_date::text AS "meetingDate",church_group.name AS "groupName",meeting.title AS "meetingTitle",template.title AS "formTitle",
+                feedback.response_type AS "responseType",COALESCE(prompt.prompt,'Removed or renamed question') AS question,answer.answer_text AS answer,
+                feedback.submitted_at::text AS "submittedAt"
+           FROM feedback_rows feedback
+           JOIN group_meetings meeting ON meeting.id=feedback.meeting_id AND meeting.department_id=feedback.department_id AND meeting.group_id=feedback.group_id
+           JOIN church_groups church_group ON church_group.id=meeting.group_id AND church_group.department_id=meeting.department_id
+           JOIN group_meeting_feedback_templates template ON template.department_id=feedback.department_id AND template.group_id=feedback.group_id
+           CROSS JOIN LATERAL jsonb_each_text(feedback.answers) AS answer(question_id,answer_text)
+           LEFT JOIN LATERAL (
+             SELECT question.value->>'prompt' AS prompt,question.ordinality AS question_order
+               FROM jsonb_array_elements(template.questions) WITH ORDINALITY AS question(value,ordinality)
+              WHERE question.value->>'id'=answer.question_id LIMIT 1
+           ) prompt ON TRUE
+          WHERE feedback.department_id=$1 AND ($2::date IS NULL OR meeting.meeting_date >= $2::date) AND ($3::date IS NULL OR meeting.meeting_date <= $3::date)
+            AND ($4::uuid IS NULL OR feedback.group_id=$4)
+          ORDER BY meeting.meeting_date DESC,church_group.name,meeting.created_at DESC,prompt.question_order,feedback.response_type LIMIT 10000`,
         [departmentId, filters.from ?? null, filters.to ?? null, filters.groupId ?? null],
       );
       rows = result.rows;

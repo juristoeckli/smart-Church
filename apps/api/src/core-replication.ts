@@ -5,7 +5,7 @@ const snapshotTableNames = [
   "contacts", "service_events", "church_groups", "group_members", "church_teams", "team_members",
   "church_team_leaders", "bookable_resources", "resource_bookings", "group_meetings",
   "group_meeting_attendance", "event_position_responses", "event_position_swap_requests", "event_attendance_checkins", "check_in_pickup_authorizations", "worship_songs",
-  "worship_song_arrangements", "service_plan_templates",
+  "worship_song_arrangements", "service_plan_templates", "service_volunteer_qualifications", "contact_service_qualifications",
   "event_registrations", "department_memberships", "user_phone_numbers", "user_relationships", "app_users",
 ] as const;
 type SnapshotTable = typeof snapshotTableNames[number];
@@ -14,7 +14,7 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 8 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 9 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
   tables.church_groups = (tables.church_groups ?? []).map((raw) => {
     const row = { ...raw };
@@ -57,6 +57,8 @@ const exportQueries: Record<SnapshotTable, string> = {
   worship_songs: "SELECT * FROM worship_songs WHERE department_id=$1 ORDER BY id",
   worship_song_arrangements: "SELECT arrangement.* FROM worship_song_arrangements arrangement JOIN worship_songs song ON song.id=arrangement.song_id WHERE song.department_id=$1 ORDER BY arrangement.id",
   service_plan_templates: "SELECT * FROM service_plan_templates WHERE department_id=$1 ORDER BY id",
+  service_volunteer_qualifications: "SELECT * FROM service_volunteer_qualifications WHERE department_id=$1 ORDER BY id",
+  contact_service_qualifications: "SELECT * FROM contact_service_qualifications WHERE department_id=$1 ORDER BY contact_id,qualification_id",
   department_memberships: "SELECT * FROM department_memberships WHERE department_id=$1 ORDER BY user_id",
   user_phone_numbers: "SELECT phone.* FROM user_phone_numbers phone JOIN department_memberships member ON member.user_id=phone.user_id WHERE member.department_id=$1 ORDER BY phone.user_id,phone.position",
   user_relationships: "SELECT relation.* FROM user_relationships relation WHERE relation.user_id IN (SELECT user_id FROM department_memberships WHERE department_id=$1) AND relation.related_user_id IN (SELECT user_id FROM department_memberships WHERE department_id=$1) ORDER BY relation.user_id,relation.related_user_id",
@@ -66,6 +68,8 @@ const exportQueries: Record<SnapshotTable, string> = {
 };
 
 const deleteQueries = [
+  "DELETE FROM contact_service_qualifications WHERE department_id=$1",
+  "DELETE FROM service_volunteer_qualifications WHERE department_id=$1",
   "DELETE FROM service_plan_templates WHERE department_id=$1",
   "DELETE FROM event_registrations WHERE event_id IN (SELECT id FROM service_events WHERE department_id=$1)",
   "DELETE FROM event_attendance_checkins WHERE event_id IN (SELECT id FROM service_events WHERE department_id=$1)",
@@ -121,7 +125,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 8, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 9, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -138,7 +142,7 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "8",
+    schemaVersion: "9",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
@@ -220,7 +224,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
            OR user_id=ANY($2::uuid[]) OR related_user_id=ANY($2::uuid[])`, [[...replicatedUserIds], orphanedSiteUsers]);
       await client.query("DELETE FROM user_phone_numbers WHERE user_id=ANY($1::uuid[])", [usersWithReplicatedPhones]);
 
-      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_events", "church_groups", "church_teams", "bookable_resources", "worship_songs", "worship_song_arrangements", "service_plan_templates", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_position_swap_requests", "event_attendance_checkins", "check_in_pickup_authorizations", "event_registrations"];
+      const insertOrder: SnapshotTable[] = ["contacts", "department_memberships", "user_phone_numbers", "user_relationships", "service_volunteer_qualifications", "contact_service_qualifications", "service_events", "church_groups", "church_teams", "bookable_resources", "worship_songs", "worship_song_arrangements", "service_plan_templates", "group_members", "team_members", "church_team_leaders", "group_meetings", "resource_bookings", "group_meeting_attendance", "event_position_responses", "event_position_swap_requests", "event_attendance_checkins", "check_in_pickup_authorizations", "event_registrations"];
       const upsertQueries: Partial<Record<SnapshotTable, string>> = {
         // Worship library rows are soft-deleted and referenced by the
         // ChurchTools/Elvanto integration module. Updating them in place keeps
@@ -251,6 +255,8 @@ export function registerCoreReplicationAdapter(pool: Pool) {
             row.created_by = userIdMap.get(String(row.created_by)) ?? row.created_by;
             row.guardian_confirmed_by = userIdMap.get(String(row.guardian_confirmed_by)) ?? row.guardian_confirmed_by;
           }
+          if (table === "service_volunteer_qualifications") row.created_by = userIdMap.get(String(row.created_by)) ?? row.created_by;
+          if (table === "contact_service_qualifications") row.granted_by = userIdMap.get(String(row.granted_by)) ?? row.granted_by;
           if (table === "church_groups") {
             row.status ??= "active";
             row.starts_on ??= null;

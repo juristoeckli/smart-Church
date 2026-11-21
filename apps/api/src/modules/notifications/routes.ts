@@ -8,7 +8,7 @@ import { renderNotificationEmail } from "./email-templates.js";
 
 type NotificationRow = {
   id: string;
-  kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder";
+  kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed";
   title: string;
   body: string;
   event_id: string | null;
@@ -412,7 +412,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           department_id UUID NOT NULL REFERENCES departments(id) ON DELETE CASCADE,
           recipient_user_id UUID NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
           sender_user_id UUID REFERENCES app_users(id) ON DELETE SET NULL,
-          kind TEXT NOT NULL CHECK (kind IN ('announcement', 'event_reminder', 'service_request', 'follow_up_assignment', 'follow_up_reminder')),
+          kind TEXT NOT NULL CHECK (kind IN ('announcement', 'event_reminder', 'service_request', 'follow_up_assignment', 'follow_up_reminder', 'community_feed')),
           title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 120),
           body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000),
           event_id UUID REFERENCES service_events(id) ON DELETE CASCADE,
@@ -436,7 +436,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ALTER TABLE module_notifications DROP CONSTRAINT IF EXISTS module_notifications_kind_check;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS related_contact_id UUID REFERENCES contacts(id) ON DELETE CASCADE;
         ALTER TABLE module_notifications ADD COLUMN IF NOT EXISTS related_event_id UUID REFERENCES service_events(id) ON DELETE CASCADE;
-        ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder'));
+        ALTER TABLE module_notifications ADD CONSTRAINT module_notifications_kind_check CHECK (kind IN ('announcement','event_reminder','service_request','follow_up_assignment','follow_up_reminder','community_feed'));
         DROP INDEX IF EXISTS module_notifications_follow_up_unique_idx;
         CREATE UNIQUE INDEX IF NOT EXISTS module_notifications_follow_up_unique_idx
           ON module_notifications (department_id,recipient_user_id,kind,related_event_id,related_contact_id)

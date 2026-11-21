@@ -117,7 +117,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   async function createFeedNotifications(postId: string, departmentId: string, actorId: string, kind: "post" | "reaction" | "comment", commentId: string | null = null) {
     if (!pool) return;
-    await pool.query(
+    const created = await pool.query<{ id: string }>(
       `WITH post AS (
          SELECT id,department_id,author_user_id,group_id,visibility FROM community_posts
           WHERE id=$1 AND department_id=$2 AND (publish_at IS NULL OR publish_at<=now())
@@ -134,7 +134,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           )
        )
        INSERT INTO community_post_notifications(id,department_id,post_id,recipient_user_id,actor_user_id,kind,comment_id)
-       SELECT gen_random_uuid(),post.department_id,post.id,recipients.user_id,$3,$4,$5
+         SELECT gen_random_uuid(),post.department_id,post.id,recipients.user_id,$3,$4,$5
          FROM post JOIN recipients ON TRUE
          LEFT JOIN community_post_notification_preferences preference
            ON preference.department_id=post.department_id AND preference.user_id=recipients.user_id
@@ -143,8 +143,34 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           WHEN 'reaction' THEN COALESCE(preference.notify_reactions,true)
           WHEN 'comment' THEN COALESCE(preference.notify_comments,true)
           ELSE false END
-       ON CONFLICT DO NOTHING`, [postId, departmentId, actorId, kind, commentId],
+       ON CONFLICT DO NOTHING
+       RETURNING id`, [postId, departmentId, actorId, kind, commentId],
     );
+    // Notifications is a required module and owns email consent, suppression, delivery
+    // retries, and provider status. Keep this email copy deliberately generic so a
+    // delayed email cannot expose a post after the recipient loses group access.
+    if (created.rowCount) {
+      try {
+        await pool.query(
+          `INSERT INTO module_notifications(id,department_id,recipient_user_id,kind,title,body)
+           SELECT notification.id,notification.department_id,notification.recipient_user_id,'community_feed',
+                  CASE notification.kind
+                    WHEN 'post' THEN 'New community post'
+                    WHEN 'reaction' THEN 'New reaction to a community post'
+                    ELSE 'New comment on a community post'
+                  END,
+                  'You have a new Community Feed notification. Open Smart Church to review it.'
+             FROM community_post_notifications notification
+            WHERE notification.id=ANY($1::uuid[])
+           ON CONFLICT (id) DO NOTHING`,
+          [created.rows.map((row) => row.id)],
+        );
+      } catch (error) {
+        // In-app feed delivery must remain available if optional notification storage
+        // is temporarily unavailable. The email pipeline will resume for new actions.
+        app.log.warn({ err: error }, "Could not enqueue Community Feed email notifications.");
+      }
+    }
   }
 
   app.get("/api/modules/community-feed/notification-preferences", async (request, reply) => {

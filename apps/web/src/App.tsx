@@ -1538,6 +1538,20 @@ function WorkspaceApp() {
     onChatConversationOpened,
     onActiveChatChange,
     refreshCsrfToken,
+    onNavigateEntity: (type: "person" | "group" | "song", id: string) => {
+      if (!/^[a-z0-9-]{1,80}$/i.test(id)) return;
+      if (type === "person") {
+        const peopleModule = registeredModules.find((module) => module.id === "people-records");
+        if (peopleModule && enabledDynamicModules.some((module) => module.id === peopleModule.id) && moduleAvailable(peopleModule, department, canManageSite)) {
+          setModuleState({ moduleId: peopleModule.id, departmentId: department.id, value: `person:${id}` });
+          setPage(modulePage(peopleModule.id));
+          return;
+        }
+        setPage("People");
+        return;
+      }
+      setPage(type === "group" ? "Groups" : "Services & events");
+    },
   };
   const renderNavigationItem = ({ label, icon: Icon }: typeof navigation[number], itemKey = label) => {
     const registered = registeredModules.find((module) => module.name === label);

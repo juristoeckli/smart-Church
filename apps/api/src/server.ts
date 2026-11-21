@@ -567,7 +567,7 @@ const serviceEventProperties = {
   description: { type: "string", maxLength: 2000 },
   room: { type: "string", maxLength: 160 },
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
-  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" } } } },
+  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, contactId: { type: "string", format: "uuid" }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } },
   timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" }, position: { type: "string", maxLength: 80 } } } },
   registrationEnabled: { type: "boolean" },
   registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
@@ -707,7 +707,27 @@ async function validateServicePlanSongs(departmentId: string, items: NonNullable
   return null;
 }
 
-async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent) {
+async function validatePositionQualifications(departmentId: string, positions: NonNullable<CreateServiceEvent["positions"]>, client?: PoolClient) {
+  const qualificationIds = [...new Set(positions.flatMap((position) => position.qualificationIds ?? []))];
+  if (!qualificationIds.length) return null;
+  const query: Pick<PoolClient, "query"> = client ?? pool!;
+  const activeQualifications = await query.query("SELECT id FROM service_volunteer_qualifications WHERE department_id=$1 AND active=true AND id=ANY($2::uuid[]) FOR SHARE", [departmentId, qualificationIds]);
+  if (activeQualifications.rowCount !== qualificationIds.length) return "One or more selected volunteer qualifications are unavailable at this location.";
+  for (const position of positions) {
+    if (!position.contactId || !position.qualificationIds?.length) continue;
+    const qualified = await query.query<{ total: string }>(
+      `SELECT count(DISTINCT assignment.qualification_id)::text AS total
+         FROM contact_service_qualifications assignment
+         JOIN contacts person ON person.id=assignment.contact_id AND person.department_id=assignment.department_id AND person.status='member'
+        WHERE assignment.department_id=$1 AND assignment.contact_id=$2 AND assignment.qualification_id=ANY($3::uuid[])`,
+      [departmentId, position.contactId, position.qualificationIds],
+    );
+    if (Number(qualified.rows[0]?.total ?? 0) !== position.qualificationIds.length) return `The assigned volunteer does not have every required qualification for ${position.name}.`;
+  }
+  return null;
+}
+
+async function validateServiceAssignments(departmentId: string, event: CreateServiceEvent, client?: PoolClient) {
   const positionNames = new Set((event.positions ?? []).map((position) => position.name.trim().toLocaleLowerCase()));
   if ((event.timePlan ?? []).some((item) => item.position && !positionNames.has(item.position.trim().toLocaleLowerCase()))) return "Each plan item must use a position listed for this service.";
   const assets = [...new Set(event.assetIds ?? [])];
@@ -720,6 +740,8 @@ async function validateServiceAssignments(departmentId: string, event: CreateSer
     const people = await pool!.query("SELECT id FROM contacts WHERE department_id=$1 AND id=ANY($2::uuid[])", [departmentId, contacts]);
     if (people.rowCount !== contacts.length) return "One or more assigned people do not belong to this site.";
   }
+  const qualificationError = await validatePositionQualifications(departmentId, event.positions ?? [], client);
+  if (qualificationError) return qualificationError;
   return validateServicePlanSongs(departmentId, event.timePlan ?? []);
 }
 
@@ -2681,6 +2703,8 @@ app.post<{ Body: CreateServiceEvent }>("/api/events", {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
+    if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const rows: ServiceEventRow[] = [];
     for (const date of dates) {
       const result = await client.query<ServiceEventRow>(
@@ -2736,6 +2760,8 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id",
       [request.params.id, selectedDepartmentId],
     );
     if (!previousPositionsResult.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "This event could not be found." }); }
+    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
+    if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events
         SET title = $3, kind = $4, event_date = $5, is_all_day = $6, start_time = $7, end_time = $8,
@@ -2784,6 +2810,8 @@ app.put<{ Params: { id: string }; Body: CreateServiceEvent }>("/api/events/:id/s
       "SELECT id,positions FROM service_events WHERE department_id=$1 AND recurrence_id=$2 FOR UPDATE",
       [selectedDepartmentId, source.rows[0].recurrence_id],
     );
+    const currentAssignmentError = await validateServiceAssignments(selectedDepartmentId, event, client);
+    if (currentAssignmentError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: currentAssignmentError }); }
     const result = await client.query<ServiceEventRow>(
     `UPDATE service_events SET event_date=event_date + $3::integer, title=$4, kind=$5, is_all_day=$6, start_time=$7, end_time=$8,
        location=$9, description=$10, room=$11, asset_ids=$12, positions=$13::jsonb, time_plan=$14::jsonb,
@@ -2855,6 +2883,107 @@ app.put<{ Params: { id: string; positionIndex: string }; Body: { status: "pendin
   finally { client.release(); }
 });
 
+app.get("/api/events/volunteer-qualifications", async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const result = await pool.query<{ id: string; name: string; category: string; active: boolean; contact_ids: string[] }>(
+    `SELECT qualification.id,qualification.name,qualification.category,qualification.active,
+            COALESCE(array_agg(assignment.contact_id ORDER BY person.last_name,person.first_name) FILTER (WHERE assignment.contact_id IS NOT NULL),'{}') AS contact_ids
+       FROM service_volunteer_qualifications qualification
+       LEFT JOIN contact_service_qualifications assignment ON assignment.qualification_id=qualification.id AND assignment.department_id=qualification.department_id
+       LEFT JOIN contacts person ON person.id=assignment.contact_id AND person.department_id=assignment.department_id
+      WHERE qualification.department_id=$1
+      GROUP BY qualification.id ORDER BY lower(qualification.category),lower(qualification.name)`, [selectedDepartmentId],
+  );
+  return result.rows.map((row) => ({ id: row.id, name: row.name, category: row.category, active: row.active, contactIds: row.contact_ids }));
+});
+
+app.post<{ Body: { name: string; category: string } }>("/api/events/volunteer-qualifications", {
+  schema: { body: { type: "object", additionalProperties: false, required: ["name", "category"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", minLength: 1, maxLength: 80 } } } },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  if (!request.body.name.trim() || !request.body.category.trim()) return reply.code(400).send({ error: "Enter both a qualification and a category." });
+  try {
+    const id = randomUUID();
+    await pool.query("INSERT INTO service_volunteer_qualifications(id,department_id,name,category,created_by) VALUES($1,$2,$3,$4,$5)", [id, selectedDepartmentId, request.body.name.trim(), request.body.category.trim(), request.authenticatedUser?.id ?? null]);
+    return reply.code(201).send({ id, name: request.body.name.trim(), category: request.body.category.trim(), active: true, contactIds: [] });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A qualification with this name already exists at this location." });
+    throw error;
+  }
+});
+
+app.put<{ Params: { id: string }; Body: { name: string; category: string; active: boolean } }>("/api/events/volunteer-qualifications/:id", {
+  schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["name", "category", "active"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", minLength: 1, maxLength: 80 }, active: { type: "boolean" } } } },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  if (!request.body.name.trim() || !request.body.category.trim()) return reply.code(400).send({ error: "Enter both a qualification and a category." });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const existing = await client.query("SELECT id FROM service_volunteer_qualifications WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    if (!existing.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "The qualification was not found." }); }
+    if (!request.body.active) {
+      const used = await client.query(
+        `SELECT 1 FROM service_events event
+         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(event.positions,'[]'::jsonb)) AS pos
+         WHERE event.department_id=$1 AND event.event_date>=CURRENT_DATE AND pos->'qualificationIds' ? $2 LIMIT 1`, [selectedDepartmentId, request.params.id],
+      );
+      if (used.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Remove this qualification from service roles before deactivating it." }); }
+    }
+    await client.query("UPDATE service_volunteer_qualifications SET name=$3,category=$4,active=$5,updated_at=now() WHERE id=$1 AND department_id=$2", [request.params.id, selectedDepartmentId, request.body.name.trim(), request.body.category.trim(), request.body.active]);
+    await client.query("COMMIT");
+    return { saved: true };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error && typeof error === "object" && "code" in error && error.code === "23505") return reply.code(409).send({ error: "A qualification with this name already exists at this location." });
+    throw error;
+  } finally { client.release(); }
+});
+
+app.put<{ Params: { id: string }; Body: { contactIds: string[] } }>("/api/events/volunteer-qualifications/:id/volunteers", {
+  schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } }, body: { type: "object", additionalProperties: false, required: ["contactIds"], properties: { contactIds: { type: "array", maxItems: 2000, uniqueItems: true, items: { type: "string", format: "uuid" } } } } },
+}, async (request, reply) => {
+  if (!databaseReady || !pool) return reply.code(503).send({ error: "The schedule database is unavailable." });
+  const selectedDepartmentId = await activeDepartmentId(request, reply, false, false, "events_manage");
+  if (!selectedDepartmentId) return reply;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const qualification = await client.query("SELECT id FROM service_volunteer_qualifications WHERE id=$1 AND department_id=$2 AND active=true FOR UPDATE", [request.params.id, selectedDepartmentId]);
+    if (!qualification.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "The active qualification was not found." }); }
+    const volunteers = request.body.contactIds;
+    if (volunteers.length) {
+      const contactsResult = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND status='member' AND id=ANY($2::uuid[])", [selectedDepartmentId, volunteers]);
+      if (contactsResult.rowCount !== volunteers.length) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "One or more volunteers do not belong to this location." }); }
+    }
+    const invalidatedAssignment = await client.query<{ title: string }>(
+      `SELECT event.title FROM service_events event
+       CROSS JOIN LATERAL jsonb_array_elements(COALESCE(event.positions,'[]'::jsonb)) AS pos
+       JOIN contact_service_qualifications current_assignment ON current_assignment.department_id=event.department_id
+         AND current_assignment.qualification_id=$2 AND current_assignment.contact_id::text=pos->>'contactId'
+       WHERE event.department_id=$1 AND event.event_date>=CURRENT_DATE AND pos->'qualificationIds' ? $2
+         AND NOT (pos->>'contactId'=ANY($3::text[])) LIMIT 1`,
+      [selectedDepartmentId, request.params.id, volunteers],
+    );
+    if (invalidatedAssignment.rowCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `A currently assigned volunteer would lose this required qualification for “${invalidatedAssignment.rows[0].title}”. Reassign the role or change its requirements first.` }); }
+    await client.query("DELETE FROM contact_service_qualifications WHERE department_id=$1 AND qualification_id=$2", [selectedDepartmentId, request.params.id]);
+    if (volunteers.length) await client.query(
+      `INSERT INTO contact_service_qualifications(department_id,contact_id,qualification_id,granted_by)
+       SELECT $1,contact.id,$2,$4 FROM contacts contact WHERE contact.department_id=$1 AND contact.status='member' AND contact.id=ANY($3::uuid[])`,
+      [selectedDepartmentId, request.params.id, volunteers, request.authenticatedUser?.id ?? null],
+    );
+    await client.query("COMMIT");
+    return { saved: true, volunteers: volunteers.length };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+});
+
 app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array<{ positionIndex: number; positionName: string }> } }>("/api/events/:id/positions/bulk-assign", {
   schema: {
     params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
@@ -2898,7 +3027,7 @@ app.post<{ Params: { id: string }; Body: { contactId: string; assignments: Array
       nextPositions[assignment.positionIndex] = { ...position, contactId: request.body.contactId };
     }
     const nextEvent = { ...event, positions: nextPositions };
-    const assignmentError = await validateServiceAssignments(departmentId, nextEvent);
+    const assignmentError = await validateServiceAssignments(departmentId, nextEvent, client);
     if (assignmentError) { await client.query("ROLLBACK"); return reply.code(400).send({ error: assignmentError }); }
     const updated = await client.query<ServiceEventRow>(
       `UPDATE service_events SET positions=$3::jsonb,updated_at=now()
@@ -3021,6 +3150,8 @@ app.put<{ Params: { id: string }; Body: { decision: "accepted" | "declined" | "c
       }
       positions[row.from_position_index] = { ...from, contactId: row.target_contact_id };
       positions[row.to_position_index] = { ...to, contactId: row.requester_contact_id };
+      const qualificationError = await validatePositionQualifications(selectedDepartmentId, positions, client);
+      if (qualificationError) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `The swap cannot be completed: ${qualificationError}` }); }
       await client.query("UPDATE service_events SET positions=$2::jsonb,updated_at=now() WHERE id=$1", [row.event_id, JSON.stringify(positions)]);
       for (const [positionIndex, newContactId] of [[row.from_position_index, row.target_contact_id], [row.to_position_index, row.requester_contact_id]] as const) {
         await client.query(
