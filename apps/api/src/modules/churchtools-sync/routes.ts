@@ -31,6 +31,7 @@ import { readChurchToolsAbsencePreview } from "./absence-preview.js";
 import { AbsenceImportReviewError, applyChurchToolsAbsenceImport, reviewChurchToolsAbsenceImport, verifiedAbsenceContact } from "./absence-import.js";
 
 import { isVisibleChurchToolsHistoryPerson, membershipHistoryCursor, membershipHistoryPageSize, personalChurchToolsId, readChurchToolsMembershipHistoryPage, readMembershipHistoryCursor } from "./membership-history.js";
+import { churchToolsPersonStatus, churchToolsPersonTags } from "./person-classification.js";
 
 type JsonObject = Record<string, any>;
 type Settings = { department_id: string; instance_url: string; encrypted_login_token: string; enabled: boolean };
@@ -2175,6 +2176,121 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
         }
         throw error;
       } finally { db.release(); }
+    });
+
+    type PersonClassificationBody = { personId: string; loginToken: string; review?: string };
+    routes.post<{ Body: PersonClassificationBody }>("/api/modules/sync/churchtools/person-classification", {
+      schema: { body: { type: "object", additionalProperties: false, required: ["personId", "loginToken"], properties: {
+        personId: { type: "string", pattern: "^[1-9][0-9]{0,15}$" },
+        loginToken: { type: "string", pattern: "^[-A-Za-z0-9._~+/=]{8,512}$" },
+        review: { type: "string", minLength: 1, maxLength: 1800 },
+      } } },
+    }, async (request, reply) => {
+      const { personId, loginToken, review } = request.body;
+      request.body.loginToken = "";
+      reply.header("Cache-Control", "private, no-store");
+      const dept = await department(request, reply, true);
+      if (!dept || !deps.validateMutation(request, reply)) return reply;
+      const actor = request.authenticatedUser?.id;
+      const config = await settings(dept);
+      if (!actor || !config) return reply.code(403).send({ error: "Configure ChurchTools and sign in to review People classifications." });
+      try {
+        const endpoint = new URL(config.instance_url);
+        if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) throw new Error();
+      } catch {
+        return reply.code(409).send({ error: "Use a configured HTTPS ChurchTools connection." });
+      }
+
+      const verified = await pool!.query<{ source_person_id: string }>(`SELECT proof.source_person_id
+        FROM department_memberships member JOIN contacts person ON person.id=member.contact_id
+          AND person.department_id=member.department_id AND person.archived_at IS NULL
+        JOIN churchtools_migration_person_provenance proof ON proof.department_id=person.department_id AND proof.contact_id=person.id
+        WHERE member.department_id=$1 AND member.user_id=$2 AND proof.instance_url=$3`, [dept, actor, config.instance_url]);
+      const ownerId = verified.rows[0]?.source_person_id;
+      if (!ownerId) return reply.code(403).send({ error: "Link your account to a verified ChurchTools People record at this location." });
+
+      type LocalPerson = { id: string; first_name: string; last_name: string; status: string };
+      const matchPerson = `SELECT p.id,p.first_name,p.last_name,p.status FROM churchtools_migration_person_provenance proof
+        JOIN contacts p ON p.id=proof.contact_id AND p.department_id=proof.department_id AND p.archived_at IS NULL
+        WHERE proof.department_id=$1 AND proof.instance_url=$2 AND proof.source_person_id=$3`;
+      const personArgs = [dept, config.instance_url, personId];
+      const local = (await pool!.query<LocalPerson>(matchPerson, personArgs)).rows[0];
+      if (!local) return reply.code(404).send({ error: "No verified active People record is linked to that ChurchTools ID at this location." });
+
+      const signal = AbortSignal.timeout(20_000);
+      let status: ReturnType<typeof churchToolsPersonStatus> = null;
+      let tags: ReturnType<typeof churchToolsPersonTags> = null;
+      try {
+        const identity = await get(config.instance_url, loginToken, "whoami", signal);
+        if (personalChurchToolsId(identity) !== ownerId) {
+          return reply.code(403).send({ error: "Use the personal ChurchTools token for your own verified account." });
+        }
+        const person = await get(config.instance_url, loginToken, `persons/${personId}`, signal);
+        if (!isVisibleChurchToolsHistoryPerson(person, personId)) {
+          return reply.code(403).send({ error: "ChurchTools did not confirm current visibility for this person." });
+        }
+        const optional = async (path: string) => {
+          try { return await get(config.instance_url, loginToken, path, signal); }
+          catch (error) {
+            if (error instanceof ChurchToolsReadError && [403, 404].includes(error.status)) return null;
+            throw error;
+          }
+        };
+        const [masters, sourceTags] = await Promise.all([
+          optional("person/masterdata"),
+          review ? Promise.resolve(null) : optional(`tags/person/${personId}`),
+        ]);
+        status = churchToolsPersonStatus(person, masters);
+        tags = churchToolsPersonTags(sourceTags);
+      } catch (error) {
+        if (error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status)) {
+          return reply.code(403).send({ error: "ChurchTools did not permit this account to review this person." });
+        }
+        return reply.code(400).send({ error: "Could not verify this ChurchTools classification. Try the review again." });
+      }
+
+      const binding = createHash("sha256").update(JSON.stringify([
+        "ct-person-classification", dept, config.instance_url, actor, ownerId, personId, local.id, local.status, status,
+      ])).digest("hex");
+      const proposed = status?.proposed;
+      const eligible = proposed && ["member", "visitor"].includes(local.status) && proposed !== local.status;
+      if (!review) return {
+        personId, localName: `${local.first_name} ${local.last_name}`.trim(), localStatus: local.status, status, tags,
+        review: eligible ? encrypt(JSON.stringify({ binding, expiresAt: Date.now() + 15 * 60_000 })) : null,
+      };
+      const stale = () => reply.code(409).send({ error: "The People classification review changed or expired. Review it again." });
+      try {
+        const proof = JSON.parse(decrypt(review));
+        if (!eligible || proof.binding !== binding || typeof proof.expiresAt !== "number" || proof.expiresAt <= Date.now()) return stale();
+      } catch { return stale(); }
+
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await deps.lockDepartmentForWrite(client, dept)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This location is read-only." });
+        }
+        const current = (await client.query<LocalPerson>(`${matchPerson} FOR UPDATE OF p,proof`, personArgs)).rows[0];
+        const currentSettings = await client.query("SELECT 1 FROM churchtools_sync_settings WHERE department_id=$1 AND instance_url=$2 FOR SHARE", [dept, config.instance_url]);
+        if (!current || current.id !== local.id || current.status !== local.status || !currentSettings.rowCount) {
+          await client.query("ROLLBACK");
+          return stale();
+        }
+        await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [actor]);
+        await client.query("UPDATE contacts SET status=$3 WHERE department_id=$1 AND id=$2", [dept, local.id, proposed]);
+        await client.query(`INSERT INTO people_record_history
+          (id,department_id,contact_id,actor_user_id,action,subject,before_value,after_value)
+          VALUES($1,$2,$3,$4,'profile_updated','churchtools_status',$5::jsonb,$6::jsonb)`,
+          [randomUUID(), dept, local.id, actor, JSON.stringify({ status: local.status }), JSON.stringify({
+            status: proposed, sourceInstance: config.instance_url, sourcePersonId: personId, sourceStatusId: status?.sourceId,
+          })]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+      deps.realtime.publish("people-records:changed", dept, { contactId: local.id });
+      deps.realtime.publish("core:contacts:changed", dept, { contactId: local.id });
+      return { updated: true, status: proposed };
     });
 
     type MembershipHistoryBody = { groupId: string; loginToken: string; cursor?: string };
