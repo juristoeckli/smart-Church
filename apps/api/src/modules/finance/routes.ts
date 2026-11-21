@@ -191,10 +191,50 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return value.replace(/[&<>"']/g, (character) => entities[character]!);
   }
 
+  type TaxTypeInput = { code: string; name: string; rateBasisPoints: number | null };
+  app.post<{ Body: TaxTypeInput }>("/api/modules/finance/tax-types", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["code", "name", "rateBasisPoints"], properties: {
+      code: { type: "string", minLength: 1, maxLength: 32 },
+      name: { type: "string", minLength: 1, maxLength: 160 },
+      rateBasisPoints: { anyOf: [{ type: "integer", minimum: 0, maximum: 10000 }, { type: "null" }] },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true);
+    if (!departmentId || !validateMutation(request, reply)) return reply;
+    const code = cleanText(request.body.code);
+    const name = cleanText(request.body.name);
+    if (!code || !name) return reply.code(400).send({ error: "Tax type code and name are required." });
+    const id = randomUUID();
+    const result = await pool!.query(
+      "INSERT INTO finance_tax_types(id,department_id,code,name,rate_basis_points) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING RETURNING id",
+      [id, departmentId, code, name, request.body.rateBasisPoints],
+    );
+    if (!result.rowCount) return reply.code(409).send({ error: "Tax type code already exists." });
+    publish(departmentId, "tax-type-created", id);
+    return reply.code(201).send({ id });
+  });
+
+  app.patch<{ Params: { id: string }; Body: { active: boolean } }>("/api/modules/finance/tax-types/:id", {
+    schema: {
+      params: { type: "object", required: ["id"], properties: { id: uuid } },
+      body: { type: "object", additionalProperties: false, required: ["active"], properties: { active: { type: "boolean" } } },
+    },
+  }, async (request, reply) => {
+    const departmentId = await department(request, reply, true);
+    if (!departmentId || !validateMutation(request, reply)) return reply;
+    const result = await pool!.query(
+      "UPDATE finance_tax_types SET active=$3,updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id",
+      [departmentId, request.params.id, request.body.active],
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Tax type not found." });
+    publish(departmentId, "tax-type-updated", request.params.id);
+    return { updated: true };
+  });
+
   app.get("/api/modules/finance/bootstrap", async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    const [settings, accounts, costCenters, donors, years, budgets, accountingYears] = await Promise.all([
+    const [settings, accounts, costCenters, donors, years, budgets, accountingYears, taxTypes] = await Promise.all([
       pool!.query("SELECT currency_code AS \"currencyCode\" FROM finance_settings WHERE department_id=$1", [departmentId]),
       pool!.query("SELECT id,code,name,account_type AS \"accountType\",active FROM finance_accounts WHERE department_id=$1 ORDER BY code", [departmentId]),
       pool!.query("SELECT id,code,name,active FROM finance_cost_centers WHERE department_id=$1 ORDER BY code", [departmentId]),
@@ -205,8 +245,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       pool!.query("SELECT accounting_year AS year FROM finance_accounting_years WHERE department_id=$1 UNION SELECT DISTINCT accounting_year AS year FROM finance_transactions WHERE department_id=$1 UNION SELECT DISTINCT accounting_year AS year FROM finance_budgets WHERE department_id=$1 ORDER BY year DESC", [departmentId]),
       pool!.query(`SELECT b.id,b.accounting_year AS "accountingYear",b.account_id AS "accountId",a.code AS "accountCode",a.name AS "accountName",b.cost_center_id AS "costCenterId",c.code AS "costCenterCode",c.name AS "costCenterName",b.amount_cents AS "amountCents",b.note FROM finance_budgets b LEFT JOIN finance_accounts a ON a.id=b.account_id AND a.department_id=b.department_id LEFT JOIN finance_cost_centers c ON c.id=b.cost_center_id AND c.department_id=b.department_id WHERE b.department_id=$1 ORDER BY b.accounting_year DESC,a.code,c.code`, [departmentId]),
       pool!.query(`SELECT accounting_year AS "accountingYear",label,start_date AS "startDate",end_date AS "endDate",status FROM finance_accounting_years WHERE department_id=$1 ORDER BY start_date DESC`, [departmentId]),
+      pool!.query('SELECT id,code,name,active,rate_basis_points AS "rateBasisPoints" FROM finance_tax_types WHERE department_id=$1 ORDER BY active DESC,lower(code),id', [departmentId]),
     ]);
-    return { currency: settings.rows[0]?.currencyCode ?? "CHF", accounts: accounts.rows, costCenters: costCenters.rows, donors: donors.rows, years: years.rows.map((row) => Number(row.year)), accountingYears: accountingYears.rows, budgets: budgets.rows };
+    return { currency: settings.rows[0]?.currencyCode ?? "CHF", accounts: accounts.rows, costCenters: costCenters.rows, donors: donors.rows, years: years.rows.map((row) => Number(row.year)), accountingYears: accountingYears.rows, budgets: budgets.rows, taxTypes: taxTypes.rows };
   });
 
   app.post<{ Body: { accountingYear: number; label: string; startDate: string; endDate: string } }>("/api/modules/finance/accounting-years", { schema: { body: { type: "object", additionalProperties: false, required: ["accountingYear", "label", "startDate", "endDate"], properties: { accountingYear: { type: "integer", minimum: 1900, maximum: 2200 }, label: { type: "string", minLength: 1, maxLength: 120 }, startDate: { type: "string", format: "date" }, endDate: { type: "string", format: "date" } } } } }, async (request, reply) => {
