@@ -11,7 +11,7 @@ When Group Hierarchy is not installed, the option is hidden and selection uses o
 ## Boundaries
 
 - The member roster includes active memberships in the selected groups; event check-ins for visitor-status contacts are added to the same roster. New visitor contacts require both event-management and People-management permission.
-- Check-in uses a staffed desk and standard browser printing.
+- Check-in uses a staffed desk and standard browser printing. Pickup pairs require current event authorization and contain matching desk references. Guardian names and contact details stay inside the authorized roster and release dialog.
 - Group selection aggregates membership records, not ChurchTools age/date rules; age subgroups must already be represented as child groups.
 - Event and group managers can record pickup contacts after confirming the parent or guardian's approval for the selected meeting. The attendee and pickup contacts must be active members of the selected group roster from the same location. Previous location-wide contacts appear as suggestions and require fresh confirmation for a meeting.
 - Staff can find a checked-in child by name or the printed desk reference, select an authorized contact, verify a photo ID or attest that they personally know the contact, and record the handoff. The app records the authorizing and releasing staff, timestamps and verification method without collecting the ID itself. Each child can be released once per event. The Check-in module locks the pickup list and attendance controls after release, while attendance history retains the arrival.
