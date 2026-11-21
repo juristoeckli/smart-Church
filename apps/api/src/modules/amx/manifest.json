@@ -2,7 +2,7 @@
   "id": "amx",
   "name": "GfC Steffisburg AMX integration",
   "version": "0.1.0",
-  "description": "Optional ICSP room control for AMX NetLinx controllers.",
+  "description": "Optional Telnet room control for AMX NetLinx controllers.",
   "serverEntry": "./routes.ts",
   "clientManaged": true,
   "required": false,
