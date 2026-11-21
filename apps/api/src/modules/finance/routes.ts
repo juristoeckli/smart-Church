@@ -1,3 +1,4 @@
+import { financePdf } from "./pdf.js";
 import { financeWorkbook } from "./workbook.js";
 import { createHash, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -31,6 +32,13 @@ function csvCell(value: unknown) {
   return `"${safeText.replace(/"/g, '""')}"`;
 }
 function sendFinanceExport(request: FastifyRequest, reply: FastifyReply, filename: string, header: string[], rows: unknown[][]) {
+  if ((request.params as { format?: string }).format === "pdf") {
+    return reply.type("application/pdf")
+      .header("Cache-Control", "private, no-store")
+      .header("X-Content-Type-Options", "nosniff")
+      .header("Content-Disposition", `attachment; filename=${filename}.pdf`)
+      .send(financePdf(filename.replace(/-/g, " "), header, rows));
+  }
   if ((request.params as { format?: string }).format === "xlsx") {
     return reply.type("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
       .header("Content-Disposition", `attachment; filename=${filename}.xlsx`)
@@ -513,8 +521,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Donor not found." }); publish(departmentId, "donor-updated", request.params.id); return { updated: true };
   });
 
-  app.get<{ Params: { id: string; format: string }; Querystring: { from?: string; to?: string } }>("/api/modules/finance/donors/:id/statement.:format", { schema: { params: { type: "object", additionalProperties: false, required: ["id", "format"], properties: { id: uuid, format: { enum: ["csv", "xlsx", "html"] } } }, querystring: { type: "object", additionalProperties: false, properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
-    if (!["csv", "xlsx", "html"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
+  app.get<{ Params: { id: string; format: string }; Querystring: { from?: string; to?: string } }>("/api/modules/finance/donors/:id/statement.:format", { schema: { params: { type: "object", additionalProperties: false, required: ["id", "format"], properties: { id: uuid, format: { enum: ["csv", "xlsx", "html", "pdf"] } } }, querystring: { type: "object", additionalProperties: false, properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
+    if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid donor-statement date range." });
     const donor = await pool!.query("SELECT 1 FROM finance_donors WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
@@ -688,7 +696,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement.:format", { schema: { querystring: { type: "object", additionalProperties: false, required: ["accountId"], properties: { accountId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
-    if (!["csv", "xlsx", "html"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
+    if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid account-statement date range." });
     const result = await pool!.query(`WITH entries AS (
@@ -705,7 +713,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Querystring: { year?: string } }>("/api/modules/finance/reports/cost-center-statement.:format", async (request, reply) => {
-    if (!["csv", "xlsx", "html"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
+    if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
     const result = await pool!.query(`SELECT c.code,c.name,COALESCE(sum(CASE WHEN t.id IS NOT NULL THEN l.debit_cents ELSE 0 END),0) AS debit_cents,
@@ -718,7 +726,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Querystring: { year?: string; report?: string } }>("/api/modules/finance/reports/turnover.:format", async (request, reply) => {
-    if (!["csv", "xlsx", "html"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
+    if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply, true); if (!departmentId) return reply;
     const year = request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : new Date().getFullYear();
     const report = request.query.report ?? "trial-balance";
@@ -736,7 +744,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Querystring: { from?: string; to?: string; year?: string; q?: string } }>("/api/modules/finance/transactions/export.:format", async (request, reply) => {
-    if (!["csv", "xlsx", "html"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
+    if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
     const departmentId = await department(request, reply); if (!departmentId) return reply;
     if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid date range." });
     const result = await pool!.query(`SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,a.code AS account_code,a.name AS account_name,c.code AS cost_center_code,d.display_name AS donor_name,l.debit_cents,l.credit_cents,l.line_text FROM finance_transactions t JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id JOIN finance_accounts a ON a.department_id=l.department_id AND a.id=l.account_id LEFT JOIN finance_cost_centers c ON c.department_id=l.department_id AND c.id=l.cost_center_id LEFT JOIN finance_donors d ON d.department_id=l.department_id AND d.id=l.donor_id WHERE t.department_id=$1 AND t.status='posted' AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ORDER BY t.booking_date,t.created_at,l.line_number`, [departmentId, request.query.from && /^\d{4}-\d{2}-\d{2}$/.test(request.query.from) ? request.query.from : null, request.query.to && /^\d{4}-\d{2}-\d{2}$/.test(request.query.to) ? request.query.to : null, request.query.year && /^\d{4}$/.test(request.query.year) ? Number(request.query.year) : null, cleanText(request.query.q ?? "").slice(0, 100)]);
