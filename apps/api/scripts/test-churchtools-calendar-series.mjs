@@ -8,7 +8,7 @@ const hooks = registerHooks({ resolve(specifier, context, next) {
     throw error;
   }
 } });
-const { reviewChurchToolsCalendarSeries } = await import("../src/modules/churchtools-sync/calendar-series.ts");
+const { readChurchToolsAllDaySeriesDates, reviewChurchToolsCalendarSeries } = await import("../src/modules/churchtools-sync/calendar-series.ts");
 hooks.deregister();
 
 const occurrence = (day, hour, event) => ({ startDate: `${day}T0${hour}:15:00Z`, endDate: `${day}T0${hour}:55:00Z`, event });
@@ -28,8 +28,25 @@ assert.deepEqual(result.dates.map(({ eventId }) => eventId), ["20", null, "30"])
 assert.equal(review({ calculatedDates: Object.fromEntries(Object.entries(dates).reverse()) }).sourceHash, result.sourceHash);
 assert.notEqual(review({ appointment: { ...appointment, title: "New title" } }).sourceHash, result.sourceHash);
 assert.throws(() => review({ appointment: { ...appointment, id: 8 } }), /different appointment/);
-assert.throws(() => review({ appointment: { ...appointment, allDay: true } }), /timed series/);
-assert.throws(() => review({ calculatedDates: { "2026-02-30": occurrence("2026-02-30", 8) } }), /invalid occurrence/);
+assert.throws(() => review({ appointment: { ...appointment, allDay: true } }), /verified inclusive end/);
+assert.throws(() => review({ calculatedDates: { "2026-02-30": occurrence("2026-02-30", 8) } }), /invalid occurrence date/);
 assert.throws(() => review({ calculatedDates: { "2026-10-25": occurrence("2026-10-25", 0) } }), /represented exactly/);
-assert.throws(() => review({ calculatedDates: { ...dates, "2026-04-13": occurrence("2026-04-13", 8) } }), /times vary/);
-console.log("ChurchTools recurring calendar import review handles exact DST, exceptions, extra dates and source changes.");
+const variable = review({ calculatedDates: { ...dates, "2026-04-13": occurrence("2026-04-13", 8) } });
+assert.deepEqual(variable.recurrence.dates, Object.keys(dates));
+assert.deepEqual(variable.extraDates, [{ startsAt: "2026-04-13T10:15:00", endsAt: "2026-04-13T10:55:00" }]);
+
+const allDayAppointment = { ...appointment, allDay: true, version: 3 };
+const allDaySource = fixture({ appointment: allDayAppointment });
+const occurrenceDetail = (day, version = 3) => ({ data: { appointment: {
+  base: { ...allDayAppointment, version },
+  calculated: { startDate: day, endDate: day === "2026-04-06" ? "2026-04-08" : day },
+} } });
+const inclusiveEnds = await readChurchToolsAllDaySeriesDates(allDaySource, "2", "7", async (day) => occurrenceDetail(day));
+const allDayReview = reviewChurchToolsCalendarSeries(allDaySource, "2", "7", "Europe/Zurich", inclusiveEnds);
+assert.equal(allDayReview.allDay, true);
+assert.equal(allDayReview.dates[0].endsAt, "2026-03-22T23:59:59");
+assert.deepEqual(allDayReview.recurrence.dates, ["2026-03-22", "2026-03-29"]);
+assert.equal(allDayReview.recurrence.endsOn, "2026-04-08");
+assert.deepEqual(allDayReview.extraDates, [{ startsAt: "2026-04-06T00:00:00", endsAt: "2026-04-08T23:59:59" }]);
+await assert.rejects(readChurchToolsAllDaySeriesDates(allDaySource, "2", "7", async (day) => occurrenceDetail(day, 4)), /series changed/);
+console.log("ChurchTools recurring calendar import handles exact DST, varying times, inclusive all-day intervals, and source changes.");

@@ -16,7 +16,7 @@ import { createFinanceDraftBatch, createReviewedJournalDrafts, journalDraftBatch
 import { planReviewedSplitDrafts, readChurchToolsSplitGroup, reconcileChurchToolsSplitGroup } from "./finance-split-review.js";
 import { reconcileChurchToolsSpecialJournal } from "./finance-special-review.js";
 import { readChurchToolsCancellationReadiness } from "./finance-cancellation-readiness.js";
-import { reviewChurchToolsCalendarSeries } from "./calendar-series.js";
+import { readChurchToolsAllDaySeriesDates, reviewChurchToolsCalendarSeries } from "./calendar-series.js";
 import { applyChurchToolsFinanceMasterData, ChurchToolsFinanceReviewError, financeBatchId, financeMappingHash, planChurchToolsFinanceMasterData, readChurchToolsFinanceReceipt, type FinanceSelection } from "./finance-masterdata.js";
 
 type JsonObject = Record<string, any>;
@@ -806,10 +806,10 @@ class ChurchToolsReadError extends Error {
     this.status = status;
   }
 }
-async function get(base: string, token: string, path: string): Promise<JsonObject> {
+async function get(base: string, token: string, path: string, signal = AbortSignal.timeout(20_000)): Promise<JsonObject> {
   const response = await fetch(base.replace(/\/+$/, "") + "/api/" + path.replace(/^\/+/, ""), {
     headers: { Authorization: "Login " + token, Accept: "application/json" },
-    signal: AbortSignal.timeout(20_000), redirect: "error",
+    signal, redirect: "error",
   });
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) throw new ChurchToolsReadError(response.status, "ChurchTools rejected the token or does not grant read access to " + path.split("?")[0] + ".");
@@ -1907,6 +1907,7 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
     async function calendarSeriesAvailable(dept: string) {
       const { rows } = await pool!.query<{ available: boolean }>(`SELECT to_regclass('public.church_calendar_calendars') IS NOT NULL
         AND to_regclass('public.church_calendar_appointments') IS NOT NULL
+        AND to_regclass('public.church_calendar_extra_dates') IS NOT NULL
         AND to_regclass('public.churchtools_migration_calendar_series') IS NOT NULL
         AND EXISTS (SELECT 1 FROM departments d JOIN installation_modules m ON m.installation_id=d.installation_id
           WHERE d.id=$1 AND m.module_id='church-calendar' AND m.enabled) AS available`, [dept]);
@@ -1946,9 +1947,17 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
       if (!target.rowCount) return reply.code(404).send({ error: "Choose an available personal calendar." });
       let review: ReturnType<typeof reviewChurchToolsCalendarSeries>;
       try {
-        const path = `calendars/${calendarId}/appointments/${seriesId}?include%5B%5D=event`;
-        review = reviewChurchToolsCalendarSeries(await get(config.instance_url, decrypt(config.encrypted_login_token), path), calendarId, seriesId, timeZone);
+        const path = `calendars/${calendarId}/appointments/${seriesId}`;
+        const token = decrypt(config.encrypted_login_token);
+        const signal = AbortSignal.timeout(20_000);
+        const series = await get(config.instance_url, token, `${path}?include%5B%5D=event`, signal);
+        const allDayEnds = await readChurchToolsAllDaySeriesDates(series, calendarId, seriesId,
+          (day) => get(config.instance_url, token, `${path}/${day}`, signal));
+        review = reviewChurchToolsCalendarSeries(series, calendarId, seriesId, timeZone, allDayEnds);
       } catch (error) {
+        if (error instanceof Error && error.name === "TimeoutError") {
+          return reply.code(504).send({ error: "ChurchTools took too long to verify every date in the series. Try the review again." });
+        }
         const status = error instanceof ChurchToolsReadError && [401, 403, 404].includes(error.status) ? error.status : 400;
         return reply.code(status).send({ error: error instanceof Error ? error.message : "Could not read the ChurchTools appointment series." });
       }
@@ -1990,11 +1999,14 @@ export function registerModuleRoutes(app: FastifyInstance, deps: ModuleServerCon
           return reply.code(409).send({ error: "This source series already has a local copy. Review changes in Calendar." });
         }
         await db.query(`INSERT INTO church_calendar_appointments
-          (id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,recurrence,internal_only,time_zone,created_by)
-          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9::jsonb,true,$10,$11)`, [
+          (id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,recurrence,internal_only,time_zone,created_by,all_day)
+          VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9::jsonb,true,$10,$11,$12)`, [
           appointmentId, dept, targetCalendarId, review.title, review.subtitle, review.description, review.startsAt, review.endsAt,
-          JSON.stringify(review.recurrence), review.zone, actor,
+          JSON.stringify(review.recurrence), review.zone, actor, review.allDay,
         ]);
+        if (review.extraDates.length) await db.query(`INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by)
+          SELECT $1,dates."startsAt",dates."endsAt",$2 FROM jsonb_to_recordset($3::jsonb) AS dates("startsAt" timestamp,"endsAt" timestamp)`,
+        [appointmentId, actor, JSON.stringify(review.extraDates)]);
         await db.query("COMMIT");
         return reply.code(201).header("Cache-Control", "private, no-store").send({ action: "created", appointmentId });
       } catch (error) {
