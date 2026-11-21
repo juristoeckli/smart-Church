@@ -78,6 +78,10 @@ function canManageCalendar(request: FastifyRequest, scope: CalendarScope, ownerI
   return scope === "group" ? permissions.includes("groups_manage") || permissions.includes("events_manage") : permissions.includes("events_manage");
 }
 
+function canManageServiceEvents(request: FastifyRequest) {
+  return request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+}
+
 function canSeePrivatePeople(request: FastifyRequest) {
   return request.activeDepartmentRole === "site_admin"
     || (request.activeDepartmentPermissions ?? []).some((permission) => permission === "people_view_private" || permission === "people_manage");
@@ -403,7 +407,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const bookings = await context.pool.query<{ id: string; purpose: string; starts_at: string }>(
       `SELECT id,purpose,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at FROM resource_bookings WHERE department_id=$1 AND status='approved' AND starts_at >= now()-interval '90 days' AND ($3 OR requested_by=$2) ORDER BY starts_at LIMIT 250`, [departmentId, userId(request), canSeeAllBookings]);
     const templatesInstalled = await context.pool.query<{ present: boolean }>("SELECT to_regclass('public.service_plan_templates') IS NOT NULL AS present");
-    const canManageEvents = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+    const canManageEvents = canManageServiceEvents(request);
     const servicePlanTemplates = canManageEvents && templatesInstalled.rows[0]?.present
       ? (await context.pool.query<{ id: string; name: string; positions: Array<{ name: string; category?: string; qualificationIds?: string[] }> }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
       : [];
@@ -430,7 +434,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const query = (request.query.q ?? "").trim().replace(/[\\%_]/g, "").slice(0, 80);
     if (query.length < 2) return [];
     if (request.query.staffing) {
-      const canManageEvents = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+      const canManageEvents = canManageServiceEvents(request);
       if (!canManageEvents) return responseError(reply, 403, "Event management access is required to search staffing qualifications.");
       return (await context.pool.query<{ id: string; name: string; qualificationIds: string[] }>(
         `SELECT person.id,concat_ws(' ',person.first_name,person.last_name) AS name,
@@ -465,9 +469,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const result = await context.pool.query<{ scope: CalendarScope; ownerUserId: string | null; memberCanCreate: boolean }>(
+    const result = await context.pool.query<{ scope: CalendarScope; ownerUserId: string | null; memberCanCreate: boolean; defaultServicePlanTemplateId: string | null }>(
       `SELECT calendar.id,calendar.name,calendar.scope,calendar.group_id AS "groupId",calendar.owner_user_id AS "ownerUserId",calendar.color,calendar.sort_order AS "sortOrder",
               calendar.allow_member_appointments AS "allowMemberAppointments",
+              calendar.default_service_plan_template_id AS "defaultServicePlanTemplateId",
               (calendar.scope='group' AND calendar.allow_member_appointments AND church_group.status='active' AND EXISTS (
                 SELECT 1 FROM group_members member WHERE member.group_id=calendar.group_id AND member.contact_id=membership.contact_id AND member.status='active'
               )) AS "memberCanCreate",
@@ -485,9 +490,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         ORDER BY CASE calendar.scope WHEN 'community' THEN 0 WHEN 'group' THEN 1 ELSE 2 END,calendar.sort_order,calendar.name,calendar.id`,
       [departmentId, userId(request), hasGroupVisibility(request)],
     );
-    return result.rows.map(({ memberCanCreate, ...calendar }) => {
+    return result.rows.map(({ memberCanCreate, defaultServicePlanTemplateId, ...calendar }) => {
       const canManage = canManageCalendar(request, calendar.scope, calendar.ownerUserId);
-      return { ...calendar, canManage, canCreateAppointment: canManage || memberCanCreate === true };
+      return {
+        ...calendar, canManage, canCreateAppointment: canManage || memberCanCreate === true,
+        ...(calendar.scope !== "personal" && canManage && canManageServiceEvents(request) ? { defaultServicePlanTemplateId } : {}),
+      };
     });
   });
 
@@ -535,7 +543,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return reply.code(201).send(created);
   });
 
-  app.patch<{ Params: { id: string }; Body: { name: string; color: string; sortOrder?: number; allowMemberAppointments?: boolean } }>("/api/modules/church-calendar/calendars/:id", {
+  app.patch<{ Params: { id: string }; Body: { name: string; color: string; sortOrder?: number; allowMemberAppointments?: boolean; defaultServicePlanTemplateId?: string | null } }>("/api/modules/church-calendar/calendars/:id", {
     schema: {
       params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
       body: { type: "object", additionalProperties: false, required: ["name", "color"], properties: {
@@ -543,6 +551,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         color: { type: "string", pattern: "^#[0-9a-fA-F]{6}$" },
         sortOrder: calendarSortOrder,
         allowMemberAppointments: { type: "boolean" },
+        defaultServicePlanTemplateId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] },
       } },
     },
   }, async (request, reply) => {
@@ -573,15 +582,35 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return responseError(reply, 400, "Only group calendars can allow member appointments.");
       }
+      const defaultTemplateId = request.body.defaultServicePlanTemplateId;
+      if (defaultTemplateId !== undefined) {
+        if (calendar.scope === "personal" || !canManageServiceEvents(request)) {
+          await client.query("ROLLBACK");
+          return responseError(reply, 403, "Event management access is required to configure a shared calendar's service-plan template.");
+        }
+        if (defaultTemplateId) {
+          const { rows: [availability] } = await client.query<{ present: boolean }>("SELECT to_regclass('public.service_plan_templates') IS NOT NULL AS present");
+          if (!availability?.present) {
+            await client.query("ROLLBACK");
+            return responseError(reply, 409, "Service-plan templates are unavailable.");
+          }
+          const template = await client.query("SELECT id FROM service_plan_templates WHERE id=$1 AND department_id=$2 AND active=true FOR SHARE", [defaultTemplateId, departmentId]);
+          if (!template.rowCount) {
+            await client.query("ROLLBACK");
+            return responseError(reply, 400, "Choose an active service-plan template from this location.");
+          }
+        }
+      }
       const { rows: [updated] } = await client.query<{ sortOrder: number; allowMemberAppointments: boolean }>(
         `UPDATE church_calendar_calendars SET name=$3,color=$4,sort_order=COALESCE($5::integer,sort_order),
-          allow_member_appointments=COALESCE($6::boolean,allow_member_appointments),updated_at=now()
+          allow_member_appointments=COALESCE($6::boolean,allow_member_appointments),
+          default_service_plan_template_id=CASE WHEN $7 THEN $8::uuid ELSE default_service_plan_template_id END,updated_at=now()
           WHERE id=$1 AND department_id=$2 RETURNING sort_order AS "sortOrder",allow_member_appointments AS "allowMemberAppointments"`,
-        [id, departmentId, name, request.body.color, request.body.sortOrder ?? null, request.body.allowMemberAppointments ?? null],
+        [id, departmentId, name, request.body.color, request.body.sortOrder ?? null, request.body.allowMemberAppointments ?? null, defaultTemplateId !== undefined, defaultTemplateId ?? null],
       );
       await client.query("COMMIT");
       context.realtime.publish("module:church-calendar:changed", departmentId, { action: "calendar-updated", calendarId: id });
-      return { id, name, color: request.body.color, ...updated };
+      return { id, name, color: request.body.color, ...updated, ...(defaultTemplateId !== undefined ? { defaultServicePlanTemplateId: defaultTemplateId } : {}) };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -1066,7 +1095,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!context.validateMutation(request, reply)) return reply;
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
-    const canManageEvents = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("events_manage");
+    const canManageEvents = canManageServiceEvents(request);
     if (!canManageEvents) return responseError(reply, 403, "Event management access is required to generate service events.");
     const client = await context.pool.connect();
     try {

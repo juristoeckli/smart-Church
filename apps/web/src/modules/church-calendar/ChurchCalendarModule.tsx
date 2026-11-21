@@ -11,7 +11,7 @@ import { applyAppointmentTemplate } from "./appointment-template-draft";
 
 type Scope = "community" | "group" | "personal";
 type View = "day" | "week" | "month" | "year" | "list";
-type Calendar = { id: string; name: string; scope: Scope; groupId: string | null; groupName?: string; ownerUserId: string | null; color: string; sortOrder?: number; isOwner?: boolean; canManage?: boolean; canCreateAppointment?: boolean; allowMemberAppointments?: boolean; hasPublicFeed?: boolean; canSubscribe?: boolean; hasSubscription?: boolean };
+type Calendar = { id: string; name: string; scope: Scope; groupId: string | null; groupName?: string; ownerUserId: string | null; color: string; sortOrder?: number; isOwner?: boolean; canManage?: boolean; canCreateAppointment?: boolean; allowMemberAppointments?: boolean; defaultServicePlanTemplateId?: string | null; hasPublicFeed?: boolean; canSubscribe?: boolean; hasSubscription?: boolean };
 type Frequency = "daily" | "weekly" | "monthly" | "monthly_weekday" | "yearly" | "manual";
 type Recurrence = { frequency: Frequency; interval: number; weekdays: number[]; weekday?: number; weekOfMonth?: number; endsOn?: string; count?: number; dates?: string[] };
 type EventRegistration = { token: string; capacity: number | null; open: boolean; registered: number; waitlisted: number };
@@ -121,7 +121,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [showCalendarForm, setShowCalendarForm] = useState(false);
-  const [calendarEdit, setCalendarEdit] = useState<{ departmentId: string; id: string; name: string; color: string; sortOrder: string; allowMemberAppointments?: boolean } | null>(null);
+  const [calendarEdit, setCalendarEdit] = useState<{ departmentId: string; id: string; name: string; color: string; sortOrder: string; allowMemberAppointments?: boolean; defaultServicePlanTemplateId?: string | null; initialDefaultServicePlanTemplateId?: string | null } | null>(null);
   const [showArchive, setShowArchive] = useState(false);
   const [editing, setEditing] = useState<Appointment | null>(null);
   const [reminderLead, setReminderLead] = useState(30);
@@ -304,6 +304,8 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     setShowForm(true);
   }
   async function openEdit(item: Appointment) {
+    const defaultTemplateId = calendars.find((calendar) => calendar.id === item.calendarId)?.defaultServicePlanTemplateId;
+    selectEventTemplate(defaultTemplateId && item.canManage && item.recurrence && choices.servicePlanTemplates.some((template) => template.id === defaultTemplateId) ? defaultTemplateId : "");
     setEventRegistrationEnabled(false);
     setEventRegistrationCapacity("");
     setImageFile(null);
@@ -473,9 +475,11 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     if (busy || calendarEdit?.departmentId !== departmentId || !calendarEdit.name.trim()) return;
     setBusy(true); setError(""); setNotice("");
     try {
-      const { id, name, color, sortOrder, allowMemberAppointments } = calendarEdit;
+      const { id, name, color, sortOrder, allowMemberAppointments, defaultServicePlanTemplateId } = calendarEdit;
       await api(`/api/modules/church-calendar/calendars/${id}`, {
-        method: "PATCH", headers: mutationHeaders, body: JSON.stringify({ name, color, sortOrder: Number(sortOrder), allowMemberAppointments }),
+        method: "PATCH", headers: mutationHeaders, body: JSON.stringify({ name, color, sortOrder: Number(sortOrder), allowMemberAppointments,
+          ...(defaultServicePlanTemplateId !== calendarEdit.initialDefaultServicePlanTemplateId ? { defaultServicePlanTemplateId } : {}),
+        }),
       });
       setCalendarEdit(null);
       setNotice("Calendar details saved.");
@@ -662,7 +666,8 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
         {calendar.canManage && selectionLocation.current === departmentId && <button type="button" className="icon-button"
           aria-label={`Edit calendar ${calendar.name}`} disabled={busy} onClick={() => {
             setCalendarEdit({ departmentId, id: calendar.id, name: calendar.name, color: calendar.color, sortOrder: String(calendar.sortOrder ?? 0),
-              allowMemberAppointments: calendar.scope === "group" ? calendar.allowMemberAppointments === true : undefined });
+              allowMemberAppointments: calendar.scope === "group" ? calendar.allowMemberAppointments === true : undefined,
+              defaultServicePlanTemplateId: calendar.defaultServicePlanTemplateId, initialDefaultServicePlanTemplateId: calendar.defaultServicePlanTemplateId });
             setError(""); setNotice("");
           }}><Pencil size={14} /></button>}</div>)}</div>{canManageShared && calendars.filter((calendar) => calendar.scope === "community").length > 0 && <section className="church-calendar-public-feed-settings"><h2>Public calendar feeds</h2>{calendars.filter((calendar) => calendar.scope === "community").map((calendar) => <div key={calendar.id}><span>{calendar.name}</span>{calendar.hasPublicFeed ? <><small>Feed enabled</small><button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Rotate link</button><button type="button" className="church-calendar-feed-button" onClick={() => void revokePublicFeed(calendar)} disabled={busy}>Revoke</button></> : <button type="button" className="church-calendar-feed-button" onClick={() => void issuePublicFeed(calendar)} disabled={busy}>Create feed link</button>}</div>)}</section>}{calendars.some((calendar) => calendar.canSubscribe || calendar.hasSubscription) && <section className="church-calendar-public-feed-settings">
         <h2>My calendar subscriptions</h2>
@@ -695,6 +700,15 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
           <label>Sort order<input type="number" required min={0} max={2_147_483_647} value={calendarEdit.sortOrder} onChange={(event) => setCalendarEdit({ ...calendarEdit, sortOrder: event.target.value })} /><small>Lower numbers appear first within the calendar type.</small></label>
           {calendarEdit.allowMemberAppointments !== undefined && <label className="church-calendar-check">
             <input type="checkbox" checked={calendarEdit.allowMemberAppointments} onChange={(event) => setCalendarEdit({ ...calendarEdit, allowMemberAppointments: event.target.checked })} /> Allow active group members to add appointments
+          </label>}
+          {calendarEdit.defaultServicePlanTemplateId !== undefined && <label>Default service-plan template
+            <select value={calendarEdit.defaultServicePlanTemplateId ?? ""} onChange={(event) => setCalendarEdit({ ...calendarEdit, defaultServicePlanTemplateId: event.target.value || null })}>
+              <option value="">No default</option>
+              {calendarEdit.defaultServicePlanTemplateId && !choices.servicePlanTemplates.some(({ id }) => id === calendarEdit.defaultServicePlanTemplateId)
+                && <option value={calendarEdit.defaultServicePlanTemplateId} disabled>Previously selected template is unavailable</option>}
+              {choices.servicePlanTemplates.map(({ id, name }) => <option value={id} key={id}>{name}</option>)}
+            </select>
+            <small>Preselects a template when a manager opens event generation on a recurring appointment.</small>
           </label>}
           <footer><button type="button" className="button button-secondary" onClick={() => setCalendarEdit(null)}>Cancel</button>
             <button type="submit" className="button button-primary" disabled={busy || !calendarEdit.name.trim()}>Save changes</button></footer>
