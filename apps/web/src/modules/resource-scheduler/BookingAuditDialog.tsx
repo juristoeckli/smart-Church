@@ -21,7 +21,7 @@ function detailFields(details: Record<string, unknown>) {
   const changed = Array.isArray(details.fields) ? details.fields.flatMap((field) => typeof field === "string" && Object.hasOwn(labels, field)
     ? [labels[field as keyof typeof labels]] : []) : [];
   if (changed.length) fields.push(["Changed", changed.join(", ")]);
-  for (const [key, label] of [["quantity", "Units"], ["leadInMinutes", "Setup"], ["cleanupMinutes", "Cleanup"], ["occurrenceCount", "Occurrences"], ["cancelledBookings", "Cancelled bookings"]]) {
+  for (const [key, label] of [["quantity", "Units"], ["leadInMinutes", "Setup"], ["cleanupMinutes", "Cleanup"], ["occurrenceCount", "Occurrences"], ["cancelledBookings", "Cancelled bookings"], ["preservedApprovedCount", "Approvals preserved"]]) {
     const value = details[key];
     if (typeof value === "number") fields.push([label, key.endsWith("Minutes") ? `${value} min` : String(value)]);
   }

@@ -326,7 +326,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return calendarBookingWindow(startsAt, endsAt, (overrides.allDay ?? appointment.all_day) === true, timeZone);
   }
 
-  async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: { query: (sql: string, values?: unknown[]) => Promise<any> }, apply = false) {
+  async function calculateFutureEdit(departmentId: string, seriesId: string, input: FutureEditInput, queryable: Pick<PoolClient, "query">, apply = false) {
     const seriesResult = await queryable.query("SELECT * FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL", [seriesId, departmentId]);
     const series = seriesResult.rows[0];
     if (!series) return { error: "Booking series not found in this location." } as const;
@@ -358,18 +358,48 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     proposed = proposed.filter((item) => item.localDate >= input.fromDate);
     if (!proposed.length) return { error: "This repeat rule has no future occurrences from the selected date." } as const;
-    const current = await queryable.query(`SELECT occurrence.resource_booking_id AS id,occurrence.occurrence_starts_at AS "occurrenceStartsAt",occurrence.is_extra_date AS "isExtraDate",booking.status,
+    const current = await queryable.query<{
+      id: string; occurrenceStartsAt: Date; occurrenceDate: string; hasOccurrenceOverride: boolean;
+      status: string; isFuture: boolean; startsAt: Date; endsAt: Date; quantity: number; leadInMinutes: number; cleanupMinutes: number;
+    }>(`SELECT occurrence.resource_booking_id AS id,occurrence.occurrence_starts_at AS "occurrenceStartsAt",booking.status,
+        booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.quantity,booking.starts_at>=now() AS "isFuture",
+        booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
         to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
         EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=occurrence.series_id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride"
       FROM resource_booking_series_occurrences occurrence JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=occurrence.department_id
       JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
-      WHERE occurrence.department_id=$1 AND occurrence.series_id=$2 AND booking.starts_at>=now()
-        AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date >= $3::date ORDER BY occurrence.occurrence_starts_at${apply && series.all_day_date ? " FOR UPDATE OF booking" : ""}`, [departmentId, seriesId, input.fromDate]);
-    const approved = current.rows.filter((row: { status: string }) => row.status === "approved");
-    const requested = current.rows.filter((row: { status: string }) => row.status === "requested");
-    const requestedDates = new Set(requested.map((row: { occurrenceDate: string }) => row.occurrenceDate));
+      WHERE occurrence.department_id=$1 AND occurrence.series_id=$2
+        AND (occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date >= $3::date
+      ORDER BY occurrence.occurrence_starts_at${apply ? " FOR UPDATE OF booking" : ""}`, [departmentId, seriesId, input.fromDate]);
+
+    const proposedDates = new Map(proposed.map((item) => [item.localDate, item]));
+    const protectedDates = new Set<string>();
+    let approvedCount = 0;
+    let preservedApprovedCount = 0;
+    let blockedStartedCount = 0;
+    for (const row of current.rows) {
+      if (row.status !== "approved" && row.isFuture) continue;
+      const replacement = proposedDates.get(row.occurrenceDate);
+      const canPreserve = Boolean(replacement && +replacement.startsAt === +row.occurrenceStartsAt &&
+        +replacement.startsAt === +row.startsAt && +replacement.endsAt === +row.endsAt &&
+        input.quantity === row.quantity && input.leadInMinutes === row.leadInMinutes && input.cleanupMinutes === row.cleanupMinutes);
+      if (row.status === "approved") {
+        approvedCount++;
+        if (canPreserve) preservedApprovedCount++;
+      } else if (!canPreserve) {
+        blockedStartedCount++;
+      }
+      if (canPreserve) protectedDates.add(row.occurrenceDate);
+    }
+    const requested = current.rows.filter((row) => row.status === "requested" && row.isFuture);
+    const requestedDates = new Set(requested.map(({ occurrenceDate }) => occurrenceDate));
     const retained = proposed.filter((item) => requestedDates.has(item.localDate)).length;
-    return { series, startsAt, endsAt, proposed, approvedCount: approved.length, current, requested, addedCount: proposed.length - retained, updatedCount: retained, cancelledCount: requested.length - retained, resourceUnits: Number(resourceResult.rows[0].total_units), calendarRequired: resourceResult.rows[0].calendar_required === true, managerBookingOnly: resourceResult.rows[0].manager_booking_only === true, visibilityGroupId: resourceResult.rows[0].visibility_group_id as string | null };
+    const addedCount = proposed.filter((item) => !requestedDates.has(item.localDate) && !protectedDates.has(item.localDate)).length;
+    return { series, startsAt, endsAt, proposed, protectedDates, approvedCount, preservedApprovedCount,
+      blockedApprovedCount: approvedCount - preservedApprovedCount, blockedStartedCount, requested, addedCount,
+      updatedCount: retained, cancelledCount: requested.length - retained,
+      calendarRequired: resourceResult.rows[0].calendar_required === true, managerBookingOnly: resourceResult.rows[0].manager_booking_only === true,
+      visibilityGroupId: resourceResult.rows[0].visibility_group_id as string | null };
   }
 
   const resourceCategories = ["room", "vehicle", "equipment", "other"] as const;
@@ -1255,7 +1285,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const managerRequired = result.managerBookingOnly && result.addedCount > 0 && !isManager(request);
     return { fromDate: request.body.fromDate, occurrenceCount: result.proposed.length, addedCount: result.addedCount,
       updatedCount: result.updatedCount, cancelledCount: result.cancelledCount, approvedCount: result.approvedCount,
-      blocked: result.approvedCount > 0 || calendarRequired || managerRequired || visibilityRequired, calendarRequired, managerRequired, visibilityRequired };
+      preservedApprovedCount: result.preservedApprovedCount, blockedApprovedCount: result.blockedApprovedCount, blockedStartedCount: result.blockedStartedCount,
+      blocked: result.blockedApprovedCount > 0 || result.blockedStartedCount > 0 || calendarRequired || managerRequired || visibilityRequired,
+      calendarRequired, managerRequired, visibilityRequired };
 
   });
   app.put<{ Params: { seriesId: string }; Body: FutureEditInput }>("/api/modules/resource-scheduler/series/:seriesId/edit-future", {
@@ -1265,16 +1297,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!context.validateMutation(request, reply)) return reply;
     const client = await context.pool!.connect();
-    let summary: { addedCount: number; updatedCount: number; cancelledCount: number } | null = null;
+    let summary: { addedCount: number; updatedCount: number; cancelledCount: number; preservedApprovedCount: number } | null = null;
     try {
       await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, request.params.seriesId]);
       const locked = await client.query("SELECT id,requested_by FROM resource_booking_series WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR UPDATE", [request.params.seriesId, departmentId]);
       if (!locked.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking series not found in this location." }); }
       if (locked.rows[0].requested_by !== request.authenticatedUser!.id && !isManager(request)) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "Only the series owner or a resource manager can edit future occurrences." }); }
       const plan = await calculateFutureEdit(departmentId, request.params.seriesId, request.body, client, true);
       if ("error" in plan) { await client.query("ROLLBACK"); return reply.code(400).send({ error: plan.error }); }
-      if (plan.approvedCount) { await client.query("ROLLBACK"); return reply.code(409).send({ error: `${plan.approvedCount} future occurrence(s) are already approved. No changes were made; handle those bookings individually before editing the series.` }); }
+      if (plan.blockedApprovedCount || plan.blockedStartedCount) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This change would remove or change approved or already started bookings. Keep those reservations as scheduled before applying the series edit." });
+      }
       if (plan.addedCount > 0 && plan.series.linked_appointment_id) {
         if (!isManager(request)) {
           await client.query("ROLLBACK");
@@ -1319,6 +1358,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const extras = new Set(extrasResult.rows.map((row: { date: string }) => row.date));
       for (const occurrence of plan.proposed) {
         const date = occurrence.localDate;
+        if (plan.protectedDates.has(date)) continue;
         const existing = currentByDate.get(date);
         if (existing) {
           if (existing.hasOccurrenceOverride) {
@@ -1342,7 +1382,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           addedCount++;
         }
       }
-      summary = { addedCount, updatedCount, cancelledCount: canceledIds.length };
+      summary = { addedCount, updatedCount, cancelledCount: canceledIds.length, preservedApprovedCount: plan.preservedApprovedCount };
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_future_edited',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, JSON.stringify({ fromDate: input.fromDate, previous: { purpose: plan.series.purpose, subtitle: plan.series.subtitle, description: plan.series.description, startsAt: plan.series.starts_at, endsAt: plan.series.ends_at, recurrence: plan.series.recurrence, quantity: plan.series.quantity, leadInMinutes: plan.series.lead_in_minutes, cleanupMinutes: plan.series.cleanup_minutes }, next: { ...input, subtitle, description }, ...summary })]);
       await client.query("COMMIT");
     } catch (error) {
