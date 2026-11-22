@@ -1,3 +1,4 @@
+import { accountStatementSql, type AccountStatementLine, type StatementLabel } from "./account-statement.js";
 import { costCenterBudgetSql, costCenterEntriesSql, costCenterScopeSql, type StatementBudget, type StatementEntry, type StatementScope } from "./cost-center-detail.js";
 import { recentGivingSql, type RecentGiving } from "./recent-giving.js";
 import { financePdf } from "./pdf.js";
@@ -808,20 +809,31 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { accountingYear: year, accounts, totals: { debitCents: exactStatementCents(totals.debit), creditCents: exactStatementCents(totals.credit) } };
   });
 
-  app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement", async (request, reply) => {
-    const departmentId = await department(request, reply); if (!departmentId) return reply;
-    const accountId = request.query.accountId; if (!accountId) return reply.code(400).send({ error: "Choose an account." });
-    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid account-statement date range." });
-    const result = await pool!.query(`WITH entries AS (
-        SELECT t.id,t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,l.line_text,l.debit_cents,l.credit_cents,t.created_at,l.line_number,
-               sum(l.debit_cents-l.credit_cents) OVER (ORDER BY t.booking_date,t.created_at,t.id,l.line_number)::text AS running_balance_cents
-          FROM finance_transaction_lines l JOIN finance_transactions t ON t.id=l.transaction_id AND t.department_id=l.department_id
-         WHERE l.department_id=$1 AND l.account_id=$2 AND t.status='posted'
-      )
-      SELECT id,booking_date AS "bookingDate",accounting_year AS "accountingYear",receipt_number AS "receiptNumber",booking_text AS "bookingText",line_text AS "lineText",debit_cents::text AS "debitCents",credit_cents::text AS "creditCents",running_balance_cents AS "runningBalanceCents"
-        FROM entries WHERE ($3::date IS NULL OR booking_date >= $3) AND ($4::date IS NULL OR booking_date <= $4)
-       ORDER BY booking_date,created_at,id,line_number`, [departmentId, accountId, request.query.from ?? null, request.query.to ?? null]);
-    return result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents), runningBalanceCents: asMoney(row.runningBalanceCents) }));
+  type AccountStatementQuery = { accountId: string; from?: string; to?: string };
+  const accountStatementQuerySchema = { type: "object", additionalProperties: false, required: ["accountId"], properties: {
+    accountId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" },
+  } } as const;
+
+  async function statementRows(id: string, { accountId,from,to }: AccountStatementQuery, reply: FastifyReply) {
+    if ((from && !validDateOnly(from)) || (to && !validDateOnly(to)) || (from && to && from > to)
+      || from?.startsWith("0000-") || to?.startsWith("0000-")) {
+      reply.code(400).send({ error: "Choose a valid account-statement date range." });
+      return null;
+    }
+    return (await pool!.query<AccountStatementLine>(accountStatementSql,[id,accountId,from ?? null,to ?? null])).rows;
+  }
+
+  app.get<{ Querystring: AccountStatementQuery }>("/api/modules/finance/reports/account-statement", {
+    schema: { querystring: accountStatementQuerySchema },
+  }, async (request,reply) => {
+    const id = await department(request,reply);
+    if (!id) return reply;
+    const entries = await statementRows(id,request.query,reply);
+    if (!entries) return reply;
+    return reply.header("Cache-Control","private, no-store").send(entries.map(row => ({ ...row,
+      debitCents:exactStatementCents(row.debitCents),creditCents:exactStatementCents(row.creditCents),
+      runningBalanceCents:exactStatementCents(row.runningBalanceCents),
+    })));
   });
 
   app.get<{ Querystring: { year?: string } }>("/api/modules/finance/reports/cost-center-statement", async (request, reply) => {
@@ -831,21 +843,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { accountingYear: year, costCenters: result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) })) };
   });
 
-  app.get<{ Querystring: { accountId?: string; from?: string; to?: string } }>("/api/modules/finance/reports/account-statement.:format", { schema: { querystring: { type: "object", additionalProperties: false, required: ["accountId"], properties: { accountId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
-    if (!["csv", "xlsx", "html", "pdf"].includes((request.params as { format: string }).format)) return reply.code(404).send({ error: "Export format not found." });
-    const departmentId = await department(request, reply, true); if (!departmentId) return reply;
-    if ((request.query.from && !validDateOnly(request.query.from)) || (request.query.to && !validDateOnly(request.query.to)) || (request.query.from && request.query.to && request.query.from > request.query.to)) return reply.code(400).send({ error: "Choose a valid account-statement date range." });
-    const result = await pool!.query(`WITH entries AS (
-        SELECT t.booking_date,t.accounting_year,t.receipt_number,t.booking_text,l.line_text,l.debit_cents,l.credit_cents,t.created_at,t.id,l.line_number,
-               sum(l.debit_cents-l.credit_cents) OVER (ORDER BY t.booking_date,t.created_at,t.id,l.line_number) AS running_balance_cents
-          FROM finance_transaction_lines l JOIN finance_transactions t ON t.id=l.transaction_id AND t.department_id=l.department_id
-         WHERE l.department_id=$1 AND l.account_id=$2 AND t.status='posted'
-      )
-      SELECT booking_date,accounting_year,receipt_number,booking_text,line_text,debit_cents,credit_cents,running_balance_cents
-        FROM entries WHERE ($3::date IS NULL OR booking_date >= $3) AND ($4::date IS NULL OR booking_date <= $4)
-       ORDER BY booking_date,created_at,id,line_number`, [departmentId, request.query.accountId, request.query.from ?? null, request.query.to ?? null]);
-    const header = ["booking_date", "accounting_year", "receipt_number", "booking_text", "line_text", "debit_cents", "credit_cents", "running_balance_cents"];
-    return sendFinanceExport(request, reply, "finance-account-statement", header, result.rows.map((row) => [row.booking_date, row.accounting_year, row.receipt_number, row.booking_text, row.line_text, row.debit_cents, row.credit_cents, row.running_balance_cents]));
+  app.get<{ Params: { format: string }; Querystring: AccountStatementQuery }>("/api/modules/finance/reports/account-statement.:format", {
+    schema: { querystring: accountStatementQuerySchema },
+  }, async (request,reply) => {
+    if (!["csv","xlsx","html","pdf"].includes(request.params.format)) return reply.code(404).send({ error: "Export format not found." });
+    const id = await department(request,reply,true);
+    if (!id) return reply;
+    const entries = await statementRows(id,request.query,reply);
+    if (!entries) return reply;
+    const label = (value: StatementLabel | null) => value ? `${value.code} · ${value.name}` : "";
+    const header = ["booking_date","accounting_year","receipt_number","booking_text","line_text","debit_cents","credit_cents",
+      "running_balance_cents","account","cost_center","counteraccounts"];
+    return sendFinanceExport(request,reply.header("Cache-Control","private, no-store"),"finance-account-statement",header,entries.map(row => [
+      row.bookingDate,row.accountingYear,row.receiptNumber,row.bookingText,row.lineText,row.debitCents,row.creditCents,row.runningBalanceCents,
+      label(row.account),label(row.costCenter),row.counterAccounts.map(label).join("; "),
+    ]),[5,6,7]);
   });
 
   app.get<{ Querystring: { year?: string } }>("/api/modules/finance/reports/cost-center-statement.:format", async (request, reply) => {
