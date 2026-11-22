@@ -66,9 +66,9 @@ export class NetLinxWebControlSession {
       signal: AbortSignal.timeout(8000),
     });
     const body = await response.text();
-    const hasControl = /<control(?:\\s|>)/i.test(body);
-    const failed = /<failed>\\s*1\\s*<\\/failed>/i.test(body);
-    const loginPage = /<login\\b/i.test(body);
+    const hasControl = /<control(?:\s|>)/i.test(body);
+    const failed = /<failed>\s*1\s*<\/failed>/i.test(body);
+    const loginPage = /<login\b/i.test(body);
     if (!response.ok || !hasControl || failed || loginPage) {
       const location = response.headers.get("location");
       const redirectPath = location ? new URL(location, this.origin).pathname : "none";
