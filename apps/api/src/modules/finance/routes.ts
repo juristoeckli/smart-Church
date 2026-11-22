@@ -33,6 +33,10 @@ function validDateOnly(value: string | undefined) {
   const date = new Date(`${value}T00:00:00.000Z`);
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
+function masterDataCsvText(value: string) {
+  // Guard spreadsheet readers that trim the leading whitespace of a cell.
+  return /^\s+[=+\-@]/.test(value) ? "'" + value : value;
+}
 function csvCell(value: unknown) {
   const text = String(value ?? "");
   const safeText = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
@@ -301,6 +305,30 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     publish(departmentId, "tax-type-updated", request.params.id);
     return { updated: true };
   });
+
+  app.get<{ Params: { dataset: "accounts" | "cost-centers"; format: "csv" | "xlsx" } }>(
+    "/api/modules/finance/master-data/:dataset/:format",
+    { schema: { params: { type: "object", additionalProperties: false, required: ["dataset", "format"],
+      properties: { dataset: { type: "string", enum: ["accounts", "cost-centers"] },
+        format: { type: "string", enum: ["csv", "xlsx"] } } } } },
+    async (request, reply) => {
+      const departmentId = await department(request, reply);
+      if (!departmentId) return reply;
+      const { dataset, format } = request.params;
+      reply.header("Cache-Control", "private, no-store").header("X-Content-Type-Options", "nosniff");
+      if (dataset === "accounts") {
+        if (format !== "csv") return reply.code(404).send({ error: "The chart of accounts is available as CSV." });
+        const { rows } = await pool!.query<{ code: string; name: string; account_type: string; active: boolean }>(
+          "SELECT code,name,account_type,active FROM finance_accounts WHERE department_id=$1 ORDER BY code,id", [departmentId]);
+        return sendFinanceExport(request, reply, "finance-chart-of-accounts", ["Code", "Name", "Type", "Active"],
+          rows.map(account => [masterDataCsvText(account.code), masterDataCsvText(account.name), account.account_type, account.active]));
+      }
+      const { rows } = await pool!.query<{ code: string; name: string; active: boolean }>(
+        "SELECT code,name,active FROM finance_cost_centers WHERE department_id=$1 ORDER BY code,id", [departmentId]);
+      return sendFinanceExport(request, reply, "finance-cost-centers", ["Code", "Name", "Active"], rows.map(center =>
+        format === "csv" ? [masterDataCsvText(center.code), masterDataCsvText(center.name), center.active] : [center.code, center.name, center.active]));
+    },
+  );
 
   app.get("/api/modules/finance/bootstrap", async (request, reply) => {
     const departmentId = await department(request, reply);
