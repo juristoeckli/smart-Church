@@ -54,6 +54,17 @@ type StatementLabel = { code: string; name: string };
 type StatementLine = { id: string; lineId: string; bookingDate: string; receiptNumber: string; bookingText: string; lineText: string;
   debitCents: number | string; creditCents: number | string; runningBalanceCents: number | string;
   account: StatementLabel; costCenter: StatementLabel | null; counterAccounts: StatementLabel[]; };
+type TransitLeg = "outgoing" | "incoming";
+type TransitDraft = { leg: TransitLeg; bankAccount: string; clearingAccount: string; amount: string };
+const initialTransit = (): TransitDraft => ({ leg: "outgoing", bankAccount: "", clearingAccount: "", amount: "" });
+
+function transitAmountCents(amount: string): number {
+  const parts = /^(\d+)(?:\.(\d{1,2}))?$/.exec(amount);
+  if (!parts) return 0;
+  const cents = Number(parts[1]) * 100 + Number((parts[2] ?? "").padEnd(2, "0"));
+  return Number.isSafeInteger(cents) && cents <= 9000000000000000 ? cents : 0;
+}
+
 type JournalLine = { accountId: string; costCenterId: string; donorId: string; debit: string; credit: string; text: string };
 type Tab = "transactions" | "accounts" | "donors" | "budgets" | "accounting-years" | "receipts" | "bank-statements" | "reports";
 type ReceiptSettings = { organizationName: string; templateText: string; numberingPrefix: string };
@@ -119,6 +130,7 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [showPosting, setShowPosting] = useState(false);
+  const [transitDraft, setTransitDraft] = useState<TransitDraft | null>(null);
   const [manualReceipt,setManualReceipt] = useState(false);
   const journalSubmissionId=useRef<string|null>(null);
   const [showTransfer, setShowTransfer] = useState(false);
@@ -259,13 +271,26 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
     return <button className="finance-text-button" type="button" disabled={saving} aria-label={`${label} ${item.code} ${item.name}`} onClick={() => void changeMasterDataStatus(collection, item)}>{label}</button>;
   }
 
+  const transitAccounts = bootstrap.accounts.filter(account => account.active && account.accountType === "asset");
+  const transitCents = transitAmountCents(transitDraft?.amount ?? "");
+  const transitValid = Boolean(transitDraft && transitCents > 0
+    && transitDraft.bankAccount !== transitDraft.clearingAccount
+    && transitAccounts.some(account => account.id === transitDraft.bankAccount)
+    && transitAccounts.some(account => account.id === transitDraft.clearingAccount));
+
   const dateUsesNumbering = bootstrap.accountingYears.some(period => period.status==="open" && period.journalNumberingEnabled
     && bookingDate>=period.startDate.slice(0,10) && bookingDate<=period.endDate.slice(0,10));
   const automaticReceipt = dateUsesNumbering && !manualReceipt;
 
   async function postTransaction(event: FormEvent) {
     event.preventDefault();
-    const payload = lines.map((line) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null, donorId: line.donorId || null, debitCents: Math.round(Number(line.debit || 0) * 100), creditCents: Math.round(Number(line.credit || 0) * 100), text: line.text }));
+    if (saving || (transitDraft && !transitValid)) return;
+    const transitDebit = transitDraft?.leg === "outgoing" ? transitDraft.clearingAccount : transitDraft?.bankAccount;
+    const transitCredit = transitDraft?.leg === "outgoing" ? transitDraft.bankAccount : transitDraft?.clearingAccount;
+    const payload = transitDebit && transitCredit ? [
+      { accountId: transitDebit, debitCents: transitCents, creditCents: 0 },
+      { accountId: transitCredit, debitCents: 0, creditCents: transitCents },
+    ] : lines.map((line) => ({ accountId: line.accountId, costCenterId: line.costCenterId || null, donorId: line.donorId || null, debitCents: Math.round(Number(line.debit || 0) * 100), creditCents: Math.round(Number(line.credit || 0) * 100), text: line.text }));
     if (automaticReceipt) journalSubmissionId.current ??= crypto.randomUUID();
     await action(async () => { await send("/api/modules/finance/transactions", "POST", {
       bookingDate,bookingText,lines:payload,...(automaticReceipt ? {submissionId:journalSubmissionId.current} : {receiptNumber}),
@@ -609,7 +634,14 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
       <div className="finance-section-heading"><div><h2>{t("Transactions")}</h2><p>Posted ledger entries · accounting year {year}</p></div><div className="finance-action-row"><button className="button button-secondary" type="button" onClick={() => void exportCsv()}><ArrowDownToLine size={15} />{exportFormat === "pdf" ? "Download PDF" : exportFormat === "html" ? "Download printable document" : exportFormat === "xlsx" ? "Export XLSX" : t("Export CSV")}</button>{canManage && <button className="button button-secondary" type="button" disabled={bootstrap.accounts.filter((account) => account.active && account.accountType === "asset").length < 2} onClick={() => setShowTransfer(true)}>Transfer between accounts</button>}{canManage && <button type="button" className="button button-secondary"
         disabled={bootstrap.costCenters.filter(center => center.active).length<2
           || !bootstrap.accounts.some(account => account.active && ["asset","liability","equity"].includes(account.accountType))}
-        onClick={() => setShowCostCenterTransfer(true)}>Transfer cost-center budget</button>}{canManage && <button className="button button-primary" type="button" onClick={() => { journalSubmissionId.current=null;setManualReceipt(false);setShowPosting(true); }}><Plus size={15} />{t("New transaction")}</button>}</div></div>
+        onClick={() => setShowCostCenterTransfer(true)}>Transfer cost-center budget</button>}{canManage && transitAccounts.length >= 2 && <button className="button button-secondary" type="button" onClick={() => {
+        journalSubmissionId.current = null;
+        setManualReceipt(false);
+        setReceiptNumber("");
+        setBookingText("");
+        setTransitDraft(initialTransit());
+        setShowPosting(true);
+      }}>Money in transit</button>}{canManage && <button className="button button-primary" type="button" onClick={() => { journalSubmissionId.current=null;setManualReceipt(false);setTransitDraft(null);setShowPosting(true); }}><Plus size={15} />{t("New transaction")}</button>}</div></div>
       <div className="finance-filter-row finance-transaction-filters"><label>{t("Search transactions")}<input aria-label={t("Search transactions")} placeholder={t("Search transactions")} value={query} onChange={(event) => { setTransactionPage(1); setQuery(event.target.value); }} /></label><label>{t("Donors")}<select value={transactionDonorId} onChange={(event) => {
         setTransactionPage(1); setTransactionDonorId(event.target.value);
       }}>
@@ -734,9 +766,31 @@ export function FinanceModule({ department, departmentId, csrfToken, canManageSi
         </form>
       </section>
     </div>}
-    {showPosting && <div className="finance-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowPosting(false)}><section className="finance-dialog" role="dialog" aria-modal="true" aria-labelledby="finance-post-title"><header><div><span className="eyebrow">DOUBLE-ENTRY JOURNAL</span><h2 id="finance-post-title">{t("Post transaction")}</h2></div><button className="finance-close" type="button" onClick={() => setShowPosting(false)} aria-label="Close">×</button></header><form onSubmit={(event) => void postTransaction(event)}><div className="finance-form-grid"><label>{t("Booking date")}<input type="date" required value={bookingDate} onChange={(event) => setBookingDate(event.target.value)} /></label>{dateUsesNumbering && <label><input type="checkbox" checked={manualReceipt} onChange={event => setManualReceipt(event.target.checked)} /> Use a manual receipt number</label>}
+    {showPosting && <div className="finance-overlay" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setShowPosting(false)}><section className="finance-dialog" role="dialog" aria-modal="true" aria-labelledby="finance-post-title"><header><div><span className="eyebrow">DOUBLE-ENTRY JOURNAL</span><h2 id="finance-post-title">{transitDraft ? "Post money in transit" : t("Post transaction")}</h2></div><button className="finance-close" type="button" onClick={() => setShowPosting(false)} aria-label="Close">×</button></header><form onSubmit={(event) => void postTransaction(event)}><div className="finance-form-grid"><label>{t("Booking date")}<input type="date" required value={bookingDate} onChange={(event) => setBookingDate(event.target.value)} /></label>{dateUsesNumbering && <label><input type="checkbox" checked={manualReceipt} onChange={event => setManualReceipt(event.target.checked)} /> Use a manual receipt number</label>}
       <label>{t("Receipt number")}<input required={!automaticReceipt} maxLength={80} value={automaticReceipt ? "" : receiptNumber}
-        placeholder={automaticReceipt ? "Assigned when posted" : undefined} disabled={automaticReceipt} onChange={event => setReceiptNumber(event.target.value)} /></label><label className="finance-form-wide">{t("Booking text")}<input required maxLength={500} value={bookingText} onChange={(event) => setBookingText(event.target.value)} /></label></div><div className="finance-journal-lines"><div className="finance-journal-header"><strong>Journal lines</strong><button className="finance-text-button" type="button" onClick={() => setLines((current) => [...current, initialLine()])}><Plus size={14} />{t("Add line")}</button></div>{lines.map((line, index) => <div className="finance-journal-line" key={index}><select aria-label={`${t("Account")} ${index + 1}`} required value={line.accountId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, accountId: event.target.value } : item))}><option value="">{t("Choose account")}</option>{bootstrap.accounts.filter((account) => account.active).map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select><select aria-label={`${t("Cost center")} ${index + 1}`} value={line.costCenterId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, costCenterId: event.target.value } : item))}><option value="">{t("Choose cost center")}</option>{bootstrap.costCenters.filter((center) => center.active).map((center) => <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}</select><select aria-label={`${t("Donor")} ${index + 1}`} value={line.donorId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, donorId: event.target.value } : item))}><option value="">{t("Donor")}</option>{bootstrap.donors.filter((donor) => donor.active).map((donor) => <option key={donor.id} value={donor.id}>{donor.displayName}</option>)}</select><input aria-label={t("Debit")} type="number" min="0" step="0.01" placeholder={t("Debit")} value={line.debit} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, debit: event.target.value, credit: event.target.value ? "" : item.credit } : item))} /><input aria-label={t("Credit")} type="number" min="0" step="0.01" placeholder={t("Credit")} value={line.credit} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, credit: event.target.value, debit: event.target.value ? "" : item.debit } : item))} /><input aria-label="Line memo" placeholder="Line memo" value={line.text} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, text: event.target.value } : item))} />{lines.length > 2 && <button className="finance-close" type="button" onClick={() => setLines((current) => current.filter((_, row) => row !== index))}>{t("Remove")}</button>}</div>)}</div><div className={Math.abs(totals.debit - totals.credit) < 0.005 && totals.debit > 0 ? "finance-balanced" : "finance-unbalanced"}>{Math.abs(totals.debit - totals.credit) < 0.005 && totals.debit > 0 ? t("Balanced") : `${t("Difference")}: ${money(Math.round((totals.debit - totals.credit) * 100), bootstrap.currency)}`} · {t("Debit")} {money(Math.round(totals.debit * 100), bootstrap.currency)} / {t("Credit")} {money(Math.round(totals.credit * 100), bootstrap.currency)}</div><p className="finance-security-note">Posted entries are permanent. Corrections create an equal and opposite dated transaction.</p><div className="finance-form-actions"><button className="button button-secondary" type="button" onClick={() => setShowPosting(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || bootstrap.accounts.filter((account) => account.active).length < 2 || Math.abs(totals.debit - totals.credit) >= 0.005 || totals.debit === 0}>{t("Post transaction")}</button></div></form></section></div>}
+        placeholder={automaticReceipt ? "Assigned when posted" : undefined} disabled={automaticReceipt} onChange={event => setReceiptNumber(event.target.value)} /></label><label className="finance-form-wide">{t("Booking text")}<input required maxLength={500} value={bookingText} onChange={(event) => setBookingText(event.target.value)} /></label></div>
+      {transitDraft ? <fieldset className="finance-form-grid" disabled={saving}>
+        <legend>Transfer leg</legend>
+        <label>Direction<select value={transitDraft.leg} onChange={event => {
+          const leg = event.target.value as TransitLeg;
+          setTransitDraft({ ...transitDraft, leg });
+        }}><option value="outgoing">Money sent</option><option value="incoming">Money received</option></select></label>
+        <label>{transitDraft.leg === "outgoing" ? "Source bank or cash account" : "Destination bank or cash account"}
+          <select required value={transitDraft.bankAccount} onChange={event => setTransitDraft({ ...transitDraft, bankAccount: event.target.value })}>
+            <option value="">Choose an account</option>
+            {transitAccounts.map(account => <option key={account.id} value={account.id} disabled={account.id === transitDraft.clearingAccount}>{account.code} · {account.name}</option>)}
+          </select>
+        </label>
+        <label>Clearing account<select required value={transitDraft.clearingAccount} onChange={event => setTransitDraft({ ...transitDraft, clearingAccount: event.target.value })}>
+          <option value="">Choose an asset account</option>
+          {transitAccounts.map(account => <option key={account.id} value={account.id} disabled={account.id === transitDraft.bankAccount}>{account.code} · {account.name}</option>)}
+        </select></label>
+        <label>Amount<input required inputMode="decimal" type="number" min="0.01" step="0.01" value={transitDraft.amount}
+          onChange={event => setTransitDraft({ ...transitDraft, amount: event.target.value })} /></label>
+        <p className="finance-form-wide">{transitDraft.leg === "outgoing"
+          ? "Debits clearing and credits the source. Post the incoming leg separately on the date the money arrives."
+          : "Debits the destination and credits clearing. Use the same clearing account and amount as the outgoing leg."}</p>
+      </fieldset> : <><div className="finance-journal-lines"><div className="finance-journal-header"><strong>Journal lines</strong><button className="finance-text-button" type="button" onClick={() => setLines((current) => [...current, initialLine()])}><Plus size={14} />{t("Add line")}</button></div>{lines.map((line, index) => <div className="finance-journal-line" key={index}><select aria-label={`${t("Account")} ${index + 1}`} required value={line.accountId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, accountId: event.target.value } : item))}><option value="">{t("Choose account")}</option>{bootstrap.accounts.filter((account) => account.active).map((account) => <option key={account.id} value={account.id}>{account.code} · {account.name}</option>)}</select><select aria-label={`${t("Cost center")} ${index + 1}`} value={line.costCenterId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, costCenterId: event.target.value } : item))}><option value="">{t("Choose cost center")}</option>{bootstrap.costCenters.filter((center) => center.active).map((center) => <option key={center.id} value={center.id}>{center.code} · {center.name}</option>)}</select><select aria-label={`${t("Donor")} ${index + 1}`} value={line.donorId} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, donorId: event.target.value } : item))}><option value="">{t("Donor")}</option>{bootstrap.donors.filter((donor) => donor.active).map((donor) => <option key={donor.id} value={donor.id}>{donor.displayName}</option>)}</select><input aria-label={t("Debit")} type="number" min="0" step="0.01" placeholder={t("Debit")} value={line.debit} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, debit: event.target.value, credit: event.target.value ? "" : item.credit } : item))} /><input aria-label={t("Credit")} type="number" min="0" step="0.01" placeholder={t("Credit")} value={line.credit} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, credit: event.target.value, debit: event.target.value ? "" : item.debit } : item))} /><input aria-label="Line memo" placeholder="Line memo" value={line.text} onChange={(event) => setLines((current) => current.map((item, row) => row === index ? { ...item, text: event.target.value } : item))} />{lines.length > 2 && <button className="finance-close" type="button" onClick={() => setLines((current) => current.filter((_, row) => row !== index))}>{t("Remove")}</button>}</div>)}</div><div className={Math.abs(totals.debit - totals.credit) < 0.005 && totals.debit > 0 ? "finance-balanced" : "finance-unbalanced"}>{Math.abs(totals.debit - totals.credit) < 0.005 && totals.debit > 0 ? t("Balanced") : `${t("Difference")}: ${money(Math.round((totals.debit - totals.credit) * 100), bootstrap.currency)}`} · {t("Debit")} {money(Math.round(totals.debit * 100), bootstrap.currency)} / {t("Credit")} {money(Math.round(totals.credit * 100), bootstrap.currency)}</div></>}<p className="finance-security-note">Posted entries are permanent. Corrections create an equal and opposite dated transaction.</p><div className="finance-form-actions"><button className="button button-secondary" type="button" onClick={() => setShowPosting(false)}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || (transitDraft ? !transitValid : bootstrap.accounts.filter(account => account.active).length < 2 || Math.abs(totals.debit - totals.credit) >= 0.005 || totals.debit === 0)}>{t("Post transaction")}</button></div></form></section></div>}
     {showAccount && <div className="finance-overlay"><section className="finance-dialog" role="dialog" aria-modal="true"><header><h2>{t("New account")}</h2><button className="finance-close" type="button" onClick={() => setShowAccount(false)}>×</button></header><form onSubmit={(event) => void addAccount(event)} className="finance-form-grid"><label>{t("Account code")}<input required maxLength={32} value={accountDraft.code} onChange={(event) => setAccountDraft({ ...accountDraft, code: event.target.value })} /></label><label>{t("Name")}<input required maxLength={160} value={accountDraft.name} onChange={(event) => setAccountDraft({ ...accountDraft, name: event.target.value })} /></label><label>{t("Type")}<select value={accountDraft.accountType} onChange={(event) => setAccountDraft({ ...accountDraft, accountType: event.target.value as Account["accountType"] })}>{["asset", "liability", "equity", "income", "expense"].map((type) => <option key={type}>{type}</option>)}</select></label><div className="finance-form-actions"><button className="button button-primary" type="submit" disabled={saving}>{t("Save account")}</button></div></form></section></div>}
     {tab === "accounts" && <section className="finance-section">
       <h3>Tax types</h3>
