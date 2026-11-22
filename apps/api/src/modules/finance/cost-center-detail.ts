@@ -12,18 +12,19 @@ export const costCenterScopeSql = `
 
 export type StatementEntry = {
   id: string; transactionId: string; date: string; receiptNumber: string; bookingText: string; lineText: string;
-  accountCode: string; accountName: string; debitCents: string; creditCents: string;
+  accountCode: string; accountName: string; debitCents: string; creditCents: string; isCostCenterTransfer: boolean;
 };
 export const costCenterEntriesSql = `
   SELECT line.id,t.id AS "transactionId",to_char(t.booking_date,'YYYY-MM-DD') AS date,
     t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",line.line_text AS "lineText",
     a.code AS "accountCode",a.name AS "accountName",
-    line.debit_cents::text AS "debitCents",line.credit_cents::text AS "creditCents"
+    line.debit_cents::text AS "debitCents",line.credit_cents::text AS "creditCents",t.is_cost_center_transfer AS "isCostCenterTransfer"
   FROM finance_transactions t
   JOIN finance_transaction_lines line ON line.department_id=t.department_id AND line.transaction_id=t.id
   JOIN finance_accounts a ON a.department_id=line.department_id AND a.id=line.account_id
   WHERE t.department_id=$1 AND line.cost_center_id=$2 AND t.accounting_year=$3 AND t.status='posted'
     AND t.booking_date BETWEEN $4::date AND $5::date
+    AND ($8::boolean OR NOT t.is_cost_center_transfer)
   ORDER BY t.booking_date,t.created_at,t.id,line.line_number LIMIT $6 OFFSET $7
 `;
 

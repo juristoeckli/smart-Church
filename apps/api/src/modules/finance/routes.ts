@@ -1,3 +1,4 @@
+import { registerCostCenterTransfers } from "./cost-center-transfer.js";
 import { accountStatementSql, type AccountStatementLine, type StatementLabel } from "./account-statement.js";
 import { costCenterBudgetSql, costCenterEntriesSql, costCenterScopeSql, type StatementBudget, type StatementEntry, type StatementScope } from "./cost-center-detail.js";
 import { recentGivingSql, type RecentGiving } from "./recent-giving.js";
@@ -681,12 +682,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const filters = [departmentId, from, to, year, q, donorId ?? null, accountId ?? null, costCenterId ?? null, request.query.postedOnly === "true"];
     const count = await pool!.query<{ total: string }>(`SELECT count(*)::text AS total FROM finance_transactions t
       WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ${transactionDonorFilter} ${transactionAccountFilter} ${transactionCostCenterFilter} ${transactionPostedFilter}`, filters);
-    const result = await pool!.query(`SELECT t.id,t.booking_date AS "bookingDate",t.accounting_year AS "accountingYear",t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",t.status,t.reverses_transaction_id AS "reversesTransactionId",t.created_at AS "createdAt",COALESCE(sum(l.debit_cents),0)::text AS "debitCents",COALESCE(sum(l.credit_cents),0)::text AS "creditCents",count(l.id)::int AS "lineCount"
+    const result = await pool!.query(`SELECT t.id,t.booking_date AS "bookingDate",t.accounting_year AS "accountingYear",t.receipt_number AS "receiptNumber",t.booking_text AS "bookingText",t.status,t.is_cost_center_transfer AS "isCostCenterTransfer",t.reverses_transaction_id AS "reversesTransactionId",t.created_at AS "createdAt",COALESCE(sum(l.debit_cents),0)::text AS "debitCents",COALESCE(sum(l.credit_cents),0)::text AS "creditCents",count(l.id)::int AS "lineCount"
       FROM finance_transactions t LEFT JOIN finance_transaction_lines l ON l.department_id=t.department_id AND l.transaction_id=t.id
       WHERE t.department_id=$1 AND ($2::date IS NULL OR t.booking_date >= $2) AND ($3::date IS NULL OR t.booking_date <= $3) AND ($4::smallint IS NULL OR t.accounting_year=$4) AND ($5='' OR t.receipt_number ILIKE '%'||$5||'%' OR t.booking_text ILIKE '%'||$5||'%') ${transactionDonorFilter} ${transactionAccountFilter} ${transactionCostCenterFilter} ${transactionPostedFilter}
       GROUP BY t.id ORDER BY ${transactionOrder(request.query, false)} LIMIT $10 OFFSET $11`, [...filters, pageSize, (page - 1) * pageSize]);
     return { items: result.rows.map((row) => ({ ...row, debitCents: asMoney(row.debitCents), creditCents: asMoney(row.creditCents) })), total: Number(count.rows[0]?.total ?? 0), page, pageSize };
   });
+
+  registerCostCenterTransfers(app,context,{ department,audit,publish,periodForDate,cleanText,validDateOnly });
 
   app.post<{ Body: FinanceTransactionBody }>("/api/modules/finance/transactions", { schema: { body: transactionSchema } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
@@ -723,7 +726,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/transactions/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
-    const transaction = await pool!.query("SELECT id,booking_date AS \"bookingDate\",accounting_year AS \"accountingYear\",receipt_number AS \"receiptNumber\",booking_text AS \"bookingText\",status,reverses_transaction_id AS \"reversesTransactionId\",created_at AS \"createdAt\" FROM finance_transactions WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
+    const transaction = await pool!.query("SELECT id,booking_date AS \"bookingDate\",accounting_year AS \"accountingYear\",receipt_number AS \"receiptNumber\",booking_text AS \"bookingText\",status,is_cost_center_transfer AS \"isCostCenterTransfer\",reverses_transaction_id AS \"reversesTransactionId\",created_at AS \"createdAt\" FROM finance_transactions WHERE department_id=$1 AND id=$2", [departmentId, request.params.id]);
     if (!transaction.rowCount) return reply.code(404).send({ error: "Transaction not found." });
     const lines = await pool!.query<FinanceLineRow>(`SELECT l.id,l.line_number,l.account_id,a.code AS account_code,a.name AS account_name,a.account_type,l.cost_center_id,c.name AS cost_center_name,l.donor_id,d.display_name AS donor_name,l.debit_cents,l.credit_cents,l.line_text FROM finance_transaction_lines l JOIN finance_accounts a ON a.id=l.account_id AND a.department_id=l.department_id LEFT JOIN finance_cost_centers c ON c.id=l.cost_center_id AND c.department_id=l.department_id LEFT JOIN finance_donors d ON d.id=l.donor_id AND d.department_id=l.department_id WHERE l.department_id=$1 AND l.transaction_id=$2 ORDER BY l.line_number`, [departmentId, request.params.id]);
     const auditRows = await pool!.query("SELECT audit.id,audit.action,audit.record_kind AS \"recordKind\",audit.record_id AS \"recordId\",audit.details,audit.created_at AS \"createdAt\",actor.display_name AS \"actorName\" FROM finance_audit audit LEFT JOIN app_users actor ON actor.id=audit.actor_user_id WHERE audit.department_id=$1 AND (audit.record_id=$2 OR audit.details->>'reversalId'=$2::text) ORDER BY audit.created_at,audit.id", [departmentId, request.params.id]);
@@ -736,7 +739,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await pool!.connect(); const reversalId = randomUUID();
     try {
       await client.query("BEGIN");
-      const original = await client.query("SELECT id,booking_date,accounting_year,receipt_number,booking_text,status FROM finance_transactions WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.id]);
+      const original = await client.query("SELECT id,booking_date,accounting_year,receipt_number,booking_text,status,is_cost_center_transfer FROM finance_transactions WHERE department_id=$1 AND id=$2 FOR UPDATE", [departmentId, request.params.id]);
       if (!original.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Transaction not found." }); }
       const source = original.rows[0];
       if (source.status !== "posted") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Only posted transactions can be reversed." }); }
@@ -747,7 +750,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const configured = await periodForDate(client, departmentId, reversalDate);
       if (!configured.rowCount || configured.rows[0]!.status !== "open") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "A reversal requires an open accounting year covering today's date." }); }
       const reversalYear = configured.rows[0]!.accounting_year;
-      await client.query("INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,status,reverses_transaction_id,created_by) VALUES($1,$2,$3,$4,$5,$6,'posted',$7,$8)", [reversalId, departmentId, reversalDate, reversalYear, `REV-${source.receipt_number}`.slice(0, 80), `Reversal of ${source.receipt_number}: ${reason}`.slice(0, 500), request.params.id, request.authenticatedUser?.id ?? null]);
+      await client.query("INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,status,reverses_transaction_id,created_by,is_cost_center_transfer) VALUES($1,$2,$3,$4,$5,$6,'posted',$7,$8,$9)", [reversalId, departmentId, reversalDate, reversalYear, `REV-${source.receipt_number}`.slice(0, 80), `Reversal of ${source.receipt_number}: ${reason}`.slice(0, 500), request.params.id, request.authenticatedUser?.id ?? null, source.is_cost_center_transfer]);
       for (let index = 0; index < sourceLines.rows.length; index++) {
         const line = sourceLines.rows[index]!;
         await client.query("INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,cost_center_id,donor_id,debit_cents,credit_cents,line_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, reversalId, index + 1, line.account_id, line.cost_center_id, line.donor_id, line.credit_cents, line.debit_cents, `Reversal: ${line.line_text}`.slice(0, 500)]);
@@ -873,11 +876,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return sendFinanceExport(request, reply, `finance-cost-centers-${year}`, header, result.rows.map((row) => [year, row.code, row.name, row.debit_cents, row.credit_cents, row.transaction_count]));
   });
 
-  type CenterStatementQuery = { year: string; centerId: string; from?: string; to?: string };
+  type CenterStatementQuery = { year: string; centerId: string; from?: string; to?: string; includeTransfers?: boolean };
   const centerStatementQuery = { type: "object", additionalProperties: false, required: ["year","centerId"] } as const;
   const centerStatementProperties = {
     year: { type: "string", pattern: "^(19[0-9]{2}|20[0-9]{2}|21[0-9]{2}|2200)$" },
     centerId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" },
+    includeTransfers: { type: "boolean" },
   } as const;
   async function centerStatementScope(id: string, query: CenterStatementQuery, reply: FastifyReply) {
     const { year, centerId, from, to } = query;
@@ -906,7 +910,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!scope) return reply;
     const { centerId,year,page=1 } = request.query;
     const [entries,budgets] = await Promise.all([
-      pool!.query<StatementEntry>(costCenterEntriesSql,[id,centerId,year,scope.from,scope.through,51,(page-1)*50]),
+      pool!.query<StatementEntry>(costCenterEntriesSql,[id,centerId,year,scope.from,scope.through,51,(page-1)*50,request.query.includeTransfers ?? false]),
       pool!.query<StatementBudget>(costCenterBudgetSql,[id,centerId,year,scope.fiscalStart,scope.through,5001]),
     ]);
     if (budgets.rows.length > 5000) return reply.code(413).send({ error: "This cost center has too many budget scopes to display." });
@@ -936,11 +940,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           ["cost_center","through","currency","account_code","account_name","budget_cents","actual_cents","remaining_cents"],
           result.rows.map(row => [scope.code,scope.through,scope.currency,row.accountCode,row.accountName,row.budgetCents,row.actualCents,row.remainingCents]),[5,6,7]);
       }
-      const result = await pool!.query<StatementEntry>(costCenterEntriesSql,[id,centerId,year,scope.from,scope.through,10001,0]);
+      const result = await pool!.query<StatementEntry>(costCenterEntriesSql,[id,centerId,year,scope.from,scope.through,10001,0,request.query.includeTransfers ?? false]);
       if (result.rows.length > 10000) return reply.code(413).send({ error: "Choose a shorter date range to export at most 10,000 postings." });
       return sendFinanceExport(request,reply,name,
-        ["cost_center","booking_date","receipt_number","account_code","account_name","booking_text","line_text","debit_cents","credit_cents","currency"],
-        result.rows.map(row => [scope.code,row.date,row.receiptNumber,row.accountCode,row.accountName,row.bookingText,row.lineText,row.debitCents,row.creditCents,scope.currency]),[7,8]);
+        ["cost_center","booking_date","receipt_number","account_code","account_name","booking_text","line_text","debit_cents","credit_cents","currency","cost_center_transfer"],
+        result.rows.map(row => [scope.code,row.date,row.receiptNumber,row.accountCode,row.accountName,row.bookingText,row.lineText,row.debitCents,row.creditCents,scope.currency,row.isCostCenterTransfer ? "yes" : "no"]),[7,8]);
     },
   );
 

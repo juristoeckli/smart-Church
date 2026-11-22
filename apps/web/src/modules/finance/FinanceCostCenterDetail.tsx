@@ -6,7 +6,7 @@ import { formatUserDate } from "../../date-format";
 type Center = { id: string; code: string; name: string };
 type Entry = {
   id: string; transactionId: string; date: string; receiptNumber: string; bookingText: string; lineText: string;
-  accountCode: string; accountName: string; debitCents: string; creditCents: string;
+  accountCode: string; accountName: string; debitCents: string; creditCents: string; isCostCenterTransfer: boolean;
 };
 type Budget = {
   id: string; accountCode: string | null; accountName: string | null; budgetCents: string; actualCents: string; remainingCents: string;
@@ -22,11 +22,12 @@ export function FinanceCostCenterDetail({ departmentId, year, centers, canManage
   const [center,setCenter] = useState("");
   const [from,setFrom] = useState("");
   const [to,setTo] = useState("");
+  const [includeTransfers,setIncludeTransfers] = useState(false);
   const [page,setPage] = useState(1);
   const [failure,setFailure] = useState("");
   const [snapshot,setSnapshot] = useState<{ key: string; result: Result } | null>(null);
   const valid = !from || !to || from <= to;
-  const params = new URLSearchParams({ year, centerId:center, ...(from ? { from } : {}), ...(to ? { to } : {}) }).toString();
+  const params = new URLSearchParams({ year, centerId:center, ...(from ? { from } : {}), ...(to ? { to } : {}), ...(includeTransfers ? { includeTransfers:"true" } : {}) }).toString();
   const key = JSON.stringify([departmentId,params,page]);
   const data = snapshot?.key === key ? snapshot.result : null;
   useEffect(() => {
@@ -59,6 +60,7 @@ export function FinanceCostCenterDetail({ departmentId, year, centers, canManage
         </select></label>
         <label>From<input type="date" value={from} max={to || undefined} onChange={event => { setFrom(event.target.value);setPage(1); }}/></label>
         <label>Through<input type="date" value={to} min={from || undefined} onChange={event => { setTo(event.target.value);setPage(1); }}/></label>
+        <label><input type="checkbox" checked={includeTransfers} onChange={event => { setIncludeTransfers(event.target.checked);setPage(1); }}/> Include cost-center transfers</label>
         {canManage && <>
           <button className="button button-secondary" type="button" disabled={!data?.entries.length} onClick={() => exportPart("entries")}>Export postings</button>
           <button className="button button-secondary" type="button" disabled={!data?.budgets.length} onClick={() => exportPart("budget")}>Export budget</button>
@@ -69,7 +71,7 @@ export function FinanceCostCenterDetail({ departmentId, year, centers, canManage
       {center && valid && !data && !failure && <p role="status">Loading statement…</p>}
       {data && <>
         <h3>Annual budget progress through {formatUserDate(data.through)}</h3>
-        <p>Actuals include posted activity from {formatUserDate(data.fiscalStart)}. Whole-center and account budgets are independent scopes.</p>
+        <p>Actuals include posted activity and cost-center transfers from {formatUserDate(data.fiscalStart)}. Whole-center and account budgets are independent scopes.</p>
         {data.budgets.length ? <div className="finance-table-wrap"><table className="finance-table">
           <thead><tr><th scope="col">Budget scope</th><th scope="col">Budget</th><th scope="col">Actual</th><th scope="col">Remaining</th></tr></thead>
           <tbody>{data.budgets.map(budget => <tr key={budget.id}>
@@ -82,7 +84,7 @@ export function FinanceCostCenterDetail({ departmentId, year, centers, canManage
           <thead><tr><th scope="col">Booking date</th><th scope="col">Receipt</th><th scope="col">Account</th><th scope="col">Booking text</th><th scope="col">Line text</th><th scope="col">Debit</th><th scope="col">Credit</th></tr></thead>
           <tbody>{data.entries.map(entry => <tr key={entry.id}>
             <td><time dateTime={entry.date}>{formatUserDate(entry.date)}</time></td>
-            <td><button type="button" className="button button-secondary" onClick={() => openTransaction(entry.transactionId)}>{entry.receiptNumber}</button></td>
+            <td><button type="button" className="button button-secondary" onClick={() => openTransaction(entry.transactionId)}>{entry.receiptNumber}</button>{entry.isCostCenterTransfer && <small> Cost-center transfer</small>}</td>
             <td>{entry.accountCode} · {entry.accountName}</td><td>{entry.bookingText}</td><td>{entry.lineText}</td>
             <td>{amount(entry.debitCents)}</td><td>{amount(entry.creditCents)}</td>
           </tr>)}</tbody>
