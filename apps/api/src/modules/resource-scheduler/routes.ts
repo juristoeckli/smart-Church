@@ -1,4 +1,5 @@
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision, recordResourceBookingReassignment, recordResourceBookingReopened, resourceBookingReviewers } from "../../resource-booking-notices.js";
+import { registerResourceSchedulerReplication } from "./replication.js";
 import { registerResourceCalendarSubscriptions } from "./booking-calendar-subscriptions.js";
 import { registerMyResourceBookings } from "./my-resource-bookings.js";
 import { resourceBookedDayReport } from "./booked-day-report.js";
@@ -319,6 +320,7 @@ async function insertBookingSeries(client: PoolClient, options: ResourceSelectio
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  registerResourceSchedulerReplication(context);
   const unavailable = (reply: FastifyReply) => reply.code(503).send({ error: "Resource scheduling is unavailable." });
   async function location(request: FastifyRequest, reply: FastifyReply, requireManager = false) {
     if (!context.pool || !context.isDatabaseReady()) { unavailable(reply); return null; }
