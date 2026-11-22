@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Plus, Search } from "lucide-react";
 import "./module.css";
 import { translate } from "../../i18n";
+import { GroupMeetingAddAttendee } from "./GroupMeetingAddAttendee";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
 import { groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceSnapshot, type GroupAttendanceStatus } from "../../group-attendance";
 
@@ -234,6 +235,14 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
         <GroupMeetingCompletion key={departmentId + ":" + meeting.id} meetingId={meeting.id} departmentId={departmentId} completedAt={completedAt} disabled={saving || Boolean(changes.length)} buttonClass="checkin-print" onComplete={changeMeetingCompletion} />
         <button className="checkin-print" type="button" disabled={saving || Boolean(completedAt) || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
       </section>
+      {roster.data?.canAddAttendees && <GroupMeetingAddAttendee key={departmentId + ":" + meeting.id}
+        meetingId={meeting.id} departmentId={departmentId} csrfToken={csrfToken} disabled={busy} onChanged={(joinedGroup) => {
+          setQuery("");
+          setFilter("");
+          setRoleFilter("");
+          roster.reload();
+          setNotice(joinedGroup ? "Person added to the group and marked present." : "Person marked present for this meeting.");
+        }} />}
       <div className="checkin-roster">
         {shown.map((row) => <article className={"checkin-person" + (row.status === "present" ? " is-present" : "")} key={row.contactId}>
           <div className="checkin-person-info"><strong>{row.firstName} {row.lastName}</strong>{row.role && <span>{row.role}</span>}</div>

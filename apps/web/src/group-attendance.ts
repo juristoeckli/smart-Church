@@ -15,6 +15,7 @@ export function groupAttendanceChanges(
 export type GroupAttendanceSnapshot = {
   attendance: GroupAttendanceEntry[];
   completedAt: string | null;
+  canAddAttendees?: boolean;
 };
 
 export function groupAttendanceUrl(meetingId: string) {

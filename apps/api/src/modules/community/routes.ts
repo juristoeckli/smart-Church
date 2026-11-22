@@ -1,3 +1,4 @@
+import { canReadPrivateContactDetails, hasLocationPermission } from "../../location-grants.js";
 import { registerBulkGroupLifecycle } from "./group-bulk-lifecycle.js";
 import { recordPendingResourceBookingRequest, recordResourceBookingDecision } from "../../resource-booking-notices.js";
 import { canViewResource, hasResourceSchedulerCapacityGuard, isResourceBookingManager, lockResourceBookingKey, lockResourceBookingPolicy, resourceCalendarRequired, resourceManagerRequired } from "../../resource-booking-policy.js";
@@ -889,6 +890,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     });
 
     const meetingParams = { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
+    const canAddMeetingAttendees = (request: FastifyRequest) =>
+      hasLocationPermission(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null, "groups_manage")
+      && canReadPrivateContactDetails(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null);
     routes.get<{ Params: { id: string }; Querystring: { withCompletion?: boolean } }>("/api/group-meetings/:id/attendance", { schema: {
       params: meetingParams,
       querystring: { type: "object", properties: { withCompletion: { type: "boolean" } } },
@@ -896,7 +900,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT m.attendance_completed_at, a.contact_id, c.first_name, c.last_name, a.status, member.role
+        `SELECT m.attendance_completed_at, g.source_system, g.status AS group_status, a.contact_id, c.first_name, c.last_name, a.status, member.role
            FROM group_meetings m
            JOIN church_groups g ON g.id=m.group_id AND g.department_id=m.department_id
            LEFT JOIN (group_meeting_attendance a JOIN contacts c ON c.id=a.contact_id AND c.department_id=$2)
@@ -912,7 +916,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       }));
       if (!request.query.withCompletion) return attendance;
       if (!result.rows.length) return reply.code(404).send({ error: "Group meeting not found." });
-      return { attendance, completedAt: result.rows[0].attendance_completed_at };
+      const meeting = result.rows[0];
+      return { attendance, completedAt: meeting.attendance_completed_at, canAddAttendees: canAddMeetingAttendees(request)
+        && !meeting.attendance_completed_at && !meeting.source_system && meeting.group_status === "active" };
     });
 
     function lockGroupMeeting(client: PoolClient, meetingId: string, departmentId: string) {
@@ -922,6 +928,122 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         [meetingId, departmentId],
       );
     }
+
+    const meetingPeoplePath = "/api/group-meetings/:id/attendance/people";
+    async function meetingPeopleDepartment(request: FastifyRequest, reply: FastifyReply) {
+      reply.header("Cache-Control", "private, no-store");
+      const departmentId = await department(request, reply, "groups_manage");
+      if (!departmentId) return null;
+      if (!canAddMeetingAttendees(request)) {
+        reply.code(403).send({ error: "Group management and private People access are required to add attendees." });
+        return null;
+      }
+      return departmentId;
+    }
+
+    routes.get<{ Params: { id: string }; Querystring: { search: string } }>(meetingPeoplePath, { schema: {
+      params: meetingParams, querystring: { type: "object", additionalProperties: false, required: ["search"],
+        properties: { search: { type: "string", minLength: 2, maxLength: 80 } } },
+    } }, async (request, reply) => {
+      const departmentId = await meetingPeopleDepartment(request, reply);
+      if (!departmentId) return reply;
+      const search = request.query.search.trim();
+      if (search.length < 2) return { people: [] };
+      const meeting = (await pool!.query(
+        `SELECT m.attendance_completed_at,g.status,g.source_system FROM group_meetings m
+          JOIN church_groups g ON g.id=m.group_id AND g.department_id=m.department_id
+          WHERE m.department_id=$1 AND m.id=$2`, [departmentId, request.params.id],
+      )).rows[0];
+      if (!meeting) return reply.code(404).send({ error: "Group meeting not found." });
+      if (meeting.source_system || meeting.status !== "active" || meeting.attendance_completed_at) {
+        return reply.code(409).send({ error: "Attendees can be added only to an open meeting in an active local group." });
+      }
+      const people = await pool!.query(
+        `SELECT c.id,c.first_name AS "firstName",c.last_name AS "lastName"
+          FROM contacts c WHERE c.department_id=$1 AND c.archived_at IS NULL AND c.status IN ('member','visitor')
+            AND (strpos(lower(concat_ws(' ',c.first_name,c.last_name)),lower($3))>0
+              OR strpos(lower(concat_ws(' ',c.last_name,c.first_name)),lower($3))>0)
+            AND NOT EXISTS(SELECT 1 FROM group_meeting_attendance a WHERE a.meeting_id=$2 AND a.contact_id=c.id)
+          ORDER BY lower(c.last_name),lower(c.first_name),c.id LIMIT 20`, [departmentId, request.params.id, search],
+      );
+      return { people: people.rows };
+    });
+
+    routes.post<{ Params: { id: string }; Body: { contactId: string; joinGroup: boolean } }>(meetingPeoplePath, { schema: {
+      params: meetingParams, body: { type: "object", additionalProperties: false, required: ["contactId", "joinGroup"],
+        properties: { contactId: { type: "string", format: "uuid" }, joinGroup: { type: "boolean" } } },
+    } }, async (request, reply) => {
+      const departmentId = await meetingPeopleDepartment(request, reply);
+      if (!departmentId || !validateMutation(request, reply)) return reply;
+      const { id } = request.params;
+      const { contactId, joinGroup } = request.body;
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await dependencies.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({ error: "This location is read-only." });
+        }
+        // Group first, matching membership and Calendar meeting creation lock order.
+        const { rows: [group] } = await client.query<{ id: string; status: string; source_system: string | null }>(
+          `SELECT g.id,g.status,g.source_system FROM group_meetings m
+            JOIN church_groups g ON g.id=m.group_id AND g.department_id=m.department_id
+            WHERE m.department_id=$1 AND m.id=$2 FOR UPDATE OF g`, [departmentId, id],
+        );
+        const meeting = (await lockGroupMeeting(client, id, departmentId)).rows[0];
+        if (!group || !meeting || meeting.group_id !== group.id) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Group meeting not found." });
+        }
+        if (group.source_system || group.status !== "active" || meeting.attendance_completed_at) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Attendees can be added only to an open meeting in an active local group." });
+        }
+        const person = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2 AND archived_at IS NULL AND status IN ('member','visitor') FOR SHARE",
+          [departmentId, contactId]);
+        if (!person.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Eligible person not found at this location." });
+        }
+        const added = await client.query(`INSERT INTO group_meeting_attendance(meeting_id,contact_id,status)
+          VALUES($1,$2,'present') ON CONFLICT(meeting_id,contact_id) DO NOTHING RETURNING contact_id`, [id, contactId]);
+        if (!added.rowCount) {
+          await client.query("COMMIT");
+          return { added: false, joinedGroup: false };
+        }
+        let joinedGroup = false;
+        if (joinGroup) {
+          const { rows: [member] } = await client.query<{ status: string }>(
+            "SELECT status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [group.id, contactId],
+          );
+          if (member && member.status !== "active") {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "This person already has a different membership status. Choose meeting attendance only or review their membership in Groups." });
+          }
+          if (!member) {
+            const form = await readSignupForm(client, departmentId, group.id);
+            const capacity = await checkGroupAdmissionCapacity(client, departmentId, group.id, "active", form.policy.defaultRole, form.policy);
+            if (capacity) {
+              await client.query("ROLLBACK");
+              return reply.code(409).send({ error: capacity });
+            }
+            await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
+            const inserted = await client.query(`INSERT INTO group_members(group_id,contact_id,role,status,joined_on)
+              VALUES($1,$2,$3,'active',CURRENT_DATE) ON CONFLICT(group_id,contact_id) DO NOTHING RETURNING contact_id`,
+              [group.id, contactId, form.policy.defaultRole]);
+            if (!inserted.rowCount) {
+              await client.query("ROLLBACK");
+              return reply.code(409).send({ error: "This person’s group membership changed. Reload the roster and try again." });
+            }
+            joinedGroup = true;
+          }
+        }
+        await client.query("COMMIT");
+        realtime.publish("core:groups:changed", departmentId, { groupId: group.id, meetingId: id, action: "meeting-attendee-added" });
+        return reply.code(201).send({ added: true, joinedGroup });
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
 
     routes.get<{ Params: { id: string } }>("/api/group-meetings/:id/attendance/completion-feedback", { schema: { params: meetingParams } }, async (request, reply) => {
       const departmentId = await department(request, reply, "groups_manage");
