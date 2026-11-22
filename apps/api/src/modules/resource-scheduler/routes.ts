@@ -15,6 +15,7 @@ type RepeatRule = { frequency: Frequency; interval?: number; endsOn?: string; co
 type SeriesInput = {
   resourceId: string; purpose: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; quantity?: number;
   leadInMinutes?: number; cleanupMinutes?: number; recurrence?: RepeatRule;
+  additionalResources?: Array<{ resourceId: string; quantity?: number; leadInMinutes?: number; cleanupMinutes?: number }>;
   allDayDate?: string;
   beneficiaryContactId?: string;
   extraDates?: string[]; excludedDates?: string[]; linkedAppointmentId?: string | null; linkedOccurrenceStartAt?: string;
@@ -860,6 +861,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     schema: { body: { type: "object", additionalProperties: false, required: ["resourceId", "purpose", "startsAt", "endsAt"], properties: {
       resourceId: { type: "string", format: "uuid" }, purpose: { type: "string", minLength: 1, maxLength: 240 }, startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
       quantity: { type: "integer", minimum: 1, maximum: 10000 }, leadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, cleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 },
+      additionalResources: { type: "array", minItems: 1, maxItems: 19, items: { type: "object", additionalProperties: false, required: ["resourceId"], properties: {
+        resourceId: { type: "string", format: "uuid" }, quantity: { type: "integer", minimum: 1, maximum: 10000 },
+        leadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, cleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 },
+      } } },
       recurrence: { type: "object", additionalProperties: false, properties: { frequency: { type: "string", enum: ["once", "daily", "weekly", "monthly", "yearly"] }, interval: { type: "integer", minimum: 1, maximum: 366 }, endsOn: { type: "string", format: "date" }, count: { type: "integer", minimum: 1, maximum: 500 }, weekdays: { type: "array", maxItems: 7, items: { type: "integer", minimum: 0, maximum: 6 } } } },
       extraDates: { type: "array", maxItems: 100, items: { type: "string", format: "date" } }, excludedDates: { type: "array", maxItems: 100, items: { type: "string", format: "date" } }, linkedAppointmentId: { anyOf: [{ type: "string", format: "uuid" }, { type: "null" }] },
       allDayDate: { type: "string", format: "date" },
@@ -879,14 +884,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (repeat.endsOn && !isoDate(repeat.endsOn)) return reply.code(400).send({ error: "Choose a valid repeat end date." });
     const extraDates = request.body.extraDates ?? []; const excludedDates = request.body.excludedDates ?? [];
     if ([...extraDates, ...excludedDates].some((date) => !isoDate(date))) return reply.code(400).send({ error: "Extra and excluded dates must be valid calendar dates." });
-    const resourceResult = await context.pool!.query<{ id: string; name: string; requires_approval: boolean; total_units: number; default_lead_in_minutes: number; default_cleanup_minutes: number }>(
-      `SELECT resource.id,resource.name,resource.requires_approval,COALESCE(settings.total_units,1)::int AS total_units,
-              COALESCE(settings.default_lead_in_minutes,0)::int AS default_lead_in_minutes,COALESCE(settings.default_cleanup_minutes,0)::int AS default_cleanup_minutes
-         FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id
-        WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true
-          AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3,$4)`, [request.body.resourceId, departmentId, request.authenticatedUser!.id, isManager(request)]);
-    const resource = resourceResult.rows[0];
-    if (!resource) return reply.code(404).send({ error: "Choose an active resource in this location." });
     const appointmentId = request.body.linkedAppointmentId ?? null;
     const occurrenceStart = cleanLocalDateTime(request.body.linkedOccurrenceStartAt);
     if (request.body.linkedOccurrenceStartAt !== undefined && (!appointmentId || !occurrenceStart || repeat.frequency !== "once" || extraDates.length || excludedDates.length)) {
@@ -895,10 +892,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (appointmentId && !isManager(request)) {
       return reply.code(403).send({ error: "Resource managers are required to link bookings to shared calendar appointments." });
     }
-    const quantity = request.body.quantity ?? 1;
-    if (quantity > resource.total_units) return reply.code(400).send({ error: "Quantity exceeds this resource's available units." });
-    const leadInMinutes = request.body.leadInMinutes ?? resource.default_lead_in_minutes;
-    const cleanupMinutes = request.body.cleanupMinutes ?? resource.default_cleanup_minutes;
+    const additionalResources = request.body.additionalResources ?? [];
+    if (additionalResources.length && (appointmentId || repeat.frequency !== "once" || repeat.endsOn || repeat.count || repeat.weekdays?.length || extraDates.length || excludedDates.length)) {
+      return reply.code(400).send({ error: "Choose one date without a Calendar appointment when requesting multiple resources." });
+    }
+    const selections = [request.body, ...additionalResources].map((selection) => ({
+      resourceId: selection.resourceId.toLowerCase(),
+      quantity: selection.quantity,
+      leadInMinutes: selection.leadInMinutes,
+      cleanupMinutes: selection.cleanupMinutes,
+    }));
+    if (new Set(selections.map(({ resourceId }) => resourceId)).size !== selections.length) {
+      return reply.code(400).send({ error: "Select each resource once. Use quantity to request multiple units." });
+    }
+    selections.sort((left, right) => left.resourceId.localeCompare(right.resourceId));
     const zoneResult = await context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
     const timeZone = zoneResult.rows[0]?.time_zone ?? "UTC";
     if (!isValidTimeZone(timeZone)) return reply.code(409).send({ error: "Configure a valid location time zone before creating recurring bookings." });
@@ -933,8 +940,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     if (!instances.length) return reply.code(400).send({ error: "This repeat rule has no occurrences in its date range." });
     const client = await context.pool!.connect();
-    let created: Awaited<ReturnType<typeof insertBookingSeries>>;
-    let status: "requested" | "approved";
+    const bookings: Array<Awaited<ReturnType<typeof insertBookingSeries>> & { resourceId: string; status: "requested" | "approved" }> = [];
+    let resourceName = "";
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -959,20 +966,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Shared calendar appointment not found in this location." });
       }
-      const policy = await lockResourceBookingPolicy(client, departmentId, request.body.resourceId);
-      if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
-      if (!await canViewResource(client, departmentId, policy.visibility_group_id, request.authenticatedUser!.id, isManager(request))) {
-        await client.query("ROLLBACK");
-        return reply.code(404).send({ error: "Choose an active resource in this location." });
-      }
-      if (policy.manager_booking_only && !isManager(request)) {
-        await client.query("ROLLBACK");
-        return reply.code(403).send({ error: resourceManagerRequired });
-      }
-      if (policy.calendar_required && (!appointmentId || !occurrenceStart)) {
-        await client.query("ROLLBACK");
-        return reply.code(409).send({ error: resourceCalendarRequired });
-      }
       if (beneficiaryContactId) {
         const beneficiary = await client.query("SELECT id FROM contacts WHERE id=$1 AND department_id=$2 AND archived_at IS NULL FOR SHARE",
           [beneficiaryContactId, departmentId]);
@@ -981,32 +974,64 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.code(400).send({ error: "Choose an active People record from this location." });
         }
       }
-      if (policy.intake_only) {
-        if (!canRequestResourceIntake(request)) {
+      // Take the same ordered resource locks as Calendar's atomic bookings.
+      for (const selection of selections) {
+        const policy = await lockResourceBookingPolicy(client, departmentId, selection.resourceId);
+        if (!policy?.active) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Choose an active resource in this location." }); }
+        if (!await canViewResource(client, departmentId, policy.visibility_group_id, request.authenticatedUser!.id, isManager(request))) {
           await client.query("ROLLBACK");
-          return reply.code(403).send({ error: "Intake request access is required for this resource." });
+          return reply.code(404).send({ error: "Choose an active resource in this location." });
         }
-        if (appointmentId || repeat.frequency !== "once" || extraDates.length || excludedDates.length) {
+        if (policy.manager_booking_only && !isManager(request)) {
           await client.query("ROLLBACK");
-          return reply.code(400).send({ error: "Intake requests must be one-off bookings without Calendar links." });
+          return reply.code(403).send({ error: resourceManagerRequired });
         }
+        if (policy.calendar_required && (!appointmentId || !occurrenceStart)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: resourceCalendarRequired });
+        }
+        resourceName = policy.name;
+        const { rows: [settings] } = await client.query<{ total_units: number; default_lead_in_minutes: number; default_cleanup_minutes: number }>(
+          "SELECT total_units,default_lead_in_minutes,default_cleanup_minutes FROM resource_scheduler_settings WHERE resource_id=$1 AND department_id=$2",
+          [policy.id, departmentId],
+        );
+        const quantity = selection.quantity ?? 1;
+        if (quantity > (settings?.total_units ?? 1)) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: `${policy.name}: quantity exceeds available units.` });
+        }
+        const leadInMinutes = selection.leadInMinutes ?? settings?.default_lead_in_minutes ?? 0;
+        const cleanupMinutes = selection.cleanupMinutes ?? settings?.default_cleanup_minutes ?? 0;
+        if (policy.intake_only) {
+          if (!canRequestResourceIntake(request)) {
+            await client.query("ROLLBACK");
+            return reply.code(403).send({ error: "Intake request access is required for this resource." });
+          }
+          if (additionalResources.length || appointmentId || repeat.frequency !== "once" || extraDates.length || excludedDates.length) {
+            await client.query("ROLLBACK");
+            return reply.code(400).send({ error: "Request intake resources individually without a Calendar link or repeat rule." });
+          }
+        }
+        const status = policy.intake_only || (policy.requires_approval && !isManager(request)) ? "requested" : "approved";
+        const created = await insertBookingSeries(client, {
+          departmentId, resourceId: policy.id, userId: request.authenticatedUser!.id,
+          purpose: request.body.purpose.trim(), subtitle: request.body.subtitle?.trim(), description: request.body.description?.trim(), startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
+          instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart, allDayDate, beneficiaryContactId,
+        });
+        if (status === "requested") await recordPendingResourceBookingRequest(client, departmentId, request.authenticatedUser!.id, created.bookingIds);
+        bookings.push({ resourceId: policy.id, ...created, status });
       }
-      status = policy.intake_only || (policy.requires_approval && !isManager(request)) ? "requested" : "approved";
-      created = await insertBookingSeries(client, {
-        departmentId, resourceId: policy.id, userId: request.authenticatedUser!.id,
-        purpose: request.body.purpose.trim(), subtitle: request.body.subtitle?.trim(), description: request.body.description?.trim(), startsAt, endsAt, timeZone, repeat, extraDates, excludedDates,
-        instances, quantity, leadInMinutes, cleanupMinutes, status, appointmentId, occurrenceStart, allDayDate, beneficiaryContactId,
-      });
-      if (status === "requested") await recordPendingResourceBookingRequest(client, departmentId, request.authenticatedUser!.id, created.bookingIds);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
-      if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) return reply.code(409).send({ error: error instanceof Error ? error.message : "A booking conflicts with resource availability." });
+      if (error && typeof error === "object" && "code" in error && (error.code === "23P01" || error.code === "23505")) return reply.code(409).send({ error: additionalResources.length ? `${resourceName} conflicts with an existing reservation or exceeds available units. No resources were booked.` : error instanceof Error ? error.message : "A booking conflicts with resource availability." });
       throw error;
     } finally { client.release(); }
     context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
     if (appointmentId) context.realtime.publish("module:church-calendar:changed", departmentId, {});
-    return reply.code(201).send({ ...created, occurrenceCount: instances.length, status });
+    if (additionalResources.length) return reply.code(201).send({ bookings });
+    const { resourceId: _resourceId, ...created } = bookings[0];
+    return reply.code(201).send({ ...created, occurrenceCount: instances.length });
   });
 
   const futureEditSchema = { type: "object", additionalProperties: false, required: ["fromDate", "purpose", "startsAt", "endsAt", "quantity", "leadInMinutes", "cleanupMinutes", "recurrence"], properties: {

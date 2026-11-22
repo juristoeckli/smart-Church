@@ -155,6 +155,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
 
   function startRequest(selection?: { resourceId: string; date: string }) {
     if (loadedDepartment !== departmentId || (selection && loadedScope !== scope)) return;
+    setAdditionalResources([]);
     const bookable = data.resources.filter(canRequestResource);
     const resource = selection
       ? bookable.find((item) => item.id === selection.resourceId)
@@ -202,6 +203,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
       if (controller.signal.aborted) return;
       const start = new Date(draft.startsAt);
       const end = new Date(draft.endsAt);
+      setAdditionalResources([]);
       setCopyTiming({ clock: localInputInZone(start, data.timeZone).slice(11), durationMs: end.getTime() - start.getTime() });
       setForm({
         resourceId: draft.resourceId, purpose: draft.purpose, subtitle: draft.subtitle ?? "", description: draft.description ?? "",
@@ -237,12 +239,20 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
     }
   }
 
+  const [additionalResources, setAdditionalResources] = useState<Array<{ resourceId: string; quantity: number; leadInMinutes: number; cleanupMinutes: number }>>([]);
   const [fullDayDate, setFullDayDate] = useState<string | null>(null);
   const getRequestWindow = () => fullDayDate !== null
     ? fullDayBookingWindow(fullDayDate, data.timeZone)
     : { startsAt: zonedInputToUtc(form.startsAt, data.timeZone), endsAt: zonedInputToUtc(form.endsAt, data.timeZone) };
 
   const previewResource = data.resources.find((resource) => resource.id === form.resourceId);
+
+  const canAddResources = Boolean(previewResource && !previewResource.intakeOnly && form.recurrence === "once" &&
+    !form.extraDates.trim() && !form.excludedDates.trim() && !form.linkedAppointmentId);
+  const additionalOptions = data.resources.filter((resource) =>
+    canRequestResource(resource) && !resource.intakeOnly && resource.id !== form.resourceId &&
+    !additionalResources.some((selection) => selection.resourceId === resource.id),
+  );
 
   async function createSeries(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -255,6 +265,13 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
       setError("Choose an active resource that accepts direct requests.");
       return;
     }
+    if (additionalResources.length && (!canAddResources || additionalResources.some((selection) => {
+      const resource = data.resources.find((item) => item.id === selection.resourceId);
+      return !resource || resource.intakeOnly || !canRequestResource(resource);
+    }))) {
+      setError("Review the selected resources and choose one date without a Calendar appointment.");
+      return;
+    }
     setSaving(true); setError(""); setNotice("");
     const parseDates = (value: string) => value.split(",").map((item) => item.trim()).filter(Boolean);
     try {
@@ -262,7 +279,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
       const repeat: Record<string, unknown> = { frequency, interval: frequency === "once" ? 1 : Number(form.interval) || 1 };
       if (form.endsOn && frequency !== "once") repeat.endsOn = form.endsOn;
       await mutate("/api/modules/resource-scheduler/series", "POST", {
-        resourceId: form.resourceId, purpose: form.purpose.trim(), subtitle: form.subtitle.trim(), description: form.description.trim(), ...getRequestWindow(),
+        resourceId: form.resourceId, ...(additionalResources.length ? { additionalResources } : {}), purpose: form.purpose.trim(), subtitle: form.subtitle.trim(), description: form.description.trim(), ...getRequestWindow(),
         ...(data.canBookForOthers && beneficiary ? { beneficiaryContactId: beneficiary.id } : {}),
         ...(fullDayDate !== null ? { allDayDate: fullDayDate } : {}),
         quantity: Number(form.quantity), leadInMinutes: Number(form.leadInMinutes), cleanupMinutes: Number(form.cleanupMinutes), recurrence: repeat,
@@ -270,7 +287,7 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
         excludedDates: !previewResource.intakeOnly && (fullDayDate === null || frequency !== "once") ? parseDates(form.excludedDates) : [],
         linkedAppointmentId: previewResource.intakeOnly ? null : form.linkedAppointmentId || null,
       });
-      setRequestDepartmentId(null); setNotice("Booking request saved. Check the status in the schedule."); await load();
+      setRequestDepartmentId(null); setNotice(additionalResources.length ? "Booking requests saved. Check each status in the schedule." : "Booking request saved. Check the status in the schedule."); await load();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the booking."); }
     finally { setSaving(false); }
   }
@@ -527,23 +544,47 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
             <button type="submit" className="button button-primary" disabled={saving || !reassignment.resourceId}>Assign resource</button></div>
         </form>
       </section></div>}
-    {requestDepartmentId === departmentId && loadedDepartment === departmentId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setRequestDepartmentId(null)}><section className="modal resource-scheduler-modal" role="dialog" aria-modal="true" aria-labelledby="resource-request-title"><div className="modal-heading"><div><span className="eyebrow">RESOURCE REQUEST</span><h2 id="resource-request-title">{copyTiming ? "Copy booking to a new request" : "Request a booking"}</h2><p>Times use the location time zone ({data.timeZone}). Conflicts and unit availability are checked before saving. Book Calendar-required resources from a saved Calendar appointment.</p></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setRequestDepartmentId(null)}><X size={18} /></button></div><form onSubmit={(event) => void createSeries(event)}><label>Resource<select required value={form.resourceId} onChange={(event) => { const resource = data.resources.find((item) => item.id === event.target.value); setForm((current) => ({ ...current, resourceId: event.target.value, leadInMinutes: resource?.defaultLeadInMinutes ?? 0, cleanupMinutes: resource?.defaultCleanupMinutes ?? 0 })); }}><option value="">Choose a resource</option>{data.resources.filter((item) => item.active).map((resource) => <option key={resource.id} value={resource.id} disabled={!canRequestResource(resource)}>{resource.name} · {resource.location || resource.category}{resource.calendarRequired ? " · Calendar required" : ""}{resource.managerBookingOnly ? " · Managers only" : ""}{resource.intakeOnly ? " · Intake" : ""}</option>)}</select></label><label>Purpose<input required maxLength={240} value={form.purpose} onChange={(event) => setForm((current) => ({ ...current, purpose: event.target.value }))} /></label>
+    {requestDepartmentId === departmentId && loadedDepartment === departmentId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setRequestDepartmentId(null)}><section className="modal resource-scheduler-modal" role="dialog" aria-modal="true" aria-labelledby="resource-request-title"><div className="modal-heading"><div><span className="eyebrow">RESOURCE REQUEST</span><h2 id="resource-request-title">{copyTiming ? "Copy booking to a new request" : "Request a booking"}</h2><p>Times use the location time zone ({data.timeZone}). Conflicts and unit availability are checked before saving. Book Calendar-required resources from a saved Calendar appointment.</p></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setRequestDepartmentId(null)}><X size={18} /></button></div><form onSubmit={(event) => void createSeries(event)}><label>Resource<select required disabled={additionalResources.length > 0} value={form.resourceId} onChange={(event) => { const resource = data.resources.find((item) => item.id === event.target.value); setForm((current) => ({ ...current, resourceId: event.target.value, leadInMinutes: resource?.defaultLeadInMinutes ?? 0, cleanupMinutes: resource?.defaultCleanupMinutes ?? 0 })); }}><option value="">Choose a resource</option>{data.resources.filter((item) => item.active).map((resource) => <option key={resource.id} value={resource.id} disabled={!canRequestResource(resource)}>{resource.name} · {resource.location || resource.category}{resource.calendarRequired ? " · Calendar required" : ""}{resource.managerBookingOnly ? " · Managers only" : ""}{resource.intakeOnly ? " · Intake" : ""}</option>)}</select></label><label>Purpose<input required maxLength={240} value={form.purpose} onChange={(event) => setForm((current) => ({ ...current, purpose: event.target.value }))} /></label>
       <label>Subtitle <input maxLength={240} value={form.subtitle} onChange={(event) => setForm((current) => ({ ...current, subtitle: event.target.value }))} /></label>
       <label>Description<textarea rows={3} maxLength={2000} value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} /></label>
       {data.canBookForOthers && <ResourceBookingBeneficiary key={departmentId} departmentId={departmentId} selected={beneficiary} onChange={setBeneficiary} />}<label><input type="checkbox" checked={fullDayDate !== null} onChange={(event) => setFullDayDate(event.target.checked ? form.startsAt.slice(0, 10) : null)} /> Reserve full day</label>{fullDayDate !== null
       ? <label>Booking date<input type="date" required value={fullDayDate} onChange={(event) => setFullDayDate(event.target.value)} /><small>Reserves this date from local midnight until the next local midnight.</small></label>
       : <>{copyTiming && <label>Copy to date<input type="date" value={form.startsAt.slice(0, 10)} onChange={(event) => setCopiedBookingDate(event.target.value)} /></label>}
       <div className="resource-scheduler-field-grid"><label>Start<input type="datetime-local" required value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End<input type="datetime-local" required value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></>}
-      {!previewResource?.intakeOnly && <><label>Repeat<select value={form.recurrence} onChange={(event) => setForm((current) => ({ ...current, recurrence: event.target.value }))}><option value="once">Does not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>{form.recurrence !== "once" && <div className="resource-scheduler-field-grid"><label>Every<input type="number" min={1} max={366} value={form.interval} onChange={(event) => setForm((current) => ({ ...current, interval: Number(event.target.value) }))} /></label><label>Repeat through<input type="date" value={form.endsOn} onChange={(event) => setForm((current) => ({ ...current, endsOn: event.target.value }))} /></label></div>}</>}
-      <div className="resource-scheduler-field-grid"><label>Quantity<input type="number" min={1} max={10000} value={form.quantity} onChange={(event) => setForm((current) => ({ ...current, quantity: Number(event.target.value) }))} /></label><label>Setup / lead-in (minutes)<input type="number" min={0} max={10080} value={form.leadInMinutes} onChange={(event) => setForm((current) => ({ ...current, leadInMinutes: Number(event.target.value) }))} /></label><label>Cleanup (minutes)<input type="number" min={0} max={10080} value={form.cleanupMinutes} onChange={(event) => setForm((current) => ({ ...current, cleanupMinutes: Number(event.target.value) }))} /></label></div>{!previewResource?.intakeOnly && (fullDayDate === null || form.recurrence !== "once") && <><label>Extra dates (comma-separated, YYYY-MM-DD)<input placeholder="2026-12-24, 2026-12-31" value={form.extraDates} onChange={(event) => setForm((current) => ({ ...current, extraDates: event.target.value }))} /></label><label>Skip dates (comma-separated, YYYY-MM-DD)<input placeholder="2026-12-25" value={form.excludedDates} onChange={(event) => setForm((current) => ({ ...current, excludedDates: event.target.value }))} /></label></>}{canManage && !previewResource?.intakeOnly && <label>Link to calendar appointment<select value={form.linkedAppointmentId} onChange={(event) => setForm((current) => ({ ...current, linkedAppointmentId: event.target.value }))}><option value="">No appointment link</option>{appointments.map((appointment) => <option key={`${appointment.appointmentId}-${appointment.occurrenceStartAt}`} value={appointment.appointmentId}>{appointment.title} · {formatTime(appointment.occurrenceStartAt)} · {appointment.calendarName}</option>)}</select></label>}{previewResource?.intakeOnly && <p>This request waits for a reviewer to assign a specific resource.</p>}
+      {!previewResource?.intakeOnly && <><label>Repeat<select disabled={additionalResources.length > 0} value={form.recurrence} onChange={(event) => setForm((current) => ({ ...current, recurrence: event.target.value }))}><option value="once">Does not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>{form.recurrence !== "once" && <div className="resource-scheduler-field-grid"><label>Every<input type="number" min={1} max={366} value={form.interval} onChange={(event) => setForm((current) => ({ ...current, interval: Number(event.target.value) }))} /></label><label>Repeat through<input type="date" value={form.endsOn} onChange={(event) => setForm((current) => ({ ...current, endsOn: event.target.value }))} /></label></div>}</>}
+      <div className="resource-scheduler-field-grid"><label>Quantity<input type="number" min={1} max={10000} value={form.quantity} onChange={(event) => setForm((current) => ({ ...current, quantity: Number(event.target.value) }))} /></label><label>Setup / lead-in (minutes)<input type="number" min={0} max={10080} value={form.leadInMinutes} onChange={(event) => setForm((current) => ({ ...current, leadInMinutes: Number(event.target.value) }))} /></label><label>Cleanup (minutes)<input type="number" min={0} max={10080} value={form.cleanupMinutes} onChange={(event) => setForm((current) => ({ ...current, cleanupMinutes: Number(event.target.value) }))} /></label></div>{!previewResource?.intakeOnly && (fullDayDate === null || form.recurrence !== "once") && <><label>Extra dates (comma-separated, YYYY-MM-DD)<input disabled={additionalResources.length > 0} placeholder="2026-12-24, 2026-12-31" value={form.extraDates} onChange={(event) => setForm((current) => ({ ...current, extraDates: event.target.value }))} /></label><label>Skip dates (comma-separated, YYYY-MM-DD)<input disabled={additionalResources.length > 0} placeholder="2026-12-25" value={form.excludedDates} onChange={(event) => setForm((current) => ({ ...current, excludedDates: event.target.value }))} /></label></>}{canManage && !previewResource?.intakeOnly && <label>Link to calendar appointment<select disabled={additionalResources.length > 0} value={form.linkedAppointmentId} onChange={(event) => setForm((current) => ({ ...current, linkedAppointmentId: event.target.value }))}><option value="">No appointment link</option>{appointments.map((appointment) => <option key={`${appointment.appointmentId}-${appointment.occurrenceStartAt}`} value={appointment.appointmentId}>{appointment.title} · {formatTime(appointment.occurrenceStartAt)} · {appointment.calendarName}</option>)}</select></label>}{previewResource?.intakeOnly && <p>This request waits for a reviewer to assign a specific resource.</p>}
+      {additionalResources.map((selection) => {
+        const resource = data.resources.find((item) => item.id === selection.resourceId);
+        return <fieldset key={selection.resourceId}>
+          <legend>{resource?.name ?? "Unavailable resource"}</legend>
+          <div className="resource-scheduler-field-grid">
+            {([
+              ["quantity", "Quantity", 1, resource?.totalUnits ?? 10000],
+              ["leadInMinutes", "Setup / lead-in (minutes)", 0, 10080],
+              ["cleanupMinutes", "Cleanup (minutes)", 0, 10080],
+            ] as const).map(([field, label, minimum, maximum]) => <label key={field}>{label}<input required type="number" min={minimum} max={maximum} value={selection[field]} onChange={(event) => {
+              const value = Number(event.target.value);
+              setAdditionalResources((current) => current.map((item) => item.resourceId === selection.resourceId ? { ...item, [field]: value } : item));
+            }} /></label>)}
+          </div>
+          <button type="button" className="button button-secondary" onClick={() => setAdditionalResources((current) => current.filter((item) => item.resourceId !== selection.resourceId))}>Remove {resource?.name ?? "resource"}</button>
+        </fieldset>;
+      })}
+      {canAddResources && additionalOptions.length > 0 && additionalResources.length < 19 && <label>Add a resource<select value="" onChange={(event) => {
+        const resource = additionalOptions.find((item) => item.id === event.target.value);
+        if (resource) setAdditionalResources((current) => [...current, { resourceId: resource.id, quantity: 1,
+          leadInMinutes: resource.defaultLeadInMinutes, cleanupMinutes: resource.defaultCleanupMinutes }]);
+      }}><option value="">Choose another resource</option>{additionalOptions.map((resource) => <option key={resource.id} value={resource.id}>{resource.name} · {resource.location || resource.category}</option>)}</select></label>}
       {previewResource && !previewResource.intakeOnly && <>
       {form.recurrence !== "once" && <small>The availability check covers the selected time. The full series is checked when you save.</small>}
       <ResourceAvailabilityCheck
-        key={JSON.stringify([departmentId, form.resourceId, form.startsAt, form.endsAt, fullDayDate, form.quantity, form.leadInMinutes, form.cleanupMinutes])}
+        key={JSON.stringify([departmentId, form.resourceId, form.startsAt, form.endsAt, fullDayDate, form.quantity, form.leadInMinutes, form.cleanupMinutes, additionalResources])}
         getWindow={getRequestWindow}
         headers={{ "x-department-id": departmentId, "x-csrf-token": csrfToken }}
         selections={[{ resourceId: previewResource.id, name: previewResource.name, quantity: Number(form.quantity),
-          leadInMinutes: Number(form.leadInMinutes), cleanupMinutes: Number(form.cleanupMinutes) }]}
+          leadInMinutes: Number(form.leadInMinutes), cleanupMinutes: Number(form.cleanupMinutes) }, ...additionalResources.map((selection) => ({
+            ...selection, name: data.resources.find((item) => item.id === selection.resourceId)?.name ?? "Unavailable resource",
+          }))]}
         disabled={saving || (fullDayDate !== null ? !fullDayDate : !form.startsAt || !form.endsAt)}
       />
     </>}<div className="form-actions"><button className="button button-secondary" type="button" onClick={() => setRequestDepartmentId(null)}>Cancel</button><button className="button button-primary" type="submit" disabled={saving || !previewResource || !canRequestResource(previewResource)}>{saving ? "Checking availability…" : "Save booking request"}</button></div></form></section></div>}
