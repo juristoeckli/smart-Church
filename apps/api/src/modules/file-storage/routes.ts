@@ -6,7 +6,7 @@ import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { canManageStoredFileWikiAudience, wikiFileAudienceSchema, storedFileWikiAudienceSql } from "../../stored-file-wiki-access.js";
 
-const resourceLimit = 25 * 1024 * 1024;
+import { storedFileUploadLimit as resourceLimit, storedFileUploadMetadata } from "./upload.js";
 function canonical(value: unknown): string {
   if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
@@ -209,11 +209,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       if (!departmentId) return reply;
       if (!Buffer.isBuffer(request.body) || request.body.length < 1) return reply.code(400).send({ error: "Choose a file to upload." });
       if (request.body.length > resourceLimit) return reply.code(413).send({ error: "Files must be 25 MiB or smaller." });
-      const fileName = basename(request.query.filename || "resource").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 255) || "resource";
-      const title = (request.query.title?.trim() || fileName).slice(0, 160);
+      const { fileName, title, contentType } = storedFileUploadMetadata(request.query, request.headers["x-resource-content-type"]);
       const category = (request.query.category?.trim() || "General").slice(0, 80);
-      const requestedType = request.headers["x-resource-content-type"];
-      const contentType = typeof requestedType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(requestedType) ? requestedType.slice(0, 120) : "application/octet-stream";
       const folderId = request.query.folderId ?? null;
       if (folderId) {
         const folder = await pool!.query("SELECT id FROM stored_file_folders WHERE id=$1 AND department_id=$2", [folderId, departmentId]);

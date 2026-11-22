@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { createWikiPdf } from "./pdf.js";
+import { storedFileUploadLimit, storedFileUploadMetadata } from "../file-storage/upload.js";
 
 type WikiAudience = "location" | "group" | "managers";
 type WikiPageRow = { id: string; category_id: string; title: string; content_html: string; status: "active" | "archived"; redirect_page_id?: string | null; is_homepage: boolean; audience?: WikiAudience; audience_group_id?: string | null; created_at: Date | string; updated_at: Date | string; updated_by: string | null; editor_name?: string | null; edit_revision?: string };
@@ -738,6 +739,59 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!result.rowCount) return reply.code(404).send({ error: "Wiki page link not found." });
     changed(departmentId, { action: "link-removed", pageId: request.params.id });
     return { deleted: true };
+  });
+
+  app.register(async (uploadRoutes) => {
+    uploadRoutes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: storedFileUploadLimit }, (_request, body, done) => done(null, body));
+    uploadRoutes.post<{ Params: { id: string }; Body: Buffer; Querystring: { filename?: string; managersOnly?: boolean } }>("/api/modules/wiki/pages/:id/files/upload", {
+      bodyLimit: storedFileUploadLimit,
+      schema: {
+        params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+        querystring: { type: "object", additionalProperties: false, properties: {
+          filename: { type: "string", maxLength: 255 }, managersOnly: { type: "boolean" },
+        } },
+      },
+    }, async (request, reply) => {
+      if (!validateMutation(request, reply)) return reply;
+      const departmentId = await site(request, reply, true);
+      if (!departmentId) return reply;
+      if (request.activeDepartmentRole !== "site_admin" && !(request.activeDepartmentModulePermissions?.["file-storage"] ?? []).includes("manage")) {
+        return reply.code(403).send({ error: "File storage management access is required." });
+      }
+      if (!Buffer.isBuffer(request.body) || !request.body.length) return reply.code(400).send({ error: "Choose a file to upload." });
+      if (request.body.length > storedFileUploadLimit) return reply.code(413).send({ error: "Files must be 25 MiB or smaller." });
+      const { fileName, title, contentType } = storedFileUploadMetadata(request.query, request.headers["x-resource-content-type"]);
+      const fileId = randomUUID();
+      const client = await pool!.connect();
+      try {
+        await client.query("BEGIN");
+        if (!await context.lockDepartmentForWrite(client, departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This location is read-only." });
+        }
+        const location = await client.query("SELECT 1 FROM departments WHERE id=$1 AND enabled_modules @> ARRAY['wiki','file-storage']::text[]",
+          [departmentId]);
+        if (!location.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Wiki and File Storage must be enabled for this location." });
+        }
+        const page = await client.query("SELECT 1 FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active' FOR SHARE",
+          [request.params.id, departmentId]);
+        if (!page.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Active Wiki page not found." });
+        }
+        await client.query(`INSERT INTO stored_files(id,department_id,title,category,file_name,content_type,file_size,file_data)
+          VALUES($1,$2,$3,'Wiki',$4,$5,$6,$7)`, [fileId, departmentId, title, fileName, contentType, request.body.length, request.body]);
+        await client.query(`INSERT INTO wiki_page_files(department_id,page_id,file_id,added_by,managers_only)
+          VALUES($1,$2,$3,$4,$5)`, [departmentId, request.params.id, fileId, request.authenticatedUser!.id, request.query.managersOnly ?? false]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+      changed(departmentId, { action: "file-attached", pageId: request.params.id });
+      context.realtime.publish("module:file-storage:changed", departmentId, { action: "uploaded" });
+      return reply.code(201).send({ fileId });
+    });
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id/available-files", async (request, reply) => {
