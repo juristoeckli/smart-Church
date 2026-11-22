@@ -1,3 +1,4 @@
+import { calendarEmbedContentPolicy, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
 import { registerCalendarTagDefinitions } from "./tag-definitions.js";
 import { loadOccurrenceRequestScope, occurrenceRequestKey, registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
@@ -220,7 +221,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       [request.params.id, departmentId, hashFeedToken(token), userId(request)],
     );
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "public-feed-rotated", calendarId: request.params.id });
-    return { url: `/api/public/church-calendar/feed/${token}.ics` };
+    return { url: `/api/public/church-calendar/feed/${token}.ics`, embedUrl: `/api/public/church-calendar/embed/${token}` };
   });
 
   app.delete<{ Params: { id: string } }>("/api/modules/church-calendar/calendars/:id/public-feed", { schema: {
@@ -271,7 +272,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { revoked: true };
   });
 
-  async function serveCalendarFeed(reply: FastifyReply, token: string, audience: "community" | "subscription") {
+  async function serveCalendarFeed(reply: FastifyReply, token: string, audience: "community" | "subscription", embed?: EmbedSettings) {
     reply.header("Cache-Control", "private, no-store").header("Referrer-Policy", "no-referrer");
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const sourceTable = audience === "subscription" ? "church_calendar_subscriptions" : "church_calendar_public_feeds";
@@ -291,8 +292,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!source) return responseError(reply, 404, "Calendar feed not found.");
     const from = source.local_today;
     const toDate = wallDate(`${from}T00:00:00`);
-    toDate.setUTCDate(toDate.getUTCDate() + 366);
+    toDate.setUTCDate(toDate.getUTCDate() + (embed ? (embed.days ?? 60) - 1 : 366));
     const to = localDateTime(toDate).slice(0, 10);
+    // An authored clock time can cross the public calendar's local date boundary.
+    const fromDay = embed ? localDateTime(addDays(wallDate(`${from}T00:00`), -2)).slice(0, 10) : from;
+    const throughDay = embed ? localDateTime(addDays(wallDate(`${to}T00:00`), 2)).slice(0, 10) : to;
+    const fromTimestamp = `${fromDay}T00:00:00`;
+    const throughTimestamp = `${throughDay}T23:59:59`;
+    const alteredStart = `left(exception.overrides->>'startsAt',10)
+      BETWEEN to_char($3::timestamp,'YYYY-MM-DD') AND to_char($4::timestamp,'YYYY-MM-DD')`;
     const events = await context.pool.query<AppointmentRow>(
       `SELECT appointment.id,appointment.calendar_id,appointment.title,appointment.subtitle,appointment.description,
               to_char(appointment.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(appointment.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at,
@@ -301,14 +309,25 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               calendar.owner_user_id,calendar.group_id
          FROM church_calendar_appointments appointment JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
         WHERE appointment.department_id=$1 AND appointment.calendar_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
-          AND calendar.scope=$5 AND appointment.internal_only=false AND appointment.starts_at <= $4::timestamp
-          AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $3::timestamp) OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $3::date))
-        ORDER BY appointment.starts_at,appointment.title LIMIT 2000`, [source.department_id, source.calendar_id, `${from}T00:00:00`, `${to}T23:59:59`, source.calendar_scope]);
+          AND calendar.scope=$5 AND appointment.internal_only=false
+          AND ((appointment.starts_at <= $4::timestamp AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $3::timestamp)
+            OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $3::date)))
+            ${embed ? `OR EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
+              WHERE exception.appointment_id=appointment.id AND NOT exception.cancelled AND ${alteredStart})
+               OR EXISTS (SELECT 1 FROM church_calendar_extra_dates extra WHERE extra.appointment_id=appointment.id AND extra.starts_at BETWEEN $3::timestamp AND $4::timestamp)` : ""})
+        ORDER BY appointment.starts_at,appointment.title LIMIT 2000`, [source.department_id, source.calendar_id, fromTimestamp, throughTimestamp, source.calendar_scope]);
     const ids = events.rows.map((item) => item.id);
     const exceptionRows = ids.length ? await context.pool.query<{ appointment_id: string; original_start: string; cancelled: boolean; overrides: Record<string, unknown> }>(
       `SELECT appointment_id,to_char(original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS original_start,cancelled,overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=ANY($1::uuid[])`, [ids]) : { rows: [] };
     const extraRows = ids.length ? await context.pool.query<{ appointment_id: string; starts_at: string; ends_at: string }>(
-      `SELECT appointment_id,to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at FROM church_calendar_extra_dates WHERE appointment_id=ANY($1::uuid[]) AND starts_at >= $2::timestamp AND starts_at <= $3::timestamp`, [ids, `${from}T00:00:00`, `${to}T23:59:59`]) : { rows: [] };
+      `SELECT extra.appointment_id,to_char(extra.starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS starts_at,
+              to_char(extra.ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS ends_at
+         FROM church_calendar_extra_dates extra WHERE extra.appointment_id=ANY($1::uuid[])
+           AND (extra.starts_at BETWEEN $2::timestamp AND $3::timestamp
+             ${embed ? `OR EXISTS (SELECT 1 FROM church_calendar_appointment_exceptions exception
+               WHERE exception.appointment_id=extra.appointment_id AND exception.original_start=extra.starts_at AND NOT exception.cancelled
+                 AND left(exception.overrides->>'startsAt',10) BETWEEN to_char($2::timestamp,'YYYY-MM-DD') AND to_char($3::timestamp,'YYYY-MM-DD'))` : ""})`,
+      [ids, fromTimestamp, throughTimestamp]) : { rows: [] };
     const exceptions = new Map(exceptionRows.rows.map((item) => [`${item.appointment_id}:${item.original_start.replace(" ", "T")}`, item]));
     const extraOccurrences = new Map<string, Map<string, string>>();
     for (const item of extraRows.rows) {
@@ -318,12 +337,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Smart-Church//Calendar//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", `X-WR-CALNAME:${icsEscape(source.calendar_name)}`];
     const stamp = icsDateTime(`${localDateTime(new Date())}Z`);
+    const movedOccurrences = new Map<string, string[]>();
+    if (embed) for (const exception of exceptionRows.rows) {
+      const startsAt = cleanLocalDateTime(exception.overrides.startsAt);
+      if (exception.cancelled || !startsAt || startsAt < fromTimestamp || startsAt > throughTimestamp) continue;
+      const originals = movedOccurrences.get(exception.appointment_id) ?? [];
+      originals.push(exception.original_start);
+      movedOccurrences.set(exception.appointment_id, originals);
+    }
+    const publicAgenda: EmbedAppointment[] = [];
     const timedOccurrences: Array<{ line: number; startsAt: string; endsAt: string; timeZone: string }> = [];
     for (const row of events.rows) {
       const start = wallDate(row.starts_at);
       const duration = Math.max(0, wallDate(row.ends_at).getTime() - start.getTime());
       const additionalDates = [...(extraOccurrences.get(row.id)?.keys() ?? [])].map(wallDate);
-      const starts = [...new Map([...occurrenceStarts(row, `${from}T00:00`, `${to}T23:59`), ...additionalDates].map((date) => [localDateTime(date), date])).values()];
+      const moved = (movedOccurrences.get(row.id) ?? []).filter((original) => calendarOccurrenceExists(row, original)).map(wallDate);
+      const starts = [...new Map([...occurrenceStarts(row, `${fromDay}T00:00`, `${throughDay}T23:59`), ...additionalDates, ...moved]
+        .map((date) => [localDateTime(date), date])).values()];
       for (const occurrence of starts) {
         const original = localDateTime(occurrence);
         const exception = exceptions.get(`${row.id}:${original}`);
@@ -332,11 +362,23 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const startsAt = cleanLocalDateTime(override.startsAt) ?? original;
         const endsAt = cleanLocalDateTime(override.endsAt) ?? extraOccurrences.get(row.id)?.get(original) ?? localDateTime(new Date(occurrence.getTime() + duration));
         const title = String(override.title ?? row.title);
+        const allDay = (override.allDay ?? row.all_day) === true;
+        if (embed) {
+          const timed = allDay ? null : appointmentInstants(startsAt, endsAt, row.time_zone ?? source.time_zone);
+          if (!allDay && !timed) continue;
+          const displayStart = timed ? appointmentWallTime(Date.parse(timed.startsAtUtc), source.time_zone) : startsAt;
+          const displayEnd = timed ? appointmentWallTime(Date.parse(timed.endsAtUtc), source.time_zone) : endsAt;
+          const displayDate = displayStart.slice(0, 10);
+          if (displayDate < from || displayDate > to) continue;
+          publicAgenda.push({ startsAt: displayStart, endsAt: displayEnd, allDay, title,
+            subtitle: String(override.subtitle ?? row.subtitle), place: String(override.place ?? row.place) });
+          continue;
+        }
         const description = String(override.description ?? row.description);
         const place = String(override.place ?? row.place);
         const url = String(override.url ?? row.url);
         lines.push("BEGIN:VEVENT", `UID:${row.id}-${icsDateTime(original)}@smart-church`, `DTSTAMP:${stamp}`);
-        if ((override.allDay ?? row.all_day) === true) {
+        if (allDay) {
           const startDate = startsAt.slice(0, 10);
           const endDate = endsAt.slice(0, 10);
           const endMidnight = wallDate(`${endDate}T00:00:00`);
@@ -354,6 +396,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         if (/^https:\/\/[^\u0000-\u001f\u007f]+$/i.test(url)) lines.push(`URL:${url}`);
         lines.push("END:VEVENT");
       }
+    }
+    if (embed) {
+      return reply.type("text/html; charset=utf-8")
+        .header("Content-Security-Policy", calendarEmbedContentPolicy)
+        .header("X-Robots-Tag", "noindex, nofollow")
+        .send(renderCalendarEmbed(source.calendar_name, publicAgenda, source.time_zone, embed.entries ?? 20));
     }
     // Expand wall times using each appointment's time zone before exporting UTC instants.
     // Batch conversions to keep query size bounded even for large feeds.
@@ -388,6 +436,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get<{ Params: { token: string } }>("/api/public/church-calendar/feed/:token.ics", { schema: {
     params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
   } }, (request, reply) => serveCalendarFeed(reply, request.params.token, "community"));
+
+  app.get<{ Params: { token: string }; Querystring: EmbedSettings }>("/api/public/church-calendar/embed/:token", { schema: {
+    params: { type: "object", additionalProperties: false, required: ["token"], properties: { token: { type: "string", minLength: 40, maxLength: 80, pattern: "^[A-Za-z0-9_-]+$" } } },
+    querystring: { type: "object", additionalProperties: false, properties: {
+      days: { type: "integer", minimum: 1, maximum: 120 }, entries: { type: "integer", minimum: 1, maximum: 50 },
+    } },
+  } }, (request, reply) => serveCalendarFeed(reply, request.params.token, "community", request.query));
 
   app.get<{ Querystring: { key: string } }>("/api/public/church-calendar/subscription.ics", { schema: {
     querystring: { type: "object", additionalProperties: false, required: ["key"], properties: { key: { type: "string", minLength: 43, maxLength: 43, pattern: "^[A-Za-z0-9_-]+$" } } },

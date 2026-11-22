@@ -453,10 +453,17 @@ app.addHook("onRequest", async (request, reply) => {
   }
 });
 
+const publicCalendarEmbedPath = /^\/api\/public\/church-calendar\/embed\/[A-Za-z0-9_-]{40,80}$/;
+
 app.addHook("onSend", async (request, reply, payload) => {
   reply.header("X-Content-Type-Options", "nosniff");
-  reply.header("X-Frame-Options", "DENY");
-  reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  const isCalendarEmbed = request.method === "GET" && reply.statusCode === 200
+    && publicCalendarEmbedPath.test(new URL(request.url, "http://localhost").pathname)
+    && String(reply.getHeader("Content-Type")).startsWith("text/html");
+  if (!isCalendarEmbed) {
+    reply.header("X-Frame-Options", "DENY");
+    reply.header("Referrer-Policy", "strict-origin-when-cross-origin");
+  }
   reply.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   if (process.env.NODE_ENV === "production" && !directHttpMode && !allowHttpFallback && request.protocol === "https") reply.header("Strict-Transport-Security", "max-age=31536000");
   return payload;
@@ -494,7 +501,8 @@ app.addHook("preHandler", async (request, reply) => {
     || /^\/api\/public\/church-calendar\/feed\/[A-Za-z0-9_-]{40,80}\.ics$/.test(new URL(request.url, "http://localhost").pathname)
     || /^\/api\/modules\/calendar-sync\/oauth\/callback\/(google|microsoft)$/.test(new URL(request.url, "http://localhost").pathname)
   );
-  if (calendarSubscriptionRequest || publicCalendarSyncRequest || request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
+  const publicCalendarEmbedRequest = request.method === "GET" && publicCalendarEmbedPath.test(new URL(request.url, "http://localhost").pathname);
+  if (publicCalendarEmbedRequest || calendarSubscriptionRequest || publicCalendarSyncRequest || request.url === "/api/health" || request.url === "/api/webhooks/resend" || request.url.startsWith("/api/auth/") || request.url === "/api/public/http-access" || request.url.startsWith("/api/public/eventdesk/") || request.url.startsWith("/api/public/event-registrations/") || request.url.startsWith("/api/public/group-signups/") || request.url.startsWith("/api/public/self-signup/")) return;
   if (request.url.startsWith("/api/modules/presenter/public/") || ["/api/public/signage/pair","/api/public/signage/pairing/start","/api/public/signage/pairing/status"].includes(request.url)) return;
   if (!databaseReady) return;
   const authorization = request.headers.authorization;

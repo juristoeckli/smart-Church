@@ -177,7 +177,18 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
   const [eventStaffAssignments, setEventStaffAssignments] = useState<Record<number, string>>({});
   const [eventStaffLabels, setEventStaffLabels] = useState<Record<string, string>>({});
   const [imageFile, setImageFile] = useState<File | null>(null);
-  const [issuedFeed, setIssuedFeed] = useState<{ url: string; departmentId: string; name: string; confidential: boolean } | null>(null);
+  const [issuedFeed, setIssuedFeed] = useState<{ url: string; embedUrl?: string; departmentId: string; name: string; confidential: boolean } | null>(null);
+  const [embedDays, setEmbedDays] = useState(60);
+  const [embedEntries, setEmbedEntries] = useState(20);
+  const embedUrl = useMemo(() => {
+    if (issuedFeed?.departmentId !== departmentId || !issuedFeed.embedUrl || issuedFeed.confidential) return null;
+    const url = new URL(issuedFeed.embedUrl);
+    url.searchParams.set("days", String(embedDays));
+    url.searchParams.set("entries", String(embedEntries));
+    return url;
+  }, [departmentId, embedDays, embedEntries, issuedFeed]);
+  const embedCode = embedUrl ? `<iframe src="${embedUrl.toString().replaceAll("&", "&amp;").replaceAll('"', "&quot;")}" title="Church calendar" width="100%" height="500" loading="lazy" sandbox referrerpolicy="no-referrer"></iframe>` : "";
+
   const canManageShared = canManageSite || (department.modulePermissions?.["church-calendar"] ?? []).includes("manage") || (department.permissions ?? []).some((permission) => ["events_manage", "groups_manage"].includes(permission));
   const canManageGroups = canManageSite || department.role === "site_admin" || (department.permissions ?? []).includes("groups_manage");
   const canManageEvents = canManageSite || department.role === "site_admin" || (department.permissions ?? []).includes("events_manage");
@@ -586,7 +597,7 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
   async function issuePublicFeed(calendar: Calendar) {
     if (busy) return;
     setBusy(true); setError(""); setIssuedFeed(null);
-    try { const result = await api<{ url: string }>(`/api/modules/church-calendar/calendars/${calendar.id}/public-feed`, { method: "POST", headers: mutationHeaders, body: "{}" }); setIssuedFeed({ url: new URL(result.url, window.location.origin).toString(), departmentId, name: calendar.name, confidential: false }); setNotice(calendar.hasPublicFeed ? "Public feed link rotated. The previous link no longer works." : "Public feed link created."); await load(); }
+    try { const result = await api<{ url: string; embedUrl?: string }>(`/api/modules/church-calendar/calendars/${calendar.id}/public-feed`, { method: "POST", headers: mutationHeaders, body: "{}" }); setIssuedFeed({ url: new URL(result.url, window.location.origin).toString(), ...(result.embedUrl ? { embedUrl: new URL(result.embedUrl, window.location.origin).toString() } : {}), departmentId, name: calendar.name, confidential: false }); setNotice(calendar.hasPublicFeed ? "Public feed link rotated. The previous link no longer works." : "Public feed link created."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not create the public feed link."); }
     finally { setBusy(false); }
   }
@@ -603,13 +614,13 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
     } finally { setBusy(false); }
   }
 
-  async function copyFeed(url: string) {
-    try { await navigator.clipboard.writeText(url); setNotice("Calendar link copied."); }
-    catch { setError("Select and copy the calendar link."); }
+  async function copyFeed(value: string, label = "Calendar link") {
+    try { await navigator.clipboard.writeText(value); setNotice(`${label} copied.`); }
+    catch { setError(`Select and copy the ${label.toLowerCase()}.`); }
   }
 
   async function revokePublicFeed(calendar: Calendar) {
-    if (busy || !window.confirm(`Revoke the public feed for ${calendar.name}? Existing subscribers will stop receiving updates.`)) return;
+    if (busy || !window.confirm(`Revoke the public feed for ${calendar.name}? Existing subscriptions and website embeds will stop working.`)) return;
     setBusy(true); setError(""); setIssuedFeed(null);
     try { await api(`/api/modules/church-calendar/calendars/${calendar.id}/public-feed`, { method: "DELETE", headers: mutationHeaders, body: "{}" }); setNotice("Public calendar feed revoked."); await load(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not revoke the public feed."); }
@@ -792,6 +803,21 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
           <button type="button" className="church-calendar-feed-button" onClick={() => void copyFeed(issuedFeed.url)}>Copy link</button>
           <a href={issuedFeed.url} download="calendar.ics" referrerPolicy="no-referrer">Download .ics</a>
         </div>
+        {embedUrl && <details className="church-calendar-web-embed">
+          <summary>Embed on a website</summary>
+          <p>The agenda updates automatically while the public feed is active.</p>
+          <label>Show upcoming<select value={embedDays} onChange={(event) => setEmbedDays(Number(event.target.value))}>
+            <option value={30}>30 days</option><option value={60}>60 days</option><option value={90}>90 days</option><option value={120}>120 days</option>
+          </select></label>
+          <label>Limit appointments<select value={embedEntries} onChange={(event) => setEmbedEntries(Number(event.target.value))}>
+            <option value={10}>10</option><option value={20}>20</option><option value={30}>30</option><option value={50}>50</option>
+          </select></label>
+          <label>Website embed code<textarea rows={4} value={embedCode} readOnly onFocus={(event) => event.target.select()} /></label>
+          <div className="church-calendar-feed-actions">
+            <a href={embedUrl.toString()} target="_blank" rel="noreferrer">Preview public agenda</a>
+            <button type="button" className="church-calendar-feed-button" onClick={() => void copyFeed(embedCode, "Embed code")}>Copy embed code</button>
+          </div>
+        </details>}
       </section>}{!calendars.length && !loading && <p className="church-calendar-empty">Create your first personal calendar or a shared calendar.</p>}</aside>
       <section className="church-calendar-main"><div className="church-calendar-toolbar"><div className="church-calendar-date-nav"><button type="button" className="icon-button" aria-label="Previous" onClick={() => move(-1)}><ChevronLeft size={18} /></button><button type="button" className="icon-button" aria-label="Next" onClick={() => move(1)}><ChevronRight size={18} /></button><h2>{view === "year" ? anchor.getFullYear() : monthLabel(anchor, language)}</h2><button type="button" className="church-calendar-today" onClick={() => setAnchor(todayInZone(viewerZone))}>Today</button></div><div className="church-calendar-views" role="group" aria-label="Calendar view">{(["day", "week", "month", "year", "list"] as View[]).map((item) => <button type="button" key={item} className={view === item ? "active" : ""} aria-pressed={view === item} onClick={() => setView(item)}>{item[0].toUpperCase()+item.slice(1)}</button>)}</div><button type="button" className="button button-secondary" disabled={loading || loadedPrintScope !== printScope} onClick={printCalendar}><Printer size={15} /> Print calendar</button></div>
         {loading ? <div className="church-calendar-loading"><RotateCcw size={18} className="spinning" /> Loading appointments…</div> : view === "month" ? <div className="church-calendar-month"><div className="church-calendar-weekdays">{["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => <span key={day}>{day}</span>)}</div><div className="church-calendar-month-grid">{Array.from({ length: 42 }, (_, index) => { const day = new Date(monthGridStart); day.setDate(day.getDate()+index); return <div key={index} className={`church-calendar-day ${day.getMonth() !== anchor.getMonth() ? "outside" : ""}`}><button className="church-calendar-day-number" type="button" onClick={() => { setAnchor(day); setView("day"); }}>{day.getDate()}</button>{eventsForDay(day).slice(0,4).map(appointmentButton)}{eventsForDay(day).length > 4 && <small>+{eventsForDay(day).length-4} more</small>}</div>; })}</div></div> : view === "week" || view === "day" ? <div className={`church-calendar-columns church-calendar-columns-${view}`}>{Array.from({ length: view === "day" ? 1 : 7 }, (_, index) => { const day = new Date(anchor); if (view === "week") day.setDate(day.getDate()-((day.getDay()+6)%7)+index); return <section key={index} className="church-calendar-column"><header><strong>{dayLabel(day, language)}</strong><button type="button" aria-label={`New appointment ${dateInput(day)}`} onClick={() => openNew(day)}><Plus size={14} /></button></header>{eventsForDay(day).map(appointmentButton)}{!eventsForDay(day).length && <button type="button" className="church-calendar-add-slot" onClick={() => openNew(day)}>Add appointment</button>}</section>; })}</div> : view === "year" ? <div className="church-calendar-year">{Array.from({ length: 12 }, (_, month) => { const first = new Date(anchor.getFullYear(), month, 1); const count = visibleAppointments.filter((event) => Number(displayStart(event).slice(5,7)) === month + 1).length; return <button type="button" key={month} onClick={() => { setAnchor(first); setView("month"); }}><strong>{new Intl.DateTimeFormat(locale, { month: "long" }).format(first)}</strong><span>{count} appointments</span></button>; })}</div> : <div className="church-calendar-list-view">{visibleAppointments.map((item) => <Fragment key={`${item.appointmentId}:${item.originalOccurrenceStartAt ?? item.occurrenceStartAt}`}><button type="button" onClick={() => openEdit(item)}><span className="church-calendar-list-date">{dayLabel(dateFromLocal(displayStart(item)), language)}</span><span className="church-calendar-list-title"><strong>{item.title}</strong>{item.myMeetingResponse && <small>Meeting request · {requestLabels[item.myMeetingResponse]}</small>}<small>{item.calendarName}{item.place ? ` · ${item.place}` : ""}{item.responsiblePersonName ? ` · On behalf of ${item.responsiblePersonName}` : ""}</small></span><span>{timeLabel(item)}</span><ChevronRight size={16} /></button>{(item.signupGroupName || item.linkedEventId || item.resourceBookings?.some((booking) => booking.scope === "occurrence")) && <div className="church-calendar-list-links">{appointmentLinks(item)}</div>}</Fragment>)}</div>}
