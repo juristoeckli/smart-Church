@@ -4,7 +4,8 @@ import type { ModuleRealtime } from "../../module-registry";
 type Request = <T>(path: string, options?: RequestInit) => Promise<T>;
 type Step = { id: string; name: string };
 type Mapping = { groupId?: string; groupType?: string; role: string; stepId: string | null };
-type Settings = { revision: number; steps: Step[]; mappings: Mapping[] };
+type Visibility = "people_managers" | "private_people";
+type Settings = { revision: number; visibility: Visibility; steps: Step[]; mappings: Mapping[] };
 type Group = { id: string; name: string; type: string };
 const path = "/api/people-records/growth-trajectory";
 const suggestedSteps = ["Welcome", "Connect", "Grow", "Lead (Group)", "Lead (Division)", "Leadership (Board)"];
@@ -38,12 +39,14 @@ export function GrowthTrajectorySettings({ request }: { request: Request }) {
 
 function GrowthTrajectoryEditor({ settings, save }: { settings: Settings & { groups: Group[] }; save: (settings: Settings) => Promise<void> }) {
   const [steps, setSteps] = useState(settings.steps);
+  const [visibility, setVisibility] = useState(settings.visibility);
   const [mappings, setMappings] = useState(settings.mappings);
   const [nextName, setNextName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const groupTypes = [...new Set(settings.groups.map(group => group.type).filter(Boolean))].sort((a,b) => a.localeCompare(b));
-  const changed = JSON.stringify([steps,mappings]) !== JSON.stringify([settings.steps,settings.mappings]);
+  const changed = visibility !== settings.visibility
+    || JSON.stringify([steps,mappings]) !== JSON.stringify([settings.steps,settings.mappings]);
   const title = (mapping: Mapping) => mapping.groupId ? "Group" : "Group type";
 
   function move(index: number, direction: number) {
@@ -62,7 +65,7 @@ function GrowthTrajectoryEditor({ settings, save }: { settings: Settings & { gro
     if (!changed || busy) return;
     setBusy(true);
     setError("");
-    try { await save({ revision: settings.revision, steps, mappings }); }
+    try { await save({ revision: settings.revision, steps, mappings, visibility }); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Could not save the growth trajectory."); }
     finally { setBusy(false); }
   }
@@ -122,18 +125,25 @@ function GrowthTrajectoryEditor({ settings, save }: { settings: Settings & { gro
         setMappings([...mappings,groupTypes.length ? { groupType:groupTypes[0],role,stepId } : { groupId:settings.groups[0].id,role,stepId }]);
       }}>Add role mapping</button>
     </fieldset>
+    <fieldset disabled={busy}>
+      <legend>Privacy</legend>
+      <label>Who can see a person's growth trajectory<select value={visibility} onChange={(event) => setVisibility(event.target.value as Visibility)}>
+        <option value="people_managers">People managers</option>
+        <option value="private_people">Everyone with private People access</option>
+      </select></label>
+    </fieldset>
     <button type="submit" disabled={!changed || busy}>Save growth trajectory</button>
     {error && <p role="alert">{error}</p>}
   </form>;
 }
 
 type Progress = { current: Step | null; achieved: Step[] };
-export function PersonGrowthTrajectory({ contactId, request, realtime }: { contactId: string; request: Request; realtime?: ModuleRealtime }) {
+export function PersonGrowthTrajectory({ contactId, request, realtime, manager }: { contactId: string; request: Request; realtime?: ModuleRealtime; manager: boolean }) {
   const [progress,setProgress] = useState<Progress | null>(null);
   const [error,setError] = useState("");
   const [revision,setRevision] = useState(0);
   useEffect(() => {
-    const refresh = () => setRevision(current => current + 1);
+    const refresh = () => { setProgress(null); setRevision(current => current + 1); };
     const off = ["people-records:changed","core:groups:changed","realtime:connected"].map(topic => realtime?.subscribe(topic,refresh));
     return () => off.forEach(unsubscribe => unsubscribe?.());
   }, [realtime]);
@@ -141,11 +151,12 @@ export function PersonGrowthTrajectory({ contactId, request, realtime }: { conta
     const controller = new AbortController();
     setProgress(null);
     setError("");
-    void request<Progress>(`/api/people-records/${contactId}/growth-trajectory`,{ signal:controller.signal })
-      .then(data => { if (!controller.signal.aborted) setProgress(data); })
+    void request<Progress | { visible: false }>(`/api/people-records/${contactId}/growth-trajectory`,{ signal:controller.signal })
+      .then(data => { if (!controller.signal.aborted) setProgress("visible" in data ? null : data); })
       .catch(reason => { if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not load the growth trajectory."); });
     return () => controller.abort();
   }, [contactId,request,revision]);
+  if (!manager && !progress) return null;
   return <details>
     <summary>Growth trajectory</summary>
     <button type="button" onClick={() => setRevision(revision + 1)}>Refresh trajectory</button>

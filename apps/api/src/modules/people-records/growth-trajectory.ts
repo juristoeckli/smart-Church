@@ -1,14 +1,14 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
-import { canManagePeopleFields } from "./field-privacy.js";
+import { canManagePeopleFields, customFieldVisibilities, type CustomFieldVisibility } from "./field-privacy.js";
 
 type DepartmentResolver = (request: FastifyRequest, reply: FastifyReply, write?: boolean) => Promise<string | null>;
 type Step = { id: string; name: string };
 type Mapping = { groupId?: string; groupType?: string; role: string; stepId: string | null };
-type Settings = { revision: number; steps: Step[]; mappings: Mapping[] };
+type Settings = { revision: number; visibility: CustomFieldVisibility; steps: Step[]; mappings: Mapping[] };
 const settingsPath = "/api/people-records/growth-trajectory";
 const uuid = { type: "string", format: "uuid" } as const;
-const emptySettings: Settings = { revision: 0, steps: [], mappings: [] };
+const emptySettings: Settings = { revision: 0, visibility: "people_managers", steps: [], mappings: [] };
 const normalized = (value: string) => value.trim().toLowerCase();
 
 function canConfigure(request: FastifyRequest) {
@@ -16,7 +16,9 @@ function canConfigure(request: FastifyRequest) {
     && (request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage"));
 }
 
-function normalizeSettings(settings: Settings) {
+type SettingsUpdate = Omit<Settings, "visibility"> & { visibility?: CustomFieldVisibility };
+
+function normalizeSettings(settings: SettingsUpdate) {
   const steps = settings.steps.map(step => ({ id: step.id.toLowerCase(), name: step.name.trim() }));
   const ids = new Set(steps.map(step => step.id));
   if (ids.size !== steps.length || new Set(steps.map(step => normalized(step.name))).size !== steps.length
@@ -35,7 +37,7 @@ function normalizeSettings(settings: Settings) {
     seen.add(key);
     mappings.push({ ...(groupId ? { groupId } : { groupType }), role, stepId });
   }
-  return { revision: settings.revision, steps, mappings };
+  return { revision: settings.revision, steps, mappings, visibility: settings.visibility };
 }
 
 export function registerGrowthTrajectory(routes: FastifyInstance, context: ModuleServerContext, department: DepartmentResolver) {
@@ -47,6 +49,7 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
     const result = await pool!.query<Settings & { groups: { id: string; name: string; type: string }[] }>(
       `SELECT COALESCE(config.revision,0) AS revision,COALESCE(config.steps,'[]') AS steps,
               COALESCE(config.mappings,'[]') AS mappings,
+              COALESCE(config.visibility,'people_managers') AS visibility,
               COALESCE((SELECT jsonb_agg(jsonb_build_object('id',g.id,'name',g.name,'type',
                 lower(btrim(COALESCE(to_jsonb(g)->>'group_type','')))) ORDER BY lower(g.name),g.id)
                  FROM church_groups g WHERE g.department_id=location.id),'[]') AS groups
@@ -56,9 +59,10 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
     return reply.header("Cache-Control", "private, no-store").send(result.rows[0] ?? { ...emptySettings, groups: [] });
   });
 
-  routes.put<{ Body: Settings }>(settingsPath, { schema: { body: {
+  routes.put<{ Body: SettingsUpdate }>(settingsPath, { schema: { body: {
     type: "object", additionalProperties: false, required: ["revision", "steps", "mappings"], properties: {
       revision: { type: "integer", minimum: 0, maximum: 2147483646 },
+      visibility: { type: "string", enum: customFieldVisibilities },
       steps: { type: "array", maxItems: 30, items: {
         type: "object", additionalProperties: false, required: ["id", "name"],
         properties: { id: uuid, name: { type: "string", minLength: 1, maxLength: 100 } },
@@ -94,13 +98,13 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "Remove unavailable group or group-type mappings before saving." });
       }
-      const saved = await client.query<{ revision: number }>(input.revision === 0
-        ? `INSERT INTO people_growth_config(department_id,revision,steps,mappings)
-           SELECT $1,1,$2::jsonb,$3::jsonb WHERE $4::int=0
-           ON CONFLICT (department_id) DO NOTHING RETURNING revision`
-        : `UPDATE people_growth_config SET steps=$2::jsonb,mappings=$3::jsonb,revision=revision+1
-           WHERE department_id=$1 AND revision=$4 RETURNING revision`,
-        [id, JSON.stringify(input.steps), JSON.stringify(input.mappings), input.revision],
+      const saved = await client.query<{ revision: number; visibility: CustomFieldVisibility }>(input.revision === 0
+        ? `INSERT INTO people_growth_config(department_id,revision,steps,mappings,visibility)
+           SELECT $1,1,$2::jsonb,$3::jsonb,COALESCE($5::text,'people_managers') WHERE $4::int=0
+           ON CONFLICT (department_id) DO NOTHING RETURNING revision,visibility`
+        : `UPDATE people_growth_config SET steps=$2::jsonb,mappings=$3::jsonb,revision=revision+1,visibility=COALESCE($5::text,visibility)
+           WHERE department_id=$1 AND revision=$4 RETURNING revision,visibility`,
+        [id, JSON.stringify(input.steps), JSON.stringify(input.mappings), input.revision, input.visibility ?? null],
       );
       const revision = saved.rows[0]?.revision;
       if (!revision) {
@@ -109,7 +113,7 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
       }
       await client.query("COMMIT");
       realtime.publish("people-records:changed", id, {});
-      return { ...input, revision };
+      return { ...input, revision, visibility: saved.rows[0].visibility };
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -123,7 +127,8 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
   }, async (request, reply) => {
     const id = await department(request, reply);
     if (!id) return reply;
-    if (!canManagePeopleFields(request)) return reply.code(403).send({ error: "People management access is required." });
+    reply.header("Cache-Control", "private, no-store");
+    const manager = canManagePeopleFields(request);
     const { rows } = await pool!.query<{ steps: Step[]; memberships: { role: string; groupId: string; groupType: string }[]; mappings: Mapping[] }>(
       `SELECT COALESCE(config.steps,'[]') AS steps,COALESCE(config.mappings,'[]') AS mappings,
               COALESCE((SELECT jsonb_agg(jsonb_build_object('role',lower(btrim(m.role)),'groupId',g.id,
@@ -131,9 +136,12 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
                  FROM group_members m JOIN church_groups g ON g.id=m.group_id AND g.department_id=c.department_id
                 WHERE m.contact_id=c.id AND m.status='active' AND COALESCE(to_jsonb(g)->>'status','active')='active'),'[]') AS memberships
          FROM contacts c LEFT JOIN people_growth_config config ON config.department_id=c.department_id
-        WHERE c.department_id=$1 AND c.id=$2 AND c.archived_at IS NULL`, [id, request.params.contactId],
+        WHERE c.department_id=$1 AND c.id=$2 AND c.archived_at IS NULL
+          AND ($3::boolean OR config.visibility='private_people')`, [id, request.params.contactId, manager],
     );
-    if (!rows[0]) return reply.code(404).send({ error: "Active person not found at this location." });
+    if (!rows[0]) return manager
+      ? reply.code(404).send({ error: "Active person not found at this location." })
+      : reply.send({ visible: false });
     const { steps, memberships, mappings } = rows[0];
     const byScope = new Map(mappings.map(mapping => [JSON.stringify([mapping.groupId ?? null, mapping.groupType ?? null, mapping.role]), mapping]));
     const achieved = new Set<string>();
@@ -143,6 +151,6 @@ export function registerGrowthTrajectory(routes: FastifyInstance, context: Modul
       if (mapping?.stepId) achieved.add(mapping.stepId);
     }
     const achievedSteps = steps.filter(step => achieved.has(step.id));
-    return reply.header("Cache-Control", "private, no-store").send({ current: achievedSteps.at(-1) ?? null, achieved: achievedSteps });
+    return reply.send({ current: achievedSteps.at(-1) ?? null, achieved: achievedSteps });
   });
 }
