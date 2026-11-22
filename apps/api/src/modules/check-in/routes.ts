@@ -254,7 +254,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       client.release();
     }
   });
-  app.put<{ Params: { eventId: string; contactId: string }; Body: { present: boolean; firstTimeVisitor?: boolean; groupIds: string[]; includeChildGroups?: boolean } }>("/api/modules/check-in/events/:eventId/attendees/:contactId", { schema: { body: { type: "object", additionalProperties: false, required: ["present", "groupIds"], properties: { present: { type: "boolean" }, firstTimeVisitor: { type: "boolean" }, includeChildGroups: { type: "boolean" }, groupIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } } } } } }, async (request, reply) => {
+  app.put<{ Params: { eventId: string; contactId: string }; Body: { present: boolean; firstTimeVisitor?: boolean; groupIds: string[];
+    includeChildGroups?: boolean; undoRevision?: string } }>("/api/modules/check-in/events/:eventId/attendees/:contactId", { schema: { body: { type: "object", additionalProperties: false, required: ["present", "groupIds"], properties: { present: { type: "boolean" }, firstTimeVisitor: { type: "boolean" }, includeChildGroups: { type: "boolean" },
+    undoRevision: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$" }, groupIds: { type: "array", minItems: 1, maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } } } } } }, async (request, reply) => {
     const departmentId = await scope(request, reply, true); if (!departmentId) return reply;
     if (!validateMutation(request, reply)) return reply;
     const hierarchyAvailable = Boolean(request.body.includeChildGroups && (await pool!.query<{ present: boolean }>("SELECT to_regclass('public.group_hierarchy_history') IS NOT NULL AS present")).rows[0]?.present);
@@ -271,7 +273,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         SELECT 1 FROM group_members gm JOIN church_groups g ON g.id=gm.group_id AND g.department_id=e.department_id AND g.status='active'
         WHERE gm.contact_id=c.id AND gm.status='active' AND gm.group_id=ANY($4::uuid[])))`, [request.params.eventId, departmentId, request.params.contactId, request.body.groupIds]);
     if (!valid.rowCount) return reply.code(404).send({ error: "Meeting or attendee not found in this location." });
+    if (request.body.present && request.body.undoRevision) return reply.code(400).send({ error: "An undo revision can only reset attendance." });
+    const revisionSql = `to_char(updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
     const client = await pool!.connect();
+    let undoRevision: string | undefined;
     try {
       await client.query("BEGIN");
       if (!await lockCheckInEvent(client, departmentId, request.params.eventId)) {
@@ -293,9 +298,24 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           const previousAttendance = await client.query("SELECT 1 FROM event_attendance_checkins WHERE contact_id=$1 AND event_id<>$2 LIMIT 1", [request.params.contactId, request.params.eventId]);
           firstTimeVisitor = previousAttendance.rowCount === 0;
         }
-        await client.query(`INSERT INTO event_attendance_checkins(event_id,contact_id,first_time_visitor) VALUES($1,$2,$3) ON CONFLICT(event_id,contact_id) DO UPDATE SET first_time_visitor=EXCLUDED.first_time_visitor,updated_at=now()`, [request.params.eventId, request.params.contactId, firstTimeVisitor]);
+        const keys = [request.params.eventId, request.params.contactId, firstTimeVisitor];
+        const arrival = await client.query<{ revision: string }>(
+          "INSERT INTO event_attendance_checkins(event_id,contact_id,first_time_visitor) VALUES($1,$2,$3)" +
+          " ON CONFLICT(event_id,contact_id) DO NOTHING RETURNING " + revisionSql + " AS revision", keys);
+        undoRevision = arrival.rows[0]?.revision;
+        if (!undoRevision) {
+          await client.query("UPDATE event_attendance_checkins SET first_time_visitor=$3,updated_at=now() WHERE event_id=$1 AND contact_id=$2", keys);
+        }
       } else {
-        await client.query("DELETE FROM event_attendance_checkins WHERE event_id=$1 AND contact_id=$2", [request.params.eventId, request.params.contactId]);
+        const expected = request.body.undoRevision;
+        const removed = await client.query(
+          "DELETE FROM event_attendance_checkins WHERE event_id=$1 AND contact_id=$2" + (expected ? " AND " + revisionSql + "=$3" : ""),
+          expected ? [request.params.eventId, request.params.contactId, expected] : [request.params.eventId, request.params.contactId],
+        );
+        if (expected && !removed.rowCount) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "This attendance was changed after check-in. Refresh the roster before editing it." });
+        }
       }
       await client.query("COMMIT");
     } catch (error) {
@@ -305,6 +325,6 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       client.release();
     }
     realtime.publish("module:check-in:changed", departmentId, { eventId: request.params.eventId, contactId: request.params.contactId, present: request.body.present });
-    return { present: request.body.present };
+    return { present: request.body.present, ...(undoRevision ? { undoRevision } : {}) };
   });
 }

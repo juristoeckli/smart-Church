@@ -40,6 +40,8 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
   const [stationScope, setStationScope] = useState<string | null>(null);
   const rosterScope = JSON.stringify([departmentId, eventId, groupIds, includeChildGroups]);
   const rosterReady = Boolean(eventId && groupIds.length && loadedScope === rosterScope);
+  const [lastArrival, setLastArrival] = useState<{ contactId: string; scope: string; revision: string }>();
+  useEffect(() => setLastArrival(undefined), [rosterScope]);
   const currentPrintScope = useRef({ key: rosterScope, canManage, stationScope });
   currentPrintScope.current = { key: rosterScope, canManage, stationScope };
   const [layout, setLayout] = useState<RosterLayout>("full");
@@ -96,7 +98,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       return a.lastName.localeCompare(b.lastName) || a.firstName.localeCompare(b.firstName);
     });
   }, [attendees, attendanceFilter, query, sort, rosterReady, normalizedCode, departmentId, eventId]);
-  const mark = async (person: Attendee, present: boolean) => {
+  const mark = async (person: Attendee, present: boolean, undoRevision?: string) => {
     if (!rosterReady || !canManage) return null;
     setBusy(true); setError("");
     let saved = false;
@@ -104,13 +106,22 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       const response = await fetch(`/api/modules/check-in/events/${eventId}/attendees/${person.id}`, {
         method: "PUT", credentials: "include",
         headers: { "content-type": "application/json", "x-csrf-token": csrfToken, "x-department-id": departmentId },
-        body: JSON.stringify({ present, firstTimeVisitor: person.firstTimeVisitor, groupIds, includeChildGroups }),
+        body: JSON.stringify({ present, firstTimeVisitor: person.firstTimeVisitor, groupIds, includeChildGroups, undoRevision }),
       });
-      const data = await response.json();
+      const data = await response.json() as { error?: string; undoRevision?: string };
       if (!response.ok) throw new Error(data.error ?? "Could not update attendance.");
       saved = true;
+      if (currentPrintScope.current.key === rosterScope) {
+        if (present && data.undoRevision) setLastArrival({ contactId: person.id, scope: rosterScope, revision: data.undoRevision });
+        else if (!present) setLastArrival((current) => current?.contactId === person.id ? undefined : current);
+      }
+      if (currentPrintScope.current.key !== rosterScope) return { person: undefined };
       return { person: (await reloadRoster())?.find((record) => record.id === person.id) };
     } catch (reason) {
+      if (undoRevision && !saved) {
+        setLastArrival((current) => current?.revision === undoRevision ? undefined : current);
+        if (currentPrintScope.current.key === rosterScope) await reloadRoster().catch(() => {});
+      }
       setError(saved ? "Attendance was saved. Refresh to update the roster." : reason instanceof Error ? reason.message : "Update failed.");
       return saved ? { person: undefined } : null;
     } finally { setBusy(false); }
@@ -146,8 +157,11 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       }
       if (!contactId) throw new Error("Could not find or add this visitor.");
       const checkInResponse = await fetch(`/api/modules/check-in/events/${eventId}/attendees/${contactId}`, { method: "PUT", credentials: "include", headers: { ...headers, "content-type": "application/json", "x-csrf-token": csrfToken }, body: JSON.stringify({ present: true, firstTimeVisitor: true, groupIds, includeChildGroups }) });
-      const checkedIn = await checkInResponse.json() as { error?: string };
+      const checkedIn = await checkInResponse.json() as { error?: string; undoRevision?: string };
       if (!checkInResponse.ok) throw new Error(checkedIn.error ?? "The visitor was saved but could not be checked in. Try again from this roster.");
+      if (checkedIn.undoRevision && currentPrintScope.current.key === rosterScope) {
+        setLastArrival({ contactId, scope: rosterScope, revision: checkedIn.undoRevision });
+      }
       setVisitorDialogOpen(false); form.reset(); await reloadRoster();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not add this visitor."); }
     finally { setVisitorBusy(false); }
@@ -308,6 +322,13 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
     return <GroupMeetingAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken} onBack={() => setGroupAttendanceOpen(false)} />;
   }
 
+  const recentArrival = canManage && rosterReady && !complete && lastArrival?.scope === rosterScope
+    ? attendees.find((person) => person.id === lastArrival.contactId && person.checkedInAt && !person.pickupRelease) : undefined;
+  const undoLastArrival = lastArrival && recentArrival ? <button type="button" className="checkin-reset"
+    disabled={busy || visitorBusy} onClick={() => void mark(recentArrival, false, lastArrival.revision)}>
+    <RotateCcw size={15} /> Undo last check-in · {recentArrival.firstName} {recentArrival.lastName}
+  </button> : null;
+
   if (canManage && rosterReady && stationScope === rosterScope) {
     return <main className="checkin-module">
       <header className="checkin-heading">
@@ -317,6 +338,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
       {error && <div className="checkin-error" role="alert">{error}</div>}
       {complete && <p>Meeting check-in completed.</p>}
       {printOptionsPanel}
+      {undoLastArrival}
       <label className="checkin-search"><Search size={17}/> Find attendee
         <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} />
       </label>
@@ -374,6 +396,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
     </section>}
     <section className="checkin-toolbar">
       <strong><Users size={17}/> {rosterReady ? `${presentCount} of ${attendees.length} present` : "Attendees"}</strong>
+      {undoLastArrival}
       <label className="checkin-search"><Search size={17}/><input aria-label="Search people or groups" placeholder="Search people or groups" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
       <label className="checkin-sort">Sort <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}>
         <option value="name">Name</option><option value="group">Group</option><option value="present">Present first</option>
