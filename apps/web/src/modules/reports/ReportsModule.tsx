@@ -6,12 +6,12 @@ import { ReportAxisFields } from "./ReportAxisFields";
 import type { ReportChartType } from "./report-chart-data";
 import "./reports.css";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-growth" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-recorded-facts-monthly" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-growth" | "group-type-development" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-recorded-facts-monthly" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportDefinition = { key: ReportKey; title: string; description: string; permission: string };
 type ReportColumn = { key: string; label: string };
 type ReportResult = { reportKey: ReportKey; title: string; generatedAt: string; columns: ReportColumn[]; rows: Array<Record<string, string | number | boolean | null>> };
 type GroupOption = { id: string; name: string };
-type Filters = { from?: string; to?: string; groupId?: string; status?: string; followUpStatus?: string; accountingYear?: string; period?: string };
+type Filters = { from?: string; to?: string; groupId?: string; groupType?: string; status?: string; followUpStatus?: string; accountingYear?: string; period?: string };
 type ScheduleStatus = "ready" | "unavailable" | "failed" | "too_large";
 const scheduleStatusLabels: Record<ScheduleStatus, string> = { ready: "Ready", unavailable: "Report unavailable", failed: "Failed", too_large: "Result too large" };
 type ScheduleFields = { notifyWhenReady?: boolean | null; scheduleDays?: 1 | 7 | null; nextRunAt?: string | null; lastRunAt?: string | null; lastRunStatus?: ScheduleStatus | null; runHistory?: { ranAt: string; status: ScheduleStatus }[] | null };
@@ -68,6 +68,7 @@ function downloadPrintableReport(result: ReportResult | DesignerResult) {
 export function ReportsModule({ department, departmentId, csrfToken, canManageSite }: ModuleContext) {
   const [definitions, setDefinitions] = useState<ReportDefinition[]>([]);
   const [groups, setGroups] = useState<GroupOption[]>([]);
+  const [historicalGroupTypes, setHistoricalGroupTypes] = useState<string[]>([]);
   const [saved, setSaved] = useState<SavedReport[]>([]);
   const [reportKey, setReportKey] = useState<ReportKey | "">("");
   const [filters, setFilters] = useState<Filters>({});
@@ -164,6 +165,15 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
   }, [request]);
 
   useEffect(() => { void loadSupportingData(); }, [loadSupportingData]);
+  useEffect(() => {
+    setHistoricalGroupTypes([]);
+    if (reportKey !== "group-type-development") return;
+    const controller = new AbortController();
+    void request<string[]>("/api/modules/reports/historical-group-types", { signal:controller.signal })
+      .then(types => { if (!controller.signal.aborted) setHistoricalGroupTypes(types); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [reportKey,request]);
 
   async function runReport() {
     if (!reportKey) return;
@@ -384,11 +394,20 @@ export function ReportsModule({ department, departmentId, csrfToken, canManageSi
         <h2>Choose a report</h2>
         <label>Report<select value={reportKey} onChange={(event) => { setReportKey(event.target.value as ReportKey); setResult(null); }}><option value="">Select a report</option>{definitions.map((item) => <option key={item.key} value={item.key}>{item.title}</option>)}</select></label>
         {selected && <p className="reports-description">{selected.description}</p>}
-        {["people-directory", "people-consent-history", "people-status-changes", "people-first-contact-trend", "group-growth", "group-meeting-attendance", "group-attendance-by-role", "group-meeting-feedback", "group-lifecycle", "event-attendance", "event-recorded-facts-monthly", "event-staffing", "event-absence-conflicts", "event-service-plan", "event-registration-summary", "event-registration-details", "check-in-trend", "visitor-follow-up", "worship-song-usage", "resource-bookings", "resource-utilization", "finance-account-summary", "finance-donor-giving"].includes(reportKey) && <div className="reports-date-filters"><label>From<input required={reportKey === "event-absence-conflicts" || reportKey === "group-growth"} type="date" value={filters.from ?? ""} onChange={(event) => setFilter("from", event.target.value)} /></label><label>To<input required={reportKey === "event-absence-conflicts" || reportKey === "group-growth"} type="date" value={filters.to ?? ""} onChange={(event) => setFilter("to", event.target.value)} /></label></div>}
+        {["people-directory", "people-consent-history", "people-status-changes", "people-first-contact-trend", "group-growth", "group-type-development", "group-meeting-attendance", "group-attendance-by-role", "group-meeting-feedback", "group-lifecycle", "event-attendance", "event-recorded-facts-monthly", "event-staffing", "event-absence-conflicts", "event-service-plan", "event-registration-summary", "event-registration-details", "check-in-trend", "visitor-follow-up", "worship-song-usage", "resource-bookings", "resource-utilization", "finance-account-summary", "finance-donor-giving"].includes(reportKey) && <div className="reports-date-filters"><label>From<input required={reportKey === "event-absence-conflicts" || reportKey === "group-growth"} type="date" value={filters.from ?? ""} onChange={(event) => setFilter("from", event.target.value)} /></label><label>To<input required={reportKey === "event-absence-conflicts" || reportKey === "group-growth"} type="date" value={filters.to ?? ""} onChange={(event) => setFilter("to", event.target.value)} /></label></div>}
         {reportKey === "people-first-contact-trend" && <small>Choose a start and end date, up to 731 calendar days.</small>}
         {reportKey === "group-attendance-by-role" && <small>Choose a start and end date, up to 731 calendar days. Roles appear as Unknown when the records cannot establish a stable role for the meeting date.</small>}
         {reportKey === "event-recorded-facts-monthly" && <small>Choose a start and end date, up to 731 calendar days. Collection totals are shown separately for each currency.</small>}
-        {reportKey === "group-growth" && <>
+        {reportKey === "group-type-development" && <>
+          <label>Historical group type<select value={filters.groupType ?? ""} onChange={(event) => setFilter("groupType", event.target.value)}>
+            <option value="">All group types</option><option value="unknown">Unknown</option><option value="untyped">No type assigned</option>
+            {filters.groupType?.startsWith("name:") && !historicalGroupTypes.includes(filters.groupType.slice(5))
+              && <option value={filters.groupType}>{filters.groupType.slice(5)}</option>}
+            {historicalGroupTypes.map(type => <option key={type} value={`name:${type}`}>{type}</option>)}
+          </select></label>
+          <small>Choose a start and end date, up to 731 calendar days. Unknown means the group type could not be established at the time of the change.</small>
+        </>}
+        {(reportKey === "group-growth" || reportKey === "group-type-development") && <>
           <label>Group by<select value={filters.period ?? "month"} onChange={(event) => setFilter("period", event.target.value)}>
             <option value="month">Month</option><option value="week">Week starting Monday</option>
           </select></label>

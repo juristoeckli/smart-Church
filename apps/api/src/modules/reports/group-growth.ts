@@ -8,17 +8,19 @@ export function validGroupGrowthRange(from: string | undefined, to: string | und
   return elapsed >= 0 && elapsed < 731;
 }
 
-export const groupGrowthSql = `
-  WITH transitions AS (
-    SELECT history.group_id,history.entity_id,
-      date_trunc($5::text,history.created_at AT TIME ZONE $6::text)::date AS period_start,
-      CASE
+export const activeMembershipDelta = `CASE
         WHEN history.action='created' AND history.before_data IS NULL AND history.after_data->>'status'='active' THEN 1
         WHEN history.action='updated' AND history.before_data->>'status' IN ('paused','waitlist') AND history.after_data->>'status'='active' THEN 1
         WHEN history.action='updated' AND history.before_data->>'status'='active' AND history.after_data->>'status' IN ('paused','waitlist') THEN -1
         WHEN history.action='deleted' AND history.before_data->>'status'='active' AND history.after_data IS NULL THEN -1
         ELSE 0
-      END AS delta
+      END`;
+
+export const groupGrowthSql = `
+  WITH transitions AS (
+    SELECT history.group_id,history.entity_id,
+      date_trunc($5::text,history.created_at AT TIME ZONE $6::text)::date AS period_start,
+      ${activeMembershipDelta} AS delta
     FROM group_hierarchy_history history
     JOIN church_groups current_group ON current_group.department_id=history.department_id AND current_group.id=history.group_id
     WHERE history.department_id=$1 AND history.entity_kind='membership' AND ($2::uuid IS NULL OR history.group_id=$2)

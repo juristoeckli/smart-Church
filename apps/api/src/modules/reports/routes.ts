@@ -1,3 +1,4 @@
+import { groupTypeDevelopmentSql, historicalGroupTypeOptionsSql } from "./group-type-development.js";
 import { monthlyRecordedFactsSql } from "./monthly-recorded-facts.js";
 import { groupAttendanceByRoleSql } from "./group-attendance-by-role.js";
 import { firstContactTrendSql } from "./first-contact-trend.js";
@@ -11,8 +12,8 @@ import { registerReportDesigner } from "./designer.js";
 import { groupGrowthSql, validGroupGrowthRange } from "./group-growth.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-recorded-facts-monthly" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
-type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-type-development" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-recorded-facts-monthly" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportFilters = { from?: string; to?: string; groupId?: string; groupType?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
 
@@ -28,6 +29,7 @@ const catalog = [
   { key: "group-leaders" as const, title: "Group leaders", description: "Current active leaders, co-leaders, owners, and managers for active groups.", permission: "groups" as const },
   { key: "group-hierarchy" as const, title: "Group hierarchy", description: "Active groups with parent and child group names, lifecycle status, and date range.", permission: "groups" as const },
   { key: "group-growth" as const, title: "Group membership growth", description: "Net active membership gains and losses recorded by week or month.", permission: "groups" as const },
+  { key: "group-type-development" as const, title: "Group development by type", description: "Net active membership gains and losses by historically recorded group type, grouped by month or week.", permission: "groups" as const },
   { key: "group-meeting-attendance" as const, title: "Group meeting attendance", description: "Present, absent and excused totals by group meeting.", permission: "groups" as const },
   { key: "group-attendance-by-role" as const, title: "Monthly group attendance by role", description: "Attendance records by month and historically recorded role. Ambiguous or uncovered roles appear under Unknown.", permission: "groups" as const },
   { key: "group-meeting-feedback" as const, title: "Group meeting feedback", description: "Leader and attendee answers by group meeting; respondent identities are omitted.", permission: "groups" as const },
@@ -75,7 +77,7 @@ function validDate(value: unknown) {
 function normalizeFilters(input: unknown): ReportFilters | string {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const value = input as Record<string, unknown>;
-  for (const key of Object.keys(value)) if (!["from", "to", "groupId", "status", "followUpStatus", "accountingYear", "period"].includes(key)) return "This report includes an unsupported filter.";
+  for (const key of Object.keys(value)) if (!["from", "to", "groupId", "groupType", "status", "followUpStatus", "accountingYear", "period"].includes(key)) return "This report includes an unsupported filter.";
   const filters: ReportFilters = {};
   if (value.from !== undefined) { if (!validDate(value.from)) return "Choose a valid start date."; filters.from = String(value.from); }
   if (value.to !== undefined) { if (!validDate(value.to)) return "Choose a valid end date."; filters.to = String(value.to); }
@@ -83,6 +85,13 @@ function normalizeFilters(input: unknown): ReportFilters | string {
   if (value.groupId !== undefined && value.groupId !== "") {
     if (typeof value.groupId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.groupId)) return "Choose a valid group.";
     filters.groupId = value.groupId;
+  }
+  if (value.groupType !== undefined && value.groupType !== "") {
+    if (typeof value.groupType !== "string" || value.groupType.length>85 || /[\u0000-\u001f\u007f]/.test(value.groupType)
+      || (!["unknown","untyped"].includes(value.groupType) && (!value.groupType.startsWith("name:") || !value.groupType.slice(5).trim()))) {
+      return "Choose a valid group type.";
+    }
+    filters.groupType = value.groupType.startsWith("name:") ? "name:" + value.groupType.slice(5).trim() : value.groupType;
   }
   if (value.status !== undefined) { if (value.status !== "member" && value.status !== "visitor") return "Choose a valid people status."; filters.status = value.status; }
   if (value.followUpStatus !== undefined) { if (!["needed", "done", "not_needed"].includes(String(value.followUpStatus))) return "Choose a valid follow-up status."; filters.followUpStatus = value.followUpStatus as ReportFilters["followUpStatus"]; }
@@ -158,7 +167,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "group-meeting-attendance" || state.groupAttendance)
       && (item.key !== "group-attendance-by-role" || (state.groupAttendance && state.groupLifecycle))
       && (item.key !== "group-meeting-feedback" || state.groupFeedback)
-      && (!["group-lifecycle", "group-growth"].includes(item.key) || state.groupLifecycle)
+      && (!["group-lifecycle", "group-growth", "group-type-development"].includes(item.key) || state.groupLifecycle)
       && (item.key !== "group-hierarchy" || state.groupHierarchy)
       && (item.key !== "event-service-plan" || state.eventServicePlan)
       && (item.key !== "event-recorded-facts-monthly" || state.monthlyFacts)
@@ -282,6 +291,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         { key: "gains", label: "Active gains" }, { key: "losses", label: "Active losses" }, { key: "net", label: "Net change" },
       ];
       const result = await db.query(groupGrowthSql, [departmentId, filters.groupId ?? null, filters.from, filters.to, filters.period ?? "month", timeZone]);
+      rows = result.rows;
+    } else if (reportKey === "group-type-development") {
+      if (!validGroupGrowthRange(filters.from, filters.to)) throw new Error("Choose a valid date range of up to 731 calendar days.");
+      const location = await db.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+      const timeZone = canonicalTimeZone(location.rows[0]?.time_zone) ?? "UTC";
+      columns = [
+        { key: "periodStart", label: "Period starts" }, { key: "groupType", label: "Group type at time of change" },
+        { key: "typeStatus", label: "Type evidence" }, { key: "gains", label: "Active gains" },
+        { key: "losses", label: "Active losses" }, { key: "net", label: "Net change" },
+      ];
+      const result = await db.query(groupTypeDevelopmentSql,[departmentId,filters.from,filters.to,filters.period ?? "month",timeZone,filters.groupType ?? null]);
+      if (result.rows.length > 5000) throw new Error("Choose a narrower date range or one group type to report at most 5,000 rows.");
       rows = result.rows;
     } else if (reportKey === "group-meeting-attendance") {
       columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "present", label: "Present" }, { key: "absent", label: "Absent" }, { key: "excused", label: "Excused" }];
@@ -573,8 +594,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!hasPermission(request, "groups")) return denied(reply);
     return (await pool!.query("SELECT id,name FROM church_groups WHERE department_id=$1 ORDER BY name LIMIT 2000", [departmentId])).rows;
   });
+  app.get("/api/modules/reports/historical-group-types", async (request, reply) => {
+    const departmentId = await department(request, reply);
+    if (!departmentId) return reply;
+    if (!(await installedReports(departmentId,request)).some(item => item.key==="group-type-development")) return denied(reply);
+    const result = await pool!.query<{ label: string }>(historicalGroupTypeOptionsSql,[departmentId]);
+    return reply.header("Cache-Control","private, no-store").send(result.rows.map(row => row.label));
+  });
   app.get<{ Querystring: ExportFormatQuery & ReportFilters & { reportKey?: ReportKey } }>("/api/modules/reports/run", {
-    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 }, period: { type: "string", enum: ["month", "week"] } } } },
+    schema: { querystring: { type: "object", additionalProperties: false, required: ["reportKey"], properties: { ...exportFormatQuery.properties, reportKey: { type: "string", enum: catalog.map((item) => item.key) }, from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, groupId: uuid, groupType: { type: "string", maxLength: 85 }, status: { type: "string", enum: ["member", "visitor"] }, followUpStatus: { type: "string", enum: ["needed", "done", "not_needed"] }, accountingYear: { type: "integer", minimum: 1900, maximum: 2200 }, period: { type: "string", enum: ["month", "week"] } } } },
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
@@ -609,7 +637,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!(await installedReports(departmentId, request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
     const filters = normalizeFilters(request.body.filters);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
-    if (["group-growth","people-first-contact-trend","group-attendance-by-role","event-recorded-facts-monthly"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
+    if (["group-growth","people-first-contact-trend","group-attendance-by-role","event-recorded-facts-monthly","group-type-development"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
       return reply.code(400).send({ error: "Choose a valid date range of up to 731 calendar days." });
     }
     const name = cleanText(request.body.name, 120);
