@@ -589,7 +589,7 @@ const serviceEventProperties = {
   description: { type: "string", maxLength: 2000 },
   room: { type: "string", maxLength: 160 },
   assetIds: { type: "array", maxItems: 50, uniqueItems: true, items: { type: "string", format: "uuid" } },
-  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, contactId: { type: "string", format: "uuid" }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } },
+  positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, contactId: { type: "string", format: "uuid" }, swapAllowed: { type: "boolean" }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } },
   timePlan: { type: "array", maxItems: 100, items: { type: "object", additionalProperties: false, required: ["title"], properties: { agendaItemId: { type: "string", format: "uuid" }, section: { type: "string", maxLength: 80 }, title: { type: "string", minLength: 1, maxLength: 160 }, startTime: { type: "string", pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }, durationMinutes: { type: "integer", minimum: 1, maximum: 1440 }, notes: { type: "string", maxLength: 500 }, songId: { type: "string", format: "uuid" }, arrangementId: { type: "string", format: "uuid" }, position: { type: "string", maxLength: 80 } } } },
   registrationEnabled: { type: "boolean" },
   registrationCapacity: { type: ["integer", "null"], minimum: 1, maximum: 100000 },
@@ -3291,6 +3291,8 @@ app.get("/api/event-position-swaps", async (request, reply): Promise<EventPositi
     `SELECT swap.id,swap.event_id,event.title AS event_title,to_char(event.event_date,'YYYY-MM-DD') AS event_date,
        swap.from_position_index,event.positions->swap.from_position_index->>'name' AS from_position_name,
        swap.to_position_index,event.positions->swap.to_position_index->>'name' AS to_position_name,
+       (event.positions->swap.from_position_index->>'swapAllowed' IS DISTINCT FROM 'false'
+        AND event.positions->swap.to_position_index->>'swapAllowed' IS DISTINCT FROM 'false') AS "canAccept",
        swap.requester_contact_id,concat_ws(' ',requester.first_name,requester.last_name) AS requester_name,
        swap.target_contact_id,concat_ws(' ',target.first_name,target.last_name) AS target_name,swap.status,swap.created_at
      FROM event_position_swap_requests swap
@@ -3329,6 +3331,9 @@ app.post<{ Params: { id: string }; Body: { fromPositionIndex: number; toPosition
     const to = positions[request.body.toPositionIndex];
     if (!from || from.contactId !== contactId) { await client.query("ROLLBACK"); return reply.code(403).send({ error: "You may request a swap only for your own assigned position." }); }
     if (!to?.contactId || to.contactId === contactId) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Choose a different assigned volunteer to request the swap from." }); }
+    if (from.swapAllowed === false || to.swapAllowed === false) {
+      await client.query("ROLLBACK"); return reply.code(409).send({ error: "Volunteer swaps are disabled for one of these roles." });
+    }
     const result = await client.query<{ id: string }>(
       `INSERT INTO event_position_swap_requests(id,event_id,from_position_index,to_position_index,requester_contact_id,target_contact_id)
        VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING RETURNING id`,
@@ -3376,6 +3381,9 @@ app.put<{ Params: { id: string }; Body: { decision: "accepted" | "declined" | "c
       const from = positions[row.from_position_index]; const to = positions[row.to_position_index];
       if (!event.rowCount || event.rows[0].cancelled_at || event.rows[0].source_system || event.rows[0].event_date < new Date().toISOString().slice(0, 10) || from?.contactId !== row.requester_contact_id || to?.contactId !== row.target_contact_id) {
         await client.query("ROLLBACK"); return reply.code(409).send({ error: "The event assignments changed since this request was made. Refresh the schedule." });
+      }
+      if (from.swapAllowed === false || to.swapAllowed === false) {
+        await client.query("ROLLBACK"); return reply.code(409).send({ error: "Volunteer swaps are disabled for one of these roles." });
       }
       positions[row.from_position_index] = { ...from, contactId: row.target_contact_id };
       positions[row.to_position_index] = { ...to, contactId: row.requester_contact_id };

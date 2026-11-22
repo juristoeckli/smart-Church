@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 
 type Assignment = { eventId: string; title: string; date: string; time: string; positionIndex: number; positionName: string };
-type Swap = { id: string; eventId: string; title: string; date: string; time: string; requesterName: string; fromPositionName: string; toPositionName: string };
+type Swap = { id: string; eventId: string; title: string; date: string; time: string; requesterName: string; fromPositionName: string; toPositionName: string; canAccept: boolean };
 
 const myUpcomingEvents = `SELECT event.*, person.id AS my_contact_id
   FROM department_memberships member
@@ -29,7 +29,9 @@ export async function getHomeDutyRequests(pool: Pick<Pool, "query">, departmentI
       `SELECT swap.id, event.id AS "eventId", event.title, to_char(event.event_date,'YYYY-MM-DD') AS date, to_char(event.start_time,'HH24:MI') AS time,
               concat_ws(' ', requester.first_name, requester.last_name) AS "requesterName",
               event.positions->swap.from_position_index->>'name' AS "fromPositionName",
-              event.positions->swap.to_position_index->>'name' AS "toPositionName"
+              event.positions->swap.to_position_index->>'name' AS "toPositionName",
+              (event.positions->swap.from_position_index->>'swapAllowed' IS DISTINCT FROM 'false'
+               AND event.positions->swap.to_position_index->>'swapAllowed' IS DISTINCT FROM 'false') AS "canAccept"
          FROM (${myUpcomingEvents}) event
          JOIN event_position_swap_requests swap ON swap.event_id=event.id AND swap.target_contact_id=event.my_contact_id
          JOIN contacts requester ON requester.id=swap.requester_contact_id AND requester.department_id=event.department_id AND requester.archived_at IS NULL

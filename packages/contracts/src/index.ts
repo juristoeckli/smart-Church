@@ -29,6 +29,7 @@ export type ServiceEventKind = "service" | "meeting" | "community" | "other";
 
 export interface ServicePosition {
   name: string;
+  swapAllowed?: boolean;
   category?: string;
   contactId?: string;
   qualificationIds?: string[];

@@ -4,7 +4,7 @@ import { formatUserDate } from "./date-format";
 import { translate } from "./i18n";
 
 type Assignment = { eventId: string; title: string; date: string; time: string; positionIndex: number; positionName: string };
-type Swap = { id: string; eventId: string; title: string; date: string; time: string; requesterName: string; fromPositionName: string; toPositionName: string };
+type Swap = { id: string; eventId: string; title: string; date: string; time: string; requesterName: string; fromPositionName: string; toPositionName: string; canAccept?: boolean };
 type DutyRequests = { assignments: Assignment[]; swaps: Swap[]; hasMore: boolean };
 
 export function HomeDutyRequests({ departmentId, csrfToken, onOpenEvent, onOpenSchedule }: {
@@ -80,7 +80,9 @@ export function HomeDutyRequests({ departmentId, csrfToken, onOpenEvent, onOpenS
               .replace("{from}", item.fromPositionName).replace("{to}", item.toPositionName) : item.positionName}</small>
           </div>
           <div className="home-duty-actions">
-            <button className="button button-primary" type="button" disabled={busy} onClick={() => void respond(item, "accepted")}>{translate(swap ? "overview.acceptSwap" : "overview.acceptDuty")}</button>
+            <button className="button button-primary" type="button" disabled={busy || (swap && item.canAccept === false)}
+              title={swap && item.canAccept === false ? translate("events.swapDisabledForRole") : undefined}
+              onClick={() => void respond(item, "accepted")}>{translate(swap ? "overview.acceptSwap" : "overview.acceptDuty")}</button>
             <button className="button button-secondary" type="button" disabled={busy} onClick={() => void respond(item, "declined")}>{translate(swap ? "overview.declineSwap" : "overview.declineDuty")}</button>
           </div>
         </li>;

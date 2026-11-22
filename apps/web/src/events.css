@@ -103,3 +103,4 @@
 .schedule-calendar-own-duty .is-confirmed{color:var(--green)}
 .schedule-calendar-own-duty .is-requested{color:var(--ink);border-style:dashed}
 .schedule-calendar-absence{display:block;margin-top:3px;border-inline-start:2px solid currentColor;padding-inline-start:3px;color:#a82d3e;font-size:8px;font-weight:650;overflow-wrap:anywhere}
+.service-position-row .service-role-swap{grid-column:1/-1;display:flex;align-items:center;gap:6px}
