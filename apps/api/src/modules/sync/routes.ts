@@ -139,7 +139,7 @@ async function redundancyManifest(pool: import("pg").Pool, adapters: ModuleRepli
   const core = adapterMap.get("core-site");
   if (!core) blockers.push("The core site-data adapter is missing.");
   else {
-    const status = await core.inspect(departmentId);
+    const status = await core.inspect(departmentId, exportContext);
     if (!status.ready) blockers.push(...status.blockers.map((blocker) => `${core.moduleName}: ${blocker}`));
     modules.unshift({ moduleId: core.moduleId, schemaVersion: await adapterSchemaVersion(core, departmentId), installedVersion: core.schemaVersion });
   }

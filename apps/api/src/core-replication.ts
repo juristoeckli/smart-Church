@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import { registerPlatformReplicationAdapter, type ReplicationRestoreContext } from "./modules/module-sdk.js";
+import { registerPlatformReplicationAdapter, type ReplicationExportContext, type ReplicationRestoreContext } from "./modules/module-sdk.js";
 
 const snapshotTableNames = [
   "contacts", "service_events", "service_event_fact_definitions", "service_event_lifecycle_audit", "church_groups", "group_members", "church_teams", "team_members",
@@ -179,6 +179,28 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
   return { version: 36, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
+// The other Calendar tables are children of these site-owned roots.
+const calendarSnapshotRoots = [
+  "church_calendar_calendars",
+  "church_calendar_event_generations",
+  "church_calendar_tag_definitions",
+  "church_calendar_agenda_publications",
+] as const;
+const calendarSnapshotRequired = "This location has Church Calendar records. A matching Calendar snapshot is required to preserve them.";
+
+async function calendarSnapshotBlocker(client: Pick<PoolClient, "query">, departmentId: string, replication?: ReplicationExportContext) {
+  if (replication?.moduleIds.has("church-calendar")) return null;
+  const relations = (await client.query<{ name: string }>(`SELECT relation.name
+    FROM unnest($1::text[]) AS relation(name) WHERE to_regclass('public.' || relation.name) IS NOT NULL`, [calendarSnapshotRoots])).rows;
+  const existing = new Set(relations.map((relation) => relation.name));
+  const queries = calendarSnapshotRoots.filter((table) => existing.has(table)).map((table) =>
+    `SELECT 1 FROM ${table} WHERE department_id=$1`);
+  if (queries.length && (await client.query(`SELECT 1 FROM (${queries.join(" UNION ALL ")}) calendar_data LIMIT 1`, [departmentId])).rowCount) {
+    return calendarSnapshotRequired;
+  }
+  return null;
+}
+
 async function countRecords(pool: Pool, departmentId: string) {
   const client = await pool.connect();
   try {
@@ -194,11 +216,20 @@ export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
     schemaVersion: "27",
-    inspect: async (departmentId) => {
+    inspect: async (departmentId, replication) => {
+      const blocker = await calendarSnapshotBlocker(pool, departmentId, replication);
       const count = await countRecords(pool, departmentId);
-      return { ready: true, blockers: [], recordCount: count };
+      return { ready: !blocker, blockers: blocker ? [blocker] : [], recordCount: count };
     },
-    exportSnapshot: (client, departmentId) => collect(client, departmentId),
+    async exportSnapshot(client, departmentId, replication) {
+      const blocker = await calendarSnapshotBlocker(client, departmentId, replication);
+      if (blocker) throw new Error(blocker);
+      return collect(client, departmentId);
+    },
+    async prepareRestore(client, departmentId, _snapshot, replication) {
+      const blocker = await calendarSnapshotBlocker(client, departmentId, replication);
+      if (blocker) throw new Error(blocker);
+    },
     restoreSnapshot: async (client, targetDepartmentId, input, restoreContext: ReplicationRestoreContext) => {
       const snapshot = normalizeSnapshot(input);
       if (!snapshot) throw new Error("The core site snapshot is incomplete or unsupported.");
