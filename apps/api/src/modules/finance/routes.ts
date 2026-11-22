@@ -1,3 +1,4 @@
+import { costCenterBudgetSql, costCenterEntriesSql, costCenterScopeSql, type StatementBudget, type StatementEntry, type StatementScope } from "./cost-center-detail.js";
 import { recentGivingSql, type RecentGiving } from "./recent-giving.js";
 import { financePdf } from "./pdf.js";
 import { financeWorkbook } from "./workbook.js";
@@ -859,6 +860,77 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const header = ["accounting_year", "cost_center_code", "cost_center_name", "debit_cents", "credit_cents", "transaction_count"];
     return sendFinanceExport(request, reply, `finance-cost-centers-${year}`, header, result.rows.map((row) => [year, row.code, row.name, row.debit_cents, row.credit_cents, row.transaction_count]));
   });
+
+  type CenterStatementQuery = { year: string; centerId: string; from?: string; to?: string };
+  const centerStatementQuery = { type: "object", additionalProperties: false, required: ["year","centerId"] } as const;
+  const centerStatementProperties = {
+    year: { type: "string", pattern: "^(19[0-9]{2}|20[0-9]{2}|21[0-9]{2}|2200)$" },
+    centerId: uuid, from: { type: "string", format: "date" }, to: { type: "string", format: "date" },
+  } as const;
+  async function centerStatementScope(id: string, query: CenterStatementQuery, reply: FastifyReply) {
+    const { year, centerId, from, to } = query;
+    const { rows: [scope] } = await pool!.query<StatementScope>(costCenterScopeSql,[id,centerId,year]);
+    if (!scope) {
+      reply.code(404).send({ error: "Cost center or accounting year not found at this location." });
+      return null;
+    }
+    const start = from ?? scope.fiscalStart;
+    const end = to ?? scope.fiscalEnd;
+    if (!validDateOnly(start) || !validDateOnly(end) || start > end || start < scope.fiscalStart || end > scope.fiscalEnd) {
+      reply.code(400).send({ error: "Choose a date range within the selected accounting year." });
+      return null;
+    }
+    return { ...scope,from:start,through:end };
+  }
+
+  app.get<{ Querystring: CenterStatementQuery & { page?: number } }>("/api/modules/finance/reports/cost-center-detail", {
+    schema: { querystring: { ...centerStatementQuery, properties: {
+      ...centerStatementProperties, page: { type: "integer", minimum: 1, maximum: 250 },
+    } } },
+  }, async (request,reply) => {
+    const id = await department(request,reply);
+    if (!id) return reply;
+    const scope = await centerStatementScope(id,request.query,reply);
+    if (!scope) return reply;
+    const { centerId,year,page=1 } = request.query;
+    const [entries,budgets] = await Promise.all([
+      pool!.query<StatementEntry>(costCenterEntriesSql,[id,centerId,year,scope.from,scope.through,51,(page-1)*50]),
+      pool!.query<StatementBudget>(costCenterBudgetSql,[id,centerId,year,scope.fiscalStart,scope.through,5001]),
+    ]);
+    if (budgets.rows.length > 5000) return reply.code(413).send({ error: "This cost center has too many budget scopes to display." });
+    return reply.header("Cache-Control","private, no-store").send({
+      ...scope, entries:entries.rows.slice(0,50),budgets:budgets.rows,hasMore:entries.rows.length>50,
+    });
+  });
+
+  app.get<{ Params: { format: string }; Querystring: CenterStatementQuery & { part?: "entries" | "budget" } }>(
+    "/api/modules/finance/reports/cost-center-detail/export.:format", {
+      schema: {
+        params: { type: "object", required: ["format"], properties: { format: { type: "string", enum: ["csv","xlsx","html","pdf"] } } },
+        querystring: { ...centerStatementQuery, properties: { ...centerStatementProperties, part: { type: "string", enum: ["entries","budget"] } } },
+      },
+    }, async (request,reply) => {
+      const id = await department(request,reply,true);
+      if (!id) return reply;
+      const scope = await centerStatementScope(id,request.query,reply);
+      if (!scope) return reply;
+      const { centerId,year,part="entries" } = request.query;
+      const name = `finance-cost-center-${part}-${year}`;
+      reply.header("Cache-Control","private, no-store");
+      if (part === "budget") {
+        const result = await pool!.query<StatementBudget>(costCenterBudgetSql,[id,centerId,year,scope.fiscalStart,scope.through,5001]);
+        if (result.rows.length > 5000) return reply.code(413).send({ error: "This cost center has too many budget scopes to export." });
+        return sendFinanceExport(request,reply,name,
+          ["cost_center","through","currency","account_code","account_name","budget_cents","actual_cents","remaining_cents"],
+          result.rows.map(row => [scope.code,scope.through,scope.currency,row.accountCode,row.accountName,row.budgetCents,row.actualCents,row.remainingCents]),[5,6,7]);
+      }
+      const result = await pool!.query<StatementEntry>(costCenterEntriesSql,[id,centerId,year,scope.from,scope.through,10001,0]);
+      if (result.rows.length > 10000) return reply.code(413).send({ error: "Choose a shorter date range to export at most 10,000 postings." });
+      return sendFinanceExport(request,reply,name,
+        ["cost_center","booking_date","receipt_number","account_code","account_name","booking_text","line_text","debit_cents","credit_cents","currency"],
+        result.rows.map(row => [scope.code,row.date,row.receiptNumber,row.accountCode,row.accountName,row.bookingText,row.lineText,row.debitCents,row.creditCents,scope.currency]),[7,8]);
+    },
+  );
 
   app.get<{ Querystring: PeriodTurnoverQuery }>("/api/modules/finance/reports/period-turnover", {
     schema: { querystring: { ...periodTurnoverQuery, properties: {
