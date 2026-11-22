@@ -11,7 +11,8 @@ import { CalendarDays, ChevronLeft, ChevronRight, Clock3, History, Pencil, Plus,
 import "./resource-scheduler.css";
 
 type Resource = { id: string; name: string; category: string; location: string; active: boolean; marked: boolean; matchesSearch: boolean; requires_approval: boolean; calendarRequired?: boolean; managerBookingOnly?: boolean; visibilityGroupId?: string | null; responsibleUserId?: string | null; totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number };
-type Booking = { id: string; resourceId: string; resourceName: string; location: string; requestedBy: string; requesterName: string; purpose: string; subtitle?: string; description?: string; beneficiaryName?: string | null; startsAt: string; endsAt: string; occurrenceDate: string | null; allDayDate?: string | null; seriesAllDay?: boolean; timeZone: string | null; status: "requested" | "approved" | "declined" | "cancelled"; quantity: number; leadInMinutes: number; cleanupMinutes: number; seriesId: string | null; recurrence: { frequency: string; interval?: number; endsOn?: string; count?: number; weekdays?: number[] } | null; isExtraDate: boolean; hasOccurrenceOverride: boolean; hasLinkedAppointment: boolean; canOpenCalendar?: boolean; canCancel: boolean; canEditSeries: boolean };
+type Booking = { id: string; resourceId: string; resourceName: string; location: string; requestedBy: string; requesterName: string; purpose: string; subtitle?: string; description?: string; beneficiaryName?: string | null; startsAt: string; endsAt: string; occurrenceDate: string | null; allDayDate?: string | null; seriesAllDay?: boolean; timeZone: string | null; status: "requested" | "approved" | "declined" | "cancelled"; quantity: number; leadInMinutes: number; cleanupMinutes: number; seriesId: string | null; recurrence: { frequency: string; interval?: number; endsOn?: string; count?: number; weekdays?: number[] } | null; isExtraDate: boolean; hasOccurrenceOverride: boolean; hasLinkedAppointment: boolean; canOpenCalendar?: boolean; canCopy?: boolean; canCancel: boolean; canEditSeries: boolean };
+type BookingCopyDraft = Pick<Booking, "resourceId" | "purpose" | "subtitle" | "description" | "quantity" | "startsAt" | "endsAt" | "leadInMinutes" | "cleanupMinutes"> & { allDay: boolean };
 type Appointment = { appointmentId: string; title: string; occurrenceStartAt: string; calendarName: string };
 type Bootstrap = { resources: Resource[]; bookings: Booking[]; canManage: boolean; canBookForOthers?: boolean; responsiblePeople?: { id: string; displayName: string }[]; visibilityGroups?: { id: string; name: string }[]; timeZone: string; from: string; to: string };
 type FutureEditForm = { allDay: boolean; seriesId: string; timeZone: string | null; fromDate: string; purpose: string; subtitle: string; description: string; startsAt: string; endsAt: string; quantity: number; leadInMinutes: number; cleanupMinutes: number; frequency: string; interval: number; endsOn: string };
@@ -53,6 +54,9 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [calendarLinks, setCalendarLinks] = useState<{ departmentId: string; bookingId: string } | null>(null);
+  const copyController = useRef<AbortController | null>(null);
+  const [copyLoading, setCopyLoading] = useState<string | null>(null);
+  const [copyTiming, setCopyTiming] = useState<{ clock: string; durationMs: number } | null>(null);
   const [requestDepartmentId, setRequestDepartmentId] = useState<string | null>(null);
   const [beneficiary, setBeneficiary] = useState<BookingBeneficiary | null>(null);
   const [showBookedDays, setShowBookedDays] = useState(false);
@@ -144,6 +148,8 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
   const canRequestResource = (resource: Resource) =>
     resource.active && !resource.calendarRequired && (!resource.managerBookingOnly || (canManage && data.canManage));
 
+  useEffect(() => () => copyController.current?.abort(), [departmentId]);
+
   function startRequest(selection?: { resourceId: string; date: string }) {
     if (loadedDepartment !== departmentId || (selection && loadedScope !== scope)) return;
     const bookable = data.resources.filter(canRequestResource);
@@ -162,15 +168,70 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
       } else {
         slot = { startsAt: `${selection.date}T09:00`, endsAt: `${selection.date}T10:00` };
       }
+    } else if (copyTiming) {
+      const tomorrow = new Date(Date.now() + 86_400_000);
+      slot = { startsAt: localInputInZone(tomorrow, data.timeZone),
+        endsAt: localInputInZone(new Date(tomorrow.getTime() + 3_600_000), data.timeZone) };
     }
     setForm((current) => ({
       ...current, resourceId: resource.id, leadInMinutes: resource.defaultLeadInMinutes, cleanupMinutes: resource.defaultCleanupMinutes,
       ...(slot ? { ...slot, purpose: "", subtitle: "", description: "", quantity: 1, recurrence: "once", interval: 1, endsOn: "", extraDates: "", excludedDates: "", linkedAppointmentId: "" } : {}),
     }));
+    copyController.current?.abort();
+    setCopyTiming(null);
     setFullDayDate(null);
     setBeneficiary(null);
     setRequestDepartmentId(departmentId);
     setNotice(""); setError("");
+  }
+
+  async function copyBooking(booking: Booking) {
+    if (!booking.canCopy || loadedDepartment !== departmentId || loadedScope !== scope || copyLoading) return;
+    const controller = new AbortController();
+    copyController.current = controller;
+    setCopyLoading(booking.id); setError(""); setNotice("");
+    try {
+      const response = await fetch(`/api/modules/resource-scheduler/bookings/${booking.id}/copy-draft`, {
+        headers: { "x-department-id": departmentId }, cache: "no-store", signal: controller.signal,
+      });
+      const draft = await response.json() as BookingCopyDraft & { error?: string };
+      if (!response.ok) throw new Error(draft.error ?? "Could not copy this booking.");
+      if (controller.signal.aborted) return;
+      const start = new Date(draft.startsAt);
+      const end = new Date(draft.endsAt);
+      setCopyTiming({ clock: localInputInZone(start, data.timeZone).slice(11), durationMs: end.getTime() - start.getTime() });
+      setForm({
+        resourceId: draft.resourceId, purpose: draft.purpose, subtitle: draft.subtitle ?? "", description: draft.description ?? "",
+        startsAt: "", endsAt: "", quantity: draft.quantity, leadInMinutes: draft.leadInMinutes, cleanupMinutes: draft.cleanupMinutes,
+        recurrence: "once", interval: 1, endsOn: "", extraDates: "", excludedDates: "", linkedAppointmentId: "",
+      });
+      setBeneficiary(null);
+      setFullDayDate(draft.allDay ? "" : null);
+      setRequestDepartmentId(departmentId);
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Could not copy this booking.");
+    } finally {
+      if (copyController.current === controller) {
+        copyController.current = null;
+        setCopyLoading(null);
+      }
+    }
+  }
+
+  function setCopiedBookingDate(date: string) {
+    if (!copyTiming) return;
+    if (!date) {
+      setForm((current) => ({ ...current, startsAt: "", endsAt: "" }));
+      return;
+    }
+    try {
+      const startsAt = `${date}T${copyTiming.clock}`;
+      const from = Date.parse(zonedInputToUtc(startsAt, data.timeZone));
+      setForm((current) => ({ ...current, startsAt, endsAt: localInputInZone(new Date(from + copyTiming.durationMs), data.timeZone) }));
+      setError("");
+    } catch {
+      setError("Choose a date with a valid booking time.");
+    }
   }
 
   const [fullDayDate, setFullDayDate] = useState<string | null>(null);
@@ -415,19 +476,22 @@ export function ResourceSchedulerModule({ departmentId, csrfToken, canManage, on
       departmentId={departmentId} timeZone={data.timeZone} resourceId={resourceFilter !== "all" ? resourceFilter : undefined}
       category={category || undefined} markedOnly={markedOnly} refreshVersion={bookedDaysRevision} />}
     <section className="resource-scheduler-matrix-wrap" ref={matrixRef}><table className="resource-scheduler-matrix"><thead><tr><th>Resource</th>{days.map((day) => <th key={day}>{formatDay(day)}</th>)}</tr></thead><tbody>{loading || loadedScope !== scope ? <tr><td colSpan={8} className="resource-scheduler-empty">{error ? "Schedule unavailable" : "Loading schedule…"}</td></tr> : filteredResources.map((resource) => <tr key={resource.id}><th scope="row"><strong>{resource.name}</strong><button className="resource-settings-button" type="button" disabled={marking || loadedScope !== scope} aria-pressed={resource.marked} aria-label={`Mark ${resource.name}`} onClick={() => void toggleResourceMark(resource)}><Star size={13} fill={resource.marked ? "currentColor" : "none"} /> {resource.marked ? "Marked" : "Mark"}</button><small>{resource.location || resource.category} · {resource.totalUnits} {resource.totalUnits === 1 ? "unit" : "units"}</small>{canManage && <button className="resource-settings-button" type="button" onClick={() => setEditingResource(resource)}><Settings2 size={13} /> Availability</button>}</th>{days.map((day) => <td key={day}>{bookingsFor(resource.id, day).map((booking) => <article key={booking.id} className={`resource-scheduler-booking status-${booking.status}`}><strong>{booking.allDayDate ? "All day" : `${formatTime(booking.startsAt, booking.timeZone)}–${formatTime(booking.endsAt, booking.timeZone)}`}</strong><span>{booking.purpose}</span>{booking.beneficiaryName && <small className="resource-booking-beneficiary">On behalf of {booking.beneficiaryName}</small>}{booking.subtitle && <small>{booking.subtitle}</small>}{booking.description && <details className="resource-booking-description"><summary>Description</summary><p>{booking.description}</p></details>}<small>{statusLabels[booking.status]} · {booking.quantity} {booking.quantity === 1 ? "unit" : "units"} · {booking.requesterName}{booking.hasOccurrenceOverride ? " · Date override" : ""}</small>{booking.leadInMinutes + booking.cleanupMinutes > 0 && <small><Clock3 size={12} /> {booking.leadInMinutes}m setup · {booking.cleanupMinutes}m cleanup</small>}{booking.hasLinkedAppointment && !booking.canOpenCalendar && <small>Linked to calendar appointment</small>}
-      {booking.canOpenCalendar && onOpenCalendarAppointment && <div className="resource-booking-actions"><button type="button" onClick={() => setCalendarLinks({ departmentId, bookingId: booking.id })}>Linked appointments</button></div>}{(canManage || booking.canCancel) && <div className="resource-booking-actions"><button type="button" onClick={() => setBookingHistory({ departmentId, bookingId: booking.id, title: booking.resourceName })}><History size={13} /> Booking history</button></div>}{canManage && booking.status === "requested" && <div className="resource-booking-actions"><button type="button" onClick={() => void changeStatus(booking,"approved")}>Approve</button><button type="button" onClick={() => void changeStatus(booking,"declined")}>Reject</button></div>}{booking.status !== "cancelled" && booking.status !== "declined" && booking.canCancel && <div className="resource-booking-actions"><button type="button" onClick={() => void changeStatus(booking,"cancelled")}>Cancel</button>{booking.seriesId && booking.canEditSeries && <>{booking.status === "requested" && <button type="button" onClick={() => openOccurrenceEdit(booking)}><Pencil size={13} /> Edit date</button>}<button type="button" onClick={() => openFutureEdit(booking)}><Pencil size={13} /> Edit future</button><button type="button" onClick={() => void openSeriesHistory(booking.seriesId!)}><History size={13} /> Series history</button><button type="button" onClick={() => { setDateAction({ seriesId: booking.seriesId!, action: "extra" }); setDateValue(""); }}>Add date</button><button type="button" onClick={() => void openExtraDates(booking.seriesId!)}>Extra dates</button><button type="button" onClick={() => { setDateAction({ seriesId: booking.seriesId!, action: "exclude" }); setDateValue(day); }}>Skip date</button><button type="button" onClick={() => void archiveSeries(booking.seriesId!)}>Cancel series</button></>}</div>}</article>)}{canRequestResource(resource) && day >= earliestBookingDay && <button className="resource-settings-button resource-scheduler-cell-request" type="button"
+      {booking.canOpenCalendar && onOpenCalendarAppointment && <div className="resource-booking-actions"><button type="button" onClick={() => setCalendarLinks({ departmentId, bookingId: booking.id })}>Linked appointments</button></div>}{(canManage || booking.canCancel) && <div className="resource-booking-actions"><button type="button" onClick={() => setBookingHistory({ departmentId, bookingId: booking.id, title: booking.resourceName })}><History size={13} /> Booking history</button>
+      {booking.canCopy && <button type="button" disabled={Boolean(copyLoading)} onClick={() => void copyBooking(booking)}>
+        {copyLoading === booking.id ? "Copying…" : "Copy booking"}</button>}</div>}{canManage && booking.status === "requested" && <div className="resource-booking-actions"><button type="button" onClick={() => void changeStatus(booking,"approved")}>Approve</button><button type="button" onClick={() => void changeStatus(booking,"declined")}>Reject</button></div>}{booking.status !== "cancelled" && booking.status !== "declined" && booking.canCancel && <div className="resource-booking-actions"><button type="button" onClick={() => void changeStatus(booking,"cancelled")}>Cancel</button>{booking.seriesId && booking.canEditSeries && <>{booking.status === "requested" && <button type="button" onClick={() => openOccurrenceEdit(booking)}><Pencil size={13} /> Edit date</button>}<button type="button" onClick={() => openFutureEdit(booking)}><Pencil size={13} /> Edit future</button><button type="button" onClick={() => void openSeriesHistory(booking.seriesId!)}><History size={13} /> Series history</button><button type="button" onClick={() => { setDateAction({ seriesId: booking.seriesId!, action: "extra" }); setDateValue(""); }}>Add date</button><button type="button" onClick={() => void openExtraDates(booking.seriesId!)}>Extra dates</button><button type="button" onClick={() => { setDateAction({ seriesId: booking.seriesId!, action: "exclude" }); setDateValue(day); }}>Skip date</button><button type="button" onClick={() => void archiveSeries(booking.seriesId!)}>Cancel series</button></>}</div>}</article>)}{canRequestResource(resource) && day >= earliestBookingDay && <button className="resource-settings-button resource-scheduler-cell-request" type="button"
       aria-label={`Request ${resource.name} on ${formatDay(day)}`} onClick={() => startRequest({ resourceId: resource.id, date: day })}><Plus size={13} /> Request</button>}</td>)}</tr>)}{!filteredResources.length && <tr><td colSpan={8} className="resource-scheduler-empty">{search ? "No resources or bookings match the search." : markedOnly ? "No marked resources match the current filter." : category ? "No bookable resources match this type." : "No bookable resources are available for this location."}</td></tr>}</tbody></table></section>
 
     </>}
     {calendarLinks?.departmentId === departmentId && onOpenCalendarAppointment &&
       <BookingCalendarLinks key={`${departmentId}:${calendarLinks.bookingId}`} departmentId={departmentId} bookingId={calendarLinks.bookingId}
         onClose={() => setCalendarLinks(null)} onOpen={(target) => { setCalendarLinks(null); onOpenCalendarAppointment(target); }} />}
-    {requestDepartmentId === departmentId && loadedDepartment === departmentId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setRequestDepartmentId(null)}><section className="modal resource-scheduler-modal" role="dialog" aria-modal="true" aria-labelledby="resource-request-title"><div className="modal-heading"><div><span className="eyebrow">RESOURCE REQUEST</span><h2 id="resource-request-title">Request a booking</h2><p>Times use the location time zone ({data.timeZone}). Conflicts and unit availability are checked before saving. Book Calendar-required resources from a saved Calendar appointment.</p></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setRequestDepartmentId(null)}><X size={18} /></button></div><form onSubmit={(event) => void createSeries(event)}><label>Resource<select required value={form.resourceId} onChange={(event) => { const resource = data.resources.find((item) => item.id === event.target.value); setForm((current) => ({ ...current, resourceId: event.target.value, leadInMinutes: resource?.defaultLeadInMinutes ?? 0, cleanupMinutes: resource?.defaultCleanupMinutes ?? 0 })); }}><option value="">Choose a resource</option>{data.resources.filter((item) => item.active).map((resource) => <option key={resource.id} value={resource.id} disabled={!canRequestResource(resource)}>{resource.name} · {resource.location || resource.category}{resource.calendarRequired ? " · Calendar required" : ""}{resource.managerBookingOnly ? " · Managers only" : ""}</option>)}</select></label><label>Purpose<input required maxLength={240} value={form.purpose} onChange={(event) => setForm((current) => ({ ...current, purpose: event.target.value }))} /></label>
+    {requestDepartmentId === departmentId && loadedDepartment === departmentId && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setRequestDepartmentId(null)}><section className="modal resource-scheduler-modal" role="dialog" aria-modal="true" aria-labelledby="resource-request-title"><div className="modal-heading"><div><span className="eyebrow">RESOURCE REQUEST</span><h2 id="resource-request-title">{copyTiming ? "Copy booking to a new request" : "Request a booking"}</h2><p>Times use the location time zone ({data.timeZone}). Conflicts and unit availability are checked before saving. Book Calendar-required resources from a saved Calendar appointment.</p></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setRequestDepartmentId(null)}><X size={18} /></button></div><form onSubmit={(event) => void createSeries(event)}><label>Resource<select required value={form.resourceId} onChange={(event) => { const resource = data.resources.find((item) => item.id === event.target.value); setForm((current) => ({ ...current, resourceId: event.target.value, leadInMinutes: resource?.defaultLeadInMinutes ?? 0, cleanupMinutes: resource?.defaultCleanupMinutes ?? 0 })); }}><option value="">Choose a resource</option>{data.resources.filter((item) => item.active).map((resource) => <option key={resource.id} value={resource.id} disabled={!canRequestResource(resource)}>{resource.name} · {resource.location || resource.category}{resource.calendarRequired ? " · Calendar required" : ""}{resource.managerBookingOnly ? " · Managers only" : ""}</option>)}</select></label><label>Purpose<input required maxLength={240} value={form.purpose} onChange={(event) => setForm((current) => ({ ...current, purpose: event.target.value }))} /></label>
       <label>Subtitle <input maxLength={240} value={form.subtitle} onChange={(event) => setForm((current) => ({ ...current, subtitle: event.target.value }))} /></label>
       <label>Description<textarea rows={3} maxLength={2000} value={form.description} onChange={(event) => setForm((current) => ({ ...current, description: event.target.value }))} /></label>
       {data.canBookForOthers && <ResourceBookingBeneficiary key={departmentId} departmentId={departmentId} selected={beneficiary} onChange={setBeneficiary} />}<label><input type="checkbox" checked={fullDayDate !== null} onChange={(event) => setFullDayDate(event.target.checked ? form.startsAt.slice(0, 10) : null)} /> Reserve full day</label>{fullDayDate !== null
       ? <label>Booking date<input type="date" required value={fullDayDate} onChange={(event) => setFullDayDate(event.target.value)} /><small>Reserves this date from local midnight until the next local midnight.</small></label>
-      : <><div className="resource-scheduler-field-grid"><label>Start<input type="datetime-local" required value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End<input type="datetime-local" required value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></>}
+      : <>{copyTiming && <label>Copy to date<input type="date" value={form.startsAt.slice(0, 10)} onChange={(event) => setCopiedBookingDate(event.target.value)} /></label>}
+      <div className="resource-scheduler-field-grid"><label>Start<input type="datetime-local" required value={form.startsAt} onChange={(event) => setForm((current) => ({ ...current, startsAt: event.target.value }))} /></label><label>End<input type="datetime-local" required value={form.endsAt} onChange={(event) => setForm((current) => ({ ...current, endsAt: event.target.value }))} /></label></div></>}
       <label>Repeat<select value={form.recurrence} onChange={(event) => setForm((current) => ({ ...current, recurrence: event.target.value }))}><option value="once">Does not repeat</option><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label>{form.recurrence !== "once" && <div className="resource-scheduler-field-grid"><label>Every<input type="number" min={1} max={366} value={form.interval} onChange={(event) => setForm((current) => ({ ...current, interval: Number(event.target.value) }))} /></label><label>Repeat through<input type="date" value={form.endsOn} onChange={(event) => setForm((current) => ({ ...current, endsOn: event.target.value }))} /></label></div>}
       <div className="resource-scheduler-field-grid"><label>Quantity<input type="number" min={1} max={10000} value={form.quantity} onChange={(event) => setForm((current) => ({ ...current, quantity: Number(event.target.value) }))} /></label><label>Setup / lead-in (minutes)<input type="number" min={0} max={10080} value={form.leadInMinutes} onChange={(event) => setForm((current) => ({ ...current, leadInMinutes: Number(event.target.value) }))} /></label><label>Cleanup (minutes)<input type="number" min={0} max={10080} value={form.cleanupMinutes} onChange={(event) => setForm((current) => ({ ...current, cleanupMinutes: Number(event.target.value) }))} /></label></div>{(fullDayDate === null || form.recurrence !== "once") && <><label>Extra dates (comma-separated, YYYY-MM-DD)<input placeholder="2026-12-24, 2026-12-31" value={form.extraDates} onChange={(event) => setForm((current) => ({ ...current, extraDates: event.target.value }))} /></label><label>Skip dates (comma-separated, YYYY-MM-DD)<input placeholder="2026-12-25" value={form.excludedDates} onChange={(event) => setForm((current) => ({ ...current, excludedDates: event.target.value }))} /></label></>}{canManage && <label>Link to calendar appointment<select value={form.linkedAppointmentId} onChange={(event) => setForm((current) => ({ ...current, linkedAppointmentId: event.target.value }))}><option value="">No appointment link</option>{appointments.map((appointment) => <option key={`${appointment.appointmentId}-${appointment.occurrenceStartAt}`} value={appointment.appointmentId}>{appointment.title} · {formatTime(appointment.occurrenceStartAt)} · {appointment.calendarName}</option>)}</select></label>}{previewResource && <>
       {form.recurrence !== "once" && <small>The availability check covers the selected time. The full series is checked when you save.</small>}

@@ -372,6 +372,45 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   const resourceCategories = ["room", "vehicle", "equipment", "other"] as const;
 
+  async function copyableResourceBooking(actor: string, manager: string) {
+    const { rows: [schema] } = await context.pool!.query<{ installed: boolean; usable: boolean }>(
+      `SELECT to_regclass('public.church_calendar_resource_links') IS NOT NULL AS installed,
+              EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.church_calendar_resource_links')
+                       AND attname='resource_booking_id' AND NOT attisdropped) AS usable`,
+    );
+    return `((booking.requested_by=${actor} OR ${manager}) AND resource.active AND NOT resource.calendar_required
+      AND (NOT resource.manager_booking_only OR ${manager})
+      AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,${actor},${manager})
+      AND series.linked_appointment_id IS NULL
+      ${schema?.usable ? "AND NOT EXISTS (SELECT 1 FROM church_calendar_resource_links link WHERE link.resource_booking_id=booking.id)" : schema?.installed ? "AND FALSE" : ""})`;
+  }
+
+  app.get<{ Params: { id: string } }>("/api/modules/resource-scheduler/bookings/:id/copy-draft", { schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    reply.header("Cache-Control", "private, no-store");
+    const copyable = await copyableResourceBooking("$3", "$4");
+    const { rows: [draft] } = await context.pool!.query(
+      `SELECT booking.resource_id AS "resourceId",booking.purpose,booking.subtitle,booking.description,booking.quantity,
+              booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",
+              booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
+              (series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE) AS "allDay"
+         FROM resource_bookings booking
+         JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+         LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
+         LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
+         LEFT JOIN resource_booking_series_occurrence_overrides day_override
+           ON day_override.series_id=series.id AND day_override.resource_booking_id=booking.id
+           AND day_override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date
+        WHERE booking.id=$1 AND booking.department_id=$2 AND ${copyable}`,
+      [request.params.id, departmentId, request.authenticatedUser!.id, isManager(request)],
+    );
+    if (!draft) return reply.code(404).send({ error: "This booking is no longer available to copy." });
+    return draft;
+  });
+
   function accessibleBookingCalendarLinks(user: string, groupAccess: string) {
     return `FROM church_calendar_resource_links link
       JOIN church_calendar_appointments appointment ON appointment.id=link.appointment_id AND appointment.department_id=booking.department_id
@@ -438,7 +477,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const category = request.query.category || null;
     if (category && !resourceCategories.some((value) => value === category)) return reply.code(400).send({ error: "Choose a valid resource type." });
     const canManage = isManager(request);
-    const calendarLinksAvailable = await calendarLinkingAvailable(context.pool!, departmentId, true);
+    const [calendarLinksAvailable, copyable] = await Promise.all([
+      calendarLinkingAvailable(context.pool!, departmentId, true),
+      copyableResourceBooking("$6", "$7"),
+    ]);
     const calendarLinkFlag = calendarLinksAvailable
       ? `((booking.requested_by=$6 OR $7) AND EXISTS (SELECT 1 ${accessibleBookingCalendarLinks("$6", "$12")}))`
       : "FALSE";
@@ -459,7 +501,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",
-          ${calendarLinkFlag} AS "canOpenCalendar",occurrence.is_extra_date AS "isExtraDate",
+          ${calendarLinkFlag} AS "canOpenCalendar", ${copyable} AS "canCopy",occurrence.is_extra_date AS "isExtraDate",
           CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate", (series.all_day_date IS NOT NULL) AS "seriesAllDay",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
