@@ -9,3 +9,4 @@ Controls use the controller WebConsole Emulate endpoint to generate NetLinx butt
 Control events target the existing virtual NetLinx device `33001`, combined with the touchpanel in the installed program. Device `34001` is not listed by this controller. The module does not create or register devices in NetLinx. Feedback reads the existing touchpanel and combined virtual device using the TP4 port and level mappings. Smart-Church page navigation stays local and never issues touchpanel page changes.
 
 For the Steffisburg master, the touchpanel is device `10001` and the Smart-Church control target is device `33001`, both on system `1`. Home mode buttons use channels `11`–`16`. The four DSP status lamps read panel channels `21`–`24` on port `1`; the API also reads TP4 feedback ports `2`, `3`, `9`, `10`, and `13` for live channel states on the other pages. Channel and audio mappings are fixed module data sourced from the TP4 project.
+

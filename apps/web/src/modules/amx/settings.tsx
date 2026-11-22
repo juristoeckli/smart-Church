@@ -1,2 +1,74 @@
-YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíÛN¹N‹Z–‹­¦ëeŠw¬Õ¥µÁ½ÉĞìÕÍ•™™•Ğ°ÕÍ•MÑ…Ñ”°ÑåÁ”½ÉµÙ•¹Ğô™É½´€‰É•…Ğˆì4)¥µÁ½ÉĞÑåÁ”ì5½‘Õ±•M•ÑÑ¥¹Í½¹Ñ•áĞô™É½´€ˆ¸¸¼¸¸½µ½‘Õ±”µÉ•¥ÍÑÉäˆì4)¥µÁ½ÉĞì…Õ‘¥½A…•Ìô™É½´€ˆ¸½…Õ‘¥¼µÁ…•Ìˆì4)¥µÁ½ÉĞ€ˆ¸½…µà¹ÍÌˆì4(4)ÑåÁ”Ñ¥½¸€ôì¥èÍÑÉ¥¹œì¹…µ”èÍÑÉ¥¹œì½µµ…¹èÍÑÉ¥¹œôì4)ÑåÁ”M•ÑÑ¥¹Ì€ôì¡½ÍĞèÍÑÉ¥¹œìÁ½ÉĞè¹Õµ‰•ÈìÕÍ•É¹…µ”èÍÑÉ¥¹œìÁ…ÍÍİ½ÉèÍÑÉ¥¹œì±•…ÉA…ÍÍİ½Éè‰½½±•…¸ìÁ…ÍÍİ½É‘½¹™¥ÕÉ•üè‰½½±•…¸ì…Ñ¥½¹ÌèÑ¥½¹mtôì4)½¹ÍĞÉ½½µÑ¥½¹ÌèÑ¥½¹mt€ôl4(€ì¥è€‰¡…±°µÉ½ÍÍİ¥Í”ˆ°¹…µ”è€‰•µ•¥¹‘•Í……°ÅÕ•Èˆ°½µµ…¹è€‰%MAlÌÌÀÀÄèÄèÄ°ÄÅtˆô°4(€ì¥è€‰¡…±°µ±•¹Ñ¡İ¥Í”ˆ°¹…µ”è€‰•µ•¥¹‘•Í……°³‘¹Ìˆ°½µµ…¹è€‰%MAlÌÌÀÀÄèÄèÄ°ÄÙtˆô°4(€ì¥è€‰½¹™•É•¹”´Äˆ°¹…µ”è€‰-½¹™•É•¹éÍ……°€Äˆ°½µµ…¹è€‰%MAlÌÌÀÀÄèÄèÄ°ÄÍtˆô°4(€ì¥è€‰±¥‰É…Éäˆ°¹…µ”è€‰	¥‰±¥½Ñ¡•¬ˆ°½µµ…¹è€‰%MAlÌÌÀÀÄèÄèÄ°ÄÉtˆô°4(€ì¥è€‰…±°µ…ÕÑ½¹½µ½ÕÌˆ°¹…µ”è€‰±±”K‘Õµ”ÕÑ½¹½´ˆ°½µµ…¹è€‰%MAlÌÌÀÀÄèÄèÄ°ÄÕtˆô°4(€ì¥è€‰½¹™•É•¹”µ±…É”ˆ°¹…µ”è€‰-½¹™•É•¹èÉ½ÍÌˆ°½µµ…¹è€‰%MAlÌÌÀÀÄèÄèÄ°ÄÑtˆô°4)tì4)½¹ÍĞ¥¹¥Ñ¥…±M•ÑÑ¥¹ÌèM•ÑÑ¥¹Ì€ôì¡½ÍĞè€ˆˆ°Á½ÉĞè€ÈÌ°ÕÍ•É¹…µ”è€ˆˆ°Á…ÍÍİ½Éè€ˆˆ°±•…ÉA…ÍÍİ½Éè™…±Í”°…Ñ¥½¹ÌèÉ½½µÑ¥½¹Ìôì4(4)™Õ¹Ñ¥½¸½µÁ±•Ñ•M•ÑÑ¥¹Ì¡Í•ÑÑ¥¹ÌèA…ÉÑ¥…°ñM•ÑÑ¥¹Ìø¤èM•ÑÑ¥¹Ìì4(€É•ÑÕÉ¸ì€¸¸¹¥¹¥Ñ¥…±M•ÑÑ¥¹Ì°€¸¸¹Í•ÑÑ¥¹Ì°…Ñ¥½¹ÌèÉ½½µÑ¥½¹Ì°Á…ÍÍİ½Éè€ˆˆ°±•…ÉA…ÍÍİ½Éè™…±Í”ôì4)ô4(4)…Íå¹Œ™Õ¹Ñ¥½¸É•…‘I•ÍÁ½¹Í”ñPø¡É•ÍÁ½¹Í”èI•ÍÁ½¹Í”¤èAÉ½µ¥Í”ñP€˜ì•ÉÉ½ÈüèÍÑÉ¥¹œôøì4(€½¹ÍĞ‘…Ñ„€ô…İ…¥ĞÉ•ÍÁ½¹Í”¹©Í½¸ ¤…ÌP€˜ì•ÉÉ½ÈüèÍÑÉ¥¹œôì4(€¥˜€ …É•ÍÁ½¹Í”¹½¬¤Ñ¡É½Ü¹•ÜÉÉ½È¡‘…Ñ„¹•ÉÉ½È€üü€‰Q¡”5`É•ÅÕ•ÍĞ™…¥±—]:æÚ$z{-®éÜj×÷&CÆ–çWBG—SÒ'77v÷&B"WFô6ö×ÆWFSÒ&7W'&VçB×77v÷&B"fÇVS×·6WGF–æw2ç77v÷&GÒöä6†ævS×²†WfVçB’Óâ6WE6WGF–æw2‚†7W'&VçB’Óâ‡²ââæ7W'&VçBÂ77v÷&C¢WfVçBçF&vWBçfÇVRÂ6ÆV%77v÷&C¢fÇ6RÒ’—ÒÖ„ÆVæwFƒ×³#SgÒÆ6V†öÆFW#×·6WGF–æw2ç77v÷&D6öæf–wW&VBò%6fVB77v÷&B—2&WF–æVB–bÆVgB&Ææ²"¢$ÆVfRV×G’–bFVÆæWB†2æòÆöv–â'ÒóãÂöÆ&VÃàĞ¢·6WGF–æw2ç77v÷&D6öæf–wW&VBbbÆÆ&VÂ6Æ74æÖSÒ&×‚×77v÷&BÖ6ÆV"#ãÆ–çWBG—SÒ&6†V6¶&÷‚"6†V6¶VC×·6WGF–æw2æ6ÆV%77v÷&GÒöä6†ævS×²†WfVçB’Óâ6WE6WGF–æw2‚†7W'&VçB’Óâ‡²ââæ7W'&VçBÂ6ÆV%77v÷&C¢WfVçBçF&vWBæ6†V6¶VBÂ77v÷&C¢""Ò’—Òóä6ÆV"F†R6fVBFVÆæWB77v÷&CÂöÆ&VÃçĞĞ¢ÆƒCå&ööÒ6†ææVÂÖ–æw3ÂöƒCàĞ¢·&ööÔ7F–öç2æÖ‚†7F–öâ’ÓâÆF—b6Æ74æÖSÒ&×‚Ö7F–öâÖVF—F÷""¶W“×¶7F–öâæ–GÓãÇ7G&öæsç¶7F–öâææÖWÓÂ÷7G&öæsãÆÆ&VÃä6öçG&öÆÆW"WfVçCÆ–çWB&–ÖÆ&VÃ×¶G¶7F–öâææÖWÒ6öçG&öÆÆW"WfVçFÒfÇVS×¶7F–öâæ6öÖÖæGÒ&VDöæÇ’óãÂöÆ&VÃãÂöF—câ—ĞĞ¢ÇåF†W6Rf—†VBÖ–æw26öÖRg&öÒF†R7FVff—6'W&rEB&ö¦V7BæB6ææ÷B&RVF—FVB†W&RãÂ÷àĞ¢ÆƒCäVF–òvW3ÂöƒCàĞ¢ÇäVF–òæB7—7FVÒ6öçG&öÇ2W6Rf—†VBÖ–æw2g&öÒF†RæVÂ&ö¦V7BâÖWFW"w&†–726†÷r&VBÖöæÇ’ÆWfVÂfÇVW2g&öÒæWDÆ–ç‚FWf–6R7FGW2ãÂ÷àĞ¢Æ'WGFöâ6Æ74æÖSÒ&'WGFöâ'WGFöâ×&–Ö'’"G—SÒ'7V&Ö—B"F—6&ÆVC×·6f–ærÇÂFW'FÖVçD–GÓç·6f–ærò%6f–æ~(
-b"¢%6fRÕ‚6WGF–æw2'ÓÂö'WGFöãàĞ¢¶fVVF&6²bbÇ6Æ74æÖS×¶f–ÆVBò&×‚ÖW'&÷""¢&×‚ÖfVVF&6²'Ò&öÆSÒ'7FGW2#ç¶fVVF&6·ÓÂ÷çĞĞ¢Âöf÷&ÓçĞĞ¢Â÷6V7F–öãã°Ğ§ĞĞ
+import { useEffect, useState, type FormEvent } from "react";
+import type { ModuleSettingsContext } from "../../module-registry";
+import { audioPages } from "./audio-pages";
+import "./amx.css";
+
+type Action = { id: string; name: string; command: string };
+type Settings = { host: string; port: number; username: string; password: string; clearPassword: boolean; passwordConfigured?: boolean; actions: Action[] };
+const roomActions: Action[] = [
+  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[33001:1:1,11]" },
+  { id: "hall-lengthwise", name: "Gemeindesaal lÃ¤ngs", command: "ICSP[33001:1:1,16]" },
+  { id: "conference-1", name: "Konferenzsaal 1", command: "ICSP[33001:1:1,13]" },
+  { id: "library", name: "Bibliothek", command: "ICSP[33001:1:1,12]" },
+  { id: "all-autonomous", name: "Alle RÃ¤ume Autonom", command: "ICSP[33001:1:1,15]" },
+  { id: "conference-large", name: "Konferenz gross", command: "ICSP[33001:1:1,14]" },
+];
+const initialSettings: Settings = { host: "", port: 23, username: "", password: "", clearPassword: false, actions: roomActions };
+
+function completeSettings(settings: Partial<Settings>): Settings {
+  return { ...initialSettings, ...settings, actions: roomActions, password: "", clearPassword: false };
+}
+
+async function readResponse<T>(response: Response): Promise<T & { error?: string }> {
+  const data = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(data.error ?? "The AMX request failed.");
+  return data;
+}
+
+export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) {
+  const [settings, setSettings] = useState<Settings>(initialSettings);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [feedback, setFeedback] = useState("");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    void fetch("/api/modules/amx/settings", { headers: { "x-department-id": departmentId }, signal: controller.signal })
+      .then((response) => readResponse<Settings>(response))
+      .then((loaded) => setSettings(completeSettings(loaded)))
+      .catch((error: unknown) => { if (!controller.signal.aborted) { setFeedback(error instanceof Error ? error.message : "Could not load AMX settings."); setFailed(true); } })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [departmentId]);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setSaving(true); setFeedback(""); setFailed(false);
+    try {
+      const response = await fetch("/api/modules/amx/settings", { method: "PUT", headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken }, body: JSON.stringify(settings) });
+      setSettings(completeSettings(await readResponse<Settings>(response))); setFeedback("AMX settings saved.");
+    } catch (error) { setFeedback(error instanceof Error ? error.message : "Could not save AMX settings."); setFailed(true); }
+    finally { setSaving(false); }
+  }
+
+  return <section className="amx-panel" aria-labelledby="amx-settings-title">
+    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Controls use the existing NetLinx virtual device 33001; the physical touchpanel is 10001. Room, level, and progress feedback is read from the combined controller devices. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
+    {loading ? <p>Loading AMX settingsâ€¦</p> : <form className="amx-form" onSubmit={(event) => void save(event)}>
+      <label>NetLinx master IP address or hostname<input value={settings.host} onChange={(event) => setSettings((current) => ({ ...current, host: event.target.value }))} placeholder="Enter the controller IP address or hostname" required maxLength={253} /></label>
+      <label>Telnet port<input type="number" min={1} max={65535} value={settings.port} onChange={(event) => setSettings((current) => ({ ...current, port: Number(event.target.value) }))} required /></label>
+      <p>AMX terminal control and feedback use Telnet (default port 23). Leave the login empty unless the controller already prompts for one. This module never enables or changes authentication.</p>
+      <label>Existing NetLinx username<input autoComplete="username" value={settings.username} onChange={(event) => setSettings((current) => ({ ...current, username: event.target.value }))} maxLength={64} /></label>
+      <label>Existing NetLinx password<input type="password" autoComplete="current-password" value={settings.password} onChange={(event) => setSettings((current) => ({ ...current, password: event.target.value, clearPassword: false }))} maxLength={256} placeholder={settings.passwordConfigured ? "Saved password is retained if left blank" : "Leave empty if Telnet has no login"} /></label>
+      {settings.passwordConfigured && <label className="amx-password-clear"><input type="checkbox" checked={settings.clearPassword} onChange={(event) => setSettings((current) => ({ ...current, clearPassword: event.target.checked, password: "" }))} />Clear the saved Telnet password</label>}
+      <h4>Room channel mappings</h4>
+      {roomActions.map((action) => <div className="amx-action-editor" key={action.id}><strong>{action.name}</strong><label>Controller event<input aria-label={`${action.name} controller event`} value={action.command} readOnly /></label></div>)}
+      <p>These fixed mappings come from the Steffisburg TP4 project and cannot be edited here.</p>
+      <h4>Audio pages</h4>
+      <p>Audio and system controls use fixed mappings from the panel project. Meter graphics show read-only level values from NetLinx device status.</p>
+      <button className="button button-primary" type="submit" disabled={saving || !departmentId}>{saving ? "Savingâ€¦" : "Save AMX settings"}</button>
+      {feedback && <p className={failed ? "amx-error" : "amx-feedback"} role="status">{feedback}</p>}
+    </form>}
+  </section>;
+}
+

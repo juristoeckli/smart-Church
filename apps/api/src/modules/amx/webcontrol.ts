@@ -1,1 +1,76 @@
-YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×^wN‹Z–‹­¦ëeŠw¬Õ¥µÁ½ÉĞÑåÁ”ì•Ù¥•‘‘É•ÍÌ°Q•±¹•ÑM•ÑÑ¥¹Ìô™É½´€ˆ¸½Ñ•±¹•Ğ¹©Ìˆì()ÑåÁ”µÕ±…Ñ•‘	ÕÑÑ½¹Ñ¥½¸€ô€‰¡…¹¹•±AÕÍ ˆğ€‰¡…¹¹•±I•±•…Í”ˆì((¼¨¨(€¨5`]•‰½¹Í½±”Ì‘½Õµ•¹Ñ•½¹ÑÉ½°½µÕ±…Ñ”Á…Ñ É•…Ñ•Ì„É•…°9•Ñ1¥¹à(€¨AUM ½I1M•Ù•¹Ğ¸Q•±¹•Ğ=8½AU1M½¹±ä¡…¹•Ì¡…¹¹•°ÍÑ…Ñ”…¹‘½•Ì¹½Ğ(€¨•¹•É…Ñ”Ñ¡”	UQQ=9}Y9PÑ¡¥ÌÁÉ½©•Ğ•áÁ•ÑÌ¸(€¨¼)•áÁ½ÉĞ±…ÍÌ9•Ñ1¥¹á]•‰½¹ÑÉ½±M•ÍÍ¥½¸ì(€ÁÉ¥Ù…Ñ”½½­¥•!•…‘•È€ô€ˆˆì(€ÁÉ¥Ù…Ñ”É•…‘½¹±ä½É¥¥¸èÍÑÉ¥¹œì((€½¹ÍÑÉÕÑ½È¡Í•ÑÑ¥¹ÌèA¥¬ñQ•±¹•ÑM•ÑÑ¥¹Ì°€‰¡½ÍĞˆø¤ì(€€€½¹ÍĞ¡½ÍĞ€ôÍ•ÑÑ¥¹Ì¹¡½ÍĞ¹¥¹±Õ‘•Ì ˆèˆ¤€˜˜€…Í•ÑÑ¥¹Ì¹¡½ÍĞ¹ÍÑ…ÉÑÍ]¥Ñ  ‰lˆ¤€ül‘íÍ•ÑÑ¥¹Ì¹¡½ÍÑõu€€èÍ•ÑÑ¥¹Ì¹¡½ÍĞì(€€€Ñ¡¥Ì¹½É¥¥¸€ô¡ÑÑÀè¼¼‘í¡½ÍÑõ€ì(€ô((€…Íå¹Œ½¹¹•Ğ¡Í•ÑÑ¥¹ÌèA¥¬ñQ•±¹•ÑM•ÑÑ¥¹Ì°€‰ÕÍ•É¹…µ”ˆğ€‰Á…ÍÍİ½Éˆø¤ì(€€€¥˜€¡	½½±•…¸¡Í•ÑÑ¥¹Ì¹ÕÍ•É¹…µ”¤€„ôô	½½±•…¸¡Í•ÑÑ¥¹Ì¹Á…ÍÍİ½É¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È ‰¹Ñ•È‰½Ñ Ñ¡”•á¥ÍÑ¥¹œ9•Ñ1¥¹à]•‰½¹Í½±”ÕÍ•É¹…µ”…¹Á…ÍÍİ½É°½È±•…Ù”‰½Ñ ‰±…¹¬¥˜Ñ¡”½¹ÑÉ½±±•ÈÉ•ÅÕ¥É•Ì¹¼±½¥¸¸ˆ¤ì(€€€ô(€€€¥˜€ …Í•ÑÑ¥¹Ì¹ÕÍ•É¹…µ”¤É•ÑÕÉ¸ì((€€€½¹ÍĞÉ•ÍÁ½¹Í”€ô…İ…¥Ğ™•Ñ ¡€‘íÑ¡¥Ì¹½É¥¥¹ô½İ•ˆ½É½½Ğ½±½¥¸¹áµ±€°ì(€€€€€µ•Ñ¡½è€‰A=MPˆ°(€€€€€É•‘¥É•Ğè€‰µ…¹Õ…°ˆ°(€€€€€¡•…‘•ÉÌèì€‰½¹Ñ•¹ĞµÑåÁ”ˆè€‰…ÁÁ±¥…Ñ¥½¸½àµİİÜµ™½É´µÕÉ±•¹½‘•ˆô°(€€€€€‰½‘äè¹•ÜUI1M•…É¡A…É…µÌ¡ì…Ñ¥½¸è€‰±½¥¸ˆ°Á…Ñ è€ˆ½İ•ˆ½¡ÑÑÀ½‘•™…Õ±Ğ¹¡Ñµ°ˆ°ÕÍ•É9…µ”èÍ•ÑÑ¥¹Ì¹ÕÍ•É¹…µ”°Á…ÍÍİ½ÉèÍ•ÑÑ¥¹Ì¹Á…ÍÍİ½É€üü€ˆˆô¤°(€€€€€Í¥¹…°è‰½ÉÑM¥¹…°¹Ñ¥µ•½ÕĞ àÀÀÀ¤°(€€€ô¤ì(€€€½¹ÍĞ‰½‘ä€ô…İ…¥ĞÉ•ÍÁ½¹Í”¹Ñ•áĞ ¤ì(€€€½¹ÍĞÍ•Ñ½½­¥•Ì€ôÉ•ÍÁ½¹Í”¹¡•…‘•ÉÌ¹•ÑM•Ñ½½­¥”ü¸ ¤€üümtì(€€€Ó^w¶‰ËkºwµçL¹‘•Ù¥”¤ñğ…‘‘É•ÍÌ¹‘•Ù¥”€ğ€Äñğ…‘‘É•ÍÌ¹‘•Ù¥”€ø€ØÔÔÌÔ(€€€€€ñğ€…9Õµ‰•È¹¥Í%¹Ñ••È¡…‘‘É•ÍÌ¹Á½ÉĞ¤ñğ…‘‘É•ÍÌ¹Á½ÉĞ€ğ€Äñğ…‘‘É•ÍÌ¹Á½ÉĞ€ø€ØÔÔÌÔ(€€€€€ñğ€…9Õµ‰•È¹¥Í%¹Ñ••È¡…‘‘É•ÍÌ¹ÍåÍÑ•´¤ñğ…‘‘É•ÍÌ¹ÍåÍÑ•´€ğ€Àñğ…‘‘É•ÍÌ¹ÍåÍÑ•´€ø€ØÔÔÌÔ(€€€€€ñğ€…9Õµ‰•È¹¥Í%¹Ñ••È¡¡…¹¹•°¤ñğ¡…¹¹•°€ğ€Äñğ¡…¹¹•°€ø€ØÔÔÌÔ¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È ‰%¹Ù…±¥9•Ñ1¥¹à•µÕ±…Ñ•‘•Ù¥”…‘‘É•ÍÌ½È¡…¹¹•°¸ˆ¤ì(€€€ô(€€€½¹ÍĞÕÉ°€ô¹•ÜUI0 ˆ½İ•ˆ½‘•Ù¥•Ì½½¹ÑÉ½°¹áµ°ˆ°Ñ¡¥Ì¹½É¥¥¸¤ì(€€€ÕÉ°¹Í•…É €ô¹•ÜUI1M•…É¡A…É…µÌ¡ì(€€€€€ÍåÍÑ•µ9Õµ‰•ÈèMÑÉ¥¹œ¡…‘‘É•ÍÌ¹ÍåÍÑ•´¤°‘•Ù¥•9Õµ‰•ÈèMÑÉ¥¹œ¡…‘‘É•ÍÌ¹‘•Ù¥”¤°Á½ÉÑ9Õµ‰•ÈèMÑÉ¥¹œ¡…‘‘É•ÍÌ¹Á½ÉĞ¤°(€€€€€µ•Ñ¡½è€‰•µÕ±…Ñ”ˆ°¡…¹¹•°èMÑÉ¥¹œ¡¡…¹¹•°¤°…Ñ¥½¸°(€€€ô¤¹Ñ½MÑÉ¥¹œ ¤ì(€€€½¹ÍĞÉ•ÍÁ½¹Í”€ô…İ…¥Ğ™•Ñ ¡ÕÉ°°ì(€€€€€¡•…‘•ÉÌèÑ¡¥Ì¹½½­¥•!•…‘•È€üì½½­¥”èÑ¡¥Ì¹½½­¥•!•…‘•Èô€èíô°(€€€€€É•‘¥É•Ğè€‰µ…¹Õ…°ˆ°(€€€€€Í¥¹…°è‰½ÉÑM¥¹…°¹Ñ¥µ•½ÕĞ àÀÀÀ¤°(€€€ô¤ì(€€€½¹ÍĞ‰½‘ä€ô…İ…¥ĞÉ•ÍÁ½¹Í”¹Ñ•áĞ ¤ì(€€€¥˜€ …É•ÍÁ½¹Í”¹½¬ñğ€„¼ñ½¹ÑÉ½° üéqÍğø¤½¤¹Ñ•ÍĞ¡‰½‘ä¤ñğ€¼ñ™…¥±•ùqÌ¨ÅqÌ¨ñp½™…¥±•ùğñ±½¥¹qˆ½¤¹Ñ•ÍĞ¡‰½‘ä¤¤ì(€€€€€Ñ¡É½Ü¹•ÜÉÉ½È¡9•Ñ1¥¹à]•‰½¹Í½±”‘¥¹½Ğ½¹™¥É´Ñ¡”€‘í…Ñ¥½¸€ôôô€‰¡…¹¹•±AÕÍ ˆ€ü€‰‰ÕÑÑ½¸ÁÉ•ÍÌˆ€è€‰‰ÕÑÑ½¸É•±•…Í”‰ô½¸¡…¹¹•°€‘í¡…¹¹•±ô¹€¤ì(€€€ô(€ô((€±½Í” ¤ìÑ¡¥Ì¹½½­¥•!•…‘•È€ô€ˆˆìô)ô()•áÁ½ÉĞ…Íå¹Œ™Õ¹Ñ¥½¸½Á•¹9•Ñ1¥¹á]•‰½¹ÑÉ½±M•ÍÍ¥½¸¡Í•ÑÑ¥¹ÌèQ•±¹•ÑM•ÑÑ¥¹Ì¤ì(€½¹ÍĞÍ•ÍÍ¥½¸€ô¹•Ü9•Ñ1¥¹á]•‰½¹ÑÉ½±M•ÍÍ¥½¸¡Í•ÑÑ¥¹Ì¤ì(€ÑÉäì(€€€…İ…¥ĞÍ•ÍÍ¥½¸¹½¹¹•Ğ¡Í•ÑÑ¥¹Ì¤ì(€€€É•ÑÕÉ¸Í•ÍÍ¥½¸ì(€ô…Ñ €¡•ÉÉ½È¤ì(€€€Í•ÍÍ¥½¸¹±½Í” ¤ì(€€€Ñ¡É½Ü•ÉÉ½Èì(€ô)ô(
+import type { DeviceAddress, TelnetSettings } from "./telnet.js";
+
+type EmulatedButtonAction = "channelPush" | "channelRelease";
+
+/**
+ * AMX WebConsole's documented Control/Emulate path creates a real NetLinx
+ * PUSH/RELEASE event. Telnet ON/PULSE only changes channel state and does not
+ * generate the BUTTON_EVENT this project expects.
+ */
+export class NetLinxWebControlSession {
+  private cookieHeader = "";
+  private readonly origin: string;
+
+  constructor(settings: Pick<TelnetSettings, "host">) {
+    const host = settings.host.includes(":") && !settings.host.startsWith("[") ? `[${settings.host}]` : settings.host;
+    this.origin = `http://${host}`;
+  }
+
+  async connect(settings: Pick<TelnetSettings, "username" | "password">) {
+    if (Boolean(settings.username) !== Boolean(settings.password)) {
+      throw new Error("Enter both the existing NetLinx WebConsole username and password, or leave both blank if the controller requires no login.");
+    }
+    if (!settings.username) return;
+
+    const response = await fetch(`${this.origin}/web/root/login.xml`, {
+      method: "POST",
+      redirect: "manual",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ action: "login", path: "/web/http/default.html", userName: settings.username, password: settings.password ?? "" }),
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await response.text();
+    const setCookies = response.headers.getSetCookie?.() ?? [];
+    this.cookieHeader = setCookies.map((cookie) => cookie.split(";", 1)[0]).filter(Boolean).join("; ");
+    if (!response.ok || /<failed>\s*1\s*<\/failed>|invalid username|incorrect password/i.test(body) || !this.cookieHeader) {
+      throw new Error("NetLinx WebConsole did not establish a session with the saved login.");
+    }
+  }
+
+  async emulateButton(address: DeviceAddress, channel: number, action: EmulatedButtonAction) {
+    if (!Number.isInteger(address.device) || address.device < 1 || address.device > 65535
+      || !Number.isInteger(address.port) || address.port < 1 || address.port > 65535
+      || !Number.isInteger(address.system) || address.system < 0 || address.system > 65535
+      || !Number.isInteger(channel) || channel < 1 || channel > 65535) {
+      throw new Error("Invalid NetLinx emulated device address or channel.");
+    }
+    const url = new URL("/web/devices/control.xml", this.origin);
+    url.search = new URLSearchParams({
+      systemNumber: String(address.system), deviceNumber: String(address.device), portNumber: String(address.port),
+      method: "emulate", channel: String(channel), action,
+    }).toString();
+    const response = await fetch(url, {
+      headers: this.cookieHeader ? { cookie: this.cookieHeader } : {},
+      redirect: "manual",
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = await response.text();
+    if (!response.ok || !/<control(?:\s|>)/i.test(body) || /<failed>\s*1\s*<\/failed>|<login\b/i.test(body)) {
+      throw new Error(`NetLinx WebConsole did not confirm the ${action === "channelPush" ? "button press" : "button release"} on channel ${channel}.`);
+    }
+  }
+
+  close() { this.cookieHeader = ""; }
+}
+
+export async function openNetLinxWebControlSession(settings: TelnetSettings) {
+  const session = new NetLinxWebControlSession(settings);
+  try {
+    await session.connect(settings);
+    return session;
+  } catch (error) {
+    session.close();
+    throw error;
+  }
+}
+

@@ -1,1 +1,284 @@
-YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíë^ýN‹Z–‹­¦ëeŠw¬Õ¥µÁ½ÉÐìÉ…¹‘½µUU%ô™É½´€‰¹½‘”éÉåÁÑ¼ˆì4)¥µÁ½ÉÐì¥Í%@ô™É½´€‰¹½‘”é¹•Ðˆì4)¥µÁ½ÉÐÑåÁ”ì…ÍÑ¥™å%¹ÍÑ…¹”ô™É½´€‰™…ÍÑ¥™äˆì4)¥µÁ½ÉÐÑåÁ”ì5½‘Õ±•M•ÉÙ•É½¹Ñ•áÐô™É½´€ˆ¸¸½µ½‘Õ±”µÍ‘¬¹©Ìˆì4)¥µÁ½ÉÐì…µáÕ‘¥½Ñ¥½¹Ì°…µáÕ‘¥½1•Ù•±Ì°…µáÕ‘¥½A…•Ì°…µáMåÍÑ•µÑ¥½¹Ìô™É½´€ˆ¸½…Õ‘¥¼µµ…ÁÁ¥¹Ì¹©Ìˆì4)¥µÁ½ÉÐì‘•ÉåÁÑQ•±¹•ÑA…ÍÍÝ½É°•¹ÉåÁÑQ•±¹•ÑA…ÍÍÝ½Éô™É½´€ˆ¸½É•‘•¹Ñ¥…±Ì¹©Ìˆì4)¥µÁ½ÉÐì½Á•¹9•Ñ1¥¹á]•‰½¹ÑÉ½±M•ÍÍ¥½¸°ÑåÁ”9•Ñ1¥¹á]•‰½¹ÑÉ½±M•ÍÍ¥½¸ô™É½´€ˆ¸½Ý•‰½¹ÑÉ½°¹©Ìˆì4)¥µÁ½ÉÐì9•Ñ1¥¹áQ•Éµ¥¹…°°É•…‘Q•±¹•Ñ•Ù¥•¡…¹¹•±Ì°É•…‘Q•±¹•Ñ•Ù¥•MÑ…ÑÕÌ°ÑåÁ”Q•±¹•ÑM•ÑÑ¥¹Ìô™É½´€ˆ¸½Ñ•±¹•Ð¹©Ìˆì4(4)ÑåÁ”µáÑ¥½¸€ôì¥èÍÑÉ¥¹œì¹…µ”èÍÑÉ¥¹œì½µµ…¹èÍÑÉ¥¹œôì4)ÑåÁ”µáM•ÑÑ¥¹Ì€ôì¡½ÍÐèÍÑÉ¥¹œìÁ½ÉÐè¹Õµ‰•ÈìÕÍ•É¹…µ”èÍÑÉ¥¹œìÁ…ÍÍÝ½ÉèÍÑÉ¥¹œì±•…ÉA…ÍÍÝ½Éè‰½½±•…¸ì…Ñ¥½¹ÌèµáÑ¥½¹mtôì4(¼¼Q¡”ÉÕ¹¹¥¹œ	XÁÉ½É…´•áÁ½Í•Ì…¹½µ‰¥¹•ÌÙ¥ÉÑÕ…°‘•Ù¥”€ÌÌÀÀÄÝ¥Ñ Ñ¡”4(¼¼•á¥ÍÑ¥¹œÑ½Õ¡Á…¹•±Ì¸•Ù¥”€ÌÐÀÀÄ¥Ì¹½ÐÁÉ•Í•¹Ð½¸Ñ¡¥Ì½¹ÑÉ½±±•È¸4)½¹ÍÐ=9QI=1}Y%€ô€ÌÌÀÀÄì4)½¹ÍÐÉ½½µÑ¥½¹ÌèµáÑ¥½¹mt€ôl4(€ì¥è€‰¡…±°µÉ½ÍÍÝ¥Í”ˆ°¹…µ”è€‰•µ•¥¹‘•Í……°ÅÕ•Èˆ°½µµ…¹è%MAl‘í=9QI=1}Y%ôèÄèÄ°ÄÅu€ô°4(€ì¥è€‰¡…±°µ±•¹Ñ¡Ý¥Í”ˆ°¹…µ”è€‰•µ•¥¹‘•Í……°³‘¹Ìˆ°½µµ…¹è%MAl‘í=9QI=1}Y%ôèÄèÄ°ÄÙu€ô°4(€ì¥è€‰½¹™•É•¹”´Äˆ°¹…µ”è€‰-½¹™•É•¹éÍ……°€Äˆ°½µµ…¹è%MAl‘í=9QI=1}Y%ôèÄèÄ°ÄÍu€ô°4(€ì¥è€‰±¥‰É…Éäˆ°¹…µ”è€‰	¥‰±¥½Ñ¡•¬ˆ°½µµ…¹è%MAl‘í=9QI=1}Y%ôèÄèÄ°ÄÉu€ô°4(€ì¥è€‰…±°µ…ÕÑ½¹½µ½ÕÌˆ°¹…µ”è€‰±±”K‘Õµ”ÕÑ½¹½´ˆ°½µµ…¹è%MAl‘í=9QI=1}Y%ôèÄèÄ°ÄÕu€ô°4(€ì¥ë{öÚ$z{-®éÜj×’&WGW&â&WÇ’æ6öFRƒC’’ç6VæB‡²W'&÷#¢$VçFW"F†RæWDÆ–ç‚6öçG&öÆÆW"•FG&W72÷"†÷7FæÖRVæFW"Õ‚ÖöGVÆR6WGF–æw2f—'7Bâ"Ò“°Ð¢6öç7B7—7FVÔ7F–öç3¢×„7F–öåµÒÒ×…7—7FVÔ7F–öç2æÖ‚†—FVÒ’Óâ‡²–C¢—FVÒæ–BÂæÖS¢—FVÒææÖRÂ6öÖÖæC¢”55²G´4ôåE$ôÅôDUd”4WÓ¢G¶—FVÒç÷'BóòÓ£ÂG¶—FVÒæ6†ææVÇÕÖÒ’“°Ð¢6öç7B7F–öâÒ²ââç&ööÔ7F–öç2Âââç7—7FVÔ7F–öç2ÂââæVF–ô7F–öç5Òæf–æB‚†—FVÒ’Óâ—FVÒæ–BÓÓÒ&WVW7Bæ&öG’æ7F–öä–B“°Ð¢–b‚7F–öâ’&WGW&â&WÇ’æ6öFRƒC2’ç6VæB‡²W'&÷#¢%F†—2Õ‚&ööÒ7F–öâ—2æ÷B7W÷'FVBâ"Ò“°Ð¢G'’°Ð¢6öç7BÖF6‚Ò7F–öâæ6öÖÖæBæÖF6‚†æWr&VtW‡†ä”55ÅÅ²G´4ôåE$ôÅôDUd”4WÓ¢…ÅÆB²“£Â…ÅÆB²•ÅÅÒF’“°Ð¢6öç7B÷'BÒçVÖ&W"†ÖF6ƒòå³Ò“°Ð¢6öç7B6†ææVÂÒçVÖ&W"†ÖF6ƒòå³%Ò“°Ð¢–b‚çVÖ&W"æ—4–çFVvW"‡÷'B’ÇÂçVÖ&W"æ—4–çFVvW"†6†ææVÂ’’&WGW&â&WÇ’æ6öFRƒC’’ç6VæB‡²W'&÷#¢%F†R6öæf—&ÖVBFVÆæWBÖ–ær—2–çfÆ–Bâ"Ò“°Ð¢6öç7BFG&W72Ò²FWf–6S¢4ôåE$ôÅôDUd”4RÂ÷'BÂ7—7FVÓ¢Ó°Ð¢6öç7B6W76–öâÒv—B÷VäæWDÆ–ç…vV$6öçG&öÅ6W76–öâ‡6WGF–æw2“°Ð¢G'’°Ð¢v—B6W76–öâæV×VÆFT'WGFöâ†FG&W72Â6†ææVÂÂ&6†ææVÅW6‚"“°Ð¢v—BæWr&öÖ—6R‚‡&W6öÇfR’Óâ6WEF–ÖV÷WB‡&W6öÇfRÂ#’“°Ð¢v—B6W76–öâæV×VÆFT'WGFöâ†FG&W72Â6†ææVÂÂ&6†ææVÅ&VÆV6R"“°Ð¢Òf–æÆÇ’²6W76–öâæ6Æ÷6R‚“²ÐÐ¢&WGW&â²6VçC¢G'VRÂ7F–öä–C¢7F–öâæ–BÓ°Ð¢Ò6F6‚†W'&÷"’°Ð¢&WGW&â&WÇ’æ6öFRƒS"’ç6VæB‡²W'&÷#¢W'&÷"–ç7Fæ6VöbW'&÷"òW'&÷"æÖW76vR¢$6÷VÆBæ÷B6VæBF†RÕ‚6öÖÖæBâ"Ò“°Ð¢ÐÐ¢Ò“°Ð§ÐÐ Ð
+import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
+import type { FastifyInstance } from "fastify";
+import type { ModuleServerContext } from "../module-sdk.js";
+import { amxAudioActions, amxAudioLevels, amxAudioPages, amxSystemActions } from "./audio-mappings.js";
+import { decryptTelnetPassword, encryptTelnetPassword } from "./credentials.js";
+import { openNetLinxWebControlSession, type NetLinxWebControlSession } from "./webcontrol.js";
+import { readTelnetDeviceChannels, readTelnetDeviceStatus, type TelnetSettings } from "./telnet.js";
+
+type AmxAction = { id: string; name: string; command: string };
+type AmxSettings = { host: string; port: number; username: string; password: string; clearPassword: boolean; actions: AmxAction[] };
+// The running EBV program exposes and combines virtual device 33001 with the
+// existing touchpanels. Device 34001 is not present on this controller.
+const CONTROL_DEVICE = 33001;
+const roomActions: AmxAction[] = [
+  { id: "hall-crosswise", name: "Gemeindesaal quer", command: `ICSP[${CONTROL_DEVICE}:1:1,11]` },
+  { id: "hall-lengthwise", name: "Gemeindesaal lÃ¤ngs", command: `ICSP[${CONTROL_DEVICE}:1:1,16]` },
+  { id: "conference-1", name: "Konferenzsaal 1", command: `ICSP[${CONTROL_DEVICE}:1:1,13]` },
+  { id: "library", name: "Bibliothek", command: `ICSP[${CONTROL_DEVICE}:1:1,12]` },
+  { id: "all-autonomous", name: "Alle RÃ¤ume Autonom", command: `ICSP[${CONTROL_DEVICE}:1:1,15]` },
+  { id: "conference-large", name: "Konferenz gross", command: `ICSP[${CONTROL_DEVICE}:1:1,14]` },
+];
+const audioActions: AmxAction[] = amxAudioActions.map((item) => ({
+  id: item.id,
+  name: item.name,
+  command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 2}:1,${item.channel}]`,
+}));
+const defaultSettings: AmxSettings = { host: "", port: 23, username: "", password: "", clearPassword: false, actions: roomActions };
+const roomStatusChannels: Array<[number, string]> = [
+  [11, "Gemeindesaal quer"], [16, "Gemeindesaal lÃ¤ngs"], [13, "Konferenzsaal 1"],
+  [12, "Bibliothek"], [15, "Alle RÃ¤ume Autonom"], [14, "Konferenz gross"],
+];
+// TP4 channel feedback is mapped to these panel ports; objects without an
+// explicit channelPort use port 1.
+const panelFeedbackPorts = [1, 2, 3, 9, 10, 13] as const;
+
+function validHost(host: string) {
+  if (!host || host.length > 253 || host.includes("://") || /[\s/@\\]/.test(host)) return false;
+  if (isIP(host)) return true;
+  return /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*\.?$/.test(host);
+}
+
+function cleanSettings(input: AmxSettings): AmxSettings | null {
+  const host = input.host.trim();
+  const username = typeof input.username === "string" ? input.username.trim() : "";
+  const password = typeof input.password === "string" ? input.password : "";
+  if (!validHost(host) || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
+    || username.length > 64 || password.length > 256 || typeof input.clearPassword !== "boolean"
+    || (password && !username) || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
+  const ids = new Set<string>();
+  const actions: AmxAction[] = [];
+  for (const action of input.actions) {
+    const preset = roomActions.find((item) => item.id === action?.id);
+    if (!action || !preset || ids.has(action.id) || action.name !== preset.name || action.command !== preset.command) return null;
+    ids.add(action.id);
+    actions.push({ id: action.id, name: preset.name, command: action.command });
+  }
+  if (roomActions.some((preset) => !ids.has(preset.id))) return null;
+  return { host, port: input.port, username, password, clearPassword: input.clearPassword, actions: roomActions.map((preset) => actions.find((item) => item.id === preset.id)!) };
+}
+
+export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
+  const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
+  const heldChannels = new Map<string, { session: NetLinxWebControlSession; departmentId: string; userId: string; address: { device: number; port: number; system: number }; channel: number; timer: NodeJS.Timeout }>();
+
+  async function getTelnetSettings(departmentId: string): Promise<TelnetSettings | null> {
+    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>(
+      "SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const row = result.rows[0];
+    if (!row?.host) return null;
+    return { host: row.host, port: row.port === 1319 ? 23 : row.port || 23, username: row.username ?? "", password: row.password_ciphertext ? decryptTelnetPassword(row.password_ciphertext) : "" };
+  }
+
+  function releaseHeldChannel(pressId: string) {
+    const held = heldChannels.get(pressId);
+    if (!held) return Promise.resolve(false);
+    heldChannels.delete(pressId);
+    clearTimeout(held.timer);
+    return held.session.emulateButton(held.address, held.channel, "channelRelease")
+      .finally(() => held.session.close());
+  }
+
+  async function requireAmxDepartment(request: Parameters<typeof resolveDepartmentId>[0], reply: Parameters<typeof resolveDepartmentId>[1], requireSiteAdmin = false) {
+    if (!context.activation.isEnabled()) {
+      reply.code(404).send({ error: "AMX Control is not enabled for this installation." });
+      return null;
+    }
+    if (!pool || !isDatabaseReady()) {
+      reply.code(503).send({ error: "The account database is unavailable." });
+      return null;
+    }
+    const departmentId = await resolveDepartmentId(request, reply, requireSiteAdmin);
+    if (!departmentId) return null;
+    const enabled = await pool.query<{ enabled_modules: string[] }>("SELECT enabled_modules FROM departments WHERE id=$1", [departmentId]);
+    if (!(enabled.rows[0]?.enabled_modules ?? []).includes("amx")) {
+      reply.code(404).send({ error: "AMX Control is not enabled for this location." });
+      return null;
+    }
+    if (!requireSiteAdmin) {
+      const membership = await pool.query<{ role: string; module_permissions: Record<string, string[]> | null }>(
+        "SELECT role,module_permissions FROM department_memberships WHERE department_id=$1 AND user_id=$2",
+        [departmentId, request.authenticatedUser?.id],
+      );
+      const access = membership.rows[0];
+      if (access?.role !== "site_admin" && !(access?.module_permissions?.amx ?? []).includes("control")) {
+        reply.code(403).send({ error: "AMX control access has not been granted for this location." });
+        return null;
+      }
+    }
+    return departmentId;
+  }
+
+  app.get("/api/modules/amx/status", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const result = await pool!.query<{ host: string }>("SELECT host FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    return { configured: Boolean(result.rows[0]?.host) };
+  });
+
+  app.get<{ Querystring: { page?: string } }>("/api/modules/amx/levels", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const settings = await getTelnetSettings(departmentId);
+    if (!settings?.host) return reply.code(409).send({ error: "Enter the NetLinx controller address under AMX module settings first." });
+    if (request.query.page === "PWR_COUNT") {
+      try {
+        const status = await readTelnetDeviceStatus(settings, { device: 10001, port: 1, system: 1 });
+        if (status.levels[1] === undefined) throw new Error("NetLinx Telnet status did not include activation progress level 1.");
+        return { page: "PWR_COUNT", values: { 1: status.levels[1] }, updatedAt: new Date().toISOString() };
+      } catch (error) {
+        return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read AMX activation progress." });
+      }
+    }
+    const page = amxAudioPages.find((item) => item.id === request.query.page);
+    if (!page) return reply.code(400).send({ error: "Choose a known AMX audio page to read its levels." });
+    const pageLevels = amxAudioLevels.filter((item) => item.page === page.id);
+    const ports = [...new Set(pageLevels.map((item) => item.port))];
+    if (!pageLevels.length || !ports.length) return { page: page.id, values: {} };
+    try {
+      const values: Record<string, number> = {};
+      for (const port of ports) {
+        const requested = [...new Set(pageLevels.filter((item) => item.port === port).map((item) => item.level))];
+        const status = await readTelnetDeviceStatus(settings, { device: 10001, port, system: 1 });
+        for (const level of requested) {
+          const value = status.levels[level];
+          if (value === undefined) throw new Error(`NetLinx Telnet status did not include level ${level} on port ${port}.`);
+          values[level] = value;
+        }
+      }
+      return { page: page.id, values, updatedAt: new Date().toISOString() };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read AMX level feedback." });
+    }
+  });
+
+  app.get("/api/modules/amx/controller-state", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const settings = await getTelnetSettings(departmentId);
+    if (!settings) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+    try {
+      const channelsByPort: Record<string, number[]> = {};
+      for (const port of panelFeedbackPorts) channelsByPort[String(port)] = await readTelnetDeviceChannels(settings, { device: 10001, port, system: 1 });
+      const portOneChannels = channelsByPort["1"] ?? [];
+      const activeRooms = roomStatusChannels.filter(([channel]) => portOneChannels.includes(channel)).map(([, name]) => name);
+      return { currentRoom: activeRooms.length === 1 ? activeRooms[0] : null, activeRooms, channels: portOneChannels, channelsByPort, updatedAt: new Date().toISOString() };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not read current AMX mode." });
+    }
+  });
+
+  app.get("/api/modules/amx/settings", async (request, reply) => {
+    const departmentId = await requireAmxDepartment(request, reply, true);
+    if (!departmentId) return reply;
+    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>(
+      "SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const row = result.rows[0];
+    return row ? { host: row.host, port: row.port === 1319 ? 23 : row.port || 23, username: row.username ?? "", password: "", clearPassword: false, passwordConfigured: Boolean(row.password_ciphertext), actions: roomActions } : defaultSettings;
+  });
+
+  app.put<{ Body: AmxSettings }>("/api/modules/amx/settings", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["host", "port", "username", "password", "clearPassword", "actions"], properties: {
+      host: { type: "string", minLength: 1, maxLength: 253 }, port: { type: "integer", minimum: 1, maximum: 65535 },
+      username: { type: "string", maxLength: 64 }, password: { type: "string", maxLength: 256 }, clearPassword: { type: "boolean" },
+      actions: { type: "array", minItems: 6, maxItems: 6, items: { type: "object", additionalProperties: false, required: ["id", "name", "command"], properties: {
+        id: { type: "string", minLength: 1, maxLength: 64 }, name: { type: "string", minLength: 1, maxLength: 80 }, command: { type: "string", maxLength: 512 },
+      } } },
+    } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await requireAmxDepartment(request, reply, true);
+    if (!departmentId) return reply;
+    const settings = cleanSettings(request.body);
+    if (!settings) return reply.code(400).send({ error: "Enter a valid NetLinx host, Telnet port, and existing login if required." });
+    const existing = await pool!.query<{ password_ciphertext: string }>("SELECT password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const currentCiphertext = existing.rows[0]?.password_ciphertext ?? "";
+    const passwordCiphertext = settings.clearPassword ? "" : settings.password ? encryptTelnetPassword(settings.password) : currentCiphertext;
+    await pool!.query(`INSERT INTO amx_site_settings(department_id,host,port,username,password_ciphertext,actions) VALUES($1,$2,$3,$4,$5,$6::jsonb)
+      ON CONFLICT(department_id) DO UPDATE SET host=EXCLUDED.host,port=EXCLUDED.port,username=EXCLUDED.username,password_ciphertext=EXCLUDED.password_ciphertext,actions=EXCLUDED.actions,updated_at=now()`,
+    [departmentId, settings.host, settings.port, settings.username, passwordCiphertext, JSON.stringify(settings.actions)]);
+    return { ...settings, password: "", clearPassword: false, passwordConfigured: Boolean(passwordCiphertext) };
+  });
+
+  app.post<{ Body: { actionId: string } }>("/api/modules/amx/press", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["actionId"], properties: { actionId: { type: "string", minLength: 1, maxLength: 64 } } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const userId = request.authenticatedUser?.id;
+    if (!userId) return reply.code(401).send({ error: "Sign in to control AMX." });
+    const settings = await getTelnetSettings(departmentId);
+    if (!settings) return reply.code(409).send({ error: "Enter the NetLinx controller address under AMX module settings first." });
+    const controls: AmxAction[] = [
+      ...roomActions,
+      ...amxSystemActions.map((item) => ({ id: item.id, name: item.name, command: `ICSP[${CONTROL_DEVICE}:1:1,${item.channel}]` })),
+      ...audioActions,
+    ];
+    const action = controls.find((item) => item.id === request.body.actionId);
+    const match = action?.command.match(new RegExp(`^ICSP\\[${CONTROL_DEVICE}:(\\d+):1,(\\d+)\\]$`));
+    if (!match || !action) return reply.code(403).send({ error: "This AMX held control is not mapped." });
+    const address = { device: CONTROL_DEVICE, port: Number(match[1]), system: 1 };
+    const channel = Number(match[2]);
+    let session: NetLinxWebControlSession | undefined;
+    try {
+      session = await openNetLinxWebControlSession(settings);
+      await session.emulateButton(address, channel, "channelPush");
+      const pressId = randomUUID();
+      const timer = setTimeout(() => { void releaseHeldChannel(pressId).catch(() => undefined); }, 30000);
+      heldChannels.set(pressId, { session, departmentId, userId, address, channel, timer });
+      return { pressId, actionId: action.id };
+    } catch (error) {
+      session?.close();
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not hold the AMX channel." });
+    }
+  });
+
+  app.post<{ Body: { pressId: string } }>("/api/modules/amx/release", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["pressId"], properties: { pressId: { type: "string", format: "uuid" } } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const held = heldChannels.get(request.body.pressId);
+    if (!held || held.departmentId !== departmentId || held.userId !== request.authenticatedUser?.id) return reply.code(404).send({ error: "This AMX button press is no longer active." });
+    try {
+      await releaseHeldChannel(request.body.pressId);
+      return { released: true };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not release the AMX channel." });
+    }
+  });
+
+  app.post<{ Body: { actionId: string } }>("/api/modules/amx/send", {
+    schema: { body: { type: "object", additionalProperties: false, required: ["actionId"], properties: { actionId: { type: "string", minLength: 1, maxLength: 64 } } } },
+  }, async (request, reply) => {
+    if (!validateMutation(request, reply)) return reply;
+    const departmentId = await requireAmxDepartment(request, reply);
+    if (!departmentId) return reply;
+    const settings = await getTelnetSettings(departmentId);
+    if (!settings) return reply.code(409).send({ error: "Enter the NetLinx controller IP address or hostname under AMX module settings first." });
+    const systemActions: AmxAction[] = amxSystemActions.map((item) => ({ id: item.id, name: item.name, command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 1}:1,${item.channel}]` }));
+    const action = [...roomActions, ...systemActions, ...audioActions].find((item) => item.id === request.body.actionId);
+    if (!action) return reply.code(403).send({ error: "This AMX room action is not supported." });
+    try {
+      const match = action.command.match(new RegExp(`^ICSP\\[${CONTROL_DEVICE}:(\\d+):1,(\\d+)\\]$`));
+      const port = Number(match?.[1]);
+      const channel = Number(match?.[2]);
+      if (!Number.isInteger(port) || !Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed Telnet mapping is invalid." });
+      const address = { device: CONTROL_DEVICE, port, system: 1 };
+      const session = await openNetLinxWebControlSession(settings);
+      try {
+        await session.emulateButton(address, channel, "channelPush");
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        await session.emulateButton(address, channel, "channelRelease");
+      } finally { session.close(); }
+      return { sent: true, actionId: action.id };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not send the AMX command." });
+    }
+  });
+}
+
+
