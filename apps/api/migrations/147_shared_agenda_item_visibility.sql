@@ -1,4 +1,9 @@
 ALTER TABLE service_events ADD COLUMN IF NOT EXISTS shared_agenda_hidden_item_ids UUID[] NOT NULL DEFAULT '{}';
+
+UPDATE service_events SET shared_agenda_source_id=NULL, shared_agenda_hidden_item_ids='{}' WHERE shared_agenda_source_id=id;
+ALTER TABLE service_events DROP CONSTRAINT IF EXISTS service_events_shared_agenda_not_self;
+ALTER TABLE service_events ADD CONSTRAINT service_events_shared_agenda_not_self
+  CHECK (shared_agenda_source_id IS DISTINCT FROM id);
 ALTER TABLE service_events DROP CONSTRAINT IF EXISTS service_events_shared_agenda_hidden_item_limit;
 ALTER TABLE service_events ADD CONSTRAINT service_events_shared_agenda_hidden_item_limit
   CHECK (cardinality(shared_agenda_hidden_item_ids) <= 100);

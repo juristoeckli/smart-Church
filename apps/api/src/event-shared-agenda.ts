@@ -58,8 +58,10 @@ export function registerSharedEventAgenda(app: FastifyInstance, {
     if (!pool || !available()) return reply.code(503).send({ error: "Shared agendas are unavailable." });
     const departmentId = await resolveScope(request, reply);
     if (!departmentId || !validateMutation(request, reply)) return reply;
-    const { id, itemId } = request.params;
-    const { expectedSourceId, hidden } = request.body;
+    const id = request.params.id.toLowerCase();
+    const itemId = request.params.itemId.toLowerCase();
+    const expectedSourceId = request.body.expectedSourceId.toLowerCase();
+    const { hidden } = request.body;
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -100,8 +102,9 @@ export function registerSharedEventAgenda(app: FastifyInstance, {
     if (!pool || !available()) return reply.code(503).send({ error: "Shared agendas are unavailable." });
     const departmentId = await resolveScope(request, reply);
     if (!departmentId || !validateMutation(request, reply)) return reply;
-    const { sourceId, expectedSourceId } = request.body;
-    const targetId = request.params.id;
+    const sourceId = request.body.sourceId?.toLowerCase() ?? null;
+    const expectedSourceId = request.body.expectedSourceId?.toLowerCase() ?? null;
+    const targetId = request.params.id.toLowerCase();
     if (sourceId === targetId) return reply.code(400).send({ error: "Choose a different event as the agenda source." });
     const client = await pool.connect();
     try {
