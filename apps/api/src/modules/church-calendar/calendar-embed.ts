@@ -1,7 +1,10 @@
 export const calendarEmbedContentPolicy = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors *; sandbox; base-uri 'none'; form-action 'none'";
 
 export type EmbedSettings = { days?: number; entries?: number };
-export type EmbedAppointment = { startsAt: string; endsAt: string; allDay: boolean; title: string; subtitle: string; place: string };
+export type EmbedAppointment = {
+  id: string; originalStart: string; startsAt: string; endsAt: string; allDay: boolean; title: string; subtitle: string; place: string;
+  calendarName?: string; calendarOrder?: number;
+};
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
@@ -11,7 +14,8 @@ export function renderCalendarEmbed(title: string, appointments: EmbedAppointmen
   const dayHeading = new Intl.DateTimeFormat("en", { dateStyle: "full", timeZone: "UTC" });
   const timeLabel = new Intl.DateTimeFormat("en", { hour: "numeric", minute: "2-digit", timeZone: "UTC" });
   const days = new Map<string, EmbedAppointment[]>();
-  for (const appointment of appointments.sort((left, right) => left.startsAt.localeCompare(right.startsAt)).slice(0, entries)) {
+  for (const appointment of appointments.sort((left, right) => left.startsAt.localeCompare(right.startsAt)
+    || (left.calendarOrder ?? 0) - (right.calendarOrder ?? 0) || left.title.localeCompare(right.title) || left.id.localeCompare(right.id) || left.originalStart.localeCompare(right.originalStart)).slice(0, entries)) {
     const day = appointment.startsAt.slice(0, 10);
     const items = days.get(day) ?? [];
     items.push(appointment);
@@ -22,7 +26,7 @@ export function renderCalendarEmbed(title: string, appointments: EmbedAppointmen
     <ol>${items.map((item) => {
       const timing = item.allDay ? "All day" : `${timeLabel.format(new Date(item.startsAt + "Z"))}–${timeLabel.format(new Date(item.endsAt + "Z"))}`;
       return `<li><time datetime="${escapeHtml(item.startsAt)}">${escapeHtml(timing)}</time><div><strong>${escapeHtml(item.title)}</strong>
-        ${item.subtitle ? `<div>${escapeHtml(item.subtitle)}</div>` : ""}${item.place ? `<div>${escapeHtml(item.place)}</div>` : ""}</div></li>`;
+        ${item.calendarName ? `<div>${escapeHtml(item.calendarName)}</div>` : ""}${item.subtitle ? `<div>${escapeHtml(item.subtitle)}</div>` : ""}${item.place ? `<div>${escapeHtml(item.place)}</div>` : ""}</div></li>`;
     }).join("")}</ol></section>`).join("");
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${escapeHtml(title)}</title><style>

@@ -453,7 +453,7 @@ app.addHook("onRequest", async (request, reply) => {
   }
 });
 
-const publicCalendarEmbedPath = /^\/api\/public\/church-calendar\/embed\/[A-Za-z0-9_-]{40,80}$/;
+const publicCalendarEmbedPath = /^\/api\/public\/church-calendar\/(?:embed|agenda)\/[A-Za-z0-9_-]{40,80}$/;
 
 app.addHook("onSend", async (request, reply, payload) => {
   reply.header("X-Content-Type-Options", "nosniff");
