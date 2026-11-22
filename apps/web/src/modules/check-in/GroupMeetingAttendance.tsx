@@ -54,6 +54,8 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   const [draft, setDraft] = useState<Record<string, GroupAttendanceStatus>>({});
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<GroupAttendanceStatus | "">("");
+  const [roleFilter, setRoleFilter] = useState("");
+  const [sortBy, setSortBy] = useState<"lastName" | "firstName">("lastName");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -63,7 +65,14 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   const changes = groupAttendanceChanges(attendance, rows);
   const busy = saving || changes.length > 0;
   const term = query.trim().toLocaleLowerCase();
-  const shown = rows.filter((row) => (!filter || row.status === filter) && (row.firstName + " " + row.lastName).toLocaleLowerCase().includes(term));
+  const names = new Intl.Collator(document.documentElement.lang || undefined, { sensitivity: "base" });
+  const roles = [...new Set(rows.map((row) => row.role?.trim()).filter((role): role is string => Boolean(role)))].sort(names.compare);
+  const activeRole = roles.includes(roleFilter) ? roleFilter : "";
+  const secondName = sortBy === "lastName" ? "firstName" : "lastName";
+  const shown = rows.filter((row) => (!filter || row.status === filter)
+    && (!activeRole || row.role?.trim() === activeRole)
+    && (row.firstName + " " + row.lastName).toLocaleLowerCase().includes(term))
+    .sort((left, right) => names.compare(left[sortBy], right[sortBy]) || names.compare(left[secondName], right[secondName]));
   const loadError = groups.error ?? meetings.error ?? roster.error;
   const pending = groups.pending || meetings.pending || roster.pending;
 
@@ -137,6 +146,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
         roster.reload();
         setQuery("");
         setFilter("");
+        setRoleFilter("");
         resetDraft();
       }}>
         <option value="">Select a group meeting…</option>
@@ -156,6 +166,14 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
           <option value="">All</option>
           {statusKeys.map((status) => <option key={status} value={status}>{statuses[status]}</option>)}
         </select></label>
+        <label className="checkin-sort">Sort by<select value={sortBy} onChange={(event) => setSortBy(event.target.value === "firstName" ? "firstName" : "lastName")}>
+          <option value="lastName">Last name</option>
+          <option value="firstName">First name</option>
+        </select></label>
+        {roles.length > 0 && <label className="checkin-sort">Group role<select value={activeRole} onChange={(event) => setRoleFilter(event.target.value)}>
+          <option value="">All roles</option>
+          {roles.map((role) => <option key={role} value={role}>{role}</option>)}
+        </select></label>}
         <button className="checkin-print" type="button" disabled={saving} onClick={() => { resetDraft(); roster.reload(); }}>
           {changes.length ? "Discard changes and reload" : "Reload attendance"}
         </button>
@@ -165,7 +183,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
       </section>
       <div className="checkin-roster">
         {shown.map((row) => <article className={"checkin-person" + (row.status === "present" ? " is-present" : "")} key={row.contactId}>
-          <div className="checkin-person-info"><strong>{row.firstName} {row.lastName}</strong></div>
+          <div className="checkin-person-info"><strong>{row.firstName} {row.lastName}</strong>{row.role && <span>{row.role}</span>}</div>
           <select aria-label={"Attendance for " + row.firstName + " " + row.lastName} value={row.status} disabled={saving || Boolean(completedAt)} onChange={(event) => {
             const status = event.target.value as GroupAttendanceStatus;
             setDraft((current) => ({ ...current, [row.contactId]: status }));

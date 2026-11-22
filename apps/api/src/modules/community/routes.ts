@@ -896,16 +896,19 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query(
-        `SELECT m.attendance_completed_at, a.contact_id, c.first_name, c.last_name, a.status
+        `SELECT m.attendance_completed_at, a.contact_id, c.first_name, c.last_name, a.status, member.role
            FROM group_meetings m
            JOIN church_groups g ON g.id=m.group_id AND g.department_id=m.department_id
            LEFT JOIN (group_meeting_attendance a JOIN contacts c ON c.id=a.contact_id AND c.department_id=$2)
              ON a.meeting_id=m.id
+           LEFT JOIN group_members member ON member.group_id=m.group_id AND member.contact_id=a.contact_id
           WHERE m.id=$1 AND m.department_id=$2 ORDER BY lower(c.last_name),lower(c.first_name)`,
         [request.params.id, departmentId],
       );
+      reply.header("Cache-Control", "private, no-store");
       const attendance = result.rows.filter((row) => row.contact_id).map((row) => ({
         contactId: row.contact_id, firstName: row.first_name, lastName: row.last_name, status: row.status,
+        ...(request.query.withCompletion ? { role: row.role } : {}),
       }));
       if (!request.query.withCompletion) return attendance;
       if (!result.rows.length) return reply.code(404).send({ error: "Group meeting not found." });

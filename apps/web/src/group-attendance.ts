@@ -1,5 +1,5 @@
 export type GroupAttendanceStatus = "present" | "absent" | "excused";
-export type GroupAttendanceEntry = { contactId: string; firstName: string; lastName: string; status: GroupAttendanceStatus };
+export type GroupAttendanceEntry = { contactId: string; firstName: string; lastName: string; status: GroupAttendanceStatus; role?: string | null };
 
 export function groupAttendanceChanges(
   baseline: Pick<GroupAttendanceEntry, "contactId" | "status">[],
