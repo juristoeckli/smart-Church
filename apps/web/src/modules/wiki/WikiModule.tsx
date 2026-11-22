@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Archive, ArrowDownToLine, BookOpenText, ChevronDown, ChevronRight, Copy, FilePlus2, FileText, History, ImagePlus, Link2, Pencil, Plus, Printer, RotateCcw, Save, Search, Trash2, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
 import { discardWikiDraft, readWikiDraft, wikiDraftKey, writeWikiDraft, type WikiDraft, type WikiDraftContent } from "./wiki-drafts";
+import { WikiCategoryLanding } from "./WikiCategoryLanding";
 import { WikiLinkCopyActions } from "./WikiLinkCopyActions";
 
 type Category = { id: string; name: string; parentId: string | null; position: number; archivedAt: string | null };
@@ -54,6 +55,9 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const [bulkGroupId, setBulkGroupId] = useState("");
   const [bulkCategoryId, setBulkCategoryId] = useState("");
   const [selectedCategoryId, setSelectedCategoryId] = useState("");
+  const [categoryLandingId, setCategoryLandingId] = useState("");
+  const categoryLandingRef = useRef("");
+  const [categoriesLoaded, setCategoriesLoaded] = useState(false);
   const [search, setSearch] = useState("");
   const [hideRedirects, setHideRedirects] = useState(false);
   const pageList = useRef({ version: 0, hideRedirects: false });
@@ -237,13 +241,64 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
       const nextGroups = canManage ? await api<GroupOption[]>("/api/modules/wiki/groups") : null;
       if (!stillCurrent()) return;
       if (nextGroups) setGroups(nextGroups);
-      setCategories(nextCategories); setPages(nextPages);
-      if (preserveSelection) return;
+      setCategories(nextCategories); setPages(nextPages); setCategoriesLoaded(true);
+      if (preserveSelection || categoryLandingRef.current) return;
       const keepHiddenRedirect = hide && selectedPage?.id === keepPageId && selectedPage?.status === nextStatus && Boolean(selectedPage.redirectPageId);
       const nextId = keepHiddenRedirect || nextPages.some((page) => page.id === keepPageId)
         ? keepPageId : nextPages.find((page) => page.isHomepage)?.id ?? nextPages[0]?.id;
       if (nextId) await openPage(nextId); else { setSelectedPage(null); setLinks([]); setAttachedFiles([]); }
     } catch (reason) { if (stillCurrent()) setError(reason instanceof Error ? reason.message : "Could not load Wiki pages."); }
+  }
+
+  function categoryUrl(categoryId: string) {
+    const url = new URL(window.location.pathname, window.location.origin);
+    url.searchParams.set("wikiCategory", categoryId);
+    url.searchParams.set("wikiLocation", departmentId);
+    url.hash = "module-wiki";
+    return url;
+  }
+
+  function closeCategoryLanding() {
+    categoryLandingRef.current = "";
+    setCategoryLandingId("");
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("wikiCategory")) return;
+    url.searchParams.delete("wikiCategory");
+    if (!url.searchParams.has("wikiPage")) url.searchParams.delete("wikiLocation");
+    window.history.replaceState(window.history.state, "", url);
+  }
+
+  function openCategory(categoryId: string, shareAddress = true) {
+    directorySearchGeneration.current += 1;
+    categoryLandingRef.current = categoryId;
+    setCategoryLandingId(categoryId);
+    setSelectedCategoryId(categoryId);
+    setStatus("active");
+    setCategoryStatus("active");
+    setSelectedPage(null);
+    currentPageId.current = null;
+    setLinks([]);
+    setAttachedFiles([]);
+    setEditing(false);
+    setCreating(false);
+    setError("");
+    if (shareAddress) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("wikiPage");
+      url.searchParams.delete("wikiHeading");
+      url.searchParams.set("wikiCategory", categoryId);
+      url.searchParams.set("wikiLocation", departmentId);
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }
+
+  async function copyCategoryLink(categoryId: string) {
+    try {
+      await navigator.clipboard.writeText(categoryUrl(categoryId).href);
+      setFeedback("Category link copied.");
+    } catch {
+      setError("Could not copy the Wiki category link. Check your browser clipboard permissions.");
+    }
   }
 
   async function copyPageLink(pageId: string, headingId?: string) {
@@ -275,6 +330,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   }
 
   async function openPage(id: string, visited = new Set<string>()) {
+    closeCategoryLanding();
     const generation = directorySearchGeneration.current;
     if (visited.has(id)) { setError("This Wiki redirect leads to a loop."); return; }
     visited.add(id);
@@ -289,7 +345,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
 
   useEffect(() => {
     if (directorySearch) return;
-    if (state === initialNavigationState.current && new URLSearchParams(window.location.search).has("wikiPage")) return;
+    if (state === initialNavigationState.current && ["wikiPage", "wikiCategory"].some((key) => new URLSearchParams(window.location.search).has(key))) return;
     const match = /^wiki-page:([a-z0-9-]{1,80}):\d+$/i.exec(state);
     if (!match) return;
     setStatus("active");
@@ -303,7 +359,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
 
   useEffect(() => {
     if (directorySearch) return;
-    if (state === initialNavigationState.current && new URLSearchParams(window.location.search).has("wikiPage")) return;
+    if (state === initialNavigationState.current && ["wikiPage", "wikiCategory"].some((key) => new URLSearchParams(window.location.search).has(key))) return;
     if (!/^wiki-create:\d+$/.test(state) || !canManage) return;
     setStatus("active"); setSearch(""); setSelectedCategoryId(""); setSelectedPage(null); setEditing(false);
     setDraftTitle(""); setDraftAudience("location"); setDraftAudienceGroupId(""); setError("");
@@ -314,6 +370,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
 
   useEffect(() => {
     if (!directorySearch) return;
+    closeCategoryLanding();
     directorySearchGeneration.current += 1;
     sharedPageOpened.current = true;
     sharedHeading.current = null;
@@ -386,7 +443,26 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     const timer = window.setTimeout(() => {
       const params = new URLSearchParams(window.location.search);
       const pageId = params.get("wikiPage");
+      const categoryId = params.get("wikiCategory");
       const locationId = params.get("wikiLocation");
+      if (!sharedPageOpened.current && !pageId && categoryId) {
+        if (locationId && locationId !== departmentId) {
+          categoryLandingRef.current = categoryId;
+          setSelectedPage(null);
+          setError("Switch to the location associated with this Wiki link.");
+          return;
+        }
+        sharedPageOpened.current = true;
+        if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(categoryId)) {
+          categoryLandingRef.current = categoryId;
+          setSelectedPage(null);
+          setError("This Wiki category is unavailable.");
+          return;
+        }
+        openCategory(categoryId.toLowerCase(), false);
+        void refresh("", "active", true);
+        return;
+      }
       if (!sharedPageOpened.current && pageId && /^[a-z0-9-]{1,80}$/i.test(pageId)) {
         if (locationId && locationId !== departmentId) {
           setSelectedPage(null);
@@ -478,6 +554,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     if (!draftCategory || !draftTitle.trim()) return;
     await run(async () => {
       const page = await api<WikiPage>("/api/modules/wiki/pages", "POST", { categoryId: draftCategory, title: draftTitle.trim(), contentHtml: "", audience: draftAudience, audienceGroupId: draftAudience === "group" ? draftAudienceGroupId : null });
+      closeCategoryLanding();
       setCreating(false); setDraftTitle(""); setDraftCategory(""); setDraftAudience("location"); setDraftAudienceGroupId(""); setStatus("active"); await refresh(page.id, "active");
     }, "Wiki page created.");
   }
@@ -810,10 +887,14 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   }
 
   function renderCategory(category: Category, depth: number) {
-    return <div className="wiki-category-row" key={category.id} style={{ paddingInlineStart: `${Math.min(depth, 6) * .8}rem` }}>{parentCategories.has(category.id) && <button className="wiki-category-toggle" type="button" aria-expanded={!collapsedCategories.has(category.id)} aria-label={`${collapsedCategories.has(category.id) ? "Expand" : "Collapse"} ${category.name}`} onClick={() => setCollapsedCategories((current) => { const next = new Set(current); if (next.has(category.id)) next.delete(category.id); else next.add(category.id); return next; })}>{collapsedCategories.has(category.id) ? <ChevronRight size={15} /> : <ChevronDown size={15} />}</button>}<button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} type="button" aria-current={selectedCategoryId === category.id} onClick={() => setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id)}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" disabled={busy} onClick={() => void setCategoryPosition(category)}>Set sort order</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
+    return <div className="wiki-category-row" key={category.id} style={{ paddingInlineStart: `${Math.min(depth, 6) * .8}rem` }}>{parentCategories.has(category.id) && <button className="wiki-category-toggle" type="button" aria-expanded={!collapsedCategories.has(category.id)} aria-label={`${collapsedCategories.has(category.id) ? "Expand" : "Collapse"} ${category.name}`} onClick={() => setCollapsedCategories((current) => { const next = new Set(current); if (next.has(category.id)) next.delete(category.id); else next.add(category.id); return next; })}>{collapsedCategories.has(category.id) ? <ChevronRight size={15} /> : <ChevronDown size={15} />}</button>}<button className={`wiki-category-item ${depth ? "wiki-category-child" : ""}`} type="button" aria-current={selectedCategoryId === category.id} onClick={() => {
+        if (category.archivedAt) setSelectedCategoryId(selectedCategoryId === category.id ? "" : category.id);
+        else openCategory(category.id);
+      }}><BookOpenText size={14} />{category.name}</button>{canManage && <details className="wiki-category-menu"><summary aria-label={`Actions for ${category.name}`}>···</summary><div>{categoryStatus === "active" ? <><button type="button" onClick={() => void addSubcategory(category)}>Add subcategory</button><button type="button" onClick={() => void renameCategory(category)}>Rename</button><button type="button" disabled={busy} onClick={() => void setCategoryPosition(category)}>Set sort order</button><button type="button" onClick={() => void archiveCategory(category)}>Archive</button></> : <button type="button" onClick={() => void restoreCategory(category)}>Restore</button>}</div></details>}</div>;
   }
 
   function goToWikiHome() {
+    closeCategoryLanding();
     const needsRefresh = status !== "active" || categoryStatus !== "active" || search !== "";
     setStatus("active");
     setCategoryStatus("active");
@@ -826,9 +907,9 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
 
   return <div className={`wiki-page ${pageLayout !== "list" ? "wiki-page-gallery-layout" : ""}`}>
     <aside className="wiki-panel" aria-label="Wiki categories">
-      <div className="wiki-panel-head"><h2>Categories</h2><div className="wiki-actions"><select className="wiki-select" aria-label="Category status" value={categoryStatus} onChange={(event) => { setCategoryStatus(event.target.value as "active" | "archived"); setSelectedCategoryId(""); }}><option value="active">Active</option><option value="archived">Archived</option></select>{canManage && categoryStatus === "active" && <button className="button button-secondary" type="button" title="Create category" onClick={() => setShowNewCategory(true)}><Plus size={15} /></button>}</div></div>
+      <div className="wiki-panel-head"><h2>Categories</h2><div className="wiki-actions"><select className="wiki-select" aria-label="Category status" value={categoryStatus} onChange={(event) => { closeCategoryLanding(); setCategoryStatus(event.target.value as "active" | "archived"); setSelectedCategoryId(""); }}><option value="active">Active</option><option value="archived">Archived</option></select>{canManage && categoryStatus === "active" && <button className="button button-secondary" type="button" title="Create category" onClick={() => setShowNewCategory(true)}><Plus size={15} /></button>}</div></div>
       <button type="button" className="wiki-category-item" disabled={busy || editing || creating} onClick={goToWikiHome}>Wiki home</button>
-      {categoryStatus === "active" && <button type="button" className={`wiki-category-item ${!selectedCategoryId ? "wiki-category-selected" : ""}`} onClick={() => setSelectedCategoryId("")}>All pages</button>}
+      {categoryStatus === "active" && <button type="button" className={`wiki-category-item ${!selectedCategoryId ? "wiki-category-selected" : ""}`} onClick={() => categoryLandingRef.current ? goToWikiHome() : setSelectedCategoryId("")}>All pages</button>}
       <div className="wiki-category-list">{visibleCategories.map(({ category, depth }) => renderCategory(category, depth))}</div>
       {!categories.length && <p className="wiki-empty">No categories yet. Create a category to organize pages.</p>}
       {canManage && <button className="button button-primary" type="button" onClick={() => { setDraftCategory(selectedCategoryId || categories[0]?.id || ""); setDraftTitle(""); setCreating(true); }} disabled={!categories.length}><FilePlus2 size={15} /> New page</button>}
@@ -930,6 +1011,10 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
       </section>}
       {editing && draftStorageFailed && <p role="status">This draft could not be stored in this browser.</p>}
       {creating ? <form onSubmit={createPage} className="wiki-create-form"><div className="wiki-editor-header"><div><span className="wiki-muted">NEW WIKI PAGE</span><h2>Create a page</h2></div><button className="button button-quiet" type="button" onClick={() => setCreating(false)} aria-label="Cancel"><X size={17} /></button></div><label>Title<input autoFocus className="wiki-title-input" maxLength={180} value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} required /></label><label>Category<select className="wiki-select" value={draftCategory} onChange={(event) => setDraftCategory(event.target.value)} required><option value="">Select category</option>{flatCategories.map(({ category, depth }) => <option key={category.id} value={category.id}>{"— ".repeat(depth)}{category.name}</option>)}</select></label><label>Who can read this page?<select className="wiki-select" value={draftAudience} onChange={(event) => { setDraftAudience(event.target.value as WikiAudience); if (event.target.value !== "group") setDraftAudienceGroupId(""); }}><option value="location">Everyone in this location</option><option value="group">Members of one group</option><option value="managers">Wiki managers only</option></select></label>{draftAudience === "group" && <label>Group<select className="wiki-select" required value={draftAudienceGroupId} onChange={(event) => setDraftAudienceGroupId(event.target.value)}><option value="">Choose a group</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>}<div className="wiki-actions"><button className="button button-primary" type="submit" disabled={busy || !draftTitle.trim() || !draftCategory || (draftAudience === "group" && !draftAudienceGroupId)}><Plus size={15} /> Create page</button></div></form>
+      : categoryLandingId ? <WikiCategoryLanding key={departmentId + ":" + categoryLandingId} departmentId={departmentId}
+        category={categories.find((category) => category.id === categoryLandingId && !category.archivedAt)}
+        categoriesLoaded={categoriesLoaded} revision={pageList.current.version} children={categories.filter((category) => category.parentId === categoryLandingId && !category.archivedAt)}
+        onOpenCategory={openCategory} onOpenPage={(id) => void openPage(id)} onCopy={() => void copyCategoryLink(categoryLandingId)} />
       : selectedPage ? <>
         <div className="wiki-editor-header"><div><span className="wiki-muted">{status === "archived" ? "ARCHIVED WIKI PAGE" : "WIKI PAGE"}</span>{editing ? <input className="wiki-title-input" maxLength={180} value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} aria-label="Page title" /> : <h1>{selectedPage.isHomepage ? "⌂ " : ""}{selectedPage.title}</h1>}<p className="wiki-muted">{categories.find((category) => category.id === (editing ? categoryDraft : selectedPage.categoryId))?.name ?? "Uncategorized"} · Audience: {selectedPage.audience === "group" ? `Group · ${groups.find((group) => group.id === selectedPage.audienceGroupId)?.name ?? "selected group"}` : selectedPage.audience === "managers" ? "Wiki managers only" : "Everyone in this location"} · Updated {humanDate(selectedPage.updatedAt)}{selectedPage.editorName ? ` by ${selectedPage.editorName}` : ""}</p></div><div className="wiki-actions">{!editing && selectedPage.status === "active" && <button className="button button-secondary" type="button" onClick={() => void copyPageLink(selectedPage.id)}><Copy size={15} /> Copy page link</button>}{!editing && <button className="button button-secondary" type="button" onClick={() => window.print()}><Printer size={15} /> Print page</button>}<a className="button button-secondary" href={`/api/modules/wiki/pages/${selectedPage.id}/export/html`} target="_blank" rel="noreferrer"><ArrowDownToLine size={15} /> HTML</a><a className="button button-secondary" href={`/api/modules/wiki/pages/${selectedPage.id}/export/pdf`}><ArrowDownToLine size={15} /> PDF</a>{canManage && status === "active" && !editing && <><button className="button button-primary" type="button" disabled={busy || Boolean(recoveredDraft)} onClick={() => void openEditor()}><Pencil size={15} /> Edit</button><button className="button button-secondary" type="button" onClick={() => void setHomepage()}>{selectedPage.isHomepage ? "Unset homepage" : "Set homepage"}</button></>}{canManage && editing && <button className="button button-primary" type="button" onClick={(event) => { event.preventDefault(); void savePage(new Event("submit") as unknown as FormEvent<HTMLFormElement>); }} disabled={busy || !titleDraft.trim() || (audienceDraft === "group" && !audienceGroupIdDraft)}><Save size={15} /> Save</button>}{canManage && editing && <button type="button" className="button button-secondary" disabled={busy}
           onClick={() => { editorBase.current = undefined; setEditing(false); void openPage(selectedPage.id); }}>Close editor</button>}{canManage && <button className="button button-secondary" type="button" onClick={() => void openHistory()}><History size={15} /> History</button>}{canManage && status === "active" && !editing && <button className="button button-secondary" type="button" onClick={() => void archivePage()}><Archive size={15} /> Archive</button>}{canManage && status === "archived" && <button className="button button-secondary" type="button" onClick={() => void restorePage()}><RotateCcw size={15} /> Restore</button>}</div></div>
