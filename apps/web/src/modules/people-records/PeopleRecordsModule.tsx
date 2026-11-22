@@ -1,3 +1,4 @@
+import { PersonTagAppearance, PersonTagLabel } from "./PersonTagAppearance";
 import { groupFromPeopleNavigation } from "../../people-group-navigation";
 import { GroupMembershipImport } from "./GroupMembershipImport";
 import { readCsvRows } from "./csv-import";
@@ -13,7 +14,7 @@ import { MailingRecipientsExport, PersonHousehold } from "./PersonHousehold";
 import { postalAddressFields, type PostalAddress } from "./postal-address";
 type Person={id:string;firstName:string;lastName:string;email:string|null;phone:string|null;status:string;postalAddress?:PostalAddress;archivedAt?:string|null;fields:Record<string,unknown>};
 type FieldVisibility = "private_people" | "people_managers";
-type Field={id:string;label:string;fieldKey:string;type:"text"|"date"|"boolean"|"select";options:string[];required:boolean;active:boolean;visibility?:FieldVisibility};
+type Field={id:string;label:string;fieldKey:string;type:"text"|"date"|"boolean"|"select";options:string[];required:boolean;active:boolean;visibility?:FieldVisibility;tagColor?:string|null};
 type RelationshipType={id:string;label:string;reverseLabel:string;active:boolean};
 type Candidate={personId:string;firstName:string;lastName:string;email:string|null;matchId:string;matchFirstName:string;matchLastName:string;matchEmail:string|null;reason:string};
 type MergePreview={keeper:{id:string;firstName:string;lastName:string;email:string|null;phone:string|null;status:string};source:{id:string;firstName:string;lastName:string;email:string|null;phone:string|null;status:string};profileConflicts:Array<{field:string;keepValue:string;sourceValue:string}>;customFieldConflicts:Array<{field:string;keeperValue:unknown;sourceValue:unknown}>;dateConflicts:Array<{kind:string;keeperValue:string;sourceValue:string}>;blockers:string[]};
@@ -459,7 +460,7 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
             ...current.filter(item => item.field !== tag.fieldKey),
             ...(include ? [{ field: tag.fieldKey, value: "true" }] : []),
           ]);
-        }} />{tag.label}</label>;
+        }} /><PersonTagLabel label={tag.label} color={tag.tagColor} /></label>;
     })}
   </fieldset>
   {canManage && !showArchived && <div className="module-toolbar">
@@ -487,7 +488,21 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   <h3>Person tags</h3>
   <label>Tag name<input required maxLength={60} value={tagLabel} onChange={event => setTagLabel(event.target.value)} /></label>
   <button type="submit" disabled={!tagLabel.trim() || tagBusy}>Create tag</button>
-</form>}{canManage&&<div><h3>Optional profile fields</h3><p>Add these fields when you need them at this location. They can be edited on profiles and used in filters and CSV.</p>{[
+</form>}{canManage && tags.length > 0 && <details>
+  <summary>Edit tag names and colors</summary>
+  {tags.map(tag => <PersonTagAppearance
+    key={JSON.stringify([departmentId, tag.id, tag.label, tag.tagColor])}
+    label={tag.label} color={tag.tagColor ?? null}
+    save={async (appearance) => {
+      await request(`/api/people-records/tags/${tag.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ ...appearance, expected: { label: tag.label, color: tag.tagColor ?? null } }),
+      });
+      setMessage("Tag updated.");
+      await load();
+    }}
+  />)}
+</details>}{canManage&&<div><h3>Optional profile fields</h3><p>Add these fields when you need them at this location. They can be edited on profiles and used in filters and CSV.</p>{[
       { key: "nickname", label: "Nickname" },
       { key: "first_contact_date", label: "First contact date" },
       { key: "nationality", label: "Nationality" },

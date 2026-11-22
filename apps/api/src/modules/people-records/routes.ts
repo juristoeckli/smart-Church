@@ -241,7 +241,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     }
     routes.get("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply); if (!d) return reply;
-      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label", [d,canManagePeopleFields(request)]); return result.rows;
+      const result = await pool!.query("SELECT id,label,field_key AS \"fieldKey\",field_type AS type,options,required,active,position,visibility,tag_color AS \"tagColor\" FROM people_record_fields WHERE department_id=$1 AND ($2::boolean OR visibility='private_people') ORDER BY position,label", [d,canManagePeopleFields(request)]); return result.rows;
     });
     routes.post<{ Body: { label: string; fieldKey: string; type: "text"|"date"|"boolean"|"select"; options?: string[]; required?: boolean; visibility?: CustomFieldVisibility } }>("/api/people-records/fields", async (request, reply) => {
       const d = await department(request, reply, true); if (!d) return reply; if (!validateMutation(request, reply)) return reply;
@@ -250,6 +250,62 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const id = randomUUID(); try { await pool!.query("INSERT INTO people_record_fields(id,department_id,label,field_key,field_type,options,required,position,visibility) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,COALESCE((SELECT max(position)+1 FROM people_record_fields WHERE department_id=$2),0),$8)", [id,d,b.label.trim(),b.fieldKey,b.type,JSON.stringify(b.options ?? []),b.required ?? false,b.visibility ?? "private_people"]); } catch { return reply.code(409).send({ error: "That field key is already in use at this location." }); }
       changed(d); return reply.code(201).send({ id });
     });
+    const tagColorSchema = { anyOf: [{ type: "string", pattern: "^#[0-9a-f]{6}$" }, { type: "null" }] } as const;
+    const tagLabelSchema = { type: "string", minLength: 1, maxLength: 100 } as const;
+    const tagPresentationSchema = { type: "object", additionalProperties: false, required: ["label", "color"], properties: {
+      label: tagLabelSchema, color: tagColorSchema,
+    } } as const;
+    type TagPresentation = { label: string; color: string | null };
+    routes.patch<{ Params: { fieldId: string }; Body: TagPresentation & { expected: TagPresentation } }>(
+      "/api/people-records/tags/:fieldId",
+      { schema: {
+        params: { type: "object", required: ["fieldId"], properties: { fieldId: uuid } },
+        body: { ...tagPresentationSchema, required: ["label", "color", "expected"],
+          properties: { ...tagPresentationSchema.properties, expected: tagPresentationSchema } },
+      } },
+      async (request, reply) => {
+        const d = await department(request, reply, true);
+        if (!d || !validateMutation(request, reply)) return reply;
+        const { color, expected } = request.body;
+        const label = request.body.label.trim();
+        if (!label) return reply.code(400).send({ error: "Enter a tag name." });
+        const client = await pool!.connect();
+        try {
+          await client.query("BEGIN");
+          if (!await context.lockDepartmentForWrite(client, d)) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "This location cannot be changed on this installation." });
+          }
+          const scope = "department_id=$1 AND id=$2 AND active AND field_type='boolean' AND NOT required AND field_key ~ '^tag_[a-z0-9_]+$'";
+          const locked = await client.query<TagPresentation>(
+            `SELECT label,tag_color AS color FROM people_record_fields WHERE ${scope} FOR UPDATE`, [d, request.params.fieldId],
+          );
+          const current = locked.rows[0];
+          if (!current) {
+            await client.query("ROLLBACK");
+            return reply.code(404).send({ error: "Active person tag not found at this location." });
+          }
+          if (current.label !== expected.label || current.color !== expected.color) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "The tag changed. Refresh before editing it again." });
+          }
+          if (current.label !== label || current.color !== color) {
+            await client.query(
+              "UPDATE people_record_fields SET label=$3,tag_color=$4,updated_at=now() WHERE department_id=$1 AND id=$2",
+              [d, request.params.fieldId, label, color],
+            );
+          }
+          await client.query("COMMIT");
+          if (current.label !== label || current.color !== color) changed(d);
+          return { label, color };
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        } finally {
+          client.release();
+        }
+      },
+    );
     const profileFieldPresets = {
       nickname: { label: "Nickname", type: "text", options: [] },
       first_contact_date: { label: "First contact date", type: "date", options: [] },
