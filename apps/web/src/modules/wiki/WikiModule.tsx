@@ -9,6 +9,9 @@ import { WikiLinkCopyActions } from "./WikiLinkCopyActions";
 type Category = { id: string; name: string; parentId: string | null; position: number; archivedAt: string | null };
 type WikiAudience = "location" | "group" | "managers";
 type GroupOption = { id: string; name: string };
+const attachmentPageSize = 15;
+type FileSort = "added" | "name" | "title" | "uploader";
+
 type WikiFile = { id: string; title: string; fileName: string; contentType: string; fileSize: number; createdAt: string; attachedAt?: string; attachedByName?: string | null; displayTitle?: string | null; managersOnly?: boolean };
 type WikiLink = { id: string; title: string; url: string; created_at?: string; managers_only?: boolean };
 type WikiPage = { id: string; categoryId: string; title: string; contentHtml: string; status: "active" | "archived"; redirectPageId: string | null; isHomepage: boolean; audience: WikiAudience; audienceGroupId: string | null; createdAt: string; updatedAt: string; updatedBy: string | null; editorName?: string | null; editRevision?: string; links?: WikiLink[]; files?: WikiFile[] };
@@ -74,7 +77,9 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const [categoryDraft, setCategoryDraft] = useState("");
   const [audienceDraft, setAudienceDraft] = useState<WikiAudience>("location");
   const [audienceGroupIdDraft, setAudienceGroupIdDraft] = useState("");
-  const [attachmentSort, setAttachmentSort] = useState<"added" | "title">("added");
+  const [linkSort, setLinkSort] = useState<"added" | "title">("added");
+  const [fileSort, setFileSort] = useState<FileSort>("added");
+  const [filePageIndex, setFilePageIndex] = useState(0);
   const [links, setLinks] = useState<WikiLink[]>([]);
   const [attachedFiles, setAttachedFiles] = useState<WikiFile[]>([]);
   const [versions, setVersions] = useState<PageVersion[]>([]);
@@ -107,7 +112,22 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const filteredLinks = links.filter((link) => (!link.managers_only || canManage)
     && (!detailQuery || [link.title, link.url].some((value) => value.toLocaleLowerCase().includes(detailQuery))));
   const filteredFiles = attachedFiles.filter((file) => (!file.managersOnly || canManage)
-    && (!detailQuery || [file.title, file.fileName].some((value) => value.toLocaleLowerCase().includes(detailQuery))));
+    && (!detailQuery || [file.title, file.fileName, file.attachedByName ?? ""].some((value) => value.toLocaleLowerCase().includes(detailQuery))));
+  const lastFilePage = Math.max(0, Math.ceil(filteredFiles.length / attachmentPageSize) - 1);
+  const filePage = Math.min(filePageIndex, lastFilePage);
+  const firstFileIndex = filePage * attachmentPageSize;
+  const visibleFiles = filteredFiles.sort((a, b) => {
+    const byDate = (b.attachedAt ?? b.createdAt).localeCompare(a.attachedAt ?? a.createdAt);
+    if (fileSort === "name") return a.fileName.localeCompare(b.fileName) || byDate || a.id.localeCompare(b.id);
+    if (fileSort === "title") return a.title.localeCompare(b.title) || byDate || a.id.localeCompare(b.id);
+    if (fileSort === "uploader") {
+      if (Boolean(a.attachedByName) !== Boolean(b.attachedByName)) return a.attachedByName ? -1 : 1;
+      return (a.attachedByName ?? "").localeCompare(b.attachedByName ?? "") || byDate || a.id.localeCompare(b.id);
+    }
+    return byDate || a.id.localeCompare(b.id);
+  }).slice(firstFileIndex, firstFileIndex + attachmentPageSize);
+  useEffect(() => { setFilePageIndex(0); }, [departmentId, selectedPage?.id, detailQuery, fileSort]);
+  useEffect(() => { setFilePageIndex((page) => Math.min(page, lastFilePage)); }, [lastFilePage]);
   const [redirectDraft, setRedirectDraft] = useState("");
   const [showEntityLink, setShowEntityLink] = useState(false);
   const [entityType, setEntityType] = useState<EntityType>("person");
@@ -1078,13 +1098,15 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
         {editing && <div className="wiki-redirect-editor"><label>Redirect to Wiki page<select className="wiki-input" value={redirectDraft} onChange={(event) => setRedirectDraft(event.target.value)}><option value="">No redirect</option>{pages.filter((page) => page.status === "active" && page.id !== selectedPage.id).map((page) => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><button className="button button-secondary" type="button" disabled={busy} onClick={() => void updateRedirect()}>Save redirect</button></div>}
         <label className="wiki-search"><Search size={14} /><input type="search" value={detailsSearch} onChange={(event) => setDetailsSearch(event.target.value)}
           placeholder="Search files and links" aria-label="Search files and links" maxLength={160} /></label>
-        <div className="wiki-detail-sections"><section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Links</h3><label>Sort <select value={attachmentSort} onChange={(event) => setAttachmentSort(event.target.value === "title" ? "title" : "added")}><option value="added">Newest first</option><option value="title">Title</option></select></label></div>{canManage && status === "active" && <form className="wiki-add-link" onSubmit={saveLink}><input className="wiki-input" aria-label="Link title" value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Link title" maxLength={160} required /><input className="wiki-input" inputMode="url" aria-label="Link address" value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://…" maxLength={2000} required />
+        <div className="wiki-detail-sections"><section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Links</h3><label>Sort <select value={linkSort} onChange={(event) => setLinkSort(event.target.value === "title" ? "title" : "added")}><option value="added">Newest first</option><option value="title">Title</option></select></label></div>{canManage && status === "active" && <form className="wiki-add-link" onSubmit={saveLink}><input className="wiki-input" aria-label="Link title" value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Link title" maxLength={160} required /><input className="wiki-input" inputMode="url" aria-label="Link address" value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://…" maxLength={2000} required />
           <label><input type="checkbox" checked={linkManagersOnly} disabled={busy} onChange={(event) => setLinkManagersOnly(event.target.checked)} /> Wiki managers only</label>
-          <button className="button button-secondary" type="submit" disabled={busy}>{editingLinkId ? <><Save size={14} /> Save link</> : <><Plus size={14} /> Add link</>}</button>{editingLinkId && <button className="button button-quiet" type="button" disabled={busy} onClick={resetLinkForm}>Cancel</button>}</form>}{[...filteredLinks].sort((a,b) => attachmentSort === "title" ? a.title.localeCompare(b.title) : (b.created_at ?? "").localeCompare(a.created_at ?? "")).map((link) => <div className="wiki-link-row" key={link.id}><a href={link.url} target="_blank" rel="noreferrer">{link.title}</a>{link.created_at && <small className="wiki-file-meta">{humanDate(link.created_at)}</small>}
+          <button className="button button-secondary" type="submit" disabled={busy}>{editingLinkId ? <><Save size={14} /> Save link</> : <><Plus size={14} /> Add link</>}</button>{editingLinkId && <button className="button button-quiet" type="button" disabled={busy} onClick={resetLinkForm}>Cancel</button>}</form>}{[...filteredLinks].sort((a,b) => linkSort === "title" ? a.title.localeCompare(b.title) : (b.created_at ?? "").localeCompare(a.created_at ?? "")).map((link) => <div className="wiki-link-row" key={link.id}><a href={link.url} target="_blank" rel="noreferrer">{link.title}</a>{link.created_at && <small className="wiki-file-meta">{humanDate(link.created_at)}</small>}
         {link.managers_only && <small className="wiki-file-meta">Wiki managers only</small>}<WikiLinkCopyActions key={link.url} url={link.url} title={link.title} />{canManage && status === "active" && <div className="wiki-actions"><button type="button" className="button button-quiet" disabled={busy} onClick={() => {
           setEditingLinkId(link.id); setLinkTitle(link.title); setLinkUrl(link.url); setLinkManagersOnly(Boolean(link.managers_only));
         }} aria-label={`Edit ${link.title}`}><Pencil size={14} /> Edit</button><button type="button" className="button button-quiet" onClick={() => void removeLink(link.id)} aria-label={`Remove ${link.title}`}><Trash2 size={14} /></button></div>}</div>)}{!filteredLinks.length && <p className="wiki-muted">{detailQuery ? "No links match the search." : "No links attached."}</p>}</section>
-        <section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Files</h3><div className="wiki-actions">{canUpload && <button className="button button-quiet" type="button" disabled={busy} onClick={() => filePicker.current?.click()} title="Upload file"><Plus size={14} /> Upload</button>}{canManage && <button className="button button-quiet" type="button" onClick={() => void loadAvailableFiles()} title="Attach an existing file"><FileText size={14} /> Attach</button>}<input ref={filePicker} hidden type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAndAttach(file); event.currentTarget.value = ""; }} /></div></div>
+        <section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Files</h3><div className="wiki-actions"><label>Sort files <select value={fileSort} onChange={(event) => setFileSort(event.target.value as FileSort)}>
+          <option value="added">Newest first</option><option value="title">Attachment title</option><option value="name">File name</option><option value="uploader">Attached by</option>
+        </select></label>{canUpload && <button className="button button-quiet" type="button" disabled={busy} onClick={() => filePicker.current?.click()} title="Upload file"><Plus size={14} /> Upload</button>}{canManage && <button className="button button-quiet" type="button" onClick={() => void loadAvailableFiles()} title="Attach an existing file"><FileText size={14} /> Attach</button>}<input ref={filePicker} hidden type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAndAttach(file); event.currentTarget.value = ""; }} /></div></div>
           {canUpload && <>
             <label><input type="checkbox" disabled={busy} checked={privateUploadPageId === selectedPage.id}
               onChange={(event) => setPrivateUploadPageId(event.target.checked ? selectedPage.id : undefined)} /> Make uploads visible to Wiki managers only</label>
@@ -1110,7 +1132,12 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
               Drop a file here to attach it to this page.
             </div>
           </>}
-          {[...filteredFiles].sort((a,b) => attachmentSort === "title" ? a.title.localeCompare(b.title) : (b.attachedAt ?? b.createdAt).localeCompare(a.attachedAt ?? a.createdAt)).map((file) => <div className="wiki-file-row" key={file.id}><span><a href={`/api/modules/wiki/pages/${selectedPage.id}/files/${file.id}/download`} target="_blank" rel="noreferrer">{file.title}</a><small className="wiki-file-meta"> · {file.fileName} · {sizeLabel(file.fileSize)} · {humanDate(file.attachedAt ?? file.createdAt)}{file.attachedByName ? ` · Attached by ${file.attachedByName}` : ""}{file.managersOnly ? " · Wiki managers only" : ""}</small></span>{canManage && <div className="wiki-actions">{selectedPage.status === "active" && <button type="button" className="button button-quiet" disabled={busy} onClick={() => void renameAttachment(file)} aria-label={`Rename ${file.title}`}><Pencil size={14} /> Rename</button>}{selectedPage.status === "active" && <button type="button" className="button button-quiet" disabled={busy} onClick={() => void updateAttachmentVisibility(file)} aria-label={`${file.managersOnly ? "Share with page readers" : "Restrict to Wiki managers"}: ${file.title}`}>{file.managersOnly ? "Share with page readers" : "Restrict to Wiki managers"}</button>}<button type="button" className="button button-quiet" onClick={() => void detachFile(file.id)} aria-label={`Remove ${file.title}`}><X size={14} /></button></div>}</div>)}{!filteredFiles.length && <p className="wiki-muted">{detailQuery ? "No files match the search." : "No files attached."}</p>}</section></div>
+          {visibleFiles.map((file) => <div className="wiki-file-row" key={file.id}><span><a href={`/api/modules/wiki/pages/${selectedPage.id}/files/${file.id}/download`} target="_blank" rel="noreferrer">{file.title}</a><small className="wiki-file-meta"> · {file.fileName} · {sizeLabel(file.fileSize)} · {humanDate(file.attachedAt ?? file.createdAt)}{file.attachedByName ? ` · Attached by ${file.attachedByName}` : ""}{file.managersOnly ? " · Wiki managers only" : ""}</small></span>{canManage && <div className="wiki-actions">{selectedPage.status === "active" && <button type="button" className="button button-quiet" disabled={busy} onClick={() => void renameAttachment(file)} aria-label={`Rename ${file.title}`}><Pencil size={14} /> Rename</button>}{selectedPage.status === "active" && <button type="button" className="button button-quiet" disabled={busy} onClick={() => void updateAttachmentVisibility(file)} aria-label={`${file.managersOnly ? "Share with page readers" : "Restrict to Wiki managers"}: ${file.title}`}>{file.managersOnly ? "Share with page readers" : "Restrict to Wiki managers"}</button>}<button type="button" className="button button-quiet" onClick={() => void detachFile(file.id)} aria-label={`Remove ${file.title}`}><X size={14} /></button></div>}</div>)}{!filteredFiles.length && <p className="wiki-muted">{detailQuery ? "No files match the search." : "No files attached."}</p>}
+          {lastFilePage > 0 && <nav className="wiki-actions" aria-label="Attached files pages">
+            <button type="button" className="button button-quiet" disabled={filePage === 0} onClick={() => setFilePageIndex(filePage - 1)}>Previous</button>
+            <span role="status">{firstFileIndex + 1}–{firstFileIndex + visibleFiles.length} of {filteredFiles.length}</span>
+            <button type="button" className="button button-quiet" disabled={filePage === lastFilePage} onClick={() => setFilePageIndex(filePage + 1)}>Next</button>
+          </nav>}</section></div>
       </> : <div className="wiki-empty"><BookOpenText size={28} /><h2>Welcome to Wiki</h2><p>Choose a page to read or create the first page for this location.</p>{canManage && categories.length > 0 && <button className="button button-primary" type="button" onClick={() => { setDraftCategory(selectedCategoryId || categories[0].id); setCreating(true); }}><Plus size={15} /> Create a page</button>}</div>}
     </main>
 
