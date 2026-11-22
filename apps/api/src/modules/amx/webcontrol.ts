@@ -66,8 +66,16 @@ export class NetLinxWebControlSession {
       signal: AbortSignal.timeout(8000),
     });
     const body = await response.text();
-    if (!response.ok || !/<control(?:\s|>)/i.test(body) || /<failed>\s*1\s*<\/failed>|<login\b/i.test(body)) {
-      throw new Error(`NetLinx WebConsole did not confirm the ${action === "channelPush" ? "button press" : "button release"} on channel ${channel}.`);
+    const hasControl = /<control(?:\s|>)/i.test(body);
+    const failed = /<failed>\s*1\s*<\/failed>/i.test(body);
+    const loginPage = /<login\b/i.test(body);
+    if (!response.ok || !hasControl || failed || loginPage) {
+      const location = response.headers.get("location");
+      const redirectPath = location ? new URL(location, this.origin).pathname : "none";
+      const contentType = response.headers.get("content-type")?.split(";")[0] ?? "unknown";
+      const root = body.match(/<([A-Za-z][A-Za-z0-9:_-]*)\\b/)?.[1] ?? "none";
+      const state = [`HTTP ${response.status}`, `root ${root}`, `control ${hasControl ? "yes" : "no"}`, `failed ${failed ? "yes" : "no"}`, `login ${loginPage ? "yes" : "no"}`, `redirect ${redirectPath}`, `content-type ${contentType}`].join(", ");
+      throw new Error(`NetLinx WebConsole did not confirm the ${action === "channelPush" ? "button press" : "button release"} on channel ${channel} (${state}). The request may have reached the controller; check its state before retrying.`);
     }
   }
 
