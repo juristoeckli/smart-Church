@@ -1,3 +1,4 @@
+import { registerGrowthTrajectory } from "./growth-trajectory.js";
 import { personTagMatch } from "./tag-search.js";
 import { registerGroupMembershipImport } from "./group-membership-import.js";
 import { presentMeetingFilter, registerPeopleMeetingFilter } from "./directory-meeting-filter.js";
@@ -99,6 +100,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     registerPeopleHistoryTimeline(routes, context, department);
     registerPeopleHouseholds(routes, context, department);
     registerPersonServiceWorkload(routes, context, department);
+    registerGrowthTrajectory(routes, context, department);
     async function validateFieldFilters(departmentId:string,filters:FieldFilterInput[],canManage:boolean):Promise<Array<{field:string;operator:string;value:unknown}>>{
       if(filters.length>10)throw new Error("Choose up to 10 custom field filters.");
       if(new Set(filters.map(item=>item.field)).size!==filters.length)throw new Error("Use each custom field only once in a filter list.");
