@@ -345,11 +345,19 @@ async function restoreSiteModules(
   for (const adapter of adapters.values()) {
     await adapter.prepareRestore?.(client, departmentId, prepared.get(adapter.moduleId)?.snapshot);
   }
-  const restoredSnapshots: Record<string, unknown> = {};
-  for (const [moduleId, { adapter, snapshot }] of prepared) {
+  for (const { adapter, snapshot } of prepared.values()) {
     await adapter.restoreSnapshot(client, departmentId, snapshot, restoreContext);
+  }
+
+  // A module can depend on data restored by another adapter. Verify the complete
+  // site before exporting any module for the replica digest.
+  for (const { adapter, snapshot } of prepared.values()) {
     const verified = await adapter.verifySnapshot(client, departmentId, snapshot, restoreContext);
     if (!verified.ready) throw new Error(`${adapter.moduleName} restore verification failed: ${verified.blockers.join(" ")}`);
+  }
+
+  const restoredSnapshots: Record<string, unknown> = {};
+  for (const [moduleId, { adapter }] of prepared) {
     restoredSnapshots[moduleId] = await adapter.exportSnapshot(client, departmentId);
   }
   return restoredSnapshots;
