@@ -79,6 +79,7 @@ export type LiveRunSheetStatus = {
 };
 
 export interface ServicePlanItem {
+  agendaItemId?: string;
   section?: string;
   title: string;
   startTime?: string;

@@ -1,10 +1,11 @@
 import { useState } from "react";
-import type { ServiceEvent } from "@smart-church/contracts";
+import type { ServiceEvent, ServicePlanItem } from "@smart-church/contracts";
+import { AgendaItemVisibility } from "./AgendaItemVisibility";
 import { translate } from "./i18n";
 
-export function SharedEventAgenda({ target, events, canManage, departmentId, csrfToken, formatTime, onChanged }: {
+export function SharedEventAgenda({ target, events, canManage, departmentId, csrfToken, formatTime, onChanged, onPlanChanged }: {
   target: ServiceEvent; events: ServiceEvent[]; canManage: boolean; departmentId: string; csrfToken: string;
-  formatTime: (event: ServiceEvent) => string; onChanged: () => void;
+  formatTime: (event: ServiceEvent) => string; onChanged: () => void; onPlanChanged: (plan: ServicePlanItem[]) => void;
 }) {
   const [selected, select] = useState("");
   const [busy, setBusy] = useState(false);
@@ -46,6 +47,8 @@ export function SharedEventAgenda({ target, events, canManage, departmentId, csr
       {canChange && <button type="button" className="button button-secondary" disabled={busy} onClick={() => void update(null)}>
         {translate("events.sharedAgendaUnlink")}
       </button>}
+      {canChange && <AgendaItemVisibility key={current} targetId={target.id} sourceId={current}
+        departmentId={departmentId} csrfToken={csrfToken} onPlanChanged={onPlanChanged} />}
     </> : <>
       <label>{translate("events.sharedAgendaChoose")}<select value={selected} disabled={busy} onChange={(event) => select(event.target.value)}>
         <option value="">{translate("events.copyAgendaChoose")}</option>
