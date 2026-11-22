@@ -372,6 +372,45 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   const resourceCategories = ["room", "vehicle", "equipment", "other"] as const;
 
+  function accessibleBookingCalendarLinks(user: string, groupAccess: string) {
+    return `FROM church_calendar_resource_links link
+      JOIN church_calendar_appointments appointment ON appointment.id=link.appointment_id AND appointment.department_id=booking.department_id
+      JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=booking.department_id
+      LEFT JOIN church_calendar_appointment_exceptions exception ON exception.appointment_id=appointment.id
+        AND exception.original_start=COALESCE(link.occurrence_start,appointment.starts_at)
+      WHERE link.resource_booking_id=booking.id AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+        AND (link.occurrence_start IS NOT NULL OR appointment.recurrence IS NULL)
+        AND COALESCE(exception.cancelled,false)=false
+        AND (calendar.scope='community' OR (calendar.scope='group' AND (${groupAccess} OR EXISTS (
+          SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
+           WHERE membership.department_id=booking.department_id AND membership.user_id=${user}
+             AND member.group_id=calendar.group_id AND member.status='active'
+        ))))`;
+  }
+
+  app.get<{ Params: { id: string } }>("/api/modules/resource-scheduler/bookings/:id/calendar-links", { schema: {
+    params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+  } }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    reply.header("Cache-Control", "private, no-store");
+    if (!await calendarLinkingAvailable(context.pool!, departmentId, true)) return [];
+    const { rows } = await context.pool!.query<{ appointmentId: string; title: string; calendarName: string; originalStartAt: string; overrideStart: string | null }>(
+      `SELECT target.* FROM resource_bookings booking
+        CROSS JOIN LATERAL (
+          SELECT appointment.id AS "appointmentId",COALESCE(exception.overrides->>'title',appointment.title) AS title,
+                 calendar.name AS "calendarName",
+                 to_char(COALESCE(link.occurrence_start,appointment.starts_at),'YYYY-MM-DD"T"HH24:MI:SS') AS "originalStartAt",
+                 exception.overrides->>'startsAt' AS "overrideStart"
+              ${accessibleBookingCalendarLinks("$3", "$5")}
+        ) target
+        WHERE booking.id=$1 AND booking.department_id=$2 AND ($4 OR booking.requested_by=$3)
+        ORDER BY target."originalStartAt",target."appointmentId"`,
+      [request.params.id, departmentId, request.authenticatedUser!.id, isManager(request), sharedCalendarLinkAccess(request).group],
+    );
+    return rows.map(({ overrideStart, ...target }) => ({ ...target, date: (cleanLocalDateTime(overrideStart) ?? target.originalStartAt).slice(0, 10) }));
+  });
+
   app.get<{ Querystring: { q?: string } }>("/api/modules/resource-scheduler/booking-beneficiaries", {
     schema: { querystring: { type: "object", additionalProperties: false, properties: { q: { type: "string", maxLength: 80 } } } },
   }, async (request, reply) => {
@@ -399,6 +438,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const category = request.query.category || null;
     if (category && !resourceCategories.some((value) => value === category)) return reply.code(400).send({ error: "Choose a valid resource type." });
     const canManage = isManager(request);
+    const calendarLinksAvailable = await calendarLinkingAvailable(context.pool!, departmentId, true);
+    const calendarLinkFlag = calendarLinksAvailable
+      ? `((booking.requested_by=$6 OR $7) AND EXISTS (SELECT 1 ${accessibleBookingCalendarLinks("$6", "$12")}))`
+      : "FALSE";
     const [department, resources, bookings, responsiblePeople, visibilityGroups] = await Promise.all([
       context.pool!.query<{ time_zone: string }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]),
       context.pool!.query(`SELECT resource.id,resource.name,resource.category,resource.location,resource.active,resource.requires_approval,resource.calendar_required AS "calendarRequired",resource.manager_booking_only AS "managerBookingOnly",
@@ -415,7 +458,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           CASE WHEN beneficiary.id IS NOT NULL THEN concat_ws(' ',beneficiary.first_name,beneficiary.last_name) END AS "beneficiaryName",
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
-          series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",occurrence.is_extra_date AS "isExtraDate",
+          series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",
+          ${calendarLinkFlag} AS "canOpenCalendar",occurrence.is_extra_date AS "isExtraDate",
           CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate", (series.all_day_date IS NOT NULL) AS "seriesAllDay",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
           (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
@@ -436,7 +480,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND ($7::boolean OR resource.active=true)
           AND (booking.requested_by=$6 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$6,$7))
           AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(booking.subtitle),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
-        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search, category, canBookForOthers(request)]),
+        ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search, category, canBookForOthers(request), ...(calendarLinksAvailable ? [sharedCalendarLinkAccess(request).group] : [])]),
       canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
       canManage ? context.pool!.query<{ id: string; name: string }>(
         "SELECT id,name FROM church_groups groups WHERE department_id=$1 AND (to_jsonb(groups)->>'status')='active' ORDER BY lower(name),id", [departmentId],

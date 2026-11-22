@@ -96,7 +96,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
-export function ChurchCalendarModule({ departmentId, csrfToken, department, canManageSite, language, realtime, onNavigateEntity, state, onStateChange }: ModuleContext) {
+export function ChurchCalendarModule({ departmentId, csrfToken, department, canManageSite, language, realtime, onNavigateEntity, state, onStateChange, calendarAppointmentNavigation, onCalendarAppointmentOpened }: ModuleContext) {
   const viewerPreference = displayPreference(state);
   const locationTimeZone = validNamedZone(department.timeZone) ?? "UTC";
   const deviceTimeZone = validNamedZone(Intl.DateTimeFormat().resolvedOptions().timeZone) ?? "UTC";
@@ -327,6 +327,46 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
     }
     setShowForm(true);
   }
+
+  const handledCalendarOpen = useRef<number | null>(null);
+  const latestCalendarOpen = useRef(calendarAppointmentNavigation);
+  latestCalendarOpen.current = calendarAppointmentNavigation?.departmentId === departmentId ? calendarAppointmentNavigation : null;
+
+  useEffect(() => {
+    const target = calendarAppointmentNavigation;
+    if (!target || target.departmentId !== departmentId || handledCalendarOpen.current === target.requestId) return;
+    const date = new Date(`${target.date}T12:00:00`);
+    if (!Number.isFinite(date.getTime())) {
+      handledCalendarOpen.current = target.requestId;
+      onCalendarAppointmentOpened?.(target.requestId);
+      return;
+    }
+    if (view !== "list" || dateInput(anchor) !== target.date) {
+      setAnchor(date);
+      setView("list");
+      return;
+    }
+    if (loading || loadedPrintScope !== printScope) return;
+    handledCalendarOpen.current = target.requestId;
+    const matchesTarget = (item: Appointment) => item.appointmentId === target.appointmentId
+      && (item.originalOccurrenceStartAt ?? item.occurrenceStartAt) === target.originalStartAt;
+    const showAppointment = (occurrence?: Appointment) => {
+      if (latestCalendarOpen.current?.requestId !== target.requestId) return;
+      onCalendarAppointmentOpened?.(target.requestId);
+      if (occurrence) void openEdit(occurrence);
+      else setError("The linked appointment is no longer available.");
+    };
+    const occurrence = appointments.find(matchesTarget);
+    if (occurrence) showAppointment(occurrence);
+    else {
+      // A busy calendar range may omit the target from the normal list.
+      const params = new URLSearchParams({ ...range, displayTimeZone: queryTimeZone, appointmentId: target.appointmentId });
+      void api<Appointment[]>(`/api/modules/church-calendar/appointments?${params}`, { headers })
+        .then((items) => showAppointment(items.find(matchesTarget)))
+        .catch(() => showAppointment());
+    }
+  }, [anchor, appointments, calendarAppointmentNavigation, departmentId, headers, loadedPrintScope, loading,
+      onCalendarAppointmentOpened, openEdit, printScope, queryTimeZone, range, view]);
 
   async function saveAppointment(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if (busy) return;

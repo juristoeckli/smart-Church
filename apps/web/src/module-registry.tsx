@@ -10,6 +10,9 @@ export interface ModuleRealtime {
   send: (topic: string, payload?: unknown) => boolean;
 }
 
+export type CalendarAppointmentTarget = { appointmentId: string; originalStartAt: string; date: string };
+export type CalendarAppointmentNavigation = CalendarAppointmentTarget & { departmentId: string; requestId: number };
+
 export type DirectorySearchNavigation = { query: string; requestId: number; onHandled: (requestId: number) => void };
 
 export interface ModuleContext {
@@ -28,6 +31,9 @@ export interface ModuleContext {
   refreshCsrfToken?: () => Promise<string>;
   directorySearch?: DirectorySearchNavigation;
   onOpenGroupPeople?: (groupId: string) => void;
+  onOpenCalendarAppointment?: (target: CalendarAppointmentTarget) => void;
+  calendarAppointmentNavigation?: CalendarAppointmentNavigation | null;
+  onCalendarAppointmentOpened?: (requestId: number) => void;
   onNavigateEntity?: (type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking", id: string) => void;
 }
 

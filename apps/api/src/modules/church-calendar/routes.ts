@@ -751,10 +751,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { removed: true };
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string; appointmentId?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
+    const appointmentId = request.query.appointmentId;
+    if (appointmentId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(appointmentId)) {
+      return responseError(reply, 400, "Invalid appointment identifier.");
+    }
     const preference = request.query.displayTimeZone;
     const projected = preference !== undefined;
     let displayZone = preference === "appointments" || preference === undefined ? null : canonicalTimeZone(preference);
@@ -789,6 +793,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          JOIN departments department ON department.id=appointment.department_id
          JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
         WHERE appointment.department_id=$1 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+          AND ($7::uuid IS NULL OR appointment.id=$7)
           AND ((appointment.starts_at <= $3::timestamp
             AND ((appointment.recurrence IS NULL AND appointment.ends_at >= $2::timestamp)
               OR (appointment.recurrence IS NOT NULL AND COALESCE(appointment.recurrence->>'endsOn','9999-12-31')::date >= $2::timestamp::date)))
@@ -801,7 +806,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             SELECT 1 FROM department_memberships membership JOIN group_members member ON member.contact_id=membership.contact_id
              WHERE membership.user_id=$4 AND membership.department_id=$1 AND member.group_id=calendar.group_id AND member.status='active'))))
         ORDER BY appointment.starts_at,appointment.title LIMIT 2000`,
-      [departmentId, from, to, userId(request), hasGroupVisibility(request), projected],
+      [departmentId, from, to, userId(request), hasGroupVisibility(request), projected, appointmentId ?? null],
     );
     const appointments = result.rows;
     if (!appointments.length) return [];

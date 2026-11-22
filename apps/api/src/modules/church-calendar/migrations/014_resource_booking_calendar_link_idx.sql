@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS church_calendar_resource_links_booking_idx ON church_calendar_resource_links(resource_booking_id);

@@ -45,7 +45,7 @@ import { smartChurchBuildInfo } from "./build-info";
 import { Groups } from "./Groups";
 import { GlobalSearch, type FullSearchDestination } from "./GlobalSearch";
 import { BookableResources } from "./BookableResources";
-import { loadRegisteredModules, ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
+import { type CalendarAppointmentTarget, type CalendarAppointmentNavigation, loadRegisteredModules, ModuleHost, ModuleIconHost, ModuleNavigationHost, ModuleSettingsHost, ModuleTranslationHost, moduleTranslation, registeredModules, translateModuleText, type ModuleContext } from "./module-registry";
 import { translateKnownModuleMessage, translateModuleMessage, translationsForModule } from "./modules/translations";
 import { PresenterRightsFieldset } from "./modules/presenter/PresenterRightsFieldset";
 import { LocationAccess } from "./LocationAccess";
@@ -304,6 +304,7 @@ function WorkspaceApp() {
   const [pendingSongNavigation, setPendingSongNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [sharedPlanHash, setSharedPlanHash] = useState(window.location.hash);
   const openedSharedPlan = useRef("");
+  const [calendarAppointmentNavigation, setCalendarAppointmentNavigation] = useState<CalendarAppointmentNavigation | null>(null);
   const [pendingEventNavigation, setPendingEventNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingResourceNavigation, setPendingResourceNavigation] = useState<{ id: string; requestId: number } | null>(null);
   const [pendingDirectorySearch, setPendingDirectorySearch] = useState<{ destination: FullSearchDestination; departmentId: string; query: string; requestId: number } | null>(null);
@@ -1637,6 +1638,17 @@ function WorkspaceApp() {
     refreshCsrfToken,
     directorySearch: directorySearch?.destination === "wiki" ? directorySearch : undefined,
     onOpenGroupPeople: openPeopleGroup,
+    calendarAppointmentNavigation,
+    onCalendarAppointmentOpened: (requestId: number) => setCalendarAppointmentNavigation((current) => current?.requestId === requestId ? null : current),
+    onOpenCalendarAppointment: (target: CalendarAppointmentTarget) => {
+      const calendarModule = enabledDynamicModules.find((module) => module.id === "church-calendar");
+      if (!calendarModule || !moduleAvailable(calendarModule, department, canManageSite)) {
+        setNotice("Calendar is unavailable in this location.");
+        return;
+      }
+      setCalendarAppointmentNavigation({ ...target, departmentId: department.id, requestId: ++entityNavigationRequestId.current });
+      setPage(modulePage(calendarModule.id));
+    },
     onNavigateEntity: (type: "person" | "group" | "wiki" | "song" | "event" | "resource" | "booking", id: string) => {
       if (!/^[a-z0-9-]{1,80}$/i.test(id)) return;
       setPendingDirectorySearch(null);

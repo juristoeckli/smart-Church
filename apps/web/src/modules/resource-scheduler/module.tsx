@@ -7,7 +7,7 @@ const Page = lazy(() => import("./ResourceSchedulerModule").then(({ ResourceSche
 
 function ResourceSchedulerModule(context: ModuleContext) {
   const canManage = context.canManageSite || (context.department.permissions ?? []).includes("resources_manage") || (context.department.modulePermissions?.["resource-scheduler"] ?? []).includes("manage");
-  return <Page departmentId={context.departmentId} csrfToken={context.csrfToken} canManage={canManage} />;
+  return <Page departmentId={context.departmentId} csrfToken={context.csrfToken} canManage={canManage} onOpenCalendarAppointment={context.onOpenCalendarAppointment} />;
 }
 
 export const moduleRegistration: ModuleRegistration = {
