@@ -116,7 +116,7 @@ export interface ServicePlanTemplate {
   id: string;
   name: string;
   description?: string;
-  positions: Array<{ name: string; category?: string; qualificationIds?: string[] }>;
+  positions: Array<Pick<ServicePosition, "name" | "category" | "qualificationIds" | "swapAllowed">>;
   items: ServicePlanItem[];
   active: boolean;
 }

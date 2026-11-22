@@ -598,7 +598,7 @@ const serviceEventProperties = {
 
 const songArrangementSchema = { type: "object", additionalProperties: false, required: ["name"], properties: { id: { type: "string", format: "uuid" }, name: { type: "string", minLength: 1, maxLength: 160 }, key: { type: "string", maxLength: 16 }, chartUrl: { type: "string", maxLength: 2048 }, audioUrl: { type: "string", maxLength: 2048 }, active: { type: "boolean" } } };
 const worshipSongBodySchema = { type: "object", additionalProperties: false, required: ["title"], properties: { title: { type: "string", minLength: 1, maxLength: 200 }, authors: { type: "string", maxLength: 500 }, defaultKey: { type: "string", maxLength: 16 }, bpm: { anyOf: [{ type: "integer", minimum: 1, maximum: 400 }, { type: "null" }] }, timeSignature: { anyOf: [{ type: "string", pattern: "^(?:[1-9]|[1-5][0-9]|6[0-4])/(?:1|2|4|8|16|32|64)$" }, { type: "null" }] }, notes: { type: "string", maxLength: 2000 }, active: { type: "boolean" }, arrangements: { type: "array", maxItems: 40, items: songArrangementSchema } } };
-const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
+const servicePlanTemplateBodySchema = { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 160 }, description: { type: "string", maxLength: 1000 }, active: { type: "boolean" }, positions: { type: "array", maxItems: 40, items: { type: "object", additionalProperties: false, required: ["name"], properties: { name: { type: "string", minLength: 1, maxLength: 80 }, category: { type: "string", maxLength: 80 }, swapAllowed: { type: "boolean" }, qualificationIds: { type: "array", maxItems: 20, uniqueItems: true, items: { type: "string", format: "uuid" } } } } }, items: { type: "array", maxItems: 100, items: serviceEventProperties.timePlan.items } } };
 const serviceEventBodySchema = {
   type: "object",
   additionalProperties: false,
@@ -607,7 +607,7 @@ const serviceEventBodySchema = {
 };
 
 type WorshipSongInput = { title: string; authors?: string; defaultKey?: string; bpm?: number | null; timeSignature?: string | null; notes?: string; arrangements?: Array<{ id?: string; name: string; key?: string; chartUrl?: string; audioUrl?: string }> };
-type ServicePlanTemplateInput = { name: string; description?: string; positions?: Array<{ name: string; category?: string; qualificationIds?: string[] }>; items?: NonNullable<CreateServiceEvent["timePlan"]> };
+type ServicePlanTemplateInput = { name: string; description?: string; positions?: ServicePlanTemplate["positions"]; items?: NonNullable<CreateServiceEvent["timePlan"]> };
 
 function validHttpsLink(value: string | undefined) {
   if (!value?.trim()) return true;
@@ -3276,7 +3276,7 @@ type EventPositionSwap = {
   id: string; event_id: string; event_title: string; event_date: string;
   from_position_index: number; from_position_name: string; to_position_index: number; to_position_name: string;
   requester_contact_id: string; requester_name: string; target_contact_id: string; target_name: string;
-  status: "pending" | "accepted" | "declined" | "cancelled"; created_at: Date | string; canRespond?: boolean; canCancel?: boolean;
+  status: "pending" | "accepted" | "declined" | "cancelled"; created_at: Date | string; canAccept: boolean; canRespond?: boolean; canCancel?: boolean;
 };
 
 app.get("/api/event-position-swaps", async (request, reply): Promise<EventPositionSwap[] | { error: string }> => {

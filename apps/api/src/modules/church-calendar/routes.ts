@@ -4,6 +4,7 @@ import { registerAppointmentTemplates } from "./appointment-templates.js";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
+import type { ServicePlanTemplate } from "@smart-church/contracts";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
 import { calendarReminderOccurrence, calendarReminderWindow, type CalendarReminderSchedule } from "../../calendar-reminders.js";
 import { appointmentInstants, appointmentWallTime, canonicalTimeZone } from "../../calendar-time.js";
@@ -389,7 +390,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const templatesInstalled = await context.pool.query<{ present: boolean }>("SELECT to_regclass('public.service_plan_templates') IS NOT NULL AS present");
     const canManageEvents = canManageServiceEvents(request);
     const servicePlanTemplates = canManageEvents && templatesInstalled.rows[0]?.present
-      ? (await context.pool.query<{ id: string; name: string; positions: Array<{ name: string; category?: string; qualificationIds?: string[] }> }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
+      ? (await context.pool.query<{ id: string; name: string; positions: ServicePlanTemplate["positions"] }>("SELECT id,name,positions FROM service_plan_templates WHERE department_id=$1 AND active=true ORDER BY lower(name),id LIMIT 250", [departmentId])).rows
       : [];
     const canSelectPeople = canSeePrivatePeople(request);
     const canManageGroups = request.activeDepartmentRole === "site_admin" || (request.activeDepartmentPermissions ?? []).includes("groups_manage");
@@ -1108,11 +1109,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const templateResult = await client.query<{ positions: unknown; items: unknown }>("SELECT positions,items FROM service_plan_templates WHERE id=$1 AND department_id=$2 AND active=true FOR SHARE", [request.body.templateId, departmentId]);
       const template = templateResult.rows[0];
       if (!template) { await client.query("ROLLBACK"); return responseError(reply, 404, "Active service-plan template not found in this location."); }
-      const validPosition = (item: unknown): item is { name: string; category?: string; qualificationIds?: string[] } => {
+      const validPosition = (item: unknown): item is ServicePlanTemplate["positions"][number] => {
         if (!item || typeof item !== "object" || Array.isArray(item)) return false;
         const position = item as Record<string, unknown>;
         return typeof position.name === "string" && Boolean(position.name.trim()) && position.name.length <= 80
           && (position.category === undefined || (typeof position.category === "string" && position.category.length <= 80))
+          && (position.swapAllowed === undefined || typeof position.swapAllowed === "boolean")
           && (position.qualificationIds === undefined || (Array.isArray(position.qualificationIds) && position.qualificationIds.length <= 20
             && position.qualificationIds.every((value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value))));
       };
@@ -1137,6 +1139,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const positions = template.positions.map((item) => ({
         name: item.name.trim(),
         ...(item.category?.trim() ? { category: item.category.trim() } : {}),
+        ...(item.swapAllowed === false ? { swapAllowed: false } : {}),
         ...(item.qualificationIds?.length ? { qualificationIds: [...new Set(item.qualificationIds.map((id) => id.toLowerCase()))] } : {}),
       }));
       const qualificationIds = [...new Set(positions.flatMap((position) => position.qualificationIds ?? []))];

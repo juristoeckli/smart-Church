@@ -702,7 +702,7 @@ export function ServicesEvents({ departmentId, departmentLocation, departmentTim
     setTimePlan(template.items.map((item) => ({ ...item })));
     setPositions(template.positions.map((position) => {
       const previous = positions.find((item) => item.name.trim().toLocaleLowerCase() === position.name.trim().toLocaleLowerCase());
-      return { name: position.name, ...(position.category?.trim() ? { category: position.category.trim() } : {}), ...(previous?.contactId ? { contactId: previous.contactId } : {}), ...(previous?.swapAllowed === false ? { swapAllowed: false } : {}), ...(position.qualificationIds?.length ? { qualificationIds: [...position.qualificationIds] } : {}) };
+      return { name: position.name, ...(position.category?.trim() ? { category: position.category.trim() } : {}), ...(previous?.contactId ? { contactId: previous.contactId } : {}), ...(position.swapAllowed === false || previous?.swapAllowed === false ? { swapAllowed: false } : {}), ...(position.qualificationIds?.length ? { qualificationIds: [...position.qualificationIds] } : {}) };
     }));
   }
 
