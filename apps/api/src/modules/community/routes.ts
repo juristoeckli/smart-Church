@@ -893,6 +893,8 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
     const canAddMeetingAttendees = (request: FastifyRequest) =>
       hasLocationPermission(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null, "groups_manage")
       && canReadPrivateContactDetails(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null);
+    const canCreateMeetingPerson = (request: FastifyRequest) =>
+      hasLocationPermission(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null, "people_manage");
     routes.get<{ Params: { id: string }; Querystring: { withCompletion?: boolean } }>("/api/group-meetings/:id/attendance", { schema: {
       params: meetingParams,
       querystring: { type: "object", properties: { withCompletion: { type: "boolean" } } },
@@ -917,8 +919,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!request.query.withCompletion) return attendance;
       if (!result.rows.length) return reply.code(404).send({ error: "Group meeting not found." });
       const meeting = result.rows[0];
-      return { attendance, completedAt: meeting.attendance_completed_at, canAddAttendees: canAddMeetingAttendees(request)
-        && !meeting.attendance_completed_at && !meeting.source_system && meeting.group_status === "active" };
+      const canAddAttendees = canAddMeetingAttendees(request) && !meeting.attendance_completed_at
+        && !meeting.source_system && meeting.group_status === "active";
+      return { attendance, completedAt: meeting.attendance_completed_at, canAddAttendees,
+        canCreateAttendees: canAddAttendees && canCreateMeetingPerson(request) };
     });
 
     function lockGroupMeeting(client: PoolClient, meetingId: string, departmentId: string) {
@@ -969,20 +973,42 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       return { people: people.rows };
     });
 
-    routes.post<{ Params: { id: string }; Body: { contactId: string; joinGroup: boolean } }>(meetingPeoplePath, { schema: {
-      params: meetingParams, body: { type: "object", additionalProperties: false, required: ["contactId", "joinGroup"],
-        properties: { contactId: { type: "string", format: "uuid" }, joinGroup: { type: "boolean" } } },
+    type MeetingAttendeeInput = { contactId?: string; joinGroup: boolean; newVisitor?: { firstName: string; lastName: string; email?: string } };
+    routes.post<{ Params: { id: string }; Body: MeetingAttendeeInput }>(meetingPeoplePath, { schema: {
+      params: meetingParams, body: { type: "object", additionalProperties: false, required: ["joinGroup"],
+        oneOf: [{ required: ["contactId"] }, { required: ["newVisitor"] }],
+        properties: {
+          contactId: { type: "string", format: "uuid" }, joinGroup: { type: "boolean" },
+          newVisitor: { type: "object", additionalProperties: false, required: ["firstName", "lastName"], properties: {
+            firstName: { type: "string", minLength: 1, maxLength: 80 }, lastName: { type: "string", minLength: 1, maxLength: 80 },
+            email: { type: "string", maxLength: 254, pattern: "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$" },
+          } },
+        } },
     } }, async (request, reply) => {
       const departmentId = await meetingPeopleDepartment(request, reply);
       if (!departmentId || !validateMutation(request, reply)) return reply;
       const { id } = request.params;
-      const { contactId, joinGroup } = request.body;
+      let { contactId } = request.body;
+      const { joinGroup, newVisitor } = request.body;
+      if (newVisitor && !canCreateMeetingPerson(request)) {
+        return reply.code(403).send({ error: "People management access is required to create a visitor." });
+      }
+      const firstName = newVisitor?.firstName.trim();
+      const lastName = newVisitor?.lastName.trim();
+      const email = newVisitor?.email?.trim() || null;
+      if (newVisitor && (!firstName || !lastName || /[\u0000-\u001f\u007f]/.test(firstName + lastName))) {
+        return reply.code(400).send({ error: "Enter the visitor’s first and last names as single lines of text." });
+      }
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
         if (!await dependencies.lockDepartmentForWrite(client, departmentId)) {
           await client.query("ROLLBACK");
           return reply.code(423).send({ error: "This location is read-only." });
+        }
+        if (newVisitor) {
+          // Serialize this workflow's duplicate check across desks in one location.
+          await client.query("SELECT pg_advisory_xact_lock(hashtext('check-in-visitor'),hashtext($1::uuid::text))", [departmentId]);
         }
         // Group first, matching membership and Calendar meeting creation lock order.
         const { rows: [group] } = await client.query<{ id: string; status: string; source_system: string | null }>(
@@ -999,11 +1025,34 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           await client.query("ROLLBACK");
           return reply.code(409).send({ error: "Attendees can be added only to an open meeting in an active local group." });
         }
-        const person = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2 AND archived_at IS NULL AND status IN ('member','visitor') FOR SHARE",
-          [departmentId, contactId]);
-        if (!person.rowCount) {
-          await client.query("ROLLBACK");
-          return reply.code(404).send({ error: "Eligible person not found at this location." });
+        if (newVisitor) {
+          const { rows: collisions } = await client.query<{ id: string; firstName: string; lastName: string; eligible: boolean }>(
+            `SELECT c.id,c.first_name AS "firstName",c.last_name AS "lastName",
+                (c.archived_at IS NULL AND c.status IN ('member','visitor') AND NOT EXISTS
+                  (SELECT 1 FROM group_meeting_attendance a WHERE a.meeting_id=$5 AND a.contact_id=c.id)) AS eligible
+              FROM contacts c WHERE c.department_id=$1 AND
+                ((lower(btrim(c.first_name))=lower($2) AND lower(btrim(c.last_name))=lower($3))
+                  OR ($4::text IS NOT NULL AND lower(btrim(c.email))=lower($4)))
+              ORDER BY eligible DESC,c.id LIMIT 20`, [departmentId, firstName, lastName, email, id],
+          );
+          if (collisions.length) {
+            await client.query("ROLLBACK");
+            const people = collisions.filter((candidate) => candidate.eligible).map(({ id, firstName, lastName }) => ({ id, firstName, lastName }));
+            return reply.code(409).send({ people, error: people.length
+              ? "A matching person exists. Select their profile to mark attendance."
+              : "A matching profile is already listed or unavailable. Review the meeting roster or People before creating another profile." });
+          }
+          contactId = randomUUID();
+          await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
+          await client.query("INSERT INTO contacts(id,department_id,first_name,last_name,email,status) VALUES($1,$2,$3,$4,$5,'visitor')",
+            [contactId, departmentId, firstName, lastName, email]);
+        } else {
+          const person = await client.query("SELECT id FROM contacts WHERE department_id=$1 AND id=$2 AND archived_at IS NULL AND status IN ('member','visitor') FOR SHARE",
+            [departmentId, contactId]);
+          if (!person.rowCount) {
+            await client.query("ROLLBACK");
+            return reply.code(404).send({ error: "Eligible person not found at this location." });
+          }
         }
         const added = await client.query(`INSERT INTO group_meeting_attendance(meeting_id,contact_id,status)
           VALUES($1,$2,'present') ON CONFLICT(meeting_id,contact_id) DO NOTHING RETURNING contact_id`, [id, contactId]);
@@ -1012,33 +1061,41 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           return { added: false, joinedGroup: false };
         }
         let joinedGroup = false;
-        if (joinGroup) {
-          const { rows: [member] } = await client.query<{ status: string }>(
-            "SELECT status FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [group.id, contactId],
+        if (joinGroup || newVisitor) {
+          const { rows: [member] } = await client.query<{ status: string; role: string }>(
+            "SELECT status,role FROM group_members WHERE group_id=$1 AND contact_id=$2 FOR UPDATE", [group.id, contactId],
           );
+          if (newVisitor && member && !joinGroup) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({ error: "An automatic rule would add this visitor to the group. Choose group membership explicitly or review the rule in Groups." });
+          }
           if (member && member.status !== "active") {
             await client.query("ROLLBACK");
             return reply.code(409).send({ error: "This person already has a different membership status. Choose meeting attendance only or review their membership in Groups." });
           }
-          if (!member) {
+          if (joinGroup && (!member || newVisitor)) {
             const form = await readSignupForm(client, departmentId, group.id);
-            const capacity = await checkGroupAdmissionCapacity(client, departmentId, group.id, "active", form.policy.defaultRole, form.policy);
+            const capacity = await checkGroupAdmissionCapacity(client, departmentId, group.id, "active",
+              member?.role ?? form.policy.defaultRole, form.policy, member ? contactId : undefined);
             if (capacity) {
               await client.query("ROLLBACK");
               return reply.code(409).send({ error: capacity });
             }
-            await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
-            const inserted = await client.query(`INSERT INTO group_members(group_id,contact_id,role,status,joined_on)
-              VALUES($1,$2,$3,'active',CURRENT_DATE) ON CONFLICT(group_id,contact_id) DO NOTHING RETURNING contact_id`,
-              [group.id, contactId, form.policy.defaultRole]);
-            if (!inserted.rowCount) {
-              await client.query("ROLLBACK");
-              return reply.code(409).send({ error: "This person’s group membership changed. Reload the roster and try again." });
+            if (!member) {
+              await client.query("SELECT set_config('smart_church.actor_id',$1,true)", [request.authenticatedUser!.id]);
+              const inserted = await client.query(`INSERT INTO group_members(group_id,contact_id,role,status,joined_on)
+                VALUES($1,$2,$3,'active',CURRENT_DATE) ON CONFLICT(group_id,contact_id) DO NOTHING RETURNING contact_id`,
+                [group.id, contactId, form.policy.defaultRole]);
+              if (!inserted.rowCount) {
+                await client.query("ROLLBACK");
+                return reply.code(409).send({ error: "This person’s group membership changed. Reload the roster and try again." });
+              }
             }
             joinedGroup = true;
           }
         }
         await client.query("COMMIT");
+        if (newVisitor) realtime.publish("core:contacts:changed", departmentId, { contactId, action: "meeting-visitor-created" });
         realtime.publish("core:groups:changed", departmentId, { groupId: group.id, meetingId: id, action: "meeting-attendee-added" });
         return reply.code(201).send({ added: true, joinedGroup });
       } catch (error) { await client.query("ROLLBACK"); throw error; }

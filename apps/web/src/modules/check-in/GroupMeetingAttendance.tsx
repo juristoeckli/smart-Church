@@ -264,7 +264,8 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
         <button className="checkin-print" type="button" disabled={saving || Boolean(completedAt) || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
       </section>
       {roster.data?.canAddAttendees && <GroupMeetingAddAttendee key={departmentId + ":" + meeting.id}
-        meetingId={meeting.id} departmentId={departmentId} csrfToken={csrfToken} disabled={busy} onChanged={(joinedGroup) => {
+        meetingId={meeting.id} departmentId={departmentId} csrfToken={csrfToken} canCreate={Boolean(roster.data.canCreateAttendees)}
+        disabled={busy} onChanged={(joinedGroup) => {
           setQuery("");
           setFilter("");
           setRoleFilter("");
