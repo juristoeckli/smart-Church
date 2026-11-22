@@ -300,7 +300,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const status = isWikiManager(request) && request.query.status === "archived" ? "archived" : "active";
     const search = (request.query.search ?? "").trim().slice(0, 120);
-    const result = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,''::text AS content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.status=$2 AND (NOT $7::boolean OR page.redirect_page_id IS NULL) AND ($3::uuid IS NULL OR page.category_id=$3) AND ($4='' OR page.title ILIKE '%'||$4||'%' OR ($5::boolean AND regexp_replace(page.content_html,'<[^>]*>',' ','g') ILIKE '%'||$4||'%')) AND ${pageReadCondition("page", 5, 6)} ORDER BY page.is_homepage DESC,page.updated_at DESC,lower(page.title) LIMIT 300`, [departmentId, status, request.query.categoryId ?? null, search, isWikiManager(request), request.authenticatedUser!.id, request.query.hideRedirects === "true"]);
+    const result = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,''::text AS content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,COALESCE(page.updated_actor_name,editor.display_name) AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.status=$2 AND (NOT $7::boolean OR page.redirect_page_id IS NULL) AND ($3::uuid IS NULL OR page.category_id=$3) AND ($4='' OR page.title ILIKE '%'||$4||'%' OR ($5::boolean AND regexp_replace(page.content_html,'<[^>]*>',' ','g') ILIKE '%'||$4||'%')) AND ${pageReadCondition("page", 5, 6)} ORDER BY page.is_homepage DESC,page.updated_at DESC,lower(page.title) LIMIT 300`, [departmentId, status, request.query.categoryId ?? null, search, isWikiManager(request), request.authenticatedUser!.id, request.query.hideRedirects === "true"]);
     return result.rows.map(pageDto);
   });
 
@@ -308,7 +308,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     reply.header("Cache-Control", "private, no-store");
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
-    const pageResult = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,page.content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,page.xmin::text AS edit_revision,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.id=$2 AND (${pageReadCondition("page", 3, 4)} OR page.status='archived' AND $3::boolean)`, [departmentId, request.params.id, isWikiManager(request), request.authenticatedUser!.id]);
+    const pageResult = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,page.content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,page.xmin::text AS edit_revision,COALESCE(page.updated_actor_name,editor.display_name) AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.id=$2 AND (${pageReadCondition("page", 3, 4)} OR page.status='archived' AND $3::boolean)`, [departmentId, request.params.id, isWikiManager(request), request.authenticatedUser!.id]);
     if (!pageResult.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
     pageResult.rows[0].content_html = await readableWikiContent(pageResult.rows[0].content_html, request, departmentId, request.params.id);
     const [links, files] = await Promise.all([
@@ -317,7 +317,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       pool!.query(`SELECT stored.id,COALESCE(link.display_title,stored.title) AS title,
         link.display_title AS "displayTitle",stored.file_name AS "fileName",stored.content_type AS "contentType",
         stored.file_size AS "fileSize",stored.created_at AS "createdAt",link.created_at AS "attachedAt",
-        actor.display_name AS "attachedByName",link.managers_only AS "managersOnly"
+        COALESCE(link.uploader_actor_name,actor.display_name) AS "attachedByName",link.managers_only AS "managersOnly"
         FROM wiki_page_files link JOIN stored_files stored ON stored.id=link.file_id AND stored.department_id=link.department_id
         LEFT JOIN app_users actor ON actor.id=link.added_by
         WHERE link.department_id=$1 AND link.page_id=$2 AND stored.deleted_at IS NULL AND (NOT link.managers_only OR $3::boolean)
@@ -580,7 +580,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Wiki page not found." });
     reply.header("Cache-Control", "private, no-store");
-    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",editor.display_name AS \"editorName\",version.audience_change AS \"audienceChange\",version.category_change AS \"categoryChange\",version.redirect_change AS \"redirectChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id]);
+    const result = await pool!.query("SELECT version.id,version.title,version.content_html AS \"contentHtml\",version.created_at AS \"createdAt\",version.editor_user_id AS \"editorId\",version.editor_actor_id AS \"editorActorId\",COALESCE(version.editor_actor_name,editor.display_name) AS \"editorName\",version.audience_change AS \"audienceChange\",version.category_change AS \"categoryChange\",version.redirect_change AS \"redirectChange\" FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id WHERE version.department_id=$1 AND version.page_id=$2 ORDER BY version.created_at DESC,version.id DESC LIMIT 200", [departmentId, request.params.id]);
     return Promise.all(result.rows.map(async (version) => ({ ...version, contentHtml: await hideUnreadableWikiEntityLinks(safeHtml(version.contentHtml, request.params.id), request, departmentId) })));
   });
 
@@ -598,8 +598,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       [request.params.id, departmentId, isWikiManager(request), request.authenticatedUser!.id],
     );
     if (!page.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
-    const revisions = await pool!.query<{ id: string; title: string; contentHtml: string; createdAt: Date | string; editorId: string | null; editorName: string | null }>(
-      `SELECT version.id,version.title,version.content_html AS "contentHtml",version.created_at AS "createdAt",version.editor_user_id AS "editorId",editor.display_name AS "editorName"
+    const revisions = await pool!.query<{ id: string; title: string; contentHtml: string; createdAt: Date | string; editorId: string | null; editorActorId: string | null; editorName: string | null }>(
+      `SELECT version.id,version.title,version.content_html AS "contentHtml",version.created_at AS "createdAt",version.editor_user_id AS "editorId",version.editor_actor_id AS "editorActorId",COALESCE(version.editor_actor_name,editor.display_name) AS "editorName"
          FROM wiki_page_versions version LEFT JOIN app_users editor ON editor.id=version.editor_user_id
         WHERE version.department_id=$1 AND version.page_id=$2 AND version.id=ANY($3::uuid[])`,
       [departmentId, request.params.id, [leftVersionId, rightVersionId]],
