@@ -60,6 +60,42 @@ export function registerPersonalFollowups(routes: FastifyInstance, context: Modu
     }
   }
 
+  const overviewFilters = ["open","overdue","today","upcoming","completed"] as const;
+  type OverviewFilter = typeof overviewFilters[number];
+  type OverviewTask = Omit<Task, "details" | "completedAt"> & { contactId: string; personName: string };
+  routes.get<{ Querystring: { filter?: OverviewFilter; page?: number } }>("/api/people-records/personal-followups", {
+    schema: { querystring: { type: "object", additionalProperties: false, properties: {
+      filter: { type: "string", enum: overviewFilters }, page: { type: "integer", minimum: 1, maximum: 10000 },
+    } } },
+  }, async (request,reply) => {
+    const departmentId = await department(request,reply);
+    if (!departmentId) return reply;
+    const { filter = "open", page = 1 } = request.query;
+    const result = await pool!.query<{ today: string; tasks: OverviewTask[] }>(
+      `WITH site AS (
+        SELECT d.id,(now() AT TIME ZONE COALESCE(zone.name,'UTC'))::date AS today
+        FROM departments d LEFT JOIN pg_timezone_names zone ON zone.name=d.time_zone WHERE d.id=$1
+      ), matches AS (
+        SELECT f.id,f.contact_id AS "contactId",concat_ws(' ',c.first_name,c.last_name) AS "personName",
+          f.title,to_char(f.due_on,'YYYY-MM-DD') AS "dueOn",f.revision
+        FROM site JOIN people_personal_followups f ON f.department_id=site.id AND f.owner_user_id=$2
+        JOIN contacts c ON c.department_id=site.id AND c.id=f.contact_id AND c.archived_at IS NULL
+        WHERE (f.completed_at IS NOT NULL)=($3='completed')
+          AND CASE $3 WHEN 'overdue' THEN f.due_on<site.today WHEN 'today' THEN f.due_on=site.today
+            WHEN 'upcoming' THEN f.due_on>site.today ELSE true END
+        ORDER BY f.due_on,f.id LIMIT 26 OFFSET $4
+      )
+      SELECT to_char(site.today,'YYYY-MM-DD') AS today,
+        COALESCE((SELECT jsonb_agg(matches ORDER BY matches."dueOn",matches.id) FROM matches),'[]') AS tasks FROM site`,
+      [departmentId,request.authenticatedUser!.id,filter,(page-1)*25],
+    );
+    const location = result.rows[0];
+    if (!location) return reply.code(404).send({ error: "Location not found." });
+    return reply.header("Cache-Control","private, no-store").send({
+      today:location.today,tasks:location.tasks.slice(0,25),hasMore:location.tasks.length>25,
+    });
+  });
+
   routes.get<{ Params: ContactParams; Querystring: { completed?: boolean; page?: number } }>(path, {
     schema: { params: contactParams, querystring: { type: "object", additionalProperties: false, properties: {
       completed: { type: "boolean" }, page: { type: "integer", minimum: 1, maximum: 10000 },
