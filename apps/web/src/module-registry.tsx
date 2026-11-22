@@ -20,6 +20,7 @@ export interface ModuleContext {
   department: DepartmentProfile;
   departmentId: string;
   csrfToken: string;
+  accountId?: string;
   realtime?: ModuleRealtime;
   systemNotificationsEnabled?: boolean;
   canManageSite: boolean;

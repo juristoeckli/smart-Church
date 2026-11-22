@@ -1643,6 +1643,7 @@ function WorkspaceApp() {
     language: activeLanguage,
     department,
     departmentId: department.id,
+    accountId: authUser?.id,
     csrfToken,
     realtime: moduleRealtime,
     systemNotificationsEnabled: systemNotificationsEnabled && systemNotificationPermission === "granted",
