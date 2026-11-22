@@ -100,7 +100,10 @@ function PersonGroupMemberships({ contactId, request, onNavigateEntity }: {
 
 export function PeopleRecordsModule({departmentId,csrfToken,department,canManageSite,state,onStateChange,onNavigateEntity}:ModuleContext){
   const canManage=canManageSite||department.role==="site_admin"||(department.permissions??[]).includes("people_manage")||(department.modulePermissions?.["people-records"]??[]).includes("manage");
-  const [directoryPeople,setPeople]=useState<Person[]>([]),[fields,setFields]=useState<Field[]>([]),[selected,setSelected]=useState<Person|null>(null),[extras,setExtras]=useState<Extra[]>([]),[detailsSection,setDetailsSection]=useState("history"),[duplicates,setDuplicates]=useState<Candidate[]>([]),[filter,setFilter]=useState(() => tagFromPeopleNavigation(state) ?? ""),[status,setStatus]=useState(""),[customFilters,setCustomFilters]=useState<DirectoryFieldFilter[]>([]),[relationshipFilters,setRelationshipFilters]=useState<RelationshipFilter[]>([]),[columns,setColumns]=useState<string[]>(defaultDirectoryColumns),[tab,setTab]=useState("directory"),[label,setLabel]=useState(""),[key,setKey]=useState(""),[fieldType,setFieldType]=useState<Field["type"]>("text"),[options,setOptions]=useState(""),[consentPurpose,setConsentPurpose]=useState(""),[consentStatus,setConsentStatus]=useState("granted"),[relatedId,setRelatedId]=useState(""),[relationshipTypeId,setRelationshipTypeId]=useState(""),[relationshipTypes,setRelationshipTypes]=useState<RelationshipType[]>([]),[legacyRelationshipLabels,setLegacyRelationshipLabels]=useState<string[]>([]),[newRelationshipLabel,setNewRelationshipLabel]=useState(""),[newRelationshipReverseLabel,setNewRelationshipReverseLabel]=useState(""),[preview,setPreview]=useState<ImportPreview|null>(null),[selectedRows,setSelectedRows]=useState<number[]>([]),[importResult,setImportResult]=useState<unknown>(null),[dates,setDates]=useState<{birthDate:string|null;weddingAnniversary:string|null}>({birthDate:null,weddingAnniversary:null}),[error,setError]=useState(""),[message,setMessage]=useState(""),[mergePreview,setMergePreview]=useState<MergePreview|null>(null),[mergeConflictsConfirmed,setMergeConflictsConfirmed]=useState(false);
+  const [directoryPeople,setPeople]=useState<Person[]>([]),[fields,setFields]=useState<Field[]>([]),[selected,setSelected]=useState<Person|null>(null),[extras,setExtras]=useState<Extra[]>([]),[detailsSection,setDetailsSection]=useState("history"),[duplicates,setDuplicates]=useState<Candidate[]>([]),[status,setStatus]=useState(""),[customFilters,setCustomFilters]=useState<DirectoryFieldFilter[]>([]),[relationshipFilters,setRelationshipFilters]=useState<RelationshipFilter[]>([]),[columns,setColumns]=useState<string[]>(defaultDirectoryColumns),[tab,setTab]=useState("directory"),[label,setLabel]=useState(""),[key,setKey]=useState(""),[fieldType,setFieldType]=useState<Field["type"]>("text"),[options,setOptions]=useState(""),[consentPurpose,setConsentPurpose]=useState(""),[consentStatus,setConsentStatus]=useState("granted"),[relatedId,setRelatedId]=useState(""),[relationshipTypeId,setRelationshipTypeId]=useState(""),[relationshipTypes,setRelationshipTypes]=useState<RelationshipType[]>([]),[legacyRelationshipLabels,setLegacyRelationshipLabels]=useState<string[]>([]),[newRelationshipLabel,setNewRelationshipLabel]=useState(""),[newRelationshipReverseLabel,setNewRelationshipReverseLabel]=useState(""),[preview,setPreview]=useState<ImportPreview|null>(null),[selectedRows,setSelectedRows]=useState<number[]>([]),[importResult,setImportResult]=useState<unknown>(null),[dates,setDates]=useState<{birthDate:string|null;weddingAnniversary:string|null}>({birthDate:null,weddingAnniversary:null}),[error,setError]=useState(""),[message,setMessage]=useState(""),[mergePreview,setMergePreview]=useState<MergePreview|null>(null),[mergeConflictsConfirmed,setMergeConflictsConfirmed]=useState(false);
+  const [search, setSearch] = useState(() => ({ text: tagFromPeopleNavigation(state) ?? "", departmentId }));
+  const filter = search.departmentId === departmentId || !isPeopleTagLookup(search.text) ? search.text : "";
+  const setFilter = useCallback((text: string) => setSearch({ text, departmentId }), [departmentId]);
   const [fieldVisibility, setFieldVisibility] = useState<FieldVisibility>("private_people");
   const canViewServiceWorkload = department.role === "site_admin" || (department.permissions ?? []).includes("events_manage");
   const canManagePeopleRecords = canManageSite || department.role === "site_admin" || department.permissions?.includes("people_manage") === true;
@@ -148,7 +151,7 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
   useEffect(() => {
     if (previousGroupFilterDepartment.current !== departmentId) {
       previousGroupFilterDepartment.current = departmentId;
-      setFilter(current => isPeopleTagLookup(current) ? "" : current);
+      setSearch(current => current.departmentId !== departmentId && isPeopleTagLookup(current.text) ? { text: "", departmentId } : current);
       setGroupId("");
       setFormerGroupId("");
       setAttendedMeetingId("");
@@ -175,7 +178,7 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
     setActiveSavedView("");
     setGroupId(group ?? "");
     onStateChange("");
-  }, [state, onStateChange]);
+  }, [state, onStateChange, setFilter]);
   useEffect(() => {
     let active = true;
     setDirectoryGroups([]);
