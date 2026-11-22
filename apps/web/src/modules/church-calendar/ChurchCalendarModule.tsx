@@ -668,7 +668,7 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
 
   if (canManageGroups && attendance?.departmentId === departmentId) {
     return <GroupMeetingAttendance key={departmentId + ":" + attendance.target.id} target={attendance.target}
-      departmentId={departmentId} csrfToken={csrfToken} onBack={() => setAttendance(undefined)} />;
+      departmentId={departmentId} csrfToken={csrfToken} realtime={realtime} onBack={() => setAttendance(undefined)} />;
   }
   return <main className="church-calendar-page">
     <header className="church-calendar-header"><div><span className="eyebrow">PLANNING</span><h1>Calendar</h1><p>Appointments across your community, groups and personal calendars.</p></div><div className="church-calendar-header-actions"><button type="button" className="button button-secondary" onClick={() => void toggleArchive()}>{showArchive ? "Hide archive" : "Archive"}</button><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(true)}><Plus size={15} /> New calendar</button><button type="button" className="button button-primary" onClick={() => openNew()}><Plus size={15} /> New appointment</button></div></header>

@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Plus, Printer, Search } from "lucide-react";
 import "./module.css";
 import { translate } from "../../i18n";
 import { GroupMeetingAddAttendee } from "./GroupMeetingAddAttendee";
+import type { ModuleRealtime } from "../../module-registry";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
 import { checkInPrintItems, readCheckInPrintOptions, writeCheckInPrintDocument, type CheckInPrintOptions } from "./printing";
 import { groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceSnapshot, type GroupAttendanceStatus } from "../../group-attendance";
@@ -14,7 +15,7 @@ const statuses = { present: "Present", absent: "Absent", excused: "Excused" } as
 const statusKeys = Object.keys(statuses) as GroupAttendanceStatus[];
 
 function useData<T>(path: string, departmentId: string, label: string) {
-  const [result, setResult] = useState<{ path: string; data?: T; error?: string }>();
+  const [result, setResult] = useState<{ path: string; departmentId: string; version: number; data?: T; error?: string }>();
   const [version, setVersion] = useState(0);
   useEffect(() => {
     if (!path) return;
@@ -24,27 +25,32 @@ function useData<T>(path: string, departmentId: string, label: string) {
       .then(async (response) => {
         if (!response.ok) throw new Error(fallback);
         const data = await response.json() as T;
-        if (!controller.signal.aborted) setResult({ path, data });
+        if (!controller.signal.aborted) setResult({ path, departmentId, version, data });
       })
       .catch(() => {
-        if (!controller.signal.aborted) setResult({ path, error: fallback });
+        if (!controller.signal.aborted) setResult({ path, departmentId, version, error: fallback });
       });
     return () => controller.abort();
   }, [path, departmentId, label, version]);
+  const reload = useCallback(() => { setResult(undefined); setVersion((current) => current + 1); }, []);
+  const refresh = useCallback(() => setVersion((current) => current + 1), []);
+  const matching = path && result?.path === path && result.departmentId === departmentId ? result : undefined;
   return {
-    data: path && result?.path === path ? result.data : undefined,
-    error: path && result?.path === path ? result.error : undefined,
-    pending: Boolean(path && result?.path !== path),
-    reload: () => { setResult(undefined); setVersion((current) => current + 1); },
+    data: matching?.data,
+    error: matching?.error,
+    pending: Boolean(path && !matching),
+    refreshing: Boolean(matching && matching.version !== version),
+    reload, refresh,
   };
 }
 
-export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target, printOptions = readCheckInPrintOptions("") }: {
+export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target, realtime, printOptions = readCheckInPrintOptions("") }: {
   departmentId: string;
   csrfToken: string;
   onBack: () => void;
   target?: GroupMeetingTarget;
   printOptions?: CheckInPrintOptions;
+  realtime?: ModuleRealtime;
 }) {
   const [groupId, selectGroup] = useState("");
   const groups = useData<Group[]>(target ? "" : "/api/groups", departmentId, "groups");
@@ -71,7 +77,32 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   const completedAt = roster.data?.completedAt ?? null;
   const rows = attendance.map((row) => ({ ...row, status: draft[row.contactId] ?? row.status }));
   const changes = groupAttendanceChanges(attendance, rows);
-  const busy = saving || creating || changes.length > 0;
+  const busy = saving || creating || roster.refreshing || changes.length > 0;
+  const [remoteMeetingId, setRemoteMeetingId] = useState("");
+  const activeMeetingId = meeting?.id;
+  const refreshRoster = roster.refresh;
+  const refreshMeetings = meetings.refresh;
+
+  useEffect(() => {
+    if (!realtime || !activeMeetingId) return;
+    const changed = realtime.subscribe("core:groups:changed", ({ departmentId: changedDepartment, payload }) => {
+      if (changedDepartment !== departmentId || !payload || typeof payload !== "object"
+        || !("meetingId" in payload) || payload.meetingId !== activeMeetingId) return;
+      setRemoteMeetingId(activeMeetingId);
+    });
+    const connected = realtime.subscribe("realtime:connected", ({ departmentId: connectedDepartment }) => {
+      if (connectedDepartment === departmentId) setRemoteMeetingId(activeMeetingId);
+    });
+    return () => { changed(); connected(); };
+  }, [activeMeetingId, departmentId, realtime]);
+
+  useEffect(() => {
+    if (busy || !remoteMeetingId) return;
+    setRemoteMeetingId("");
+    if (remoteMeetingId !== activeMeetingId) return;
+    refreshRoster();
+    if (!target) refreshMeetings();
+  }, [activeMeetingId, busy, refreshMeetings, refreshRoster, remoteMeetingId, target]);
   const term = query.trim().toLocaleLowerCase();
   const names = new Intl.Collator(document.documentElement.lang || undefined, { sensitivity: "base" });
   const roles = [...new Set(rows.map((row) => row.role?.trim()).filter((role): role is string => Boolean(role)))].sort(names.compare);
@@ -144,7 +175,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   }
 
   async function saveAttendance() {
-    if (!meeting || !roster.data || completedAt || saving || !changes.length) return;
+    if (!meeting || !roster.data || completedAt || saving || roster.refreshing || !changes.length) return;
     setSaving(true);
     setError("");
     setNotice("");
@@ -167,7 +198,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   }
 
   async function changeMeetingCompletion(feedback?: CompletionFeedbackDraft) {
-    if (!meeting || !roster.data || saving || changes.length) return false;
+    if (!meeting || !roster.data || saving || roster.refreshing || changes.length) return false;
     setSaving(true);
     setError("");
     setNotice("");
@@ -260,8 +291,9 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
           <Printer size={16} /> Print visible present labels
         </button>
         {completedAt && <strong>Attendance completed.</strong>}
-        <GroupMeetingCompletion key={departmentId + ":" + meeting.id} meetingId={meeting.id} departmentId={departmentId} completedAt={completedAt} disabled={saving || Boolean(changes.length)} buttonClass="checkin-print" onComplete={changeMeetingCompletion} />
-        <button className="checkin-print" type="button" disabled={saving || Boolean(completedAt) || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
+        {remoteMeetingId === activeMeetingId && changes.length > 0 && <p role="status">Attendance changed on another desk. Save or discard your edits to refresh.</p>}
+        <GroupMeetingCompletion key={departmentId + ":" + meeting.id} meetingId={meeting.id} departmentId={departmentId} completedAt={completedAt} disabled={saving || roster.refreshing || Boolean(changes.length)} buttonClass="checkin-print" onComplete={changeMeetingCompletion} />
+        <button className="checkin-print" type="button" disabled={saving || roster.refreshing || Boolean(completedAt) || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
       </section>
       {roster.data?.canAddAttendees && <GroupMeetingAddAttendee key={departmentId + ":" + meeting.id}
         meetingId={meeting.id} departmentId={departmentId} csrfToken={csrfToken} canCreate={Boolean(roster.data.canCreateAttendees)}
@@ -275,7 +307,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
       <div className="checkin-roster">
         {shown.map((row) => <article className={"checkin-person" + (row.status === "present" ? " is-present" : "")} key={row.contactId}>
           <div className="checkin-person-info"><strong>{row.firstName} {row.lastName}</strong>{row.role && <span>{row.role}</span>}</div>
-          <select aria-label={"Attendance for " + row.firstName + " " + row.lastName} value={row.status} disabled={saving || Boolean(completedAt)} onChange={(event) => {
+          <select aria-label={"Attendance for " + row.firstName + " " + row.lastName} value={row.status} disabled={saving || roster.refreshing || Boolean(completedAt)} onChange={(event) => {
             const status = event.target.value as GroupAttendanceStatus;
             setDraft((current) => ({ ...current, [row.contactId]: status }));
             setNotice("");
