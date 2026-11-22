@@ -1,3 +1,5 @@
+import { firstContactTrendSql } from "./first-contact-trend.js";
+import { canManagePeopleFields } from "../people-records/field-privacy.js";
 import { exportFormatQuery, sendReportWorkbook, type ExportFormatQuery } from "./xlsx.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -7,7 +9,7 @@ import { registerReportDesigner } from "./designer.js";
 import { groupGrowthSql, validGroupGrowthRange } from "./group-growth.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
@@ -16,6 +18,7 @@ const catalog = [
   { key: "people-directory" as const, title: "People directory", description: "Contact list with status and contact details.", permission: "people" as const },
   { key: "people-consent-history" as const, title: "People consent history", description: "Consent purpose, status, capture date, expiry, and actor; private notes are excluded.", permission: "people" as const },
   { key: "people-status-changes" as const, title: "People status changes", description: "Audited member/visitor status changes recorded through People Records.", permission: "people" as const },
+  { key: "people-first-contact-trend" as const, title: "First contacts by month", description: "First-contact dates recorded for active People profiles, including months with zero first contacts.", permission: "people" as const },
   { key: "upcoming-birthdays" as const, title: "Upcoming birthdays", description: "People with birthdays in the next 30 days.", permission: "people" as const },
   { key: "upcoming-anniversaries" as const, title: "Upcoming wedding anniversaries", description: "People with wedding anniversaries in the next 30 days.", permission: "people" as const },
   { key: "group-summary" as const, title: "Group summary", description: "Group membership counts by active, paused and waitlist status.", permission: "groups" as const },
@@ -112,8 +115,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!canModule(request, "view")) { reply.code(403).send({ error: "Reports view access is required." }); return null; }
     return id;
   }
-  async function installedReports(request: ReportAccess, db: Pool | PoolClient = pool!) {
-    const present = await db.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; absenceConflicts: boolean }>(
+  async function installedReports(departmentId: string, request: ReportAccess, db: Pool | PoolClient = pool!) {
+    const present = await db.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; peopleFields: boolean; absenceConflicts: boolean }>(
       `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
               to_regclass('public.finance_budgets') IS NOT NULL AS "financeBudgets",
               to_regclass('public.finance_donors') IS NOT NULL AS "financeDonors",
@@ -128,13 +131,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               to_regclass('public.worship_songs') IS NOT NULL AND to_regclass('public.service_events') IS NOT NULL AS worship,
               to_regclass('public.bookable_resources') IS NOT NULL AND to_regclass('public.resource_bookings') IS NOT NULL AS resources,
               to_regclass('public.people_record_person_dates') IS NOT NULL AS "personDates",
+              to_regclass('public.people_record_values') IS NOT NULL AND EXISTS (
+                SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='people_record_fields' AND column_name='visibility'
+              ) AS "peopleFields",
               to_regclass('public.event_person_absences') IS NOT NULL AND to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.event_position_responses') IS NOT NULL AS "absenceConflicts"`,
     );
     const state = present.rows[0];
+    const firstContactField = state.peopleFields && available(request,"people-first-contact-trend")
+      && (await db.query(`SELECT id FROM people_record_fields
+        WHERE department_id=$1 AND field_key='first_contact_date' AND field_type='date' AND active
+          AND ($2::boolean OR visibility='private_people')`, [departmentId,canManagePeopleFields(request)])).rows.length > 0;
     return catalog.filter((item) => available(request, item.key)
       && (item.permission !== "finance" || state.finance)
       && (item.key !== "people-consent-history" || state.peopleConsents)
       && (item.key !== "people-status-changes" || state.peopleHistory)
+      && (item.key !== "people-first-contact-trend" || firstContactField)
       && (item.key !== "finance-budget-vs-actual" || (state.finance && state.financeBudgets))
       && (item.key !== "finance-donor-giving" || (state.finance && state.financeDonors))
       && (item.key !== "group-meeting-attendance" || state.groupAttendance)
@@ -149,7 +160,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "resource-bookings" || state.resources)
       && (item.key !== "resource-utilization" || state.resources));
   }
-  async function runReport(departmentId: string, reportKey: ReportKey, filters: ReportFilters, db: Pool | PoolClient = pool!) {
+  async function runReport(departmentId: string, reportKey: ReportKey, filters: ReportFilters, access: ReportAccess, db: Pool | PoolClient = pool!) {
     let columns: Array<{ key: string; label: string }>;
     let rows: ReportRow[];
     if (reportKey === "people-directory") {
@@ -185,6 +196,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           ORDER BY history.created_at DESC,contact.last_name,contact.first_name LIMIT 5000`,
         [departmentId, filters.from ?? null, filters.to ?? null],
       );
+      rows = result.rows;
+    } else if (reportKey === "people-first-contact-trend") {
+      if (!validGroupGrowthRange(filters.from, filters.to)) throw new Error("Choose a valid date range of up to 731 calendar days.");
+      columns = [{ key: "month", label: "Month" }, { key: "firstContacts", label: "First contacts" }];
+      const result = await db.query(firstContactTrendSql,[departmentId,filters.from,filters.to,canManagePeopleFields(access)]);
       rows = result.rows;
     } else if (reportKey === "upcoming-birthdays" || reportKey === "upcoming-anniversaries") {
       const kind = reportKey === "upcoming-birthdays" ? "birth_date" : "wedding_anniversary";
@@ -524,7 +540,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/reports/catalog", async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    return installedReports(request);
+    return installedReports(departmentId, request);
   });
   app.get("/api/modules/reports/groups", async (request, reply) => {
     const departmentId = await department(request, reply);
@@ -538,14 +554,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
     const reportKey = request.query.reportKey!;
-    if (!(await installedReports(request)).some((item) => item.key === reportKey)) return denied(reply);
+    if (!(await installedReports(departmentId, request)).some((item) => item.key === reportKey)) return denied(reply);
     const filterInput: Record<string, unknown> = { ...request.query };
     delete filterInput.reportKey;
     delete filterInput.format;
     const filters = normalizeFilters(filterInput);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
     try {
-      const report = await runReport(departmentId, reportKey, filters);
+      const report = await runReport(departmentId, reportKey, filters, request);
+      if (reportKey === "people-first-contact-trend") reply.header("Cache-Control","private, no-store");
       return request.query.format === "xlsx" ? sendReportWorkbook(reply, report, reportKey) : report;
     }
     catch (error) { return reply.code(error instanceof Error && error.message.startsWith("Choose") ? 400 : 503).send({ error: error instanceof Error ? error.message : "The report could not be generated." }); }
@@ -554,7 +571,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
     const result = await pool!.query<SavedReport & { share_scope: "private" | "department"; can_edit: boolean }>("SELECT id,report_key,name,filters,owner_user_id,updated_at,share_scope,schedule_days,notify_when_ready,next_run_at,last_run_at,last_run_status,CASE WHEN owner_user_id=$2 THEN run_history END AS run_history,(owner_user_id=$2 OR $3::boolean) AS can_edit FROM saved_report_definitions WHERE department_id=$1 AND (owner_user_id=$2 OR share_scope='department') ORDER BY lower(name),id", [departmentId, request.authenticatedUser!.id, request.activeDepartmentRole === "site_admin"]);
-    const availableKeys = new Set((await installedReports(request)).map((item) => item.key));
+    const availableKeys = new Set((await installedReports(departmentId, request)).map((item) => item.key));
     return result.rows.filter((saved) => availableKeys.has(saved.report_key)).map((saved) => ({ id: saved.id, reportKey: saved.report_key, name: saved.name, filters: saved.filters, ownerId: saved.owner_user_id, updatedAt: saved.updated_at, shareScope: saved.share_scope, canEdit: saved.can_edit, ...(saved.owner_user_id === request.authenticatedUser!.id ? { scheduleDays: saved.schedule_days, notifyWhenReady: saved.notify_when_ready, nextRunAt: saved.next_run_at, lastRunAt: saved.last_run_at, lastRunStatus: saved.last_run_status, runHistory: saved.run_history } : {}) }));
   });
   app.post<{ Body: { reportKey: ReportKey; name: string; filters: unknown; shareScope?: "private" | "department" } }>("/api/modules/reports/saved", {
@@ -564,10 +581,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!canModule(request, "manage")) return denied(reply);
     if (!validateMutation(request, reply)) return reply;
-    if (!(await installedReports(request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
+    if (!(await installedReports(departmentId, request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
     const filters = normalizeFilters(request.body.filters);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
-    if (request.body.reportKey === "group-growth" && !validGroupGrowthRange(filters.from, filters.to)) {
+    if (["group-growth","people-first-contact-trend"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
       return reply.code(400).send({ error: "Choose a valid date range of up to 731 calendar days." });
     }
     const name = cleanText(request.body.name, 120);
@@ -608,7 +625,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     if (!canModule(request, "manage")) return denied(reply);
     if (!validateMutation(request, reply)) return reply;
-    const keys = (await installedReports(request)).map((item) => item.key);
+    const keys = (await installedReports(departmentId, request)).map((item) => item.key);
     const client = await pool!.connect();
     try {
       await client.query("BEGIN");
@@ -638,7 +655,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   }, async (request, reply) => {
     const departmentId = await department(request, reply);
     if (!departmentId) return reply;
-    const keys = (await installedReports(request)).map((item) => item.key);
+    const keys = (await installedReports(departmentId, request)).map((item) => item.key);
     const result = await pool!.query<{ scheduled_result: Awaited<ReturnType<typeof runReport>> | null }>(
       `SELECT scheduled_result FROM saved_report_definitions
         WHERE id=$1 AND department_id=$2 AND owner_user_id=$3 AND report_key=ANY($4::text[])`,
@@ -713,8 +730,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
             try {
               const report = candidate.kind === "designer"
                 ? await designer.runSavedDesign(access, candidate.department_id, saved.definition, client)
-                : (await installedReports(access, client)).some((entry) => entry.key === saved.report_key)
-                  ? await runReport(candidate.department_id, saved.report_key, saved.filters, client)
+                : (await installedReports(candidate.department_id, access, client)).some((entry) => entry.key === saved.report_key)
+                  ? await runReport(candidate.department_id, saved.report_key, saved.filters, access, client)
                   : null;
               if (report) {
                 const document = JSON.stringify(report);
