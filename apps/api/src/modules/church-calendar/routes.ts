@@ -112,6 +112,26 @@ const calendarSubscriptionAudience = `(
   ))
 )`;
 
+async function notifyAppointmentCreator(client: PoolClient, departmentId: string, appointmentId: string, actorId: string) {
+  if (!isServerModuleEnabled("notifications")) return false;
+  const storage = await client.query<{ installed: boolean }>("SELECT to_regclass('public.module_notifications') IS NOT NULL AS installed");
+  if (!storage.rows[0]?.installed) return false;
+  const result = await client.query(
+    `INSERT INTO module_notifications (id,department_id,recipient_user_id,sender_user_id,kind,title,body,in_app_enabled,email_enabled)
+     SELECT $4,calendar.department_id,account.id,$3,'calendar_appointment_updated','Calendar appointment updated',
+            'An appointment you created changed. Open Calendar to see current appointments.',true,true
+       FROM church_calendar_appointments appointment
+       JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+       JOIN department_memberships membership ON membership.department_id=calendar.department_id AND membership.user_id=appointment.created_by
+       JOIN app_users account ON account.id=membership.user_id AND account.is_enabled AND NOT account.is_service_user
+      WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL
+        AND calendar.archived_at IS NULL AND account.id<>$3
+        AND (calendar.scope='community' OR ${calendarSubscriptionAudience})`,
+    [appointmentId, departmentId, actorId, randomUUID()],
+  );
+  return Boolean(result.rowCount);
+}
+
 async function registrationFormTemplatesInstalled(db: Pick<PoolClient, "query">) {
   const result = await db.query<{ installed: boolean }>(
     `SELECT count(*)=3 AS installed FROM pg_attribute
@@ -1483,7 +1503,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { restored: true };
   });
 
-  app.put<{ Params: { id: string }; Querystring: { scope?: "occurrence" | "future" | "series" }; Body: AppointmentInput & { occurrenceStartAt?: string } }>("/api/modules/church-calendar/appointments/:id", { schema: {
+  app.put<{ Params: { id: string }; Querystring: { scope?: "occurrence" | "future" | "series" }; Body: AppointmentInput & { occurrenceStartAt?: string; notifyCreator?: boolean } }>("/api/modules/church-calendar/appointments/:id", { schema: {
     params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
     querystring: { type: "object", additionalProperties: false, properties: { scope: { type: "string", enum: ["occurrence", "future", "series"] } } },
   } }, async (request, reply) => {
@@ -1491,6 +1511,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!context.validateMutation(request, reply)) return reply;
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
+    if (request.body.notifyCreator !== undefined && typeof request.body.notifyCreator !== "boolean") {
+      return responseError(reply, 400, "Choose whether to notify the appointment creator.");
+    }
     const normalized = normalizeInput(request.body);
     if (typeof normalized === "string") return responseError(reply, 400, normalized);
     const found = await context.pool.query<AppointmentRow>(
@@ -1529,35 +1552,50 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const resourceRows = await context.pool.query("SELECT id FROM resource_bookings WHERE id=ANY($1::uuid[]) AND department_id=$2 AND status='approved' AND ($3 OR requested_by=$4)", [resourceIds, departmentId, canManageResources, userId(request)]);
       if (resourceRows.rowCount !== resourceIds.length) return responseError(reply, 400, "One or more resource bookings are outside this location or unavailable.");
     }
-    if (scope === "occurrence" && row.recurrence) {
-      if (!occurrenceStart) return responseError(reply, 400, "Choose which occurrence to edit.");
-      const overrides = Object.fromEntries(calendarFields.filter((field) => field in values).map((field) => [field, values[field]]));
-      if (!canSeePrivatePeople(request) && !("responsibleContactId" in request.body)) {
-        const existing = await context.pool.query<{ overrides: Record<string, unknown> }>(
-          "SELECT overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp",
-          [row.id, occurrenceStart],
-        );
-        if (existing.rows[0]?.overrides && Object.prototype.hasOwnProperty.call(existing.rows[0].overrides, "responsibleContactId")) {
-          const retainedResponsibleContactId = existing.rows[0].overrides.responsibleContactId;
-          overrides.responsibleContactId = typeof retainedResponsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(retainedResponsibleContactId) ? retainedResponsibleContactId : null;
-        }
+    if (scope === "occurrence" && row.recurrence && !occurrenceStart) return responseError(reply, 400, "Choose which occurrence to edit.");
+    if (scope === "future" && row.recurrence && (!occurrenceStart || occurrenceStart <= row.starts_at)) {
+      return responseError(reply, 400, "Choose an occurrence after the first appointment to split the series.");
+    }
+    const client = await context.pool.connect();
+    let futureAppointmentId: string | undefined;
+    let creatorNotificationQueued = false;
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 423, "This location is read-only.");
       }
-      await context.pool.query(
-        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by) VALUES($1,$2::timestamp,false,$3::jsonb,$4)
-         ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=false,overrides=EXCLUDED.overrides,updated_by=EXCLUDED.updated_by,updated_at=now()`,
-        [row.id, occurrenceStart, JSON.stringify(overrides), userId(request)],
+      const current = await client.query<{ scope: CalendarScope; owner_user_id: string | null }>(
+        `SELECT calendar.scope,calendar.owner_user_id FROM church_calendar_appointments appointment
+         JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=appointment.department_id
+         WHERE appointment.id=$1 AND appointment.department_id=$2 AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+         FOR UPDATE OF appointment FOR SHARE OF calendar`, [row.id, departmentId],
       );
-    } else if (scope === "future" && row.recurrence) {
-      if (!occurrenceStart || occurrenceStart <= row.starts_at) return responseError(reply, 400, "Choose an occurrence after the first appointment to split the series.");
-      const next = { startsAt: normalized.startsAt, endsAt: normalized.endsAt };
-      const client = await context.pool.connect();
-      const newId = randomUUID();
-      try {
-        await client.query("BEGIN");
-        if (!await context.lockDepartmentForWrite(client, departmentId)) {
-          await client.query("ROLLBACK");
-          return responseError(reply, 423, "This location is read-only.");
+      if (!current.rows[0] || !canManageCalendar(request, current.rows[0].scope, current.rows[0].owner_user_id)) {
+        await client.query("ROLLBACK");
+        return responseError(reply, 409, "The appointment changed. Open it again before saving.");
+      }
+      if (scope === "occurrence" && row.recurrence) {
+        const overrides = Object.fromEntries(calendarFields.filter((field) => field in values).map((field) => [field, values[field]]));
+        if (!canSeePrivatePeople(request) && !("responsibleContactId" in request.body)) {
+          const existing = await client.query<{ overrides: Record<string, unknown> }>(
+            "SELECT overrides FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start=$2::timestamp",
+            [row.id, occurrenceStart],
+          );
+          if (existing.rows[0]?.overrides && Object.prototype.hasOwnProperty.call(existing.rows[0].overrides, "responsibleContactId")) {
+            const retainedResponsibleContactId = existing.rows[0].overrides.responsibleContactId;
+            overrides.responsibleContactId = typeof retainedResponsibleContactId === "string" && /^[0-9a-f-]{36}$/i.test(retainedResponsibleContactId) ? retainedResponsibleContactId : null;
+          }
         }
+        await client.query(
+          `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by) VALUES($1,$2::timestamp,false,$3::jsonb,$4)
+           ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=false,overrides=EXCLUDED.overrides,updated_by=EXCLUDED.updated_by,updated_at=now()`,
+          [row.id, occurrenceStart, JSON.stringify(overrides), userId(request)],
+        );
+      } else if (scope === "future" && row.recurrence) {
+        const next = { startsAt: normalized.startsAt, endsAt: normalized.endsAt };
+        futureAppointmentId = randomUUID();
+        const newId = futureAppointmentId;
         const locked = await lockCalendarSeries(client, row.id, departmentId);
         if (!locked || locked.starts_at !== row.starts_at || locked.ends_at !== row.ends_at
           || JSON.stringify(locked.recurrence) !== JSON.stringify(row.recurrence)) {
@@ -1568,7 +1606,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           `SELECT to_char(starts_at,'YYYY-MM-DD"T"HH24:MI:SS') AS "startsAt",to_char(ends_at,'YYYY-MM-DD"T"HH24:MI:SS') AS "endsAt"
              FROM church_calendar_extra_dates WHERE appointment_id=$1 FOR UPDATE`, [row.id],
         );
-        const plan = planCalendarSeriesSplit(locked, occurrenceStart, next, normalized.recurrence ?? row.recurrence, extras);
+        const plan = planCalendarSeriesSplit(locked, occurrenceStart!, next, normalized.recurrence ?? row.recurrence, extras);
         if (!plan) {
           await client.query("ROLLBACK");
           return responseError(reply, 409, "Choose an existing occurrence and a new start time that does not duplicate a neighboring occurrence.");
@@ -1607,35 +1645,33 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            SELECT $1,dates."startsAt",dates."endsAt",$2 FROM jsonb_to_recordset($3::jsonb) AS dates("startsAt" timestamp,"endsAt" timestamp)`,
           [newId, userId(request), JSON.stringify(plan.addedExtras)],
         );
-        await moveCalendarOccurrenceLinks(client, row.id, newId, occurrenceStart, selectedOverrides, plan.targetOccurrence);
+        await moveCalendarOccurrenceLinks(client, row.id, newId, occurrenceStart!, selectedOverrides, plan.targetOccurrence);
         await client.query(
           `INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by)
            SELECT $2,resource_booking_id,created_by FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start IS NULL`, [row.id, newId],
         );
-        if (updateSeriesLinks) await updateCalendarSeriesResources(client, newId, resourceIds, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")));
-        await client.query("COMMIT");
-      } catch (error) { await client.query("ROLLBACK"); throw error; }
-      finally { client.release(); }
-      context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, futureAppointmentId: newId, scope });
-      return { updated: true, futureAppointmentId: newId };
-    } else {
-      const currentOccurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
-      const seriesStart = currentOccurrenceStart ? new Date(wallDate(row.starts_at).getTime() + wallDate(normalized.startsAt).getTime() - wallDate(currentOccurrenceStart).getTime()) : wallDate(normalized.startsAt);
-      const seriesStartAt = localDateTime(seriesStart);
-      const seriesDuration = Math.max(0, wallDate(normalized.endsAt).getTime() - wallDate(normalized.startsAt).getTime());
-      const seriesEndAt = localDateTime(new Date(seriesStart.getTime() + seriesDuration));
-      await context.pool.query(
-        `WITH changed AS (
-           UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,time_zone=$17,updated_at=now()
-            WHERE id=$1 AND department_id=$2 RETURNING id
-         ) UPDATE church_calendar_resource_links link SET occurrence_start=$6::timestamp
-            FROM changed WHERE link.appointment_id=changed.id AND link.occurrence_start=$18::timestamp`,
-        [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
-      );
-    }
-    if (updateSeriesLinks) await updateCalendarSeriesResources(context.pool, row.id, resourceIds, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")));
-    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, scope });
-    return { updated: true };
+      } else {
+        const currentOccurrenceStart = cleanLocalDateTime(request.body.occurrenceStartAt);
+        const seriesStart = currentOccurrenceStart ? new Date(wallDate(row.starts_at).getTime() + wallDate(normalized.startsAt).getTime() - wallDate(currentOccurrenceStart).getTime()) : wallDate(normalized.startsAt);
+        const seriesStartAt = localDateTime(seriesStart);
+        const seriesDuration = Math.max(0, wallDate(normalized.endsAt).getTime() - wallDate(normalized.startsAt).getTime());
+        const seriesEndAt = localDateTime(new Date(seriesStart.getTime() + seriesDuration));
+        await client.query(
+          `WITH changed AS (
+             UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,time_zone=$17,updated_at=now()
+              WHERE id=$1 AND department_id=$2 RETURNING id
+           ) UPDATE church_calendar_resource_links link SET occurrence_start=$6::timestamp
+              FROM changed WHERE link.appointment_id=changed.id AND link.occurrence_start=$18::timestamp`,
+          [row.id, departmentId, values.title, values.subtitle, values.description, row.recurrence ? seriesStartAt : values.startsAt, row.recurrence ? seriesEndAt : values.endsAt, values.allDay ?? false, values.place, values.url, values.internalOnly ?? false, values.tags, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null, values.linkedEventId ?? null, values.signupGroupId ?? null, "responsibleContactId" in request.body ? normalized.responsibleContactId ?? null : row.responsible_contact_id ?? null, timeZone, row.recurrence ? null : row.starts_at],
+        );
+      }
+      if (updateSeriesLinks) await updateCalendarSeriesResources(client, futureAppointmentId ?? row.id, resourceIds, userId(request), isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler")));
+      if (request.body.notifyCreator) creatorNotificationQueued = await notifyAppointmentCreator(client, departmentId, row.id, userId(request));
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    context.realtime.publish("module:church-calendar:changed", departmentId, { action: "appointment-updated", appointmentId: row.id, ...(futureAppointmentId ? { futureAppointmentId } : {}), scope });
+    return { updated: true, ...(futureAppointmentId ? { futureAppointmentId } : {}), ...(request.body.notifyCreator ? { creatorNotificationQueued } : {}) };
   });
 
   app.delete<{ Params: { id: string }; Querystring: { scope?: "occurrence" | "future" | "series"; occurrenceStartAt?: string } }>("/api/modules/church-calendar/appointments/:id", { schema: {
