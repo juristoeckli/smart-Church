@@ -1,3 +1,4 @@
+import { isPeopleTagLookup } from "./people-group-navigation";
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Search, X } from "lucide-react";
 import "./global-search.css";
@@ -47,7 +48,8 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
   const categories = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
     const actions: ActionResult[] = [];
-    if (term.length >= 2 && !term.startsWith("#")) {
+    const tagLookup = isPeopleTagLookup(term);
+    if (term.length >= 2 && !term.startsWith("#") && !tagLookup) {
       const candidates = [...navigationActions, ...(onQuickCreate ? quickCreateActions.map((action) => ({
         id: `create:${action.type}`,
         label: `Create ${action.label.toLocaleLowerCase()}`,
@@ -74,7 +76,8 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
       );
       if (!result.isIdQuery && query.trim().length >= 2 && onFullSearch) {
         groups.push({ title: "More results", items: fullSearchDestinations
-          .filter((destination) => destination !== "people" || result.canSearchPeople)
+          .filter((destination) => tagLookup ? destination === "people" && result.canSearchPeople
+            : destination !== "people" || result.canSearchPeople)
           .map((destination) => ({
             id: `search:${destination}`, type: "action", title: fullSearchLabels[destination],
             detail: query.trim(), run: () => onFullSearch(destination, query.trim()),
@@ -170,7 +173,7 @@ export function GlobalSearch({ departmentId, userId, onNavigateEntity, quickCrea
         <div className="global-search-input-row"><Search size={19} aria-hidden="true" /><input ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded={resultRows.length > 0}
           aria-controls={resultRows.length > 0 ? resultListId : undefined} aria-activedescendant={activeOptionId} value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={handleKeyDown} placeholder="Search records, actions or # ID" aria-label="Search records, actions or ID" autoComplete="off" maxLength={100} /><kbd>ESC</kbd><button type="button" className="icon-button" aria-label="Close search" onClick={hide}><X size={17} /></button></div>
         <div className="global-search-body">
-          {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly.</p>{quickCreateActions.length > 0 && onQuickCreate && <section className="global-search-quick-create"><strong>Quick create</strong>{quickCreateActions.map((action) => <button type="button" key={action.type} onClick={() => { hide(); onQuickCreate(action.type); }}><span><b>{action.label}</b><small>{action.description}</small></span></button>)}</section>}{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
+          {!query.trim() && <><p className="global-search-hint">Search across this location. Use <code>#</code> before a record ID to open it directly. Use <code>tag:</code> followed by a tag name to find people.</p>{quickCreateActions.length > 0 && onQuickCreate && <section className="global-search-quick-create"><strong>Quick create</strong>{quickCreateActions.map((action) => <button type="button" key={action.type} onClick={() => { hide(); onQuickCreate(action.type); }}><span><b>{action.label}</b><small>{action.description}</small></span></button>)}</section>}{recent.length > 0 && <section className="global-search-recent"><strong>Recent searches</strong>{recent.map((item) => <button type="button" key={item} onClick={() => setQuery(item)}><Search size={13} />{item}</button>)}</section>}</>}
           {query.trim() && !query.trim().startsWith("#") && query.trim().length < 2 && <p className="global-search-hint">Type at least two characters, or enter # followed by a record ID.</p>}
           {loading && <p className="global-search-status" role="status">Searching…</p>}
           {error && <p className="global-search-status global-search-error" role="alert">{error}</p>}

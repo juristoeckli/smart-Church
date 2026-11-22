@@ -1,3 +1,4 @@
+import { personTagMatch } from "./tag-search.js";
 import { registerGroupMembershipImport } from "./group-membership-import.js";
 import { presentMeetingFilter, registerPeopleMeetingFilter } from "./directory-meeting-filter.js";
 import { registerPrivatePersonNotes } from "./private-person-notes.js";
@@ -34,14 +35,16 @@ function directoryOrder(sort: DirectorySort | undefined) {
   }
 }
 const coreDirectoryColumns=["id","firstName","lastName","email","phone","status"];
-const directoryTextMatch = `($2='' OR concat_ws(' ',c.first_name,c.last_name,c.email,c.phone) ILIKE '%'||$2||'%'
+const directoryTextMatch = `(CASE WHEN left(lower(btrim($2)),4)='tag:'
+  THEN ${personTagMatch("btrim(substring(btrim($2) FROM 5))", "$10")}
+  ELSE ($2='' OR concat_ws(' ',c.first_name,c.last_name,c.email,c.phone) ILIKE '%'||$2||'%'
   OR (btrim($2)<>'' AND EXISTS (
     SELECT 1 FROM people_record_fields nickname JOIN people_record_values saved
       ON saved.department_id=nickname.department_id AND saved.field_id=nickname.id AND saved.contact_id=c.id
      WHERE nickname.department_id=c.department_id AND nickname.field_key='nickname' AND nickname.field_type='text'
        AND nickname.active AND ($10::boolean OR nickname.visibility='private_people')
        AND jsonb_typeof(saved.value)='string' AND lower(btrim(saved.value #>> '{}'))=lower(btrim($2))
-  )))`;
+  ))) END)`;
 function parseRelationshipFilters(raw:string|undefined):RelationshipFilterInput[]{
   if(raw===undefined)return [];
   let parsed:unknown;try{parsed=JSON.parse(raw)}catch{throw new Error("Relationship filters must be a valid list.")}

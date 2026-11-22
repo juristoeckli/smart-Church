@@ -1,3 +1,5 @@
+import { personTagMatch } from "../people-records/tag-search.js";
+import { canManagePeopleFields } from "../people-records/field-privacy.js";
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { isServerModuleEnabled, type ModuleServerContext } from "../module-sdk.js";
@@ -24,13 +26,37 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
     const rawQuery = request.query.q?.trim() ?? "";
+    const emptyCategories = { people: [], groups: [], wiki: [], songs: [], events: [], resources: [], bookings: [] };
+    if (/^tag:/i.test(rawQuery)) {
+      reply.header("cache-control", "private, no-store");
+      const tag = rawQuery.slice(4).trim();
+      const empty = { isIdQuery: false, canSearchPeople: false, categories: emptyCategories };
+      if (!tag || /[\u0000-\u001f\u007f]/.test(tag) || !canSearchPeople(request) || !isServerModuleEnabled("people-records")) return empty;
+      const available = await pool.query<{ ready: boolean }>(
+        `SELECT 'people-records'=ANY(enabled_modules)
+             AND to_regclass('public.people_record_values') IS NOT NULL
+             AND EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='people_record_fields' AND column_name='visibility') AS ready
+           FROM departments WHERE id=$1`, [departmentId],
+      );
+      if (!available.rows[0]?.ready) return empty;
+      const people = await pool.query<{ id: string; title: string }>(
+        `SELECT c.id,concat_ws(' ',c.first_name,c.last_name) AS title FROM contacts c
+          WHERE c.department_id=$1 AND c.archived_at IS NULL AND ${personTagMatch("$2", "$3")}
+          ORDER BY lower(c.last_name),lower(c.first_name),c.id LIMIT 6`,
+        [departmentId, tag, canManagePeopleFields(request)],
+      );
+      return { isIdQuery: false, canSearchPeople: true, categories: {
+        ...emptyCategories, people: people.rows.map((row): SearchResult => ({ ...row, type: "person" })),
+      } };
+    }
     const isIdQuery = rawQuery.startsWith("#");
     const id = isIdQuery ? rawQuery.slice(1).trim() : "";
     const searchText = rawQuery.replace(/[\\%_]/g, "").trim().slice(0, 100);
     const validIdQuery = isIdQuery && id.length > 0 && id.length <= 100 && !/[\u0000-\u001f\u007f]/.test(id);
     const localUuidQuery = validIdQuery && uuidPattern.test(id);
     if ((!isIdQuery && searchText.length < 2) || (isIdQuery && !validIdQuery)) {
-      return { isIdQuery, canSearchPeople: canSearchPeople(request), categories: { people: [], groups: [], wiki: [], songs: [], events: [], resources: [], bookings: [] } };
+      return { isIdQuery, canSearchPeople: canSearchPeople(request), categories: emptyCategories };
     }
     const pattern = `%${searchText}%`;
     const values = localUuidQuery ? [departmentId, id] : [departmentId, pattern];

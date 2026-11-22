@@ -1,4 +1,4 @@
-import { peopleGroupNavigationState } from "./people-group-navigation";
+import { isPeopleTagLookup, peopleGroupNavigationState, peopleTagNavigationState } from "./people-group-navigation";
 import { AccountSetupInvitation, PersonAccountOnboarding } from "./AccountSetupInvitation";
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
@@ -1600,6 +1600,15 @@ function WorkspaceApp() {
     setPendingGroupNavigation(null);
     setPendingSongNavigation(null);
     if (destination === "people") {
+      if (isPeopleTagLookup(search)) {
+        if (!peopleDirectoryModule || !moduleAvailable(peopleDirectoryModule, department, canManageSite)) return;
+        const value = peopleTagNavigationState(search, ++entityNavigationRequestId.current);
+        if (!value) return;
+        setPendingDirectorySearch(null);
+        setModuleState({ moduleId: peopleDirectoryModule.id, departmentId: department.id, value });
+        setPage(modulePage(peopleDirectoryModule.id));
+        return;
+      }
       setDetailsContact(null);
       setIsAddOpen(false);
       setPendingCorePersonNavigation(null);
