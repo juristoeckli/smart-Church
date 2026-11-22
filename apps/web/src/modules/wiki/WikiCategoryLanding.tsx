@@ -10,9 +10,12 @@ export function WikiCategoryLanding({ departmentId, category, categoriesLoaded, 
 }) {
   const [pages, setPages] = useState<Page[]>();
   const [error, setError] = useState("");
+  const [retry, setRetry] = useState(0);
   const categoryId = category?.id;
   useEffect(() => {
     if (!categoryId) return;
+    setPages(undefined);
+    setError("");
     const controller = new AbortController();
     void fetch("/api/modules/wiki/pages?" + new URLSearchParams({ categoryId, status: "active" }), {
       headers: { "x-department-id": departmentId }, signal: controller.signal, cache: "no-store",
@@ -24,13 +27,13 @@ export function WikiCategoryLanding({ departmentId, category, categoriesLoaded, 
       if (!controller.signal.aborted) setError("Could not load the pages in this category.");
     });
     return () => controller.abort();
-  }, [categoryId, departmentId, revision]);
+  }, [categoryId, departmentId, revision, retry]);
 
   if (!categoriesLoaded) return <p role="status">Loading Wiki category…</p>;
   if (!category) return <p role="alert">This Wiki category is unavailable.</p>;
   return <section aria-label="Wiki category">
     <header className="wiki-editor-header">
-      <div><span className="wiki-muted">WIKI CATEGORY</span><h1>{category.name}</h1></div>
+      <h1>{category.name}</h1>
       <button className="button button-secondary" type="button" onClick={onCopy}><Copy size={15} /> Copy category link</button>
     </header>
     {children.length > 0 && <nav aria-label="Subcategories" className="wiki-page-list">
@@ -39,7 +42,7 @@ export function WikiCategoryLanding({ departmentId, category, categoriesLoaded, 
           <BookOpenText size={15} /> {child.name}
         </button>)}
     </nav>}
-    {error && <p role="alert">{error}</p>}
+    {error && <><p role="alert">{error}</p><button className="button button-secondary" type="button" onClick={() => setRetry((current) => current + 1)}>Retry</button></>}
     {!error && !pages && <p role="status">Loading pages…</p>}
     {pages && (pages.length ? <nav aria-label="Pages in this category" className="wiki-page-list">
       {pages.map((page) => <button className="wiki-page-item" key={page.id} type="button" onClick={() => onOpenPage(page.id)}>
