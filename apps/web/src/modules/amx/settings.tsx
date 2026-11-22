@@ -6,12 +6,12 @@ import "./amx.css";
 type Action = { id: string; name: string; command: string };
 type Settings = { host: string; port: number; username: string; password: string; clearPassword: boolean; passwordConfigured?: boolean; actions: Action[] };
 const roomActions: Action[] = [
-  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[34001:1:1,11]" },
-  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[34001:1:1,16]" },
-  { id: "conference-1", name: "Konferenzsaal 1", command: "ICSP[34001:1:1,13]" },
-  { id: "library", name: "Bibliothek", command: "ICSP[34001:1:1,12]" },
-  { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[34001:1:1,15]" },
-  { id: "conference-large", name: "Konferenz gross", command: "ICSP[34001:1:1,14]" },
+  { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[33001:1:1,11]" },
+  { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[33001:1:1,16]" },
+  { id: "conference-1", name: "Konferenzsaal 1", command: "ICSP[33001:1:1,13]" },
+  { id: "library", name: "Bibliothek", command: "ICSP[33001:1:1,12]" },
+  { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[33001:1:1,15]" },
+  { id: "conference-large", name: "Konferenz gross", command: "ICSP[33001:1:1,14]" },
 ];
 const initialSettings: Settings = { host: "", port: 23, username: "", password: "", clearPassword: false, actions: roomActions };
 
@@ -53,7 +53,7 @@ export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) 
   }
 
   return <section className="amx-panel" aria-labelledby="amx-settings-title">
-    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Control events target NetLinx device 34001; the physical touchpanel is 10001. The NetLinx program must handle device 34001. Read-only room, level, and progress feedback reads device 10001. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
+    <div className="server-admin-panel-heading"><h3 id="amx-settings-title">GfC Steffisburg AMX integration</h3><p>Controls use the existing NetLinx virtual device 33001; the physical touchpanel is 10001. Room, level, and progress feedback is read from the combined controller devices. Smart-Church does not change NetLinx settings, authentication, or encryption.</p></div>
     {loading ? <p>Loading AMX settings…</p> : <form className="amx-form" onSubmit={(event) => void save(event)}>
       <label>NetLinx master IP address or hostname<input value={settings.host} onChange={(event) => setSettings((current) => ({ ...current, host: event.target.value }))} placeholder="Enter the controller IP address or hostname" required maxLength={253} /></label>
       <label>Telnet port<input type="number" min={1} max={65535} value={settings.port} onChange={(event) => setSettings((current) => ({ ...current, port: Number(event.target.value) }))} required /></label>
@@ -71,3 +71,4 @@ export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) 
     </form>}
   </section>;
 }
+

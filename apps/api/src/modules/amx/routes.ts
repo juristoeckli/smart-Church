@@ -4,12 +4,14 @@ import type { FastifyInstance } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { amxAudioActions, amxAudioLevels, amxAudioPages, amxSystemActions } from "./audio-mappings.js";
 import { decryptTelnetPassword, encryptTelnetPassword } from "./credentials.js";
-import { assertNetLinxDevicePresent, NetLinxTerminal, readTelnetDeviceChannels, readTelnetDeviceStatus, sendTelnetChannel, type TelnetSettings } from "./telnet.js";
+import { openNetLinxWebControlSession, type NetLinxWebControlSession } from "./webcontrol.js";
+import { readTelnetDeviceChannels, readTelnetDeviceStatus, type TelnetSettings } from "./telnet.js";
 
 type AmxAction = { id: string; name: string; command: string };
 type AmxSettings = { host: string; port: number; username: string; password: string; clearPassword: boolean; actions: AmxAction[] };
-// Keep Smart-Church input events separate from the physical touch panel.
-const CONTROL_DEVICE = 34001;
+// The running EBV program exposes and combines virtual device 33001 with the
+// existing touchpanels. Device 34001 is not present on this controller.
+const CONTROL_DEVICE = 33001;
 const roomActions: AmxAction[] = [
   { id: "hall-crosswise", name: "Gemeindesaal quer", command: `ICSP[${CONTROL_DEVICE}:1:1,11]` },
   { id: "hall-lengthwise", name: "Gemeindesaal längs", command: `ICSP[${CONTROL_DEVICE}:1:1,16]` },
@@ -59,7 +61,7 @@ function cleanSettings(input: AmxSettings): AmxSettings | null {
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
-  const heldChannels = new Map<string, { terminal: NetLinxTerminal; departmentId: string; userId: string; address: { device: number; port: number; system: number }; channel: number; timer: NodeJS.Timeout }>();
+  const heldChannels = new Map<string, { session: NetLinxWebControlSession; departmentId: string; userId: string; address: { device: number; port: number; system: number }; channel: number; timer: NodeJS.Timeout }>();
 
   async function getTelnetSettings(departmentId: string): Promise<TelnetSettings | null> {
     const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>(
@@ -74,13 +76,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!held) return Promise.resolve(false);
     heldChannels.delete(pressId);
     clearTimeout(held.timer);
-    return held.terminal.command(`OFF[${held.address.device}:${held.address.port}:${held.address.system},${held.channel}]`)
-      .then((response) => {
-        if (!new RegExp(`Sending\\s+Off\\[${held.address.device}:${held.address.port}:${held.address.system},${held.channel}\\]`, "i").test(response)) {
-          throw new Error(`NetLinx did not confirm release of channel ${held.channel}.`);
-        }
-      })
-      .finally(() => held.terminal.close());
+    return held.session.emulateButton(held.address, held.channel, "channelRelease")
+      .finally(() => held.session.close());
   }
 
   async function requireAmxDepartment(request: Parameters<typeof resolveDepartmentId>[0], reply: Parameters<typeof resolveDepartmentId>[1], requireSiteAdmin = false) {
@@ -224,21 +221,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!match || !action) return reply.code(403).send({ error: "This AMX held control is not mapped." });
     const address = { device: CONTROL_DEVICE, port: Number(match[1]), system: 1 };
     const channel = Number(match[2]);
-    const terminal = new NetLinxTerminal();
+    let session: NetLinxWebControlSession | undefined;
     try {
-      await terminal.connect(settings);
-      await assertNetLinxDevicePresent(terminal, address);
-      const response = await terminal.command(`ON[${address.device}:${address.port}:${address.system},${channel}]`);
-      if (!new RegExp(`Sending\\s+On\\[${address.device}:${address.port}:${address.system},${channel}\\]`, "i").test(response)) {
-        terminal.close();
-        return reply.code(502).send({ error: `NetLinx did not confirm the held channel ${channel}.` });
-      }
+      session = await openNetLinxWebControlSession(settings);
+      await session.emulateButton(address, channel, "channelPush");
       const pressId = randomUUID();
       const timer = setTimeout(() => { void releaseHeldChannel(pressId).catch(() => undefined); }, 30000);
-      heldChannels.set(pressId, { terminal, departmentId, userId, address, channel, timer });
+      heldChannels.set(pressId, { session, departmentId, userId, address, channel, timer });
       return { pressId, actionId: action.id };
     } catch (error) {
-      terminal.close();
+      session?.close();
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not hold the AMX channel." });
     }
   });
@@ -275,11 +267,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const port = Number(match?.[1]);
       const channel = Number(match?.[2]);
       if (!Number.isInteger(port) || !Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed Telnet mapping is invalid." });
-      await sendTelnetChannel(settings, { device: CONTROL_DEVICE, port, system: 1 }, channel, "pulse");
+      const address = { device: CONTROL_DEVICE, port, system: 1 };
+      const session = await openNetLinxWebControlSession(settings);
+      try {
+        await session.emulateButton(address, channel, "channelPush");
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        await session.emulateButton(address, channel, "channelRelease");
+      } finally { session.close(); }
       return { sent: true, actionId: action.id };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Could not send the AMX command." });
     }
   });
 }
+
 
