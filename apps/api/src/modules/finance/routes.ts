@@ -1,3 +1,4 @@
+import { recentGivingSql, type RecentGiving } from "./recent-giving.js";
 import { financePdf } from "./pdf.js";
 import { financeWorkbook } from "./workbook.js";
 import { registerChurchToolsDraftPromotion } from "./draft-promotion-routes.js";
@@ -625,6 +626,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
     const result = await pool!.query("UPDATE finance_donors SET active=$3,updated_at=now() WHERE department_id=$1 AND id=$2 RETURNING id", [departmentId, request.params.id, request.body.active]);
     if (!result.rowCount) return reply.code(404).send({ error: "Donor not found." }); publish(departmentId, "donor-updated", request.params.id); return { updated: true };
+  });
+
+  app.get("/api/modules/finance/donors/recent-giving", async (request, reply) => {
+    const departmentId = await department(request,reply);
+    if (!departmentId) return reply;
+    const result = await pool!.query<RecentGiving>(recentGivingSql,[departmentId]);
+    if (!result.rows[0]) return reply.code(404).send({ error: "Finance location not found." });
+    return reply.header("Cache-Control","private, no-store").send(result.rows[0]);
   });
 
   app.get<{ Params: { id: string; format: string }; Querystring: { from?: string; to?: string } }>("/api/modules/finance/donors/:id/statement.:format", { schema: { params: { type: "object", additionalProperties: false, required: ["id", "format"], properties: { id: uuid, format: { enum: ["csv", "xlsx", "html", "pdf"] } } }, querystring: { type: "object", additionalProperties: false, properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" } } } } }, async (request, reply) => {
