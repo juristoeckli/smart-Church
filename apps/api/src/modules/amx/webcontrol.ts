@@ -32,7 +32,11 @@ export class NetLinxWebControlSession {
     const body = await response.text();
     const setCookies = response.headers.getSetCookie?.() ?? [];
     this.cookieHeader = setCookies.map((cookie) => cookie.split(";", 1)[0]).filter(Boolean).join("; ");
-    if (!response.ok || /<failed>\s*1\s*<\/failed>|invalid username|incorrect password/i.test(body) || !this.cookieHeader) {
+    // Older NetLinx WebConsoles redirect after a successful login. Fetch is
+    // configured not to follow that redirect so we can keep the session cookie;
+    // treat it as success only when the controller also supplied that cookie.
+    const redirected = response.status >= 300 && response.status < 400;
+    if ((!response.ok && !redirected) || /<failed>\s*1\s*<\/failed>|invalid username|incorrect password/i.test(body) || !this.cookieHeader) {
       throw new Error("NetLinx WebConsole did not establish a session with the saved login.");
     }
   }
