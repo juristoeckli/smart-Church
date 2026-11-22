@@ -1,0 +1,1 @@
+ALTER TABLE wiki_page_files ADD COLUMN IF NOT EXISTS managers_only BOOLEAN NOT NULL DEFAULT false;

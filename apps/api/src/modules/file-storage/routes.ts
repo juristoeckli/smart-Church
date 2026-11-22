@@ -98,6 +98,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.register(async (routes) => {
     routes.addContentTypeParser("application/vnd.smart-church.resource", { parseAs: "buffer", bodyLimit: resourceLimit }, (_request, body, done) => done(null, body));
     async function department(request: FastifyRequest, reply: FastifyReply, requireManage = false) {
+      reply.header("Cache-Control", "private, no-store");
       if (!isDatabaseReady() || !pool) {
         reply.code(503).send({ error: "The file storage database is unavailable." });
         return null;
@@ -233,6 +234,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const title = request.body.title.trim();
       const category = request.body.category.trim();
       if (!title || !category) return reply.code(400).send({ error: "Title and category are required." });
@@ -283,6 +285,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       if (!Buffer.isBuffer(request.body) || request.body.length < 1) return reply.code(400).send({ error: "Choose a replacement file." });
       if (request.body.length > resourceLimit) return reply.code(413).send({ error: "Files must be 25 MiB or smaller." });
       const fileName = basename(request.query.filename || "resource").replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_").trim().slice(0, 255) || "resource";
@@ -333,6 +336,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.post<{ Params: { id: string; versionId: string } }>("/api/files/:id/versions/:versionId/restore", { schema: { params: { type: "object", required: ["id", "versionId"], properties: { id: { type: "string", format: "uuid" }, versionId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
@@ -354,6 +358,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.delete<{ Params: { id: string } }>("/api/files/:id", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const result = await pool!.query("UPDATE stored_files SET deleted_at = now(), updated_at = now() WHERE id = $1 AND department_id = $2 AND deleted_at IS NULL RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
       return { deleted: true, trashed: true };
@@ -362,6 +367,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.post<{ Params: { id: string } }>("/api/files/:id/restore", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const result = await pool!.query("UPDATE stored_files SET deleted_at = NULL, updated_at = now() WHERE id = $1 AND department_id = $2 AND deleted_at IS NOT NULL RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
       return { restored: true };
@@ -370,6 +376,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     routes.delete<{ Params: { id: string } }>("/api/files/:id/permanent", { schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
       const departmentId = await department(request, reply, true);
       if (!departmentId) return reply;
+      if (!await requireStoredFileRead(request, reply, departmentId, request.params.id)) return reply;
       const result = await pool!.query("DELETE FROM stored_files WHERE id = $1 AND department_id = $2 AND deleted_at IS NOT NULL RETURNING id", [request.params.id, departmentId]);
       if (!result.rowCount) return reply.code(404).send({ error: "Resource not found." });
       return { deleted: true, permanently: true };

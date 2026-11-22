@@ -141,6 +141,20 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return id && allowedIds.has(id) ? full : "<span>Restricted Wiki page</span>";
     });
   }
+  async function readableWikiContent(html: string, request: FastifyRequest, departmentId: string, pageId: string) {
+    const content = await hideUnreadableWikiEntityLinks(html, request, departmentId);
+    if (isWikiManager(request) || !/<img\b/i.test(content)) return content;
+    const result = await pool!.query<{ file_id: string }>(`SELECT attachment.file_id FROM wiki_page_files attachment
+      JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
+      WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND NOT attachment.managers_only AND stored.deleted_at IS NULL`,
+      [departmentId, pageId]);
+    const visible = new Set(result.rows.map((file) => file.file_id));
+    return content.replace(/<img\b[^>]*>/gi, (tag) => {
+      const ref = inlineWikiImageRefs(tag, pageId)[0];
+      return ref && !visible.has(ref.fileId.toLowerCase()) ? "" : tag;
+    });
+  }
+
   async function canFollowWikiLink(value: string, request: FastifyRequest, departmentId: string) {
     const id = value.match(/^(?:#wiki:|#entity:wiki:|\/wiki\/)([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i)?.[1];
     return !id || await canReadPage(request, departmentId, id);
@@ -295,18 +309,18 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const pageResult = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,page.content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,page.xmin::text AS edit_revision,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.id=$2 AND (${pageReadCondition("page", 3, 4)} OR page.status='archived' AND $3::boolean)`, [departmentId, request.params.id, isWikiManager(request), request.authenticatedUser!.id]);
     if (!pageResult.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
-    pageResult.rows[0].content_html = await hideUnreadableWikiEntityLinks(pageResult.rows[0].content_html, request, departmentId);
+    pageResult.rows[0].content_html = await readableWikiContent(pageResult.rows[0].content_html, request, departmentId, request.params.id);
     const [links, files] = await Promise.all([
       pool!.query("SELECT id,title,url,created_at,managers_only FROM wiki_page_links WHERE department_id=$1 AND page_id=$2 AND (NOT managers_only OR $3::boolean) ORDER BY created_at,id",
         [departmentId, request.params.id, isWikiManager(request)]),
       pool!.query(`SELECT stored.id,COALESCE(link.display_title,stored.title) AS title,
         link.display_title AS "displayTitle",stored.file_name AS "fileName",stored.content_type AS "contentType",
         stored.file_size AS "fileSize",stored.created_at AS "createdAt",link.created_at AS "attachedAt",
-        actor.display_name AS "attachedByName"
+        actor.display_name AS "attachedByName",link.managers_only AS "managersOnly"
         FROM wiki_page_files link JOIN stored_files stored ON stored.id=link.file_id AND stored.department_id=link.department_id
         LEFT JOIN app_users actor ON actor.id=link.added_by
-        WHERE link.department_id=$1 AND link.page_id=$2 AND stored.deleted_at IS NULL ORDER BY link.created_at DESC,stored.id`,
-        [departmentId, request.params.id]),
+        WHERE link.department_id=$1 AND link.page_id=$2 AND stored.deleted_at IS NULL AND (NOT link.managers_only OR $3::boolean)
+        ORDER BY link.created_at DESC,stored.id`, [departmentId, request.params.id, isWikiManager(request)]),
     ]);
     const visibleLinks = await Promise.all(links.rows.map(async (link) => await canFollowWikiLink(String(link.url), request, departmentId) ? link : null));
     const redirectPageId = pageResult.rows[0].redirect_page_id;
@@ -734,7 +748,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return result.rows;
   });
 
-  app.post<{ Params: { id: string }; Body: { fileId: string } }>("/api/modules/wiki/pages/:id/files", { schema: { body: { type: "object", additionalProperties: false, required: ["fileId"], properties: { fileId: { type: "string", format: "uuid" } } } } }, async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { fileId: string; managersOnly?: boolean } }>("/api/modules/wiki/pages/:id/files", { schema: { body: { type: "object", additionalProperties: false, required: ["fileId"], properties: { fileId: { type: "string", format: "uuid" }, managersOnly: { type: "boolean" } } } } }, async (request, reply) => {
     if (!validateMutation(request, reply)) return reply;
     const departmentId = await site(request, reply, true);
     if (!departmentId) return reply;
@@ -742,15 +756,16 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!page.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
     const file = await pool!.query("SELECT id FROM stored_files WHERE id=$1 AND department_id=$2 AND deleted_at IS NULL", [request.body.fileId, departmentId]);
     if (!file.rowCount) return reply.code(404).send({ error: "Active file not found in this site." });
-    await pool!.query("INSERT INTO wiki_page_files(department_id,page_id,file_id,added_by) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING", [departmentId, request.params.id, request.body.fileId, request.authenticatedUser!.id]);
+    await pool!.query("INSERT INTO wiki_page_files(department_id,page_id,file_id,added_by,managers_only) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING", [departmentId, request.params.id, request.body.fileId, request.authenticatedUser!.id, request.body.managersOnly ?? false]);
     changed(departmentId, { action: "file-attached", pageId: request.params.id });
     return { attached: true };
   });
 
-  app.patch<{ Params: { id: string; fileId: string }; Body: { displayTitle: string | null } }>("/api/modules/wiki/pages/:id/files/:fileId", {
+  app.patch<{ Params: { id: string; fileId: string }; Body: { displayTitle?: string | null; managersOnly?: boolean } }>("/api/modules/wiki/pages/:id/files/:fileId", {
     schema: {
       params: { type: "object", required: ["id", "fileId"], properties: { id: { type: "string", format: "uuid" }, fileId: { type: "string", format: "uuid" } } },
-      body: { type: "object", additionalProperties: false, required: ["displayTitle"], properties: {
+      body: { type: "object", additionalProperties: false, anyOf: [{ required: ["displayTitle"] }, { required: ["managersOnly"] }], properties: {
+        managersOnly: { type: "boolean" },
         displayTitle: { anyOf: [{ type: "string", minLength: 1, maxLength: 160 }, { type: "null" }] },
       } },
     },
@@ -763,7 +778,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       return reply.code(400).send({ error: "Enter an attachment title or use the original file title." });
     }
     const client = await pool!.connect();
-    let attachment: { title: string; displayTitle: string | null };
+    let attachment: { title: string; displayTitle: string | null; managersOnly: boolean };
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -776,10 +791,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Active Wiki page not found." });
       }
-      const result = await client.query<typeof attachment>(`UPDATE wiki_page_files link SET display_title=$4
+      const result = await client.query<typeof attachment>(`UPDATE wiki_page_files link SET display_title=CASE WHEN $5::boolean THEN $4 ELSE link.display_title END,
+          managers_only=COALESCE($6::boolean,link.managers_only)
         FROM stored_files stored WHERE link.department_id=$1 AND link.page_id=$2 AND link.file_id=$3
           AND stored.id=link.file_id AND stored.department_id=link.department_id AND stored.deleted_at IS NULL
-        RETURNING COALESCE(link.display_title,stored.title) AS title,link.display_title AS "displayTitle"`, [...args, displayTitle]);
+        RETURNING COALESCE(link.display_title,stored.title) AS title,link.display_title AS "displayTitle",link.managers_only AS "managersOnly"`,
+      [...args, displayTitle, request.body.displayTitle !== undefined, request.body.managersOnly ?? null]);
       if (!result.rows[0]) {
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Page attachment not found." });
@@ -788,7 +805,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
-    changed(departmentId, { action: "file-title-updated", pageId: request.params.id });
+    changed(departmentId, { action: "file-updated", pageId: request.params.id });
     return attachment;
   });
 
@@ -814,12 +831,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       `SELECT stored.file_name,stored.content_type,stored.file_data
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
-        WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=$3 AND stored.deleted_at IS NULL`,
-      [departmentId, request.params.id, request.params.fileId],
+        WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=$3 AND stored.deleted_at IS NULL
+          AND (NOT attachment.managers_only OR $4::boolean)`,
+      [departmentId, request.params.id, request.params.fileId, isWikiManager(request)],
     );
     const file = result.rows[0];
     if (!file) return reply.code(404).send({ error: "Wiki file not found." });
-    reply.type(file.content_type).header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.file_name)}`).header("X-Content-Type-Options", "nosniff");
+    reply.type(file.content_type).header("Cache-Control", "private, no-store").header("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.file_name)}`).header("X-Content-Type-Options", "nosniff");
     return file.file_data;
   });
 
@@ -832,8 +850,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND attachment.file_id=$3
-          AND stored.deleted_at IS NULL AND stored.content_type=ANY($4::text[]) AND stored.file_size BETWEEN 1 AND 2000000`,
-      [departmentId, request.params.id, request.params.fileId, inlineImageContentTypes],
+          AND stored.deleted_at IS NULL AND stored.content_type=ANY($4::text[]) AND stored.file_size BETWEEN 1 AND 2000000
+          AND (NOT attachment.managers_only OR $5::boolean)`,
+      [departmentId, request.params.id, request.params.fileId, inlineImageContentTypes, isWikiManager(request)],
     );
     const file = result.rows[0];
     if (!file || !matchesInlineImageType(file.file_data, file.content_type)) return reply.code(404).send({ error: "Wiki image not found." });
@@ -846,7 +865,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Active Wiki page not found." });
     const result = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
     if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
-    result.rows[0].content_html = await hideUnreadableWikiEntityLinks(result.rows[0].content_html, request, departmentId);
+    result.rows[0].content_html = await readableWikiContent(result.rows[0].content_html, request, departmentId, request.params.id);
     const title = result.rows[0].title.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
     const content = addExportContents(safeHtml(result.rows[0].content_html, request.params.id), request.params.id);
     return reply.type("text/html; charset=utf-8").header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'").header("X-Content-Type-Options", "nosniff").header("Cache-Control", "private, no-store").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:850px;margin:3rem auto;padding:0 1rem;color:#17212b}img{max-width:100%}table{border-collapse:collapse}td,th{border:1px solid #bbb;padding:.4rem}.wiki-contents ul{list-style:none;padding:0}.wiki-contents-level-2{margin-inline-start:1rem}.wiki-contents-level-3{margin-inline-start:2rem}.wiki-contents-level-4{margin-inline-start:3rem}.wiki-contents-level-5{margin-inline-start:4rem}.wiki-contents-level-6{margin-inline-start:5rem}</style><main><h1>${title}</h1>${content}</main></html>`);
@@ -858,16 +877,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!await canReadPage(request, departmentId, request.params.id)) return reply.code(404).send({ error: "Active Wiki page not found." });
     const result = await pool!.query<{ title: string; content_html: string }>("SELECT title,content_html FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
     if (!result.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
-    const content = await hideUnreadableWikiEntityLinks(safeHtml(result.rows[0].content_html), request, departmentId);
-    const inlineRefs = inlineWikiImageRefs(result.rows[0].content_html, request.params.id);
+    const visibleHtml = await readableWikiContent(result.rows[0].content_html, request, departmentId, request.params.id);
+    const content = safeHtml(visibleHtml);
+    const inlineRefs = inlineWikiImageRefs(visibleHtml, request.params.id);
     const inlineImages = inlineRefs.length ? await pool!.query<{ id: string; title: string; fileName: string; fileData: Buffer }>(
       `SELECT stored.id,stored.title,stored.file_name AS "fileName",stored.file_data AS "fileData"
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.id=ANY($3::uuid[])
-          AND stored.deleted_at IS NULL AND stored.content_type IN ('image/jpeg','image/png') AND stored.file_size BETWEEN 1 AND 2000000
+          AND (NOT attachment.managers_only OR $4::boolean) AND stored.deleted_at IS NULL AND stored.content_type IN ('image/jpeg','image/png') AND stored.file_size BETWEEN 1 AND 2000000
         ORDER BY attachment.created_at,attachment.file_id LIMIT 5`,
-      [departmentId, request.params.id, inlineRefs.map((image) => image.fileId)],
+      [departmentId, request.params.id, inlineRefs.map((image) => image.fileId), isWikiManager(request)],
     ) : { rows: [] as Array<{ id: string; title: string; fileName: string; fileData: Buffer }> };
     const inlineAltById = new Map(inlineRefs.map((image) => [image.fileId, image.alt]));
     const attachedImages = await pool!.query<{ id: string; title: string; fileName: string; fileData: Buffer }>(
@@ -875,14 +895,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
          FROM wiki_page_files attachment
          JOIN stored_files stored ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
         WHERE attachment.department_id=$1 AND attachment.page_id=$2 AND stored.deleted_at IS NULL
-          AND stored.content_type IN ('image/jpeg','image/png') AND stored.file_size BETWEEN 1 AND 2000000
+          AND (NOT attachment.managers_only OR $3::boolean) AND stored.content_type IN ('image/jpeg','image/png') AND stored.file_size BETWEEN 1 AND 2000000
         ORDER BY attachment.created_at,attachment.file_id LIMIT 5`,
-      [departmentId, request.params.id],
+      [departmentId, request.params.id, isWikiManager(request)],
     );
     const filename = result.rows[0].title.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "wiki-page";
     const images = [...inlineImages.rows.map((image) => ({ ...image, title: inlineAltById.get(image.id) ?? image.title })), ...attachedImages.rows.filter((image) => !inlineAltById.has(image.id))]
       .slice(0, 5)
       .map((image) => ({ title: image.title, fileName: image.fileName, data: image.fileData }));
-    return reply.type("application/pdf").header("Content-Disposition", `attachment; filename="${filename}.pdf"`).header("X-Content-Type-Options", "nosniff").send(createWikiPdf(result.rows[0].title, content, images));
+    return reply.type("application/pdf").header("Cache-Control", "private, no-store").header("Content-Disposition", `attachment; filename="${filename}.pdf"`).header("X-Content-Type-Options", "nosniff").send(createWikiPdf(result.rows[0].title, content, images));
   });
 }
