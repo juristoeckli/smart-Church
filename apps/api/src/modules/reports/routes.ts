@@ -1,3 +1,4 @@
+import { monthlyRecordedFactsSql } from "./monthly-recorded-facts.js";
 import { groupAttendanceByRoleSql } from "./group-attendance-by-role.js";
 import { firstContactTrendSql } from "./first-contact-trend.js";
 import { canManagePeopleFields } from "../people-records/field-privacy.js";
@@ -10,7 +11,7 @@ import { registerReportDesigner } from "./designer.js";
 import { groupGrowthSql, validGroupGrowthRange } from "./group-growth.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-recorded-facts-monthly" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
@@ -32,6 +33,7 @@ const catalog = [
   { key: "group-meeting-feedback" as const, title: "Group meeting feedback", description: "Leader and attendee answers by group meeting; respondent identities are omitted.", permission: "groups" as const },
   { key: "group-lifecycle" as const, title: "Group lifecycle history", description: "Group creation, edits, and deletion history with prior and updated names, descriptions, and parent links.", permission: "groups" as const },
   { key: "event-attendance" as const, title: "Event attendance", description: "Event dates, adult and child totals, and recorded check-ins.", permission: "events" as const },
+  { key: "event-recorded-facts-monthly" as const, title: "Monthly recorded event facts", description: "Visitor counts, collections by currency, and custom fact totals from non-cancelled events.", permission: "events" as const },
   { key: "event-staffing" as const, title: "Event staffing", description: "Volunteer assignments and outstanding responses by service and role.", permission: "events" as const },
   { key: "event-absence-conflicts" as const, title: "Event absence conflicts", description: "Assigned roles that overlap recorded volunteer absences.", permission: "events" as const },
   { key: "event-service-plan" as const, title: "Event service plan", description: "Ordered service-plan items, timing, song links, and role categories.", permission: "events" as const },
@@ -118,7 +120,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return id;
   }
   async function installedReports(departmentId: string, request: ReportAccess, db: Pool | PoolClient = pool!) {
-    const present = await db.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; peopleFields: boolean; absenceConflicts: boolean }>(
+    const present = await db.query<{ finance: boolean; financeBudgets: boolean; financeDonors: boolean; peopleConsents: boolean; peopleHistory: boolean; groupAttendance: boolean; groupFeedback: boolean; groupLifecycle: boolean; groupHierarchy: boolean; eventServicePlan: boolean; monthlyFacts: boolean; eventRegistrations: boolean; worship: boolean; resources: boolean; personDates: boolean; peopleFields: boolean; absenceConflicts: boolean }>(
       `SELECT to_regclass('public.finance_transactions') IS NOT NULL AS finance,
               to_regclass('public.finance_budgets') IS NOT NULL AS "financeBudgets",
               to_regclass('public.finance_donors') IS NOT NULL AS "financeDonors",
@@ -129,6 +131,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
               to_regclass('public.group_hierarchy_history') IS NOT NULL AS "groupLifecycle",
               (SELECT count(*)=4 FROM information_schema.columns WHERE table_schema='public' AND table_name='church_groups' AND column_name=ANY(ARRAY['parent_group_id','status','starts_on','ends_on'])) AS "groupHierarchy",
               to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.worship_songs') IS NOT NULL AS "eventServicePlan",
+              to_regclass('public.service_event_fact_definitions') IS NOT NULL
+                AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public'
+                  AND table_name='service_events' AND column_name=ANY(ARRAY['recorded_facts','cancelled_at'])) AS "monthlyFacts",
               to_regclass('public.service_events') IS NOT NULL AND to_regclass('public.event_registrations') IS NOT NULL AS "eventRegistrations",
               to_regclass('public.worship_songs') IS NOT NULL AND to_regclass('public.service_events') IS NOT NULL AS worship,
               to_regclass('public.bookable_resources') IS NOT NULL AND to_regclass('public.resource_bookings') IS NOT NULL AS resources,
@@ -156,6 +161,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (!["group-lifecycle", "group-growth"].includes(item.key) || state.groupLifecycle)
       && (item.key !== "group-hierarchy" || state.groupHierarchy)
       && (item.key !== "event-service-plan" || state.eventServicePlan)
+      && (item.key !== "event-recorded-facts-monthly" || state.monthlyFacts)
       && (!item.key.startsWith("event-registration-") || state.eventRegistrations)
       && (item.key !== "worship-song-usage" || state.worship)
       && (!item.key.startsWith("upcoming-") || state.personDates)
@@ -350,6 +356,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     } else if (reportKey === "event-attendance") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "title", label: "Event" }, { key: "kind", label: "Type" }, { key: "location", label: "Location" }, { key: "adults", label: "Adults" }, { key: "children", label: "Children" }, { key: "checkedIn", label: "Individual check-ins" }, { key: "firstTimeVisitors", label: "First-time visitors" }];
       const result = await db.query("SELECT event.event_date::text AS \"eventDate\",event.title,event.kind,event.location,event.attendance_adults AS adults,event.attendance_children AS children,count(contact.id)::int AS \"checkedIn\",count(contact.id) FILTER (WHERE checkin.first_time_visitor)::int AS \"firstTimeVisitors\" FROM service_events event LEFT JOIN event_attendance_checkins checkin ON checkin.event_id=event.id LEFT JOIN contacts contact ON contact.id=checkin.contact_id AND contact.department_id=event.department_id WHERE event.department_id=$1 AND ($2::date IS NULL OR event.event_date >= $2::date) AND ($3::date IS NULL OR event.event_date <= $3::date) GROUP BY event.id ORDER BY event.event_date DESC,event.start_time DESC LIMIT 2000", [departmentId, filters.from ?? null, filters.to ?? null]);
+      rows = result.rows;
+    } else if (reportKey === "event-recorded-facts-monthly") {
+      if (!validGroupGrowthRange(filters.from, filters.to)) throw new Error("Choose a valid date range of up to 731 calendar days.");
+      columns = [{ key: "month", label: "Month" }, { key: "label", label: "Fact" }, { key: "source", label: "Source" },
+        { key: "choice", label: "Choice" }, { key: "unit", label: "Unit or currency" }, { key: "total", label: "Total" },
+        { key: "samples", label: "Events with a recorded value" }];
+      const result = await db.query(monthlyRecordedFactsSql,[departmentId,filters.from,filters.to]);
+      if (result.rows.length > 5000) throw new Error("Choose a shorter date range to report at most 5,000 fact rows.");
       rows = result.rows;
     } else if (reportKey === "check-in-trend") {
       columns = [{ key: "eventDate", label: "Date" }, { key: "eventCount", label: "Events" }, { key: "checkIns", label: "Check-ins" }, { key: "firstTimeVisitors", label: "First-time visitors" }];
@@ -573,7 +587,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (filterError(filters)) return reply.code(400).send({ error: filters });
     try {
       const report = await runReport(departmentId, reportKey, filters, request);
-      if (reportKey === "people-first-contact-trend") reply.header("Cache-Control","private, no-store");
+      if (reportKey === "people-first-contact-trend" || reportKey === "event-recorded-facts-monthly") reply.header("Cache-Control","private, no-store");
       return request.query.format === "xlsx" ? sendReportWorkbook(reply, report, reportKey) : report;
     }
     catch (error) { return reply.code(error instanceof Error && error.message.startsWith("Choose") ? 400 : 503).send({ error: error instanceof Error ? error.message : "The report could not be generated." }); }
@@ -595,7 +609,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!(await installedReports(departmentId, request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
     const filters = normalizeFilters(request.body.filters);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
-    if (["group-growth","people-first-contact-trend","group-attendance-by-role"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
+    if (["group-growth","people-first-contact-trend","group-attendance-by-role","event-recorded-facts-monthly"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
       return reply.code(400).send({ error: "Choose a valid date range of up to 731 calendar days." });
     }
     const name = cleanText(request.body.name, 120);
