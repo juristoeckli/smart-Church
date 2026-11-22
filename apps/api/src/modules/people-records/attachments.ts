@@ -13,12 +13,12 @@ const uuid = { type: "string", format: "uuid" } as const;
 const contactParams = { type: "object", required: ["contactId"], additionalProperties: false, properties: { contactId: uuid } } as const;
 const fileParams = { type: "object", required: ["contactId", "attachmentId"], additionalProperties: false, properties: { contactId: uuid, attachmentId: uuid } } as const;
 
-function filenameForUpload(value: string) {
+export function filenameForUpload(value: string) {
   const basename = (value.split(/[/\\]/).at(-1) ?? "").replace(/[<>:"|?*\p{Cc}\p{Cf}]/gu, "_").trim();
   return !basename || /^\.+$/.test(basename) ? "attachment" : Array.from(basename).slice(0, 180).join("");
 }
 
-function attachmentFilename(value: string) {
+export function attachmentFilename(value: string) {
   return "attachment; filename*=UTF-8''" + encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 

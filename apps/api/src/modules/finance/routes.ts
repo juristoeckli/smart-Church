@@ -1,3 +1,4 @@
+import { registerTransactionEvidence } from "./transaction-evidence.js";
 import { registerCostCenterTransfers } from "./cost-center-transfer.js";
 import { accountStatementSql, type AccountStatementLine, type StatementLabel } from "./account-statement.js";
 import { costCenterBudgetSql, costCenterEntriesSql, costCenterScopeSql, type StatementBudget, type StatementEntry, type StatementScope } from "./cost-center-detail.js";
@@ -690,6 +691,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   registerCostCenterTransfers(app,context,{ department,audit,publish,periodForDate,cleanText,validDateOnly });
+  registerTransactionEvidence(app,context,{department,audit});
 
   app.post<{ Body: FinanceTransactionBody }>("/api/modules/finance/transactions", { schema: { body: transactionSchema } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
