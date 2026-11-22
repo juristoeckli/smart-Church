@@ -12,6 +12,12 @@ import { getHomeDutyRequests } from "./home-duty-requests.js";
 import { normalizeHomeLinks, normalizeHomeNotice, registerHomeWelcome } from "./home-welcome.js";
 import { registerHomeLayout } from "./home-layout.js";
 
+function activeCalendarMeetingRequestNotice() {
+  return isServerModuleEnabled("church-calendar")
+    ? "(notification.kind<>'calendar_meeting_request' OR active_calendar_meeting_request_notice(notification.id,notification.department_id,notification.recipient_user_id))"
+    : "notification.kind<>'calendar_meeting_request'";
+}
+
 type NotificationRow = {
   id: string;
   kind: "announcement" | "event_reminder" | "service_request" | "follow_up_assignment" | "follow_up_reminder" | "community_feed" | "report_ready" | "resource_booking" | "resource_booking_request" | "calendar_appointment_updated" | "calendar_meeting_request";
@@ -348,7 +354,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                   (COALESCE(preference.email_notifications_enabled,false)
                    AND (notification.kind<>'service_request' OR COALESCE(preference.service_requests_enabled,true))
                    AND ${activeResourceBookingRequestNotice}
-                   AND (notification.kind<>'calendar_meeting_request' OR active_calendar_meeting_request_notice(notification.id,notification.department_id,notification.recipient_user_id))
+                   AND ${activeCalendarMeetingRequestNotice()}
                    AND (notification.kind<>'resource_booking' OR (account.is_enabled AND NOT account.is_service_user AND EXISTS (
                      SELECT 1 FROM department_memberships member
                      WHERE member.department_id=notification.department_id AND member.user_id=notification.recipient_user_id
@@ -700,7 +706,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
            LEFT JOIN module_notification_email_deliveries delivery ON delivery.notification_id=notification.id
           WHERE notification.department_id = $1 AND notification.recipient_user_id = $2 AND notification.in_app_enabled=true
             AND ${activeResourceBookingRequestNotice}
-                   AND (notification.kind<>'calendar_meeting_request' OR active_calendar_meeting_request_notice(notification.id,notification.department_id,notification.recipient_user_id))
+                   AND ${activeCalendarMeetingRequestNotice()}
           ORDER BY notification.created_at DESC LIMIT 100`,
         [departmentId, request.authenticatedUser!.id],
       );
