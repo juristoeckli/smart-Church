@@ -459,7 +459,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
                 COALESCE(round((sum(extract(epoch FROM (booking.ends_at-booking.starts_at))/3600) FILTER (WHERE booking.status='requested'))::numeric,2),0)::text AS "requestedHours",
                 COALESCE(round((sum(extract(epoch FROM (booking.ends_at-booking.starts_at))/3600) FILTER (WHERE booking.status='approved'))::numeric,2),0)::text AS "approvedHours"
            FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
-          WHERE booking.department_id=$1 AND ($2::date IS NULL OR booking.starts_at::date >= $2::date) AND ($3::date IS NULL OR booking.starts_at::date <= $3::date)
+          WHERE booking.department_id=$1 AND NOT booking.is_intake_request
+            AND ($2::date IS NULL OR booking.starts_at::date >= $2::date) AND ($3::date IS NULL OR booking.starts_at::date <= $3::date)
           GROUP BY date_trunc('month',booking.starts_at)::date,resource.id,resource.name,resource.category
           ORDER BY month DESC,resource.name LIMIT 5000`,
         [departmentId, filters.from ?? null, filters.to ?? null],

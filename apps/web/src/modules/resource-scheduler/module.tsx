@@ -16,6 +16,9 @@ export const moduleRegistration: ModuleRegistration = {
   icon: CalendarRange,
   enabledByDefault: true,
   accessLabel: "Resource Scheduler",
-  accessLevels: [{ value: "manage", label: "Manage resource scheduling", description: "Set availability, approve requests, and manage recurring bookings." }],
+  accessLevels: [
+    { value: "manage", label: "Manage resource scheduling", description: "Set availability, approve requests, and manage recurring bookings." },
+    { value: "request-intake", label: "Request from intake resources", description: "Submit a pending request that a reviewer assigns to a specific resource." },
+  ],
   component: ResourceSchedulerModule,
 };

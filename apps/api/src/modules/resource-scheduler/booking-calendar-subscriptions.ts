@@ -129,7 +129,7 @@ export function registerResourceCalendarSubscriptions(
                ON day_override.series_id=series.id AND day_override.resource_booking_id=booking.id
                AND day_override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date
             WHERE booking.department_id=subscription.department_id AND booking.requested_by=subscription.user_id
-              AND resource.active AND booking.status IN ('requested','approved')
+              AND resource.active AND booking.status IN ('requested','approved') AND NOT booking.is_intake_request
               AND booking.ends_at>now() AND booking.starts_at<now()+interval '366 days'
               AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,membership.user_id,false)
             ORDER BY booking.starts_at,booking.id LIMIT 2000

@@ -7,5 +7,5 @@
   "required": false,
   "enabledByDefault": true,
   "dependencies": { "required": [], "optional": ["church-calendar"] },
-  "accessGrants": ["manage"]
+  "accessGrants": ["manage", "request-intake"]
 }

@@ -14,7 +14,7 @@ type OverviewPage = "People" | "Services & events" | "Groups" | "Resources";
 type UpcomingBirthday = { person: string; nextDate: string };
 type UpcomingAnniversary = { person: string; nextDate: string; years?: number | null };
 type GroupAppointment = { appointmentId: string; occurrenceStartAt: string; occurrenceEndAt: string; title: string; calendarName: string; place: string | null; allDay: boolean; internalOnly: boolean; calendarScope: string };
-type ResourceBooking = { id: string; resourceName: string; location: string; purpose: string; requesterName: string; startsAt: string; endsAt: string };
+type ResourceBooking = { id: string; resourceName: string; location: string; purpose: string; requesterName: string; startsAt: string; endsAt: string; isIntakeRequest?: boolean };
 type HomeBookings = { current: ResourceBooking[]; pending: ResourceBooking[] | null };
 type RecentEventFact = { eventDate: string; title: string; adults: number; children: number; checkedIn: number; firstTimeVisitors: number };
 const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts", "homeLinks"] as const;
@@ -262,7 +262,8 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
       {bookings.pending.length ? <div className="community-upcoming-list">{bookings.pending.map((booking) => <div className="community-upcoming-item" key={booking.id}>
         <span className="community-upcoming-date">{bookingDateTime.formatRange(new Date(booking.startsAt), new Date(booking.endsAt))}</span>
         <div><strong>{booking.purpose}</strong><small>{[booking.resourceName, booking.location, booking.requesterName].filter(Boolean).join(" · ")}</small></div>
-        <div><button className="button button-secondary" type="button" disabled={decidingBooking} onClick={() => void decideBooking(booking.id, "approved")}>{translate("overview.approveBooking")}</button>{" "}
+        <div>{booking.isIntakeRequest ? <small>Assign a specific resource in Resource Scheduler.</small>
+          : <button className="button button-secondary" type="button" disabled={decidingBooking} onClick={() => void decideBooking(booking.id, "approved")}>{translate("overview.approveBooking")}</button>}{" "}
           <button className="button button-secondary" type="button" disabled={decidingBooking} onClick={() => void decideBooking(booking.id, "declined")}>{translate("overview.declineBooking")}</button></div>
       </div>)}</div> : <p className="community-empty">{translate("overview.noResourceApprovals")}</p>}
       {approvalFeedback && <p className="community-empty" role="status">{approvalFeedback}</p>}

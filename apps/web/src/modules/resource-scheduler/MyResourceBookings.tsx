@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 type Period = "upcoming" | "past";
 type Status = "requested" | "approved" | "declined" | "cancelled";
-type Booking = { id: string; resourceName: string; location: string; purpose: string; subtitle?: string; description?: string; beneficiaryName?: string | null; quantity: number; status: Status; allDayDate?: string | null; startsAt: string; endsAt: string };
+type Booking = { id: string; resourceName: string; location: string; purpose: string; subtitle?: string; description?: string; beneficiaryName?: string | null; quantity: number; status: Status; isIntakeRequest?: boolean; allDayDate?: string | null; startsAt: string; endsAt: string };
 type BookingPage = { bookings: Booking[]; nextCursor: string | null; timeZone: string };
 
 export function MyResourceBookings({ departmentId, csrfToken, refreshVersion, statusLabels, onHistory }: {
@@ -71,7 +71,7 @@ export function MyResourceBookings({ departmentId, csrfToken, refreshVersion, st
             <td>{formatter?.format(new Date(booking.startsAt))}</td>
             <td>{formatter?.format(new Date(booking.endsAt))}</td>
           </>}
-          <td>{statusLabels[booking.status]}</td>
+          <td>{booking.isIntakeRequest && booking.status === "requested" ? "Awaiting assignment" : statusLabels[booking.status]}</td>
           <td><button type="button" className="button button-secondary" onClick={() => onHistory(booking.id, booking.resourceName)}>Booking history</button></td>
         </tr>)}</tbody>
       </table>

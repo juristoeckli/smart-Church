@@ -18,7 +18,7 @@ export const resourceBookedDayReport = `
       least(($5::date)::timestamp,((booking.ends_at - interval '1 microsecond') AT TIME ZONE $6::text)::date::timestamp),
       interval '1 day'
     ) AS days(day)
-    WHERE booking.department_id=$1 AND booking.status IN ('approved','requested')
+    WHERE booking.department_id=$1 AND booking.status IN ('approved','requested') AND NOT booking.is_intake_request
       AND booking.ends_at>($4::date::timestamp AT TIME ZONE $6::text)
       AND booking.starts_at<(($5::date+1)::timestamp AT TIME ZONE $6::text)
       AND (days.day AT TIME ZONE $6::text)<((days.day+interval '1 day') AT TIME ZONE $6::text)

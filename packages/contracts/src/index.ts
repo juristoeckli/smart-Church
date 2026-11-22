@@ -298,6 +298,7 @@ export interface ResourceBooking {
   startsAt: string;
   endsAt: string;
   status: "requested" | "approved" | "declined" | "cancelled";
+  isIntakeRequest?: boolean;
   createdAt: string;
 }
 

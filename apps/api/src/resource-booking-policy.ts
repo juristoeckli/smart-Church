@@ -17,6 +17,11 @@ export function canBookForOthers(request: FastifyRequest) {
     && canReadPrivateContactDetails(request.activeDepartmentRole ?? null, request.activeDepartmentPermissions ?? null);
 }
 
+export function canRequestResourceIntake(request: FastifyRequest) {
+  return request.activeDepartmentRole === "site_admin"
+    || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("request-intake");
+}
+
 export async function canViewResource(client: Pick<PoolClient, "query">, departmentId: string, groupId: string | null, userId: string, canManage: boolean) {
   if (canManage || !groupId) return true;
   const { rows } = await client.query<{ allowed: boolean }>(
@@ -32,8 +37,8 @@ export async function lockResourceBookingKey(client: PoolClient, departmentId: s
 
 export async function lockResourceBookingPolicy(client: PoolClient, departmentId: string, resourceId: string) {
   await lockResourceBookingKey(client, departmentId, resourceId);
-  const result = await client.query<{ id: string; name: string; requires_approval: boolean; calendar_required: boolean; active: boolean; responsible_user_id: string | null; manager_booking_only: boolean; visibility_group_id: string | null }>(
-    "SELECT id,name,requires_approval,calendar_required,active,responsible_user_id,manager_booking_only,visibility_group_id FROM bookable_resources WHERE id=$1 AND department_id=$2",
+  const result = await client.query<{ id: string; name: string; requires_approval: boolean; calendar_required: boolean; active: boolean; responsible_user_id: string | null; manager_booking_only: boolean; intake_only: boolean; visibility_group_id: string | null }>(
+    "SELECT id,name,requires_approval,calendar_required,active,responsible_user_id,manager_booking_only,intake_only,visibility_group_id FROM bookable_resources WHERE id=$1 AND department_id=$2",
     [resourceId, departmentId],
   );
   return result.rows[0] ?? null;

@@ -2,7 +2,7 @@ import { ResourceAvailabilityCheck } from "../resource-scheduler/ResourceAvailab
 import { useEffect, useState } from "react";
 
 type Resource = {
-  id: string; name: string; location: string; active: boolean;
+  id: string; name: string; location: string; active: boolean; intakeOnly?: boolean;
   totalUnits: number; defaultLeadInMinutes: number; defaultCleanupMinutes: number;
 };
 type Selection = { resourceId: string; quantity: string; leadInMinutes: string; cleanupMinutes: string };
@@ -33,7 +33,7 @@ export function CalendarResourceRequest({ appointmentId, occurrenceStartAt, defa
     return () => controller.abort();
   }, [headers, open, startsAt]);
 
-  const resources = data?.resources.filter((resource) => resource.active) ?? [];
+  const resources = data?.resources.filter((resource) => resource.active && !resource.intakeOnly) ?? [];
   const available = resources.filter((resource) => !selections.some((selection) => selection.resourceId === resource.id));
 
   function addResource(id: string) {

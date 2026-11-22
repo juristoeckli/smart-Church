@@ -21,12 +21,12 @@ const uuidPattern = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 
 type BookableResourceRow = {
   id: string; name: string; category: BookableResource["category"]; description: string; location: string;
-  capacity: number | null; requires_approval: boolean; calendar_required: boolean; manager_booking_only: boolean; active: boolean; source_system?: string | null;
+  capacity: number | null; requires_approval: boolean; calendar_required: boolean; manager_booking_only: boolean; intake_only?: boolean; active: boolean; source_system?: string | null;
 };
 
 type BookingRow = {
   id: string; resource_id: string; resource_name: string; requested_by: string; requester_name: string;
-  purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; created_at: Date | string;
+  purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; is_intake_request?: boolean; created_at: Date | string;
 };
 
 function mapGroup(row: { id: string; name: string; description: string; group_type?: string | null; status?: GroupLifecycleStatus; starts_on?: string | Date | null; ends_on?: string | Date | null; member_count: number; member_ids: string[]; member_details?: ChurchGroup["memberDetails"]; created_at: Date | string; source_system?: string | null; public_signup_enabled?: boolean; public_signup_token?: string | null }): ChurchGroup {
@@ -39,7 +39,7 @@ function mapBookableResource(row: BookableResourceRow): BookableResource & { cal
 }
 
 function mapBooking(row: BookingRow): ResourceBooking {
-  return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, createdAt: new Date(row.created_at).toISOString() };
+  return { id: row.id, resourceId: row.resource_id, resourceName: row.resource_name, requestedBy: row.requested_by, requesterName: row.requester_name, purpose: row.purpose, startsAt: new Date(row.starts_at).toISOString(), endsAt: new Date(row.ends_at).toISOString(), status: row.status, isIntakeRequest: row.is_intake_request === true, createdAt: new Date(row.created_at).toISOString() };
 }
 
 export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleServerContext) {
@@ -1058,14 +1058,14 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!departmentId) return reply;
       const canManageBookings = isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"));
       const result = await pool!.query<BookableResourceRow>(
-        `SELECT id, name, category, description, location, capacity, requires_approval, calendar_required, manager_booking_only, active, source_system
+        `SELECT id, name, category, description, location, capacity, requires_approval, calendar_required, manager_booking_only, intake_only, active, source_system
            FROM bookable_resources WHERE department_id=$1 AND (active OR $3)
              AND can_view_bookable_resource(department_id,visibility_group_id,$2,$3)
            ORDER BY active DESC, category, lower(name)`,
         [departmentId, request.authenticatedUser!.id, canManageBookings],
       );
       return result.rows.map((row) => ({
-        ...mapBookableResource(row), canRequestBooking: !row.manager_booking_only || canManageBookings,
+        ...mapBookableResource(row), canRequestBooking: !row.intake_only && (!row.manager_booking_only || canManageBookings),
       }));
     });
 
@@ -1128,7 +1128,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       if (!departmentId) return reply;
       const result = await pool!.query<BookingRow>(
         `SELECT b.id, b.resource_id, r.name AS resource_name, b.requested_by, u.display_name AS requester_name,
-                b.purpose, b.starts_at, b.ends_at, b.status, b.created_at
+                b.purpose, b.starts_at, b.ends_at, b.status, b.is_intake_request, b.created_at
            FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id JOIN app_users u ON u.id=b.requested_by
           WHERE b.department_id=$1 AND b.ends_at > now() - interval '30 days' AND b.starts_at < now() + interval '6 months'
             AND (b.requested_by=$2 OR can_view_bookable_resource(r.department_id,r.visibility_group_id,$2,$3))
@@ -1157,6 +1157,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
           await client.query("ROLLBACK");
           return reply.code(404).send({ error: "This resource is not available for booking." });
         }
+        if (resource.intake_only) { await client.query("ROLLBACK"); return reply.code(409).send({ error: "Request an intake resource from Resource Scheduler." }); }
         if (resource.calendar_required) { await client.query("ROLLBACK"); return reply.code(409).send({ error: resourceCalendarRequired }); }
         if (resource.manager_booking_only && !isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))) {
           await client.query("ROLLBACK");
@@ -1206,7 +1207,7 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const client = await pool!.connect();
       try {
         await client.query("BEGIN");
-        const existing = await client.query("SELECT resource_id, requested_by, status FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
+        const existing = await client.query("SELECT resource_id, requested_by, status, is_intake_request FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE", [request.params.id, departmentId]);
         const booking = existing.rows[0];
         if (!booking) { await client.query("ROLLBACK"); return reply.code(404).send({ error: "Booking not found." }); }
         if (request.body.status === "cancelled") {
@@ -1215,6 +1216,10 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
         } else if (!isAdmin || booking.status !== "requested") {
           await client.query("ROLLBACK");
           return reply.code(403).send({ error: "Resource management permission is required to approve or decline a pending request." });
+        }
+        if (request.body.status === "approved" && booking.is_intake_request) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Assign a specific resource before approving this request." });
         }
         if (request.body.status === "approved" && !await hasResourceSchedulerCapacityGuard(client)) {
           await lockResourceBookingKey(client, departmentId, booking.resource_id);
