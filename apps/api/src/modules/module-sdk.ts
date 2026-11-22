@@ -14,7 +14,8 @@ export type ModuleReplicationAdapter = {
   schemaVersion: string;
   getSchemaVersion?: (departmentId: string) => Promise<string>;
   isEnabled: () => boolean;
-  inspect: (departmentId: string) => Promise<{ ready: boolean; blockers: string[]; recordCount: number }>;
+  requiresSnapshot?: (departmentId: string) => Promise<boolean>;
+  inspect: (departmentId: string, context?: ReplicationExportContext) => Promise<{ ready: boolean; blockers: string[]; recordCount: number }>;
   exportSnapshot: (client: PoolClient, departmentId: string, context?: ReplicationExportContext) => Promise<unknown>;
   prepareSnapshotForPeer?: (snapshot: unknown, sealForPeer: (plaintext: string) => string) => Promise<unknown>;
   restoreSnapshotFromPeer?: (snapshot: unknown, openForLocal: (envelope: string) => string) => Promise<unknown>;
@@ -22,7 +23,7 @@ export type ModuleReplicationAdapter = {
     moduleIds: readonly string[];
     validate: (snapshot: unknown, dependencies: ReadonlyMap<string, unknown>) => void | Promise<void>;
   };
-  prepareRestore?: (client: PoolClient, departmentId: string, snapshot?: unknown) => Promise<void>;
+  prepareRestore?: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationExportContext) => Promise<void>;
   restoreSnapshot: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<{ recordCount: number }>;
   verifySnapshot: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationRestoreContext) => Promise<{ ready: boolean; blockers: string[] }>;
 };

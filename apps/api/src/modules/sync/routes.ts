@@ -113,20 +113,26 @@ async function installSiteChangeTriggers(pool: import("pg").Pool) {
 }
 
 async function redundancyManifest(pool: import("pg").Pool, adapters: ModuleReplicationAdapter[], departmentId: string) {
-  const installed = await pool.query<{ module_id: string; version: string | null }>(`SELECT module.module_id,module.version FROM installation_modules module
+  const installed = await pool.query<{ module_id: string; version: string | null; included: boolean }>(`SELECT module.module_id,module.version,
+    ((module.enabled=TRUE OR module.required=TRUE) AND
+      (module.required=TRUE OR module.client_managed=FALSE OR module.module_id=ANY(department.enabled_modules))) AS included
+    FROM installation_modules module
     JOIN installations installation ON installation.id=module.installation_id AND installation.is_current=TRUE
     JOIN departments department ON department.installation_id=installation.id AND department.id=$1
-    WHERE (module.enabled=TRUE OR module.required=TRUE)
-      AND (module.required=TRUE OR module.client_managed=FALSE OR module.module_id=ANY(department.enabled_modules))
     ORDER BY module.module_id`, [departmentId]);
   const adapterMap = new Map(adapters.map((adapter) => [adapter.moduleId, adapter]));
-  const enabled = installed.rows.filter((item) => item.module_id !== "sync");
+  const enabled: typeof installed.rows = [];
+  for (const item of installed.rows) {
+    if (item.module_id === "sync") continue;
+    if (item.included || await adapterMap.get(item.module_id)?.requiresSnapshot?.(departmentId)) enabled.push(item);
+  }
+  const exportContext = { moduleIds: new Set(["core-site", ...enabled.map((item) => item.module_id)]) };
   const modules: RedundancyModuleManifestEntry[] = [];
   const blockers: string[] = [];
   for (const item of enabled) {
     const adapter = adapterMap.get(item.module_id);
     if (!adapter) { blockers.push(`${item.module_id} has no installed replication adapter.`); continue; }
-    const status = await adapter.inspect(departmentId);
+    const status = await adapter.inspect(departmentId, exportContext);
     if (!status.ready) blockers.push(...status.blockers.map((blocker) => `${adapter.moduleName}: ${blocker}`));
     modules.push({ moduleId: adapter.moduleId, schemaVersion: await adapterSchemaVersion(adapter, departmentId), installedVersion: item.version ?? "unknown" });
   }
@@ -355,10 +361,11 @@ async function restoreSiteModules(
     }
     await contract.validate(snapshot, dependencies);
   }
+  const exportContext = replicationExportContext(entries);
   // Clear module-owned dependents before core replaces the referenced rows.
   // Adapters can also guard existing module data when the incoming manifest omits it.
   for (const adapter of adapters.values()) {
-    await adapter.prepareRestore?.(client, departmentId, prepared.get(adapter.moduleId)?.snapshot);
+    await adapter.prepareRestore?.(client, departmentId, prepared.get(adapter.moduleId)?.snapshot, exportContext);
   }
   for (const { adapter, snapshot } of prepared.values()) {
     await adapter.restoreSnapshot(client, departmentId, snapshot, restoreContext);
@@ -372,7 +379,6 @@ async function restoreSiteModules(
   }
 
   const restoredSnapshots: Record<string, unknown> = {};
-  const exportContext = replicationExportContext(entries);
   for (const [moduleId, { adapter }] of prepared) {
     restoredSnapshots[moduleId] = await adapter.exportSnapshot(client, departmentId, exportContext);
   }

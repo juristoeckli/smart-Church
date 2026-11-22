@@ -7,6 +7,7 @@ import type { ModuleServerContext } from "../module-sdk.js";
 import { canManageStoredFileWikiAudience, wikiFileAudienceSchema, storedFileWikiAudienceSql } from "../../stored-file-wiki-access.js";
 
 import { storedFileUploadLimit as resourceLimit, storedFileUploadMetadata } from "./upload.js";
+import { isSnapshotRow, storedWikiAttachmentFingerprint, validateStoredWikiAttachmentEvidence } from "../wiki/replication-access.js";
 function canonical(value: unknown): string {
   if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
@@ -20,60 +21,53 @@ function mapResource(row: ResourceRow): StoredFile {
 type FolderRow = { id: string; name: string; parent_id: string | null; created_at: Date | string };
 function mapFolder(row: FolderRow): StoredFolder { return { id: row.id, name: row.name, parentId: row.parent_id, createdAt: new Date(row.created_at).toISOString() }; }
 
-async function wikiAttachmentReplicationBlocker(db: Pick<PoolClient, "query">, departmentId: string) {
-  const schema = await wikiFileAudienceSchema(db);
-  if (schema === "absent") return null;
-  if (schema === "partial") return "Wiki attachment permissions cannot be verified. Complete the Wiki migrations before replicating File Storage.";
-  const result = await db.query<{ attached: boolean }>(`SELECT EXISTS (
-    SELECT 1 FROM wiki_page_files attachment JOIN stored_files stored
-      ON stored.id=attachment.file_id AND stored.department_id=attachment.department_id
-    WHERE attachment.department_id=$1
-  ) AS attached`, [departmentId]);
-  return result.rows[0]?.attached === false ? null
-    : "File Storage replication is blocked while this location has Wiki attachments. Wiki attachment access rules are not replicated.";
-}
+const missingWikiSnapshot = "File Storage replication requires a corresponding Wiki snapshot while this location has Wiki attachments.";
 
-function fileSnapshotWikiAccessBlocker(input: unknown) {
-  if (!input || typeof input !== "object") return null;
-  const { files, versions, wikiAttachmentAccess } = input as { files?: unknown; versions?: unknown; wikiAttachmentAccess?: unknown };
-  if (wikiAttachmentAccess === "none") return null;
-  if (wikiAttachmentAccess === undefined && Array.isArray(files) && !files.length
-    && (versions === undefined || Array.isArray(versions) && !versions.length)) return null;
-  return "This File Storage snapshot does not verify Wiki attachment access. Create a fresh snapshot after upgrading the source installation.";
+function recordedWikiFingerprint(input: unknown) {
+  return isSnapshotRow(input) && typeof input.wikiAttachmentAccess === "string" ? input.wikiAttachmentAccess : "none";
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId } = context;
   context.replication.register({
     schemaVersion: "3",
-    inspect: async (departmentId) => {
+    inspect: async (departmentId, replication) => {
       if (!pool || !isDatabaseReady()) return { ready: false, blockers: ["The file storage database is unavailable."], recordCount: 0 };
       const result = await pool.query<{ count: string; bytes: string }>("SELECT ((SELECT count(*) FROM stored_files WHERE department_id=$1)+(SELECT count(*) FROM stored_file_versions WHERE department_id=$1)+(SELECT count(*) FROM stored_file_folders WHERE department_id=$1))::text AS count,((SELECT COALESCE(sum(file_size),0) FROM stored_files WHERE department_id=$1)+(SELECT COALESCE(sum(file_size),0) FROM stored_file_versions WHERE department_id=$1))::text AS bytes", [departmentId]);
       const count = Number(result.rows[0].count);
       const bytes = Number(result.rows[0].bytes ?? 0);
       const blockers: string[] = [];
       if (bytes > 200 * 1024 * 1024) blockers.push("Stored files exceed the current 200 MiB snapshot safety limit.");
-      const wikiBlocker = await wikiAttachmentReplicationBlocker(pool, departmentId);
-      if (wikiBlocker) blockers.push(wikiBlocker);
+      try {
+        if (await storedWikiAttachmentFingerprint(pool, departmentId) !== "none" && !replication?.moduleIds.has("wiki")) {
+          blockers.push(missingWikiSnapshot);
+        }
+      } catch (error) {
+        blockers.push(error instanceof Error ? error.message : "Wiki attachment permissions cannot be verified.");
+      }
       return { ready: !blockers.length, blockers, recordCount: count };
     },
-    exportSnapshot: async (client: PoolClient, departmentId) => {
-      const blocker = await wikiAttachmentReplicationBlocker(client, departmentId);
-      if (blocker) throw new Error(blocker);
+    exportSnapshot: async (client: PoolClient, departmentId, replication) => {
+      const wikiAttachmentAccess = await storedWikiAttachmentFingerprint(client, departmentId);
+      if (wikiAttachmentAccess !== "none" && !replication?.moduleIds.has("wiki")) throw new Error(missingWikiSnapshot);
       const files = await client.query("SELECT id,title,category,file_name,content_type,file_size,folder_id,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId]);
       const folders = await client.query("SELECT id,name,parent_id,created_at FROM stored_file_folders WHERE department_id=$1 ORDER BY id", [departmentId]);
       const versions = await client.query("SELECT id,department_id,file_id,version_number,title,category,file_name,content_type,file_size,encode(file_data,'base64') AS file_data,uploaded_by,created_at FROM stored_file_versions WHERE department_id=$1 ORDER BY file_id,version_number", [departmentId]);
-      return { version: 3, ...(files.rows.length || versions.rows.length ? { wikiAttachmentAccess: "none" } : {}), files: files.rows, folders: folders.rows, versions: versions.rows };
+      return { version: 3, ...(files.rows.length || versions.rows.length ? { wikiAttachmentAccess } : {}), files: files.rows, folders: folders.rows, versions: versions.rows };
     },
-    prepareRestore: async (client, departmentId, snapshot) => {
+    restoreDependencies: {
+      moduleIds: ["wiki"],
+      validate: (snapshot, dependencies) => validateStoredWikiAttachmentEvidence(snapshot, dependencies.get("wiki")),
+    },
+    prepareRestore: async (client, departmentId, snapshot, replication) => {
       if (snapshot === undefined) return;
-      const blocker = fileSnapshotWikiAccessBlocker(snapshot) ?? await wikiAttachmentReplicationBlocker(client, departmentId);
-      if (blocker) throw new Error(blocker);
+      const current = await storedWikiAttachmentFingerprint(client, departmentId);
+      if (current !== "none" && !replication?.moduleIds.has("wiki")) throw new Error(missingWikiSnapshot);
     },
     restoreSnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       if (!input || typeof input !== "object" || ![1, 2, 3].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) throw new Error("The File Storage snapshot is invalid.");
-      const blocker = fileSnapshotWikiAccessBlocker(input) ?? await wikiAttachmentReplicationBlocker(client, departmentId);
-      if (blocker) throw new Error(blocker);
+      // Wiki prepareRestore must clear dependent links before File Storage replaces their files.
+      if (await storedWikiAttachmentFingerprint(client, departmentId) !== "none") throw new Error(missingWikiSnapshot);
       const files = (input as { files: Array<Record<string, unknown>> }).files;
       const folders = (input as { folders?: Array<Record<string, unknown>> }).folders ?? [];
       const versions = (input as { versions?: Array<Record<string, unknown>> }).versions ?? [];
@@ -110,8 +104,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     },
     verifySnapshot: async (client: PoolClient, departmentId, input, restoreContext) => {
       if (!input || typeof input !== "object" || ![1, 2, 3].includes((input as { version?: number }).version ?? 0) || !Array.isArray((input as { files?: unknown }).files)) return { ready: false, blockers: ["No verified File Storage snapshot is available."] };
-      const wikiBlocker = fileSnapshotWikiAccessBlocker(input) ?? await wikiAttachmentReplicationBlocker(client, departmentId);
-      if (wikiBlocker) return { ready: false, blockers: [wikiBlocker] };
+      if (await storedWikiAttachmentFingerprint(client, departmentId) !== recordedWikiFingerprint(input)) {
+        return { ready: false, blockers: ["Restored Wiki attachment access differs from the signed snapshot."] };
+      }
       const expected = (input as { files: Array<Record<string, unknown>> }).files;
       const actual = (await client.query("SELECT id,title,category,file_name,content_type,file_size,folder_id,encode(file_data,'base64') AS file_data,created_at,updated_at,deleted_at FROM stored_files WHERE department_id=$1 ORDER BY id", [departmentId])).rows as Array<Record<string, unknown>>;
       if (actual.length !== expected.length) return { ready: false, blockers: [`Stored file count differs: expected ${expected.length}, found ${actual.length}.`] };

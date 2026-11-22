@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { ModuleServerContext } from "../module-sdk.js";
 import { createWikiPdf } from "./pdf.js";
+import { registerWikiReplication } from "./replication.js";
 import { storedFileUploadLimit, storedFileUploadMetadata } from "../file-storage/upload.js";
 
 type WikiAudience = "location" | "group" | "managers";
@@ -102,6 +103,7 @@ function categoryDto(row: WikiCategoryRow) {
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
+  registerWikiReplication(context);
   async function site(request: FastifyRequest, reply: FastifyReply, manage = false) {
     if (!pool || !isDatabaseReady()) { reply.code(503).send({ error: "The Wiki database is unavailable." }); return null; }
     const departmentId = await resolveDepartmentId(request, reply);
