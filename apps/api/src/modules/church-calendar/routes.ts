@@ -1,3 +1,4 @@
+import { registerCalendarBookingDescriptions } from "./booking-descriptions.js";
 import { loadPublicAgenda, registerCalendarAgendaPublications } from "./calendar-agenda-publications.js";
 import { calendarEmbedContentPolicy, renderCalendarEmbed, type EmbedAppointment, type EmbedSettings } from "./calendar-embed.js";
 import { registerCalendarTagDefinitions } from "./tag-definitions.js";
@@ -200,6 +201,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   registerAppointmentTemplates(app, context, canManageCalendar);
   registerCalendarTagDefinitions(app, context, (request) => canManageCalendar(request, "community", null));
   registerCalendarMeetingRequests(app, context, canManageCalendar);
+  registerCalendarBookingDescriptions(app, context, canManageCalendar);
   registerCalendarAgendaPublications(app, context, (request) => canManageCalendar(request, "community", null), hashFeedToken);
   const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
   const userId = (request: FastifyRequest) => request.authenticatedUser!.id;

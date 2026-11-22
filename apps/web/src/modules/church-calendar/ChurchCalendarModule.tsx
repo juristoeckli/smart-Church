@@ -1,3 +1,4 @@
+import { CalendarBookingDescription } from "./CalendarBookingDescription";
 import { CalendarEmbedCode } from "./CalendarEmbedCode";
 import { CalendarPublicAgendas } from "./CalendarPublicAgendas";
 import { CalendarTagManager, type CalendarTagDefinition } from "./CalendarTagManager";
@@ -684,6 +685,8 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
     ? editing.occurrenceStartAt.slice(0, 10) >= dateInput(todayInZone(viewerZone))
     : editing.startsAtUtc && Date.parse(editing.startsAtUtc) > Date.now());
   const reminderZones = [...new Set([reminderClockZone, viewerZone, ...viewerTimeZones])];
+  const canManageCalendarResources = Boolean(editing?.canManage && editing.calendarScope !== "personal" && department.enabledModules?.includes("resource-scheduler")
+    && (department.role === "site_admin" || (department.permissions ?? []).includes("resources_manage") || (department.modulePermissions?.["resource-scheduler"] ?? []).includes("manage")));
   const linkedResourceBookings = editedOccurrence?.resourceBookings ?? editing?.resourceBookings ?? [];
   function appointmentLinks(item: Appointment) {
     const occurrenceBookings = item.resourceBookings?.filter((booking) => booking.scope === "occurrence") ?? [];
@@ -868,10 +871,16 @@ export function ChurchCalendarModule({ departmentId, accountId, csrfToken, depar
         <ul className="church-calendar-extra-date-list">{linkedResourceBookings.map((booking) => <li key={booking.id}>
           <div><strong>{booking.name}</strong><br /><small>{booking.scope === "occurrence" ? "This occurrence" : "Entire appointment"} · {booking.status === "approved" ? "Confirmed" : booking.status === "requested" ? "Pending approval" : booking.status} · Setup {booking.leadInMinutes} min · Cleanup {booking.cleanupMinutes} min</small>
             {booking.timeMismatch && <p role="status">The booking time differs from the appointment. Review it in Resources.</p>}</div>
+          {canManageCalendarResources && editing && booking.scope === "occurrence" && (booking.status === "requested" || booking.status === "approved") &&
+            <CalendarBookingDescription
+              key={`${departmentId}:${editing.appointmentId}:${editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}:${booking.id}`}
+              appointmentId={editing.appointmentId} originalStart={editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}
+              bookingId={booking.id} departmentId={departmentId} csrfToken={csrfToken}
+            />}
           {onNavigateEntity && <button className="button button-secondary" type="button" onClick={() => onNavigateEntity("booking", booking.id)}>Open booking</button>}
         </li>)}</ul>
       </div>}
-      {editing?.canManage && editing.resourceWindow && editing.resourceWindow.endsAt > editing.resourceWindow.startsAt && editing.calendarScope !== "personal" && department.enabledModules?.includes("resource-scheduler") && (department.role === "site_admin" || (department.permissions ?? []).includes("resources_manage") || (department.modulePermissions?.["resource-scheduler"] ?? []).includes("manage")) && <CalendarResourceRequest
+      {canManageCalendarResources && editing?.resourceWindow && editing.resourceWindow.endsAt > editing.resourceWindow.startsAt && <CalendarResourceRequest
         key={departmentId + ":" + editing.appointmentId + ":" + editing.occurrenceStartAt}
         appointmentId={editing.appointmentId} occurrenceStartAt={editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}
         defaultPurpose={editing.calendarScope === "group" || editing.internalOnly ? "Calendar booking" : editing.title}
