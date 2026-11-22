@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
-import { Search } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { Plus, Search } from "lucide-react";
 import "./module.css";
+import { translate } from "../../i18n";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
 import { groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceSnapshot, type GroupAttendanceStatus } from "../../group-attendance";
 
-type Group = { id: string; name: string; importedFrom?: string };
+type Group = { id: string; name: string; status: string; importedFrom?: string };
 type Meeting = { id: string; date: string; title: string; completedAt?: string | null };
 export type GroupMeetingTarget = Meeting & { groupId: string };
 const statuses = { present: "Present", absent: "Absent", excused: "Excused" } as const;
@@ -51,6 +52,10 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   const availableMeetings = meetings.data ?? [];
   const meeting = target ?? availableMeetings.find((value) => value.id === meetingId);
   const roster = useData<GroupAttendanceSnapshot>(meeting ? groupAttendanceUrl(meeting.id) + "?withCompletion=true" : "", departmentId, "attendance");
+  const [newMeetingOpen, setNewMeetingOpen] = useState(false);
+  const [newMeetingDate, setNewMeetingDate] = useState("");
+  const [newMeetingTitle, setNewMeetingTitle] = useState("");
+  const [creating, setCreating] = useState(false);
   const [draft, setDraft] = useState<Record<string, GroupAttendanceStatus>>({});
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<GroupAttendanceStatus | "">("");
@@ -63,7 +68,7 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
   const completedAt = roster.data?.completedAt ?? null;
   const rows = attendance.map((row) => ({ ...row, status: draft[row.contactId] ?? row.status }));
   const changes = groupAttendanceChanges(attendance, rows);
-  const busy = saving || changes.length > 0;
+  const busy = saving || creating || changes.length > 0;
   const term = query.trim().toLocaleLowerCase();
   const names = new Intl.Collator(document.documentElement.lang || undefined, { sensitivity: "base" });
   const roles = [...new Set(rows.map((row) => row.role?.trim()).filter((role): role is string => Boolean(role)))].sort(names.compare);
@@ -80,6 +85,36 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
     setDraft({});
     setError("");
     setNotice("");
+  }
+
+  async function createMeeting(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (target || group?.status !== "active" || busy || !newMeetingDate) return;
+    setCreating(true);
+    resetDraft();
+    try {
+      const response = await fetch("/api/groups/" + group.id + "/meetings", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-department-id": departmentId, "x-csrf-token": csrfToken },
+        body: JSON.stringify({ date: newMeetingDate, title: newMeetingTitle.trim() }),
+      });
+      const created = await response.json() as Meeting | { error?: string };
+      if (!response.ok || !("id" in created)) throw new Error("error" in created && created.error ? created.error : "Could not open the group meeting.");
+      selectMeeting(created.id);
+      setNewMeetingOpen(false);
+      setNewMeetingDate("");
+      setNewMeetingTitle("");
+      setQuery("");
+      setFilter("");
+      setRoleFilter("");
+      meetings.reload();
+      roster.reload();
+      setNotice(response.status === 201 ? "Meeting created. The attendance roster is ready to open." : "Existing meeting opened.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not open the group meeting.");
+    } finally {
+      setCreating(false);
+    }
   }
 
   async function saveAttendance() {
@@ -134,6 +169,9 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
       <label>Group<select value={groupId} disabled={busy || groups.pending} onChange={(event) => {
         selectGroup(event.target.value);
         selectMeeting("");
+        setNewMeetingOpen(false);
+        setNewMeetingDate("");
+        setNewMeetingTitle("");
         meetings.reload();
         roster.reload();
         resetDraft();
@@ -153,11 +191,26 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
         {availableMeetings.map((value) => <option key={value.id} value={value.id}>{value.date}{value.title ? " · " + value.title : ""}{value.completedAt ? " · completed" : ""}</option>)}
       </select></label>
     </section>}
+    {!target && group?.status === "active" && <section className="checkin-toolbar">
+      <button type="button" className="checkin-print" disabled={busy || meetings.pending}
+        aria-expanded={newMeetingOpen} onClick={() => { setNewMeetingOpen(!newMeetingOpen); setError(""); }}>
+        <Plus size={15} /> {translate("groups.createMeeting")}
+      </button>
+      {newMeetingOpen && <form className="group-meeting-form" onSubmit={(event) => void createMeeting(event)}>
+        <label>{translate("groups.meetingDate")}<input type="date" required value={newMeetingDate} disabled={creating}
+          onChange={(event) => setNewMeetingDate(event.target.value)} /></label>
+        <label>{translate("groups.meetingName")}<input type="text" maxLength={160} value={newMeetingTitle} disabled={creating}
+          onChange={(event) => setNewMeetingTitle(event.target.value)} /></label>
+        <button type="submit" className="checkin-print" disabled={busy || !newMeetingDate}>
+          {creating ? translate("events.saving") : translate("groups.createMeeting")}
+        </button>
+      </form>}
+    </section>}
     {(error || loadError) && <p className="checkin-error" role="alert">{error || loadError}</p>}
     {notice && <p role="status">{notice}</p>}
     {loadError && <button className="checkin-print" type="button" onClick={groups.error ? groups.reload : meetings.error ? meetings.reload : roster.reload}>Retry</button>}
     {pending && <p className="checkin-empty" role="status">Loading…</p>}
-    {!pending && !loadError && group && !availableMeetings.length && <p className="checkin-empty">Create a meeting in Groups to record its attendance here.</p>}
+    {!pending && !loadError && group && !availableMeetings.length && <p className="checkin-empty">No meetings have been created for this group.</p>}
     {!pending && !loadError && meeting && <>
       <section className="checkin-toolbar">
         <strong>{statusKeys.map((status) => rows.filter((row) => row.status === status).length + " " + statuses[status].toLowerCase()).join(" · ")}</strong>
