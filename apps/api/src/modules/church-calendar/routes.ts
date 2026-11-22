@@ -1,3 +1,4 @@
+import { registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import { registerAppointmentTemplates } from "./appointment-templates.js";
@@ -194,6 +195,7 @@ async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId:
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   registerAppointmentTemplates(app, context, canManageCalendar);
+  registerCalendarMeetingRequests(app, context, canManageCalendar);
   const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
   const userId = (request: FastifyRequest) => request.authenticatedUser!.id;
 
@@ -1633,6 +1635,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           if (field !== "linkedEventId" && field !== "signupGroupId" && field !== "responsibleContactId") delete selectedOverrides[field];
         }
         await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(plan.previousRule)]);
+        await client.query("DELETE FROM church_calendar_meeting_requests WHERE appointment_id=$1 AND original_start >= $2::timestamp", [row.id, occurrenceStart]);
         await client.query(
           `INSERT INTO church_calendar_appointments(id,department_id,calendar_id,title,subtitle,description,starts_at,ends_at,all_day,place,url,internal_only,tags,recurrence,linked_event_id,signup_group_id,responsible_contact_id,created_by,time_zone)
            VALUES($1,$2,$3,$4,$5,$6,$7::timestamp,$8::timestamp,$9,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19)`,
@@ -1656,6 +1659,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const seriesStartAt = localDateTime(seriesStart);
         const seriesDuration = Math.max(0, wallDate(normalized.endsAt).getTime() - wallDate(normalized.startsAt).getTime());
         const seriesEndAt = localDateTime(new Date(seriesStart.getTime() + seriesDuration));
+        await client.query(
+          "DELETE FROM church_calendar_meeting_requests WHERE appointment_id=$1 AND EXISTS (SELECT 1 FROM church_calendar_appointments WHERE id=$1 AND recurrence IS DISTINCT FROM $2::jsonb)",
+          [row.id, normalized.recurrence ? JSON.stringify(normalized.recurrence) : null],
+        );
         await client.query(
           `WITH changed AS (
              UPDATE church_calendar_appointments SET title=$3,subtitle=$4,description=$5,starts_at=$6::timestamp,ends_at=$7::timestamp,all_day=$8,place=$9,url=$10,internal_only=$11,tags=$12,recurrence=$13::jsonb,linked_event_id=$14,signup_group_id=$15,responsible_contact_id=$16,time_zone=$17,updated_at=now()
@@ -1692,8 +1699,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (scope !== "series" && !occurrence) return responseError(reply, 400, "Choose which occurrence to remove.");
     if (scope === "occurrence" && row.recurrence) {
       await context.pool.query(
-        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by) VALUES($1,$2::timestamp,true,'{}',$3)
-         ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=true,overrides='{}',updated_by=EXCLUDED.updated_by,updated_at=now()`, [row.id, occurrence, userId(request)],
+        `INSERT INTO church_calendar_appointment_exceptions(appointment_id,original_start,cancelled,overrides,updated_by)
+         SELECT id,$2::timestamp,true,'{}',$3 FROM church_calendar_appointments
+          WHERE id=$1 AND department_id=$4 AND archived_at IS NULL FOR UPDATE
+         ON CONFLICT(appointment_id,original_start) DO UPDATE SET cancelled=true,overrides='{}',updated_by=EXCLUDED.updated_by,updated_at=now()`, [row.id, occurrence, userId(request), departmentId],
       );
     } else if (scope === "future" && row.recurrence) {
       const boundary = occurrence!;
@@ -1712,6 +1721,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }
         const previousRule = truncateCalendarSeries(locked, boundary);
         await client.query("UPDATE church_calendar_appointments SET recurrence=$2::jsonb,updated_at=now() WHERE id=$1", [row.id, JSON.stringify(previousRule)]);
+        await client.query("DELETE FROM church_calendar_meeting_requests WHERE appointment_id=$1 AND original_start >= $2::timestamp", [row.id, boundary]);
         await client.query("DELETE FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at >= $2::timestamp", [row.id, boundary]);
         await client.query("DELETE FROM church_calendar_appointment_exceptions WHERE appointment_id=$1 AND original_start >= $2::timestamp", [row.id, boundary]);
         await client.query("DELETE FROM church_calendar_resource_links WHERE appointment_id=$1 AND occurrence_start >= $2::timestamp", [row.id, boundary]);
@@ -1762,7 +1772,13 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const endsAt = cleanLocalDateTime(request.body.endsAt);
     if (!startsAt || !endsAt || endsAt < startsAt) return responseError(reply, 400, "Choose valid start and end times.");
     if (!validAppointmentTimes({ startsAt, endsAt, allDay: calendar.all_day }, canonicalTimeZone(calendar.time_zone))) return responseError(reply, 400, invalidAppointmentTime);
-    await context.pool.query("INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by) VALUES($1,$2::timestamp,$3::timestamp,$4) ON CONFLICT(appointment_id,starts_at) DO UPDATE SET ends_at=EXCLUDED.ends_at", [request.params.id, startsAt, endsAt, userId(request)]);
+    const saved = await context.pool.query(
+      `INSERT INTO church_calendar_extra_dates(appointment_id,starts_at,ends_at,created_by)
+       SELECT id,$2::timestamp,$3::timestamp,$4 FROM church_calendar_appointments
+        WHERE id=$1 AND department_id=$5 AND archived_at IS NULL FOR UPDATE
+       ON CONFLICT(appointment_id,starts_at) DO UPDATE SET ends_at=EXCLUDED.ends_at`, [request.params.id, startsAt, endsAt, userId(request), departmentId],
+    );
+    if (!saved.rowCount) return responseError(reply, 404, "The appointment was not found.");
     context.realtime.publish("module:church-calendar:changed", departmentId, { action: "extra-date-added", appointmentId: request.params.id });
     return reply.code(201).send({ added: true });
   });
@@ -1785,7 +1801,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
-      const deleted = await client.query("DELETE FROM church_calendar_extra_dates WHERE appointment_id=$1 AND starts_at=$2::timestamp RETURNING starts_at", [request.params.id, startsAt]);
+      const deleted = await client.query(
+        `WITH appointment AS (
+           SELECT id FROM church_calendar_appointments WHERE id=$1 AND department_id=$3 AND archived_at IS NULL FOR UPDATE
+         ) DELETE FROM church_calendar_extra_dates extra USING appointment
+             WHERE extra.appointment_id=appointment.id AND extra.starts_at=$2::timestamp`, [request.params.id, startsAt, departmentId],
+      );
       if (!deleted.rowCount) {
         await client.query("ROLLBACK");
         return responseError(reply, 404, "The extra date was not found.");

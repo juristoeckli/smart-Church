@@ -1,3 +1,4 @@
+import { CalendarMeetingRequests } from "./CalendarMeetingRequests";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import { CalendarDays, ChevronLeft, ChevronRight, MapPin, Pencil, Plus, Printer, Repeat2, RotateCcw, Trash2, X } from "lucide-react";
 import type { ModuleContext } from "../../module-registry";
@@ -761,6 +762,11 @@ export function ChurchCalendarModule({ departmentId, csrfToken, department, canM
       {calendarScope === "group" && <label className="church-calendar-check"><input type="checkbox" checked={allowMemberAppointments}
         onChange={(event) => setAllowMemberAppointments(event.target.checked)} /> Allow active group members to add appointments</label>}<footer><button type="button" className="button button-secondary" onClick={() => setShowCalendarForm(false)}>Cancel</button><button type="submit" className="button button-primary" disabled={busy || !calendarName.trim()}><Plus size={15} /> Create calendar</button></footer></form></section></div>}
     {showForm && <div className="church-calendar-modal-backdrop" role="presentation"><section className="church-calendar-modal church-calendar-appointment-modal" role="dialog" aria-modal="true" aria-labelledby="appointment-heading"><header><div><span className="eyebrow">{editing ? "APPOINTMENT DETAILS" : "NEW APPOINTMENT"}</span><h2 id="appointment-heading">{editing ? "Edit appointment" : "Create appointment"}</h2></div><button className="icon-button" type="button" aria-label="Close" onClick={() => setShowForm(false)}><X size={18} /></button></header><form onSubmit={(event) => void saveAppointment(event)}><div className="church-calendar-form-grid">
+      {editing?.calendarScope === "group" && <CalendarMeetingRequests
+        key={`${departmentId}:${editing.appointmentId}:${editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}`}
+        departmentId={departmentId} csrfToken={csrfToken} appointmentId={editing.appointmentId}
+        originalStart={editing.originalOccurrenceStartAt ?? editing.occurrenceStartAt}
+      />}
       {editing && (editing.reminder || canScheduleReminder) && <div className="church-calendar-extra-date wide">
         <strong>Remind me about this occurrence</strong>
         <small>{editing.reminder?.delivered ? "Reminder delivered to your Notifications." : editing.reminder ? "Personal reminder scheduled." : "Receive a reminder in your Notifications."}</small>
