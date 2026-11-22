@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 export type BookingAuditEntry = { id: string; action: string; details: Record<string, unknown>; createdAt: string; actorName: string | null };
 
 const actionLabels: Record<string, string> = {
+  booking_details_updated: "Booking details updated",
   booking_resource_reassigned: "Resource reassigned", booking_approved: "Booking approved", booking_declined: "Booking rejected", booking_cancelled: "Booking cancelled",
   series_created: "Series created", series_archived: "Series cancelled", series_future_edited: "Future bookings changed",
   occurrence_overridden: "Occurrence changed", occurrence_override_reset: "Occurrence reset",
@@ -15,6 +16,10 @@ const statusLabels: Record<string, string> = {
 
 function detailFields(details: Record<string, unknown>) {
   const fields: Array<[string, string]> = [];
+  const labels = { purpose: "Purpose", subtitle: "Subtitle", description: "Description" } as const;
+  const changed = Array.isArray(details.fields) ? details.fields.flatMap((field) => typeof field === "string" && Object.hasOwn(labels, field)
+    ? [labels[field as keyof typeof labels]] : []) : [];
+  if (changed.length) fields.push(["Changed", changed.join(", ")]);
   for (const [key, label] of [["quantity", "Units"], ["leadInMinutes", "Setup"], ["cleanupMinutes", "Cleanup"], ["occurrenceCount", "Occurrences"], ["cancelledBookings", "Cancelled bookings"]]) {
     const value = details[key];
     if (typeof value === "number") fields.push([label, key.endsWith("Minutes") ? `${value} min` : String(value)]);

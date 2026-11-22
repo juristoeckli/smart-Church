@@ -387,10 +387,115 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       ${schema?.usable ? "AND NOT EXISTS (SELECT 1 FROM church_calendar_resource_links link WHERE link.resource_booking_id=booking.id)" : schema?.installed ? "AND FALSE" : ""})`;
   }
 
-  const assignableSingleBooking = `booking.status='requested' AND booking.ends_at>now()
-    AND (series.id IS NULL OR (series.recurrence->>'frequency'='once' AND NOT EXISTS (
-      SELECT 1 FROM resource_booking_series_occurrences other WHERE other.series_id=series.id AND other.resource_booking_id<>booking.id
-    ) AND NOT EXISTS (SELECT 1 FROM resource_booking_series_dates dates WHERE dates.series_id=series.id)))`;
+  const directSingleBooking = `(series.id IS NULL OR (series.recurrence->>'frequency'='once' AND NOT EXISTS (
+    SELECT 1 FROM resource_booking_series_occurrences other WHERE other.series_id=series.id AND other.resource_booking_id<>booking.id
+  ) AND NOT EXISTS (SELECT 1 FROM resource_booking_series_dates dates WHERE dates.series_id=series.id)))`;
+  const assignableSingleBooking = `booking.status='requested' AND booking.ends_at>now() AND ${directSingleBooking}`;
+  const editableBookingDetails = (manager: string) => `resource.active AND series.archived_at IS NULL AND booking.status IN ('requested','approved') AND booking.ends_at>now() AND ${directSingleBooking}
+    AND (booking.status='requested' OR NOT resource.requires_approval OR ${manager})`;
+  const detailsRevision = `to_char(booking.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+  const detailsParams = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
+  type BookingText = { purpose: string; subtitle: string; description: string };
+
+  async function queryEditableBookingDetails(db: Pick<PoolClient, "query">, departmentId: string, bookingId: string, actorId: string, manager: boolean, copyable: string) {
+    const { rows: [booking] } = await db.query<BookingText & { revision: string }>(
+      `SELECT booking.purpose,booking.subtitle,booking.description,${detailsRevision} AS revision
+         FROM resource_bookings booking
+         JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+         LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
+         LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
+        WHERE booking.id=$1 AND booking.department_id=$2 AND ${copyable} AND ${editableBookingDetails("$4")}`,
+      [bookingId, departmentId, actorId, manager],
+    );
+    return booking;
+  }
+
+  const detailsPath = "/api/modules/resource-scheduler/bookings/:id/details";
+  app.get<{ Params: { id: string } }>(detailsPath, { schema: { params: detailsParams } }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    reply.header("Cache-Control", "private, no-store");
+    const booking = await queryEditableBookingDetails(context.pool!, departmentId, request.params.id, request.authenticatedUser!.id,
+      isManager(request), await copyableResourceBooking("$3", "$4"));
+    return booking ?? reply.code(404).send({ error: "This booking is no longer available to edit." });
+  });
+
+  app.put<{ Params: { id: string }; Body: BookingText & { expectedRevision: string } }>(detailsPath, {
+    schema: { params: detailsParams, body: { type: "object", additionalProperties: false, required: ["purpose", "subtitle", "description", "expectedRevision"], properties: {
+      purpose: { type: "string", minLength: 1, maxLength: 240 },
+      subtitle: { type: "string", maxLength: 240 },
+      description: { type: "string", maxLength: 2000 },
+      expectedRevision: { type: "string", minLength: 27, maxLength: 27 },
+    } } },
+  }, async (request, reply) => {
+    const departmentId = await location(request, reply);
+    if (!departmentId) return reply;
+    if (!context.validateMutation(request, reply)) return reply;
+    reply.header("Cache-Control", "private, no-store");
+    const { id: bookingId } = request.params;
+    const actor = request.authenticatedUser!.id;
+    const manager = isManager(request);
+    const next = { purpose: request.body.purpose.trim(), subtitle: request.body.subtitle.trim(), description: request.body.description.trim() };
+    if (!next.purpose) return reply.code(400).send({ error: "Enter a purpose for this booking." });
+    const copyable = await copyableResourceBooking("$3", "$4");
+    const client = await context.pool!.connect();
+    let changed = false;
+    try {
+      await client.query("BEGIN");
+      if (!await context.lockDepartmentForWrite(client, departmentId)) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "This location is read-only on this installation." });
+      }
+      const { rows: [seriesLink] } = await client.query<{ series_id: string }>(
+        `SELECT occurrence.series_id FROM resource_booking_series_occurrences occurrence
+          JOIN resource_bookings booking ON booking.id=occurrence.resource_booking_id AND booking.department_id=occurrence.department_id
+          WHERE booking.id=$1 AND booking.department_id=$2 AND (booking.requested_by=$3 OR $4)`, [bookingId, departmentId, actor, manager],
+      );
+      const seriesId = seriesLink?.series_id;
+      if (seriesId) {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, seriesId]);
+        await client.query("SELECT id FROM resource_booking_series WHERE id=$1 AND department_id=$2 FOR UPDATE", [seriesId, departmentId]);
+      }
+      const { rows: [locked] } = await client.query<{ resource_id: string }>(
+        "SELECT resource_id FROM resource_bookings WHERE id=$1 AND department_id=$2 AND (requested_by=$3 OR $4) FOR UPDATE",
+        [bookingId, departmentId, actor, manager],
+      );
+      if (locked) await lockResourceBookingPolicy(client, departmentId, locked.resource_id);
+      const current = locked && await queryEditableBookingDetails(client, departmentId, bookingId, actor, manager, copyable);
+      if (!current) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ error: "This booking is no longer available to edit." });
+      }
+      if (current.revision !== request.body.expectedRevision) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "The booking changed. Reopen it before saving your edits." });
+      }
+      const fields = (["purpose", "subtitle", "description"] as const).filter((field) => next[field] !== current[field]);
+      if (fields.length) {
+        await client.query(
+          `UPDATE resource_bookings SET purpose=$3,subtitle=$4,description=$5,
+             updated_at=GREATEST(clock_timestamp(),updated_at + interval '1 microsecond') WHERE id=$1 AND department_id=$2`,
+          [bookingId, departmentId, next.purpose, next.subtitle, next.description],
+        );
+        if (seriesId) await client.query("UPDATE resource_booking_series SET purpose=$3,subtitle=$4,description=$5,updated_at=now() WHERE id=$1 AND department_id=$2",
+          [seriesId, departmentId, next.purpose, next.subtitle, next.description]);
+        await client.query(
+          `INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details)
+           VALUES($1,$2,$3,'booking_details_updated',$4,$5,$6::jsonb)`,
+          [randomUUID(), departmentId, actor, seriesId ?? null, bookingId, JSON.stringify({ fields })],
+        );
+        changed = true;
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+    if (changed) context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
+    return { updated: changed };
+  });
 
   app.get<{ Params: { id: string } }>("/api/modules/resource-scheduler/bookings/:id/copy-draft", { schema: {
     params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
@@ -509,6 +614,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
           series.id AS "seriesId",series.recurrence,(series.linked_appointment_id IS NOT NULL) AS "hasLinkedAppointment",
           ${calendarLinkFlag} AS "canOpenCalendar", (resource.active AND ${copyable}) AS "canCopy",
+          (${copyable} AND ${editableBookingDetails("$7")}) AS "canEditDetails",
           booking.is_intake_request AS "isIntakeRequest",
           ($7 AND (resource.active OR booking.is_intake_request) AND ${copyable} AND ${assignableSingleBooking}) AS "canReassign",occurrence.is_extra_date AS "isExtraDate",
           CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate", (series.all_day_date IS NOT NULL) AS "seriesAllDay",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
