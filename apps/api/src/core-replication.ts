@@ -286,6 +286,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
       );
       const jsonTypes = new Map(jsonColumns.rows.map((column) => [`${column.table_name}.${column.column_name}`, column.data_type]));
       for (const table of insertOrder) {
+        if (table === "resource_bookings") await restoreContext.beforeCoreResourceBookings?.(client, targetDepartmentId);
         for (const raw of tables[table] ?? []) {
           const row = { ...objectRecord(raw, table) };
           if ("department_id" in row) row.department_id = targetDepartmentId;

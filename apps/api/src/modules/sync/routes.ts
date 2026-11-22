@@ -367,8 +367,16 @@ async function restoreSiteModules(
   for (const adapter of adapters.values()) {
     await adapter.prepareRestore?.(client, departmentId, prepared.get(adapter.moduleId)?.snapshot, exportContext);
   }
-  for (const { adapter, snapshot } of prepared.values()) {
-    await adapter.restoreSnapshot(client, departmentId, snapshot, restoreContext);
+  const coreContext: ReplicationRestoreContext = {
+    ...restoreContext,
+    beforeCoreResourceBookings: async (resourceClient, resourceDepartmentId) => {
+      for (const { adapter, snapshot } of prepared.values()) {
+        await adapter.restoreBeforeCoreResourceBookings?.(resourceClient, resourceDepartmentId, snapshot, restoreContext);
+      }
+    },
+  };
+  for (const [moduleId, { adapter, snapshot }] of prepared) {
+    await adapter.restoreSnapshot(client, departmentId, snapshot, moduleId === "core-site" ? coreContext : restoreContext);
   }
 
   // A module can depend on data restored by another adapter. Verify the complete

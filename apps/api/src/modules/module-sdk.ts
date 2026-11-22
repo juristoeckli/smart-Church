@@ -24,12 +24,15 @@ export type ModuleReplicationAdapter = {
     validate: (snapshot: unknown, dependencies: ReadonlyMap<string, unknown>) => void | Promise<void>;
   };
   prepareRestore?: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationExportContext) => Promise<void>;
+  // Runs after Core restores bookable resources and before it inserts their bookings.
+  restoreBeforeCoreResourceBookings?: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<void>;
   restoreSnapshot: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<{ recordCount: number }>;
   verifySnapshot: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationRestoreContext) => Promise<{ ready: boolean; blockers: string[] }>;
 };
 
 export type ReplicationRestoreContext = {
   userIdMap: Map<string, string>;
+  beforeCoreResourceBookings?: (client: PoolClient, departmentId: string) => Promise<void>;
   onCommit: (callback: () => Promise<void>) => void;
   onRollback: (callback: () => Promise<void>) => void;
 };
