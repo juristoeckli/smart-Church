@@ -10,7 +10,7 @@ type Category = { id: string; name: string; parentId: string | null; position: n
 type WikiAudience = "location" | "group" | "managers";
 type GroupOption = { id: string; name: string };
 type WikiFile = { id: string; title: string; fileName: string; contentType: string; fileSize: number; createdAt: string; attachedAt?: string; attachedByName?: string | null; displayTitle?: string | null };
-type WikiLink = { id: string; title: string; url: string; created_at?: string };
+type WikiLink = { id: string; title: string; url: string; created_at?: string; managers_only?: boolean };
 type WikiPage = { id: string; categoryId: string; title: string; contentHtml: string; status: "active" | "archived"; redirectPageId: string | null; isHomepage: boolean; audience: WikiAudience; audienceGroupId: string | null; createdAt: string; updatedAt: string; updatedBy: string | null; editorName?: string | null; editRevision?: string; links?: WikiLink[]; files?: WikiFile[] };
 type AudienceSnapshot = { audience: WikiAudience; groupId: string | null };
 type CategorySnapshot = { id: string; name: string };
@@ -94,13 +94,16 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const [categoryParentId, setCategoryParentId] = useState("");
   const [linkTitle, setLinkTitle] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
+  const [linkManagersOnly, setLinkManagersOnly] = useState(false);
   const [editingLinkId, setEditingLinkId] = useState<string | null>(null);
   const [detailsSearch, setDetailsSearch] = useState("");
   useEffect(() => {
-    setEditingLinkId(null); setLinkTitle(""); setLinkUrl(""); setDetailsSearch("");
+    setEditingLinkId(null); setLinkTitle(""); setLinkUrl(""); setLinkManagersOnly(false); setDetailsSearch("");
   }, [selectedPage?.id, departmentId]);
   const detailQuery = detailsSearch.trim().toLocaleLowerCase();
-  const filteredLinks = links.filter((link) => !detailQuery || [link.title, link.url].some((value) => value.toLocaleLowerCase().includes(detailQuery)));
+  const canManage = canManageSite || (department.modulePermissions?.wiki ?? []).includes("manage");
+  const filteredLinks = links.filter((link) => (!link.managers_only || canManage)
+    && (!detailQuery || [link.title, link.url].some((value) => value.toLocaleLowerCase().includes(detailQuery))));
   const filteredFiles = attachedFiles.filter((file) => !detailQuery || [file.title, file.fileName].some((value) => value.toLocaleLowerCase().includes(detailQuery)));
   const [redirectDraft, setRedirectDraft] = useState("");
   const [showEntityLink, setShowEntityLink] = useState(false);
@@ -117,7 +120,6 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   const [pickerCreateError, setPickerCreateError] = useState("");
   const [pickerCreateNotice, setPickerCreateNotice] = useState("");
 
-  const canManage = canManageSite || (department.modulePermissions?.wiki ?? []).includes("manage");
   const draftKey = canManage && selectedPage?.status === "active" ? wikiDraftKey(accountId, departmentId, selectedPage.id) : "";
   const [storedDraft, setStoredDraft] = useState<{ key: string; draft: WikiDraft }>();
   const [draftPreview, setDraftPreview] = useState<{ key: string; html: string; title: string }>();
@@ -826,7 +828,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
   }
 
   function resetLinkForm() {
-    setEditingLinkId(null); setLinkTitle(""); setLinkUrl("");
+    setEditingLinkId(null); setLinkTitle(""); setLinkUrl(""); setLinkManagersOnly(false);
   }
 
   async function saveLink(event: FormEvent<HTMLFormElement>) {
@@ -836,7 +838,7 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
     const linkId = editingLinkId;
     await run(async () => {
       const link = await api<WikiLink>(`/api/modules/wiki/pages/${pageId}/links${linkId ? `/${linkId}` : ""}`,
-        linkId ? "PATCH" : "POST", { title: linkTitle.trim(), url: linkUrl.trim() });
+        linkId ? "PATCH" : "POST", { title: linkTitle.trim(), url: linkUrl.trim(), managersOnly: linkManagersOnly });
       if (currentPageId.current !== pageId) return;
       setLinks((current) => linkId ? current.map((item) => item.id === linkId ? link : item) : [...current, link]);
       resetLinkForm();
@@ -1056,8 +1058,11 @@ export function WikiModule({ department, departmentId, accountId, csrfToken, can
         {editing && <div className="wiki-redirect-editor"><label>Redirect to Wiki page<select className="wiki-input" value={redirectDraft} onChange={(event) => setRedirectDraft(event.target.value)}><option value="">No redirect</option>{pages.filter((page) => page.status === "active" && page.id !== selectedPage.id).map((page) => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><button className="button button-secondary" type="button" disabled={busy} onClick={() => void updateRedirect()}>Save redirect</button></div>}
         <label className="wiki-search"><Search size={14} /><input type="search" value={detailsSearch} onChange={(event) => setDetailsSearch(event.target.value)}
           placeholder="Search files and links" aria-label="Search files and links" maxLength={160} /></label>
-        <div className="wiki-detail-sections"><section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Links</h3><label>Sort <select value={attachmentSort} onChange={(event) => setAttachmentSort(event.target.value === "title" ? "title" : "added")}><option value="added">Newest first</option><option value="title">Title</option></select></label></div>{canManage && status === "active" && <form className="wiki-add-link" onSubmit={saveLink}><input className="wiki-input" aria-label="Link title" value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Link title" maxLength={160} required /><input className="wiki-input" inputMode="url" aria-label="Link address" value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://…" maxLength={2000} required /><button className="button button-secondary" type="submit" disabled={busy}>{editingLinkId ? <><Save size={14} /> Save link</> : <><Plus size={14} /> Add link</>}</button>{editingLinkId && <button className="button button-quiet" type="button" disabled={busy} onClick={resetLinkForm}>Cancel</button>}</form>}{[...filteredLinks].sort((a,b) => attachmentSort === "title" ? a.title.localeCompare(b.title) : (b.created_at ?? "").localeCompare(a.created_at ?? "")).map((link) => <div className="wiki-link-row" key={link.id}><a href={link.url} target="_blank" rel="noreferrer">{link.title}</a>{link.created_at && <small className="wiki-file-meta">{humanDate(link.created_at)}</small>}<WikiLinkCopyActions key={link.url} url={link.url} title={link.title} />{canManage && status === "active" && <div className="wiki-actions"><button type="button" className="button button-quiet" disabled={busy} onClick={() => {
-          setEditingLinkId(link.id); setLinkTitle(link.title); setLinkUrl(link.url);
+        <div className="wiki-detail-sections"><section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Links</h3><label>Sort <select value={attachmentSort} onChange={(event) => setAttachmentSort(event.target.value === "title" ? "title" : "added")}><option value="added">Newest first</option><option value="title">Title</option></select></label></div>{canManage && status === "active" && <form className="wiki-add-link" onSubmit={saveLink}><input className="wiki-input" aria-label="Link title" value={linkTitle} onChange={(event) => setLinkTitle(event.target.value)} placeholder="Link title" maxLength={160} required /><input className="wiki-input" inputMode="url" aria-label="Link address" value={linkUrl} onChange={(event) => setLinkUrl(event.target.value)} placeholder="https://…" maxLength={2000} required />
+          <label><input type="checkbox" checked={linkManagersOnly} disabled={busy} onChange={(event) => setLinkManagersOnly(event.target.checked)} /> Wiki managers only</label>
+          <button className="button button-secondary" type="submit" disabled={busy}>{editingLinkId ? <><Save size={14} /> Save link</> : <><Plus size={14} /> Add link</>}</button>{editingLinkId && <button className="button button-quiet" type="button" disabled={busy} onClick={resetLinkForm}>Cancel</button>}</form>}{[...filteredLinks].sort((a,b) => attachmentSort === "title" ? a.title.localeCompare(b.title) : (b.created_at ?? "").localeCompare(a.created_at ?? "")).map((link) => <div className="wiki-link-row" key={link.id}><a href={link.url} target="_blank" rel="noreferrer">{link.title}</a>{link.created_at && <small className="wiki-file-meta">{humanDate(link.created_at)}</small>}
+        {link.managers_only && <small className="wiki-file-meta">Wiki managers only</small>}<WikiLinkCopyActions key={link.url} url={link.url} title={link.title} />{canManage && status === "active" && <div className="wiki-actions"><button type="button" className="button button-quiet" disabled={busy} onClick={() => {
+          setEditingLinkId(link.id); setLinkTitle(link.title); setLinkUrl(link.url); setLinkManagersOnly(Boolean(link.managers_only));
         }} aria-label={`Edit ${link.title}`}><Pencil size={14} /> Edit</button><button type="button" className="button button-quiet" onClick={() => void removeLink(link.id)} aria-label={`Remove ${link.title}`}><Trash2 size={14} /></button></div>}</div>)}{!filteredLinks.length && <p className="wiki-muted">{detailQuery ? "No links match the search." : "No links attached."}</p>}</section>
         <section className="wiki-detail-section"><div className="wiki-panel-head"><h3>Files</h3><div className="wiki-actions">{canUpload && <button className="button button-quiet" type="button" disabled={busy} onClick={() => filePicker.current?.click()} title="Upload file"><Plus size={14} /> Upload</button>}{canManage && <button className="button button-quiet" type="button" onClick={() => void loadAvailableFiles()} title="Attach an existing file"><FileText size={14} /> Attach</button>}<input ref={filePicker} hidden type="file" onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadAndAttach(file); event.currentTarget.value = ""; }} /></div></div>
           {canUpload && (

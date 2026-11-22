@@ -290,13 +290,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/wiki/pages/:id", async (request, reply) => {
+    reply.header("Cache-Control", "private, no-store");
     const departmentId = await site(request, reply);
     if (!departmentId) return reply;
     const pageResult = await pool!.query<WikiPageRow>(`SELECT page.id,page.category_id,page.title,page.content_html,page.status,page.redirect_page_id,page.is_homepage,page.audience,page.audience_group_id,page.created_at,page.updated_at,page.updated_by,page.xmin::text AS edit_revision,editor.display_name AS editor_name FROM wiki_pages page LEFT JOIN app_users editor ON editor.id=page.updated_by WHERE page.department_id=$1 AND page.id=$2 AND (${pageReadCondition("page", 3, 4)} OR page.status='archived' AND $3::boolean)`, [departmentId, request.params.id, isWikiManager(request), request.authenticatedUser!.id]);
     if (!pageResult.rowCount) return reply.code(404).send({ error: "Wiki page not found." });
     pageResult.rows[0].content_html = await hideUnreadableWikiEntityLinks(pageResult.rows[0].content_html, request, departmentId);
     const [links, files] = await Promise.all([
-      pool!.query("SELECT id,title,url,created_at FROM wiki_page_links WHERE department_id=$1 AND page_id=$2 ORDER BY created_at,id", [departmentId, request.params.id]),
+      pool!.query("SELECT id,title,url,created_at,managers_only FROM wiki_page_links WHERE department_id=$1 AND page_id=$2 AND (NOT managers_only OR $3::boolean) ORDER BY created_at,id",
+        [departmentId, request.params.id, isWikiManager(request)]),
       pool!.query(`SELECT stored.id,COALESCE(link.display_title,stored.title) AS title,
         link.display_title AS "displayTitle",stored.file_name AS "fileName",stored.content_type AS "contentType",
         stored.file_size AS "fileSize",stored.created_at AS "createdAt",link.created_at AS "attachedAt",
@@ -655,9 +657,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     finally { client.release(); }
   });
 
-  type WikiLinkInput = { title: string; url: string };
+  type WikiLinkInput = { title: string; url: string; managersOnly?: boolean };
   const wikiLinkSchema = { type: "object", additionalProperties: false, required: ["title", "url"], properties: {
     title: { type: "string", minLength: 1, maxLength: 160 }, url: { type: "string", minLength: 1, maxLength: 2000 },
+    managersOnly: { type: "boolean" },
   } };
   function cleanWikiLink(input: WikiLinkInput) {
     const title = input.title.trim(), url = input.url.trim();
@@ -673,7 +676,8 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!link) return reply.code(400).send({ error: invalidLink });
     const page = await pool!.query("SELECT id FROM wiki_pages WHERE id=$1 AND department_id=$2 AND status='active'", [request.params.id, departmentId]);
     if (!page.rowCount) return reply.code(404).send({ error: "Active Wiki page not found." });
-    const result = await pool!.query("INSERT INTO wiki_page_links(id,department_id,page_id,title,url,created_by) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,title,url,created_at", [randomUUID(), departmentId, request.params.id, link.title, link.url, request.authenticatedUser!.id]);
+    const result = await pool!.query("INSERT INTO wiki_page_links(id,department_id,page_id,title,url,created_by,managers_only) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,title,url,created_at,managers_only",
+      [randomUUID(), departmentId, request.params.id, link.title, link.url, request.authenticatedUser!.id, request.body.managersOnly ?? false]);
     changed(departmentId, { action: "link-added", pageId: request.params.id });
     return reply.code(201).send(result.rows[0]);
   });
@@ -688,7 +692,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const link = cleanWikiLink(request.body);
     if (!link) return reply.code(400).send({ error: invalidLink });
     const client = await pool!.connect();
-    let updated: (WikiLinkInput & { id: string; created_at: Date }) | undefined;
+    let updated: { id: string; title: string; url: string; created_at: Date; managers_only: boolean } | undefined;
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -700,8 +704,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Active Wiki page not found." });
       }
-      const result = await client.query<NonNullable<typeof updated>>(`UPDATE wiki_page_links SET title=$4,url=$5 WHERE department_id=$1 AND page_id=$2 AND id=$3
-        RETURNING id,title,url,created_at`, [departmentId, request.params.id, request.params.linkId, link.title, link.url]);
+      const result = await client.query<NonNullable<typeof updated>>(`UPDATE wiki_page_links SET title=$4,url=$5,managers_only=COALESCE($6::boolean,managers_only)
+        WHERE department_id=$1 AND page_id=$2 AND id=$3 RETURNING id,title,url,created_at,managers_only`,
+        [departmentId, request.params.id, request.params.linkId, link.title, link.url, request.body.managersOnly ?? null]);
       updated = result.rows[0];
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
