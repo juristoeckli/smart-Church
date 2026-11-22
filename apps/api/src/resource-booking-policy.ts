@@ -22,8 +22,9 @@ export function canRequestResourceIntake(request: FastifyRequest) {
     || (request.activeDepartmentModulePermissions?.["resource-scheduler"] ?? []).includes("request-intake");
 }
 
-export async function canViewResource(client: Pick<PoolClient, "query">, departmentId: string, groupId: string | null, userId: string, canManage: boolean) {
+export async function canViewResource(client: Pick<PoolClient, "query">, departmentId: string, groupId: string | null, userId: string | null, canManage: boolean) {
   if (canManage || !groupId) return true;
+  if (!userId) return false;
   const { rows } = await client.query<{ allowed: boolean }>(
     "SELECT can_view_bookable_resource($1,$2,$3,$4) AS allowed", [departmentId, groupId, userId, canManage],
   );

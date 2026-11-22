@@ -781,7 +781,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         WHERE resource.department_id=$1 AND ($2 OR resource.active=true)
           AND can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$3,$2) ORDER BY resource.location,resource.category,resource.name`, [departmentId, isManager(request), request.authenticatedUser!.id, search]),
       context.pool!.query(`SELECT booking.id,booking.resource_id AS "resourceId",resource.name AS "resourceName",resource.location,
-          booking.requested_by AS "requestedBy",requester.display_name AS "requesterName",booking.purpose,booking.subtitle,booking.description,
+          booking.requested_by AS "requestedBy",COALESCE(requester.display_name,booking.requester_actor_name,'Unknown requester') AS "requesterName",booking.purpose,booking.subtitle,booking.description,
           CASE WHEN beneficiary.id IS NOT NULL THEN concat_ws(' ',beneficiary.first_name,beneficiary.last_name) END AS "beneficiaryName",
           booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.status,booking.quantity,
           booking.lead_in_minutes AS "leadInMinutes",booking.cleanup_minutes AS "cleanupMinutes",
@@ -792,10 +792,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           ($7 AND (resource.active OR booking.is_intake_request) AND ${copyable} AND ${assignableSingleBooking}) AS "canReassign",occurrence.is_extra_date AS "isExtraDate",
           CASE WHEN series.all_day_date IS NOT NULL AND day_override.all_day IS DISTINCT FROM FALSE THEN to_char((occurrence.occurrence_starts_at AT TIME ZONE series.time_zone)::date,'YYYY-MM-DD') END AS "allDayDate", (series.all_day_date IS NOT NULL) AS "seriesAllDay",series.time_zone AS "timeZone",to_char((occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date,'YYYY-MM-DD') AS "occurrenceDate",
           EXISTS(SELECT 1 FROM resource_booking_series_occurrence_overrides override WHERE override.series_id=series.id AND override.occurrence_date=(occurrence.occurrence_starts_at AT TIME ZONE COALESCE(series.time_zone,'UTC'))::date) AS "hasOccurrenceOverride",
-          (booking.requested_by=$6 OR $7) AS "canCancel",(series.id IS NOT NULL AND NOT booking.is_intake_request AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND (booking.requested_by=$6 OR $7)) AS "canEditSeries",
+          COALESCE(booking.requested_by=$6 OR $7,false) AS "canCancel",(series.id IS NOT NULL AND NOT booking.is_intake_request AND (series.all_day_date IS NULL OR series.recurrence->>'frequency' <> 'once') AND COALESCE(booking.requested_by=$6 OR $7,false)) AS "canEditSeries",
           booking.created_at AS "createdAt",booking.updated_at AS "updatedAt"
         FROM resource_bookings booking JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
-        JOIN app_users requester ON requester.id=booking.requested_by
+        LEFT JOIN app_users requester ON requester.id=booking.requested_by
         LEFT JOIN contacts beneficiary ON $11::boolean AND beneficiary.id=booking.beneficiary_contact_id
           AND beneficiary.department_id=booking.department_id AND beneficiary.archived_at IS NULL
         LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
@@ -809,7 +809,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           AND (NOT $8::boolean OR EXISTS (SELECT 1 FROM resource_scheduler_marks mark WHERE mark.department_id=booking.department_id AND mark.resource_id=booking.resource_id AND mark.user_id=$6))
           AND ($7::boolean OR resource.active=true)
           AND (booking.requested_by=$6 OR can_view_bookable_resource(resource.department_id,resource.visibility_group_id,$6,$7))
-          AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(booking.subtitle),lower($9))>0 OR strpos(lower(requester.display_name),lower($9))>0)
+          AND ($9::text='' OR (strpos(lower(resource.name),lower($9))>0 OR strpos(lower(resource.category),lower($9))>0 OR strpos(lower(resource.location),lower($9))>0) OR strpos(lower(booking.purpose),lower($9))>0 OR strpos(lower(booking.subtitle),lower($9))>0 OR strpos(lower(COALESCE(requester.display_name,booking.requester_actor_name,'')),lower($9))>0)
         ORDER BY booking.starts_at,resource.name,booking.id LIMIT 2000`, [departmentId, from, to, request.query.status && request.query.status !== "all" ? request.query.status : null, request.query.resourceId ?? null, request.authenticatedUser!.id, isManager(request), request.query.markedOnly === "true", search, category, canBookForOthers(request), ...(calendarLinksAvailable ? [sharedCalendarLinkAccess(request).group] : [])]),
       canManage ? resourceBookingReviewers(context.pool!, departmentId) : Promise.resolve([]),
       canManage ? context.pool!.query<{ id: string; name: string }>(
@@ -849,11 +849,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const departmentId = await location(request, reply);
     if (!departmentId) return reply;
     const canManage = isManager(request);
-    const selectBookings = `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,requester.display_name AS "requesterName",
+    const selectBookings = `SELECT booking.id,resource.name AS "resourceName",resource.location,booking.purpose,COALESCE(requester.display_name,booking.requester_actor_name,'Unknown requester') AS "requesterName",
         booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.is_intake_request AS "isIntakeRequest"
       FROM resource_bookings booking JOIN bookable_resources resource
         ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
-      JOIN app_users requester ON requester.id=booking.requested_by
+      LEFT JOIN app_users requester ON requester.id=booking.requested_by
       WHERE booking.department_id=$1`;
     const [current, pending] = await Promise.all([
       context.pool!.query(`${selectBookings} AND booking.status='approved'
@@ -1421,9 +1421,9 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         } else {
           await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND occurrence_date=$2::date", [request.params.seriesId, date]);
           const bookingId = randomUUID();
-          await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id)
+          await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id,requester_actor_id,requester_actor_name)
             VALUES($1,$2,$3,$4,$5,$6,$7,'requested',$8,$9,$10,$11,$12,
-              (SELECT id FROM contacts WHERE id=$13 AND department_id=$2 AND archived_at IS NULL))`, [bookingId, departmentId, plan.series.resource_id, plan.series.requested_by, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes, subtitle, description, plan.series.beneficiary_contact_id]);
+              (SELECT id FROM contacts WHERE id=$13 AND department_id=$2 AND archived_at IS NULL),$14,$15)`, [bookingId, departmentId, plan.series.resource_id, plan.series.requested_by, input.purpose.trim(), occurrence.startsAt, occurrence.endsAt, input.quantity, input.leadInMinutes, input.cleanupMinutes, subtitle, description, plan.series.beneficiary_contact_id, plan.series.requester_actor_id, plan.series.requester_actor_name]);
           await client.query(`INSERT INTO resource_booking_series_occurrences(id,department_id,series_id,resource_booking_id,occurrence_starts_at,is_extra_date) VALUES($1,$2,$3,$4,$5,$6)
             ON CONFLICT(series_id,occurrence_starts_at) DO UPDATE SET resource_booking_id=EXCLUDED.resource_booking_id,is_extra_date=EXCLUDED.is_extra_date`, [randomUUID(), departmentId, request.params.seriesId, bookingId, occurrence.startsAt, extras.has(date)]);
           if (plan.series.linked_appointment_id) {
@@ -1610,10 +1610,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const bookingId = randomUUID();
       const status = series.all_day_date ? (policy.requires_approval && !isManager(request) ? "requested" : "approved") : series.initial_status ?? "requested";
       const existingBookingId = existingFullDay?.rows[0]?.id;
-      if (!existingBookingId) await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id)
+      if (!existingBookingId) await client.query(`INSERT INTO resource_bookings(id,department_id,resource_id,requested_by,purpose,starts_at,ends_at,status,quantity,lead_in_minutes,cleanup_minutes,subtitle,description,beneficiary_contact_id,requester_actor_id,requester_actor_name)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-          (SELECT id FROM contacts WHERE id=$14 AND department_id=$2 AND archived_at IS NULL))
-        ${series.all_day_date ? "" : "ON CONFLICT DO NOTHING"}`, [bookingId, departmentId, series.resource_id, series.requested_by, series.purpose, startsAt, endsAt, status, series.quantity, series.lead_in_minutes, series.cleanup_minutes, series.subtitle, series.description, series.beneficiary_contact_id]);
+          (SELECT id FROM contacts WHERE id=$14 AND department_id=$2 AND archived_at IS NULL),$15,$16)
+        ${series.all_day_date ? "" : "ON CONFLICT DO NOTHING"}`, [bookingId, departmentId, series.resource_id, series.requested_by, series.purpose, startsAt, endsAt, status, series.quantity, series.lead_in_minutes, series.cleanup_minutes, series.subtitle, series.description, series.beneficiary_contact_id, series.requester_actor_id, series.requester_actor_name]);
       const finalBookingId = series.all_day_date ? existingBookingId ?? bookingId : (await client.query(
         "SELECT id FROM resource_bookings WHERE department_id=$1 AND resource_id=$2 AND starts_at=$3",
         [departmentId, series.resource_id, startsAt],
@@ -1624,7 +1624,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("INSERT INTO church_calendar_resource_links(appointment_id,resource_booking_id,created_by) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
           [series.linked_appointment_id, finalBookingId, request.authenticatedUser!.id]);
       }
-      if (series.all_day_date && !existingBookingId && status === "requested") await recordPendingResourceBookingRequest(client, departmentId, series.requested_by, [finalBookingId]);
+      if (series.all_day_date && !existingBookingId && status === "requested") await recordPendingResourceBookingRequest(client, departmentId, request.authenticatedUser!.id, [finalBookingId]);
       await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details) VALUES($1,$2,$3,'extra_date_added',$4,$5,$6::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, series.id, finalBookingId, JSON.stringify({ date: request.body.date })]);
       await client.query("COMMIT");
       context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
@@ -1752,7 +1752,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("SELECT pg_advisory_xact_lock(hashtext($1),hashtext($2))", [departmentId, seriesId]);
         await client.query("SELECT id FROM resource_booking_series WHERE id=$1 AND department_id=$2 FOR UPDATE", [seriesId, departmentId]);
       }
-      const found = await client.query<{ resource_id: string; requested_by: string }>(
+      const found = await client.query<{ resource_id: string; requested_by: string | null }>(
         `SELECT resource_id,requested_by FROM resource_bookings WHERE id=$1 AND department_id=$2 FOR UPDATE`, [bookingId, departmentId],
       );
       const booking = found.rows[0];
@@ -1803,7 +1803,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           next: { resourceId: target.id, resourceName: target.name },
         })],
       );
-      await recordResourceBookingReassignment(client, departmentId, bookingId, actor, booking.requested_by, source.name, target.name);
+      await recordResourceBookingReassignment(client, departmentId, bookingId, actor, source.name, target.name);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -1893,7 +1893,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!isManager(request) && owner.rows[0].requested_by !== request.authenticatedUser!.id) {
       return reply.code(403).send({ error: "You can only view the history of your own bookings." });
     }
-    const result = await context.pool!.query(`SELECT audit.id,audit.action,audit.details,audit.created_at AS "createdAt",actor.display_name AS "actorName"
+    const result = await context.pool!.query(`SELECT audit.id,audit.action,audit.details,audit.created_at AS "createdAt",COALESCE(audit.historical_actor_name,actor.display_name) AS "actorName"
       FROM resource_scheduler_audit audit LEFT JOIN app_users actor ON actor.id=audit.actor_user_id
       WHERE audit.department_id=$1 AND audit.booking_id=$2
       ORDER BY audit.created_at DESC,audit.id DESC LIMIT 200`, [departmentId, bookingId]);
@@ -1908,7 +1908,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const owner = await context.pool!.query("SELECT requested_by FROM resource_booking_series WHERE id=$1 AND department_id=$2", [request.params.seriesId, departmentId]);
     if (!owner.rowCount) return reply.code(404).send({ error: "Booking series not found." });
     if (!isManager(request) && owner.rows[0].requested_by !== request.authenticatedUser!.id) return reply.code(403).send({ error: "You can only view the history of your own booking series." });
-    const result = await context.pool!.query(`SELECT audit.id,audit.action,audit.details,audit.created_at AS "createdAt",actor.display_name AS "actorName"
+    const result = await context.pool!.query(`SELECT audit.id,audit.action,audit.details,audit.created_at AS "createdAt",COALESCE(audit.historical_actor_name,actor.display_name) AS "actorName"
       FROM resource_scheduler_audit audit LEFT JOIN app_users actor ON actor.id=audit.actor_user_id WHERE audit.department_id=$1 AND audit.series_id=$2 ORDER BY audit.created_at DESC LIMIT 500`, [departmentId, request.params.seriesId]);
     return reply.header("Cache-Control", "private, no-store").send(result.rows);
   });

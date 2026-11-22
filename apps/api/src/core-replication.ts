@@ -15,7 +15,7 @@ type CoreSnapshot = { version: number; sourceDepartmentId: string; department: {
 function normalizeSnapshot(input: unknown): CoreSnapshot | null {
   if (!input || typeof input !== "object") return null;
   const snapshot = input as CoreSnapshot;
-  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 35 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
+  if (!Number.isInteger(snapshot.version) || snapshot.version < 1 || snapshot.version > 36 || !snapshot.department || !snapshot.tables || !Array.isArray(snapshot.tables.contacts) || !Array.isArray(snapshot.tables.service_events) || !Array.isArray(snapshot.tables.church_groups)) return null;
   const tables = Object.fromEntries(snapshotTableNames.map((table) => [table, Array.isArray(snapshot.tables[table]) ? snapshot.tables[table] : []])) as CoreSnapshot["tables"];
   tables.event_registrations = (tables.event_registrations ?? []).map((row) => ({ ...row, cancellation_token_hash: row.cancellation_token_hash ?? null, additional_attendee: row.additional_attendee ?? false, party_id: row.party_id ?? null, answer_snapshot: row.answer_snapshot ?? [] }));
   tables.resource_bookings = (tables.resource_bookings ?? []).map((row) => ({ ...row, is_intake_request: row.is_intake_request ?? false, subtitle: row.subtitle ?? "", description: row.description ?? "", beneficiary_contact_id: row.beneficiary_contact_id ?? null }));
@@ -57,6 +57,11 @@ function normalizeSnapshot(input: unknown): CoreSnapshot | null {
     if (row.ends_on === undefined) row.ends_on = null;
     return row;
   });
+  tables.resource_bookings = (tables.resource_bookings ?? []).map((row) => ({
+    ...row,
+    requester_actor_id: row.requester_actor_id ?? row.requested_by ?? null,
+    requester_actor_name: row.requester_actor_name ?? null,
+  }));
   return { ...snapshot, tables };
 }
 
@@ -171,7 +176,7 @@ async function collect(client: PoolClient, departmentId: string): Promise<CoreSn
     }
     tables[table] = rows;
   }
-  return { version: 35, sourceDepartmentId: departmentId, department: department.rows[0], tables };
+  return { version: 36, sourceDepartmentId: departmentId, department: department.rows[0], tables };
 }
 
 async function countRecords(pool: Pool, departmentId: string) {
@@ -188,7 +193,7 @@ async function countRecords(pool: Pool, departmentId: string) {
 export function registerCoreReplicationAdapter(pool: Pool) {
   return registerPlatformReplicationAdapter({
     moduleId: "core-site",
-    schemaVersion: "26",
+    schemaVersion: "27",
     inspect: async (departmentId) => {
       const count = await countRecords(pool, departmentId);
       return { ready: true, blockers: [], recordCount: count };
@@ -297,7 +302,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
             row.related_user_id = userIdMap.get(String(row.related_user_id)) ?? row.related_user_id;
           }
           if (table === "bookable_resources" && row.responsible_user_id != null) row.responsible_user_id = userIdMap.get(String(row.responsible_user_id)) ?? null;
-          if (table === "resource_bookings") row.requested_by = userIdMap.get(String(row.requested_by)) ?? row.requested_by;
+          if (table === "resource_bookings") row.requested_by = userIdMap.get(String(row.requested_by)) ?? null;
           if (table === "church_team_leaders") row.user_id = userIdMap.get(String(row.user_id)) ?? row.user_id;
           if (table === "check_in_pickup_authorizations") {
             row.created_by = userIdMap.get(String(row.created_by)) ?? row.created_by;
@@ -365,6 +370,7 @@ export function registerCoreReplicationAdapter(pool: Pool) {
         }
         const expected = expectedRows.map((source) => {
           const row = mapUserFields({ ...source }, userIdMap);
+          if (table === "resource_bookings") row.requested_by = userIdMap.get(String(source.requested_by)) ?? null;
           if (table === "bookable_resources" && source.responsible_user_id != null) row.responsible_user_id = userIdMap.get(String(source.responsible_user_id)) ?? null;
           if (table === "check_in_sessions" && source.completed_by != null) row.completed_by = userIdMap.get(String(source.completed_by)) ?? null;
           if ("department_id" in row) row.department_id = departmentId;

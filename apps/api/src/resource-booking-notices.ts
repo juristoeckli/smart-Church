@@ -39,7 +39,7 @@ export async function recordResourceBookingReopened(client: PoolClient, departme
   }
 }
 
-export async function recordResourceBookingReassignment(client: PoolClient, departmentId: string, bookingId: string, actorId: string, requesterId: string, previousName: string, nextName: string) {
+export async function recordResourceBookingReassignment(client: PoolClient, departmentId: string, bookingId: string, actorId: string, previousName: string, nextName: string) {
   const storage = await client.query<{ ready: boolean }>(
     "SELECT to_regclass('public.module_notifications') IS NOT NULL AS ready",
   );
@@ -54,7 +54,7 @@ export async function recordResourceBookingReassignment(client: PoolClient, depa
     [departmentId, bookingId, actorId, `Your request for “${previousName}” was moved to “${nextName}” and is awaiting a decision.`, randomUUID()],
   );
   if (await clearResourceBookingRequestNotices(client, departmentId, bookingId)) {
-    await recordPendingResourceBookingRequest(client, departmentId, requesterId, [bookingId]);
+    await recordPendingResourceBookingRequest(client, departmentId, actorId, [bookingId]);
   }
 }
 

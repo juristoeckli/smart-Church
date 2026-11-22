@@ -26,7 +26,7 @@ type BookableResourceRow = {
 };
 
 type BookingRow = {
-  id: string; resource_id: string; resource_name: string; requested_by: string; requester_name: string;
+  id: string; resource_id: string; resource_name: string; requested_by: string | null; requester_name: string;
   purpose: string; starts_at: Date | string; ends_at: Date | string; status: ResourceBooking["status"]; is_intake_request?: boolean; created_at: Date | string;
 };
 
@@ -1306,9 +1306,9 @@ export function registerModuleRoutes(app: FastifyInstance, dependencies: ModuleS
       const departmentId = await department(request, reply);
       if (!departmentId) return reply;
       const result = await pool!.query<BookingRow>(
-        `SELECT b.id, b.resource_id, r.name AS resource_name, b.requested_by, u.display_name AS requester_name,
+        `SELECT b.id, b.resource_id, r.name AS resource_name, b.requested_by, COALESCE(u.display_name,b.requester_actor_name,'Unknown requester') AS requester_name,
                 b.purpose, b.starts_at, b.ends_at, b.status, b.is_intake_request, b.created_at
-           FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id JOIN app_users u ON u.id=b.requested_by
+           FROM resource_bookings b JOIN bookable_resources r ON r.id=b.resource_id LEFT JOIN app_users u ON u.id=b.requested_by
           WHERE b.department_id=$1 AND b.ends_at > now() - interval '30 days' AND b.starts_at < now() + interval '6 months'
             AND (b.requested_by=$2 OR can_view_bookable_resource(r.department_id,r.visibility_group_id,$2,$3))
           ORDER BY b.starts_at, r.name`, [departmentId, request.authenticatedUser!.id, isResourceBookingManager(request, isServerModuleEnabled("resource-scheduler"))]);
