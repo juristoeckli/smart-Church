@@ -4,7 +4,7 @@ import { audioPages } from "./audio-pages";
 import "./amx.css";
 
 type Action = { id: string; name: string; command: string };
-type Settings = { host: string; port: number; username: string; password: string; clearPassword: boolean; passwordConfigured?: boolean; actions: Action[] };
+type Settings = { host: string; port: number; username: string; password: string; clearPassword: boolean; passwordConfigured?: boolean; webConsoleUsername: string; webConsolePassword: string; clearWebConsolePassword: boolean; webConsolePasswordConfigured?: boolean; actions: Action[] };
 const roomActions: Action[] = [
   { id: "hall-crosswise", name: "Gemeindesaal quer", command: "ICSP[33001:1:1,11]" },
   { id: "hall-lengthwise", name: "Gemeindesaal längs", command: "ICSP[33001:1:1,16]" },
@@ -13,10 +13,10 @@ const roomActions: Action[] = [
   { id: "all-autonomous", name: "Alle Räume Autonom", command: "ICSP[33001:1:1,15]" },
   { id: "conference-large", name: "Konferenz gross", command: "ICSP[33001:1:1,14]" },
 ];
-const initialSettings: Settings = { host: "", port: 23, username: "", password: "", clearPassword: false, actions: roomActions };
+const initialSettings: Settings = { host: "", port: 23, username: "", password: "", clearPassword: false, webConsoleUsername: "", webConsolePassword: "", clearWebConsolePassword: false, actions: roomActions };
 
 function completeSettings(settings: Partial<Settings>): Settings {
-  return { ...initialSettings, ...settings, actions: roomActions, password: "", clearPassword: false };
+  return { ...initialSettings, ...settings, actions: roomActions, password: "", clearPassword: false, webConsolePassword: "", clearWebConsolePassword: false };
 }
 
 async function readResponse<T>(response: Response): Promise<T & { error?: string }> {
@@ -61,6 +61,11 @@ export function AmxSettings({ departmentId, csrfToken }: ModuleSettingsContext) 
       <label>Existing NetLinx username<input autoComplete="username" value={settings.username} onChange={(event) => setSettings((current) => ({ ...current, username: event.target.value }))} maxLength={64} /></label>
       <label>Existing NetLinx password<input type="password" autoComplete="current-password" value={settings.password} onChange={(event) => setSettings((current) => ({ ...current, password: event.target.value, clearPassword: false }))} maxLength={256} placeholder={settings.passwordConfigured ? "Saved password is retained if left blank" : "Leave empty if Telnet has no login"} /></label>
       {settings.passwordConfigured && <label className="amx-password-clear"><input type="checkbox" checked={settings.clearPassword} onChange={(event) => setSettings((current) => ({ ...current, clearPassword: event.target.checked, password: "" }))} />Clear the saved Telnet password</label>}
+      <h4>WebConsole controls</h4>
+      <p>Button presses use the NetLinx WebConsole Control/Emulate endpoint. Its login is stored separately from the Telnet status login.</p>
+      <label>Existing WebConsole username<input autoComplete="username" value={settings.webConsoleUsername} onChange={(event) => setSettings((current) => ({ ...current, webConsoleUsername: event.target.value }))} maxLength={64} /></label>
+      <label>Existing WebConsole password<input type="password" autoComplete="current-password" value={settings.webConsolePassword} onChange={(event) => setSettings((current) => ({ ...current, webConsolePassword: event.target.value, clearWebConsolePassword: false }))} maxLength={256} placeholder={settings.webConsolePasswordConfigured ? "Saved password is retained if left blank" : "Leave empty only if WebConsole has no login"} /></label>
+      {settings.webConsolePasswordConfigured && <label className="amx-password-clear"><input type="checkbox" checked={settings.clearWebConsolePassword} onChange={(event) => setSettings((current) => ({ ...current, clearWebConsolePassword: event.target.checked, webConsolePassword: "" }))} />Clear the saved WebConsole password</label>}
       <h4>Room channel mappings</h4>
       {roomActions.map((action) => <div className="amx-action-editor" key={action.id}><strong>{action.name}</strong><label>Controller event<input aria-label={`${action.name} controller event`} value={action.command} readOnly /></label></div>)}
       <p>These fixed mappings come from the Steffisburg TP4 project and cannot be edited here.</p>
