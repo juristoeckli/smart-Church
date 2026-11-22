@@ -4,6 +4,10 @@ import type { LocationPermission } from "@smart-church/contracts";
 import type { ManagedWorkerDiagnostics } from "../runtime-diagnostics.js";
 import { IsolatedModuleProcess } from "./isolated-module-process.js";
 
+export type ReplicationExportContext = {
+  moduleIds: ReadonlySet<string>;
+};
+
 export type ModuleReplicationAdapter = {
   moduleId: string;
   moduleName: string;
@@ -11,9 +15,13 @@ export type ModuleReplicationAdapter = {
   getSchemaVersion?: (departmentId: string) => Promise<string>;
   isEnabled: () => boolean;
   inspect: (departmentId: string) => Promise<{ ready: boolean; blockers: string[]; recordCount: number }>;
-  exportSnapshot: (client: PoolClient, departmentId: string) => Promise<unknown>;
+  exportSnapshot: (client: PoolClient, departmentId: string, context?: ReplicationExportContext) => Promise<unknown>;
   prepareSnapshotForPeer?: (snapshot: unknown, sealForPeer: (plaintext: string) => string) => Promise<unknown>;
   restoreSnapshotFromPeer?: (snapshot: unknown, openForLocal: (envelope: string) => string) => Promise<unknown>;
+  restoreDependencies?: {
+    moduleIds: readonly string[];
+    validate: (snapshot: unknown, dependencies: ReadonlyMap<string, unknown>) => void | Promise<void>;
+  };
   prepareRestore?: (client: PoolClient, departmentId: string, snapshot?: unknown) => Promise<void>;
   restoreSnapshot: (client: PoolClient, departmentId: string, snapshot: unknown, context: ReplicationRestoreContext) => Promise<{ recordCount: number }>;
   verifySnapshot: (client: PoolClient, departmentId: string, snapshot?: unknown, context?: ReplicationRestoreContext) => Promise<{ ready: boolean; blockers: string[] }>;

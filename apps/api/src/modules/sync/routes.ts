@@ -317,6 +317,10 @@ async function signedRemoteSnapshotRequest(peer: RemotePeerAddress, identity: Aw
   return { contentType: response.headers["content-type"]?.split(";", 1)[0] ?? "", bytes };
 }
 
+function replicationExportContext(manifest: readonly RedundancyModuleManifestEntry[]) {
+  return { moduleIds: new Set(manifest.map((entry) => entry.moduleId)) };
+}
+
 async function restoreSiteModules(
   client: PoolClient,
   departmentId: string,
@@ -340,6 +344,17 @@ async function restoreSiteModules(
       : encoded;
     prepared.set(entry.moduleId, { adapter, snapshot });
   }
+  // Validate relationships between decoded snapshots before any adapter can mutate state.
+  for (const { adapter, snapshot } of prepared.values()) {
+    const contract = adapter.restoreDependencies;
+    if (!contract) continue;
+    const dependencies = new Map<string, unknown>();
+    for (const moduleId of contract.moduleIds) {
+      const dependency = prepared.get(moduleId);
+      if (dependency) dependencies.set(moduleId, dependency.snapshot);
+    }
+    await contract.validate(snapshot, dependencies);
+  }
   // Clear module-owned dependents before core replaces the referenced rows.
   // Adapters can also guard existing module data when the incoming manifest omits it.
   for (const adapter of adapters.values()) {
@@ -357,8 +372,9 @@ async function restoreSiteModules(
   }
 
   const restoredSnapshots: Record<string, unknown> = {};
+  const exportContext = replicationExportContext(entries);
   for (const [moduleId, { adapter }] of prepared) {
-    restoredSnapshots[moduleId] = await adapter.exportSnapshot(client, departmentId);
+    restoredSnapshots[moduleId] = await adapter.exportSnapshot(client, departmentId, exportContext);
   }
   return restoredSnapshots;
 }
@@ -446,10 +462,11 @@ async function pullRedundancySnapshot(app: FastifyInstance, pool: import("pg").P
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       currentSnapshots = {};
+      const exportContext = replicationExportContext(state.last_replica_manifest);
       for (const item of state.last_replica_manifest) {
         const adapter = adapters.get(item.moduleId);
         if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
-        currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, departmentId);
+        currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, departmentId, exportContext);
       }
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -500,10 +517,11 @@ async function pushRedundancySnapshot(pool: import("pg").Pool, context: ModuleSe
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       snapshot = {};
+      const exportContext = replicationExportContext(local.modules);
       for (const module of local.modules) {
         const adapter = local.adapters.get(module.moduleId);
         if (!adapter) throw new Error(`The ${module.moduleId} replication adapter is unavailable.`);
-        snapshot[module.moduleId] = await adapter.exportSnapshot(client, departmentId);
+        snapshot[module.moduleId] = await adapter.exportSnapshot(client, departmentId, exportContext);
       }
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -1043,10 +1061,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const lockedIsFormerStandby = lockedFormer?.installationId === sender.installationId && (!lockedFormer.departmentId || lockedFormer.departmentId === body.targetDepartmentId);
         if (!locked || locked.role !== "primary" || locked.site_epoch !== state.site_epoch || (!lockedIsFormerStandby && !lockedPullAuthorized)) throw new Error("The primary role or standby authorization changed during snapshot export.");
         snapshots = {};
+        const exportContext = replicationExportContext(local.modules);
         for (const module of local.modules) {
           const adapter = local.adapters.get(module.moduleId);
           if (!adapter) throw new Error(`The ${module.moduleId} replication adapter is unavailable.`);
-          snapshots[module.moduleId] = await adapter.exportSnapshot(client, body.sourceDepartmentId);
+          snapshots[module.moduleId] = await adapter.exportSnapshot(client, body.sourceDepartmentId, exportContext);
         }
         await client.query("COMMIT");
       } catch (error) { await client.query("ROLLBACK"); throw error; }
@@ -1214,10 +1233,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return json(reply, 200, { verified: false }, identity, String(request.headers["x-sc-nonce"] ?? ""));
       }
       const currentSnapshots: Record<string, unknown> = {};
+      const exportContext = replicationExportContext(state.last_replica_manifest);
       for (const item of state.last_replica_manifest) {
         const adapter = adapters.get(item.moduleId);
         if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
-        currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, body.departmentId);
+        currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, body.departmentId, exportContext);
       }
       if (replicationDigest(currentSnapshots) !== state.last_replica_digest) {
         await client.query("ROLLBACK");
@@ -1567,10 +1587,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         try {
           await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
           const currentSnapshots: Record<string, unknown> = {};
+          const exportContext = replicationExportContext(siteState.last_replica_manifest!);
           for (const item of siteState.last_replica_manifest!) {
             const adapter = standbyAdapters.get(item.moduleId);
             if (!adapter) throw new Error(`The ${item.moduleId} replication adapter is unavailable.`);
-            currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, department);
+            currentSnapshots[item.moduleId] = await adapter.exportSnapshot(client, department, exportContext);
           }
           snapshotVerified = replicationDigest(currentSnapshots) === siteState.last_replica_digest;
           await client.query("COMMIT");
@@ -1831,9 +1852,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         return reply.code(409).send({ error: "A snapshot adapter changed during promotion. Push a fresh snapshot and retry." });
       }
       const currentSnapshots: Record<string, unknown> = {};
+      const exportContext = replicationExportContext(state.last_replica_manifest);
       for (const module of state.last_replica_manifest) {
         const adapter = adapters.get(module.moduleId)!;
-        currentSnapshots[module.moduleId] = await adapter.exportSnapshot(client, department);
+        currentSnapshots[module.moduleId] = await adapter.exportSnapshot(client, department, exportContext);
       }
       if (replicationDigest(currentSnapshots) !== state.last_replica_digest) {
         await client.query("ROLLBACK");
