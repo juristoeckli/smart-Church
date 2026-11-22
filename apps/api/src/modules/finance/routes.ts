@@ -13,7 +13,7 @@ import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type FinanceLineInput = { accountId: string; costCenterId?: string | null; donorId?: string | null; debitCents: number; creditCents: number; text?: string };
-type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bookingText: string; lines: FinanceLineInput[] };
+type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bankStatementRowId?: string; bookingText: string; lines: FinanceLineInput[] };
 type FinanceLineRow = { id: string; line_number: number; account_id: string; account_code: string; account_name: string; account_type: string; cost_center_id: string | null; cost_center_name: string | null; donor_id: string | null; donor_name: string | null; debit_cents: string | number; credit_cents: string | number; line_text: string };
 
 const uuid = { type: "string", format: "uuid" } as const;
@@ -24,7 +24,7 @@ const lineSchema = {
 } as const;
 const transactionSchema = {
   type: "object", additionalProperties: false, required: ["bookingDate", "bookingText", "lines"],
-  properties: { submissionId:uuid, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
+  properties: { submissionId:uuid, bankStatementRowId: uuid, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
 } as const;
 
 function cleanText(value: string) { return value.trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " "); }
@@ -712,18 +712,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!validDateOnly(bookingDate) || bookingDate.startsWith("0000-")) return reply.code(400).send({ error: "Booking date is invalid." });
     const id = automatic ? request.body.submissionId!.toLowerCase() : randomUUID();
     const actorId = request.authenticatedUser?.id ?? null;
+    const bankRowId = request.body.bankStatementRowId?.toLowerCase();
     const submissionHash = automatic ? createHash("sha256").update(JSON.stringify([bookingDate,bookingText,
       lines.map(line => [line.accountId.toLowerCase(),line.costCenterId?.toLowerCase() ?? null,line.donorId?.toLowerCase() ?? null,
-        line.debitCents,line.creditCents,line.text])])).digest("hex") : null;
+        line.debitCents,line.creditCents,line.text]), ...(bankRowId ? [bankRowId] : [])])).digest("hex") : null;
     const client = await pool!.connect();
     let accountingYear = 0;
     try {
       await client.query("BEGIN");
-      if (automatic) {
+      if (automatic || bankRowId) {
         if (!await context.lockDepartmentForWrite(client,departmentId)) {
           await client.query("ROLLBACK");
           return reply.code(423).send({error:"This location is read-only."});
         }
+      }
+      if (automatic) {
         await client.query("SELECT pg_advisory_xact_lock(hashtext('finance-journal-submission:'||$1::text))",[id]);
         const { rows:[previous] } = await client.query<{ receipt_number:string;accounting_year:number;created_by:string|null;submission_hash:string|null }>(`
           SELECT t.receipt_number,t.accounting_year,t.created_by,(SELECT a.details->>'journalSubmissionHash' FROM finance_audit a
@@ -739,6 +742,33 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           return reply.send({id,bookingDate,accountingYear:previous.accounting_year,receiptNumber:previous.receipt_number,
             bookingText,status:"posted",debitCents:debitTotal,creditCents:creditTotal});
         }
+      }
+      let bankImportId: string | undefined;
+      if (bankRowId) {
+        const { rows: [row] } = await client.query<{
+          import_id: string; account_id: string; amount_cents: string; booking_date: string; status: string;
+        }>(`SELECT r.import_id, i.account_id, r.amount_cents::text, r.booking_date::text, r.status
+          FROM finance_bank_statement_rows r JOIN finance_bank_statement_imports i
+            ON i.department_id=r.department_id AND i.id=r.import_id
+          JOIN finance_accounts a ON a.department_id=i.department_id AND a.id=i.account_id
+          WHERE r.department_id=$1 AND r.id=$2 AND a.active AND a.account_type='asset'
+          FOR UPDATE OF r`, [departmentId, bankRowId]);
+        if (!row) {
+          await client.query("ROLLBACK");
+          return reply.code(404).send({ error: "Statement row with an active bank account not found." });
+        }
+        if (row.status !== "unmatched") {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({ error: "Only unmatched statement rows can be posted. Review any existing match or suggestion first." });
+        }
+        const bankLines = lines.filter(line => line.accountId.toLowerCase() === row.account_id);
+        const bankLine = bankLines[0];
+        if (bankLines.length !== 1 || bookingDate !== row.booking_date
+          || !bankLine || BigInt(bankLine.debitCents - bankLine.creditCents) !== BigInt(row.amount_cents)) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "The booking date and signed bank amount must match the statement row." });
+        }
+        bankImportId = row.import_id;
       }
       const configured = await periodForDate(client, departmentId, bookingDate);
       if (!configured.rowCount || configured.rows[0]!.status !== "open") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The booking date must fall within an open configured accounting year." }); }
@@ -770,6 +800,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const line = lines[index]!;
         await client.query("INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,cost_center_id,donor_id,debit_cents,credit_cents,line_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, id, index + 1, line.accountId, line.costCenterId ?? null, line.donorId ?? null, line.debitCents, line.creditCents, line.text ?? ""]);
       }
+      if (bankRowId && bankImportId) {
+        await client.query(`UPDATE finance_bank_statement_rows SET status='matched', matched_transaction_id=$3,
+          reconciled_by=$4, reconciled_at=now() WHERE department_id=$1 AND id=$2`, [departmentId,bankRowId,id,actorId]);
+        await audit(client, departmentId, request, "bank_statement_row_matched", "bank_statement_row", bankRowId,
+          { importId: bankImportId, transactionId: id, createdPosting: true });
+      }
       await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
       await client.query("COMMIT");
     } catch (error) {
@@ -779,6 +815,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       }
       throw error;
     } finally { client.release(); }
+    if (bankRowId) publish(departmentId, "bank-statement-row-reconciled", bankRowId);
     publish(departmentId, "transaction-posted", id); return reply.code(201).send({ id, bookingDate, accountingYear, receiptNumber, bookingText, status: "posted", debitCents: debitTotal, creditCents: creditTotal });
   });
 
@@ -1264,7 +1301,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   app.get<{ Params: { id: string } }>("/api/modules/finance/bank-statements/:id", { schema: { params: { type: "object", additionalProperties: false, required: ["id"], properties: { id: uuid } } } }, async (request, reply) => {
     const departmentId = await department(request, reply); if (!departmentId) return reply;
-    const result = await pool!.query(`SELECT row.id,row.line_number AS "lineNumber",row.booking_date AS "bookingDate",row.description,row.reference,row.amount_cents AS "amountCents",row.status,row.suggested_transaction_id AS "suggestedTransactionId",row.matched_transaction_id AS "matchedTransactionId",transaction.receipt_number AS "transactionReceipt",transaction.booking_text AS "transactionText"
+    const result = await pool!.query(`SELECT row.id,imported.account_id AS "accountId",row.line_number AS "lineNumber",row.booking_date AS "bookingDate",row.description,row.reference,row.amount_cents AS "amountCents",row.status,row.suggested_transaction_id AS "suggestedTransactionId",row.matched_transaction_id AS "matchedTransactionId",transaction.receipt_number AS "transactionReceipt",transaction.booking_text AS "transactionText"
       FROM finance_bank_statement_rows row JOIN finance_bank_statement_imports imported ON imported.department_id=row.department_id AND imported.id=row.import_id LEFT JOIN finance_transactions transaction ON transaction.department_id=row.department_id AND transaction.id=COALESCE(row.matched_transaction_id,row.suggested_transaction_id)
       WHERE row.department_id=$1 AND imported.id=$2 ORDER BY row.line_number LIMIT 20000`, [departmentId, request.params.id]);
     return result.rows.map((row) => ({ ...row, amountCents: asMoney(row.amountCents) }));
