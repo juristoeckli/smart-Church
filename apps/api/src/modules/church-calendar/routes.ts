@@ -1,5 +1,5 @@
 import { registerCalendarTagDefinitions } from "./tag-definitions.js";
-import { registerCalendarMeetingRequests } from "./meeting-requests.js";
+import { loadOccurrenceRequestScope, occurrenceRequestKey, registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
 import { registerAppointmentTemplates } from "./appointment-templates.js";
@@ -776,7 +776,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     return { removed: true };
   });
 
-  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string; appointmentId?: string } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
+  app.get<{ Querystring: { from?: string; to?: string; displayTimeZone?: string; appointmentId?: string; meetingRequests?: "mine" | "invitations" } }>("/api/modules/church-calendar/appointments", async (request, reply) => {
     if (!context.pool || !context.isDatabaseReady()) return unavailable(reply);
     const departmentId = await context.resolveDepartmentId(request, reply);
     if (!departmentId) return reply;
@@ -784,6 +784,11 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (appointmentId !== undefined && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(appointmentId)) {
       return responseError(reply, 400, "Invalid appointment identifier.");
     }
+    const meetingRequests = request.query.meetingRequests;
+    if (meetingRequests !== undefined && meetingRequests !== "mine" && meetingRequests !== "invitations") {
+      return responseError(reply, 400, "Choose a valid meeting request filter.");
+    }
+    if (meetingRequests) reply.header("Cache-Control", "private, no-store");
     const preference = request.query.displayTimeZone;
     const projected = preference !== undefined;
     let displayZone = preference === "appointments" || preference === undefined ? null : canonicalTimeZone(preference);
@@ -797,7 +802,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const now = Date.now();
     const visibleFrom = cleanLocalDateTime(request.query.from ?? `${when(now).slice(0, 10)}T00:00`);
     const visibleTo = cleanLocalDateTime(request.query.to ?? `${when(now + 31 * 86_400_000).slice(0, 10)}T23:59:59`);
-    if (!visibleFrom || !visibleTo || visibleTo < visibleFrom || (projected && wallDate(visibleTo).getTime() - wallDate(visibleFrom).getTime() > 400 * 86_400_000)) {
+    if (!visibleFrom || !visibleTo || visibleTo < visibleFrom || ((projected || meetingRequests) && wallDate(visibleTo).getTime() - wallDate(visibleFrom).getTime() > 400 * 86_400_000)) {
       return responseError(reply, 400, "Choose a valid calendar date range of up to 400 days.");
     }
     // Authored and viewer zones can be more than one calendar date apart.
@@ -922,6 +927,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const existing = links.get(key);
       if (existing) existing.push(row); else links.set(key, [row]);
     }
+    const requestScope = meetingRequests ? await loadOccurrenceRequestScope(
+      context.pool, departmentId, userId(request), appointments.filter((row) => row.calendar_scope === "group").map((row) => row.id),
+      visibleFrom, visibleTo,
+    ) : undefined;
     const output: Occurrence[] = [];
     for (const row of appointments) {
       const seriesTimeZone = row.time_zone ?? null;
@@ -958,6 +967,12 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         const viewStartsAt = instants ? appointmentWallTime(Date.parse(instants.startsAtUtc), viewTimeZone) : startAt;
         if (projected && (viewStartsAt < visibleFrom || viewStartsAt > visibleTo)) continue;
         const resourceWindow = allDay ? calendarBookingWindow(startAt, endAt, true, timeZone) : instants;
+        const requestKey = requestScope && row.calendar_scope === "group" && resourceWindow
+          ? occurrenceRequestKey(row.id, original, resourceWindow.startsAtUtc, resourceWindow.endsAtUtc)
+          : null;
+        const myMeetingResponse = requestKey ? requestScope?.get(requestKey) : undefined;
+        if (requestScope && (meetingRequests === "invitations" ? !myMeetingResponse : myMeetingResponse === null)) continue;
+
         const seriesBookings = links.get(row.id) ?? [];
         const resourceBookings = [...seriesBookings, ...(links.get(`${row.id}:${original}`) ?? [])].map((booking) => ({
           id: booking.resource_booking_id, name: booking.name, status: booking.status,
@@ -975,6 +990,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           allDay, place: override.place ?? row.place, url: override.url ?? row.url,
           internalOnly, tags: override.tags ?? row.tags,
           recurrence: row.recurrence, linkedEventId: linkedEvent?.id ?? null, linkedEventCancelled: linkedEvent?.cancelled ?? false, eventRegistration,
+          ...(myMeetingResponse ? { myMeetingResponse } : {}),
           resourceBookingIds: seriesBookings.map((booking) => booking.resource_booking_id), resourceBookings,
           resourceWindow: resourceWindow && { startsAt: resourceWindow.startsAtUtc, endsAt: resourceWindow.endsAtUtc },
           signupGroupId, signupGroupName: signupGroup?.name ?? null,

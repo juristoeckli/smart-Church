@@ -9,8 +9,8 @@ type MeetingRequests = {
 
 const labels: Record<Status, string> = { pending: "Awaiting response", accepted: "Accepted", declined: "Declined" };
 
-export function CalendarMeetingRequests({ appointmentId, originalStart, departmentId, csrfToken }: {
-  appointmentId: string; originalStart: string; departmentId: string; csrfToken: string;
+export function CalendarMeetingRequests({ appointmentId, originalStart, departmentId, csrfToken, onChange }: {
+  appointmentId: string; originalStart: string; departmentId: string; csrfToken: string; onChange?: () => void;
 }) {
   const [data, setData] = useState<MeetingRequests | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -50,6 +50,7 @@ export function CalendarMeetingRequests({ appointmentId, originalStart, departme
       });
       const result = await response.json() as { error?: string; invited?: number };
       if (!response.ok) throw new Error(result.error ?? "Could not save the meeting request.");
+      onChange?.();
       if (method === "POST") {
         setSelected([]);
         setNotice(result.invited ? `${result.invited} invitation${result.invited === 1 ? "" : "s"} added.` : "Everyone selected already has an invitation.");

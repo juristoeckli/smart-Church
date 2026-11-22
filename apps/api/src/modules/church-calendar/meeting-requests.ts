@@ -141,6 +141,7 @@ export function registerCalendarMeetingRequests(app: FastifyInstance, context: M
           );
           await queueInvitationNotices(client, departmentId, actor, result.rows);
           await client.query("COMMIT");
+          if (result.rows.length) context.realtime.publish("module:church-calendar:changed", departmentId, { action: "meeting-requests-changed" });
           return reply.code(201).send({ invited: result.rows.length });
         }
         const eligible = members.some((member) => member.userId === actor);
@@ -155,6 +156,7 @@ export function registerCalendarMeetingRequests(app: FastifyInstance, context: M
                 AND scheduled_end=$4::timestamptz AND recipient_user_id=$5 RETURNING status`, [...windowKey, actor, status],
           );
           await client.query("COMMIT");
+          if (result.rowCount) context.realtime.publish("module:church-calendar:changed", departmentId, { action: "meeting-requests-changed" });
           return result.rowCount ? { status } : reply.code(404).send({ error: "No invitation is available for this occurrence." });
         }
         const roster = await client.query<{ userId: string; status: "pending" | ResponseStatus }>(
@@ -176,4 +178,44 @@ export function registerCalendarMeetingRequests(app: FastifyInstance, context: M
       }
     },
   });
+}
+
+type ActiveRequestStatus = "pending" | ResponseStatus;
+type OccurrenceRequests = {
+  appointmentId: string; originalStart: string; startsAt: Date; endsAt: Date; myStatus: ActiveRequestStatus | null;
+};
+
+export function occurrenceRequestKey(id: string, originalStart: string, startsAt: string | Date, endsAt: string | Date) {
+  return `${id}:${originalStart}:${new Date(startsAt).getTime()}:${new Date(endsAt).getTime()}`;
+}
+
+export async function loadOccurrenceRequestScope(
+  db: Pick<PoolClient, "query">, departmentId: string, viewerId: string, appointmentIds: string[], from: string, to: string,
+) {
+  if (!appointmentIds.length) return new Map<string, ActiveRequestStatus | null>();
+  // Bound the search by the displayed range plus time-zone offset in either direction.
+  const start = new Date(Date.parse(from + "Z") - 2 * 86_400_000);
+  const end = new Date(Date.parse(to + "Z") + 2 * 86_400_000);
+  const result = await db.query<OccurrenceRequests>(
+    `SELECT invitation.appointment_id AS "appointmentId",
+            to_char(invitation.original_start,'YYYY-MM-DD"T"HH24:MI:SS') AS "originalStart",
+            invitation.scheduled_start AS "startsAt",invitation.scheduled_end AS "endsAt",
+            max(invitation.status) FILTER (WHERE invitation.recipient_user_id=$2) AS "myStatus"
+       FROM church_calendar_meeting_requests invitation
+       JOIN church_calendar_appointments appointment ON appointment.id=invitation.appointment_id AND appointment.department_id=$1
+       JOIN church_calendar_calendars calendar ON calendar.id=appointment.calendar_id AND calendar.department_id=$1
+       JOIN church_groups church_group ON church_group.id=calendar.group_id AND church_group.department_id=$1 AND church_group.status='active'
+       JOIN department_memberships membership ON membership.department_id=$1 AND membership.user_id=invitation.recipient_user_id
+       JOIN app_users account ON account.id=membership.user_id AND account.is_enabled AND NOT account.is_service_user
+       JOIN contacts contact ON contact.id=membership.contact_id AND contact.department_id=$1 AND contact.archived_at IS NULL
+       JOIN group_members member ON member.group_id=calendar.group_id AND member.contact_id=contact.id AND member.status='active'
+      WHERE invitation.appointment_id=ANY($3::uuid[]) AND appointment.archived_at IS NULL AND calendar.archived_at IS NULL
+        AND calendar.scope='group' AND invitation.scheduled_end>now()
+        AND invitation.scheduled_start<=$5 AND invitation.scheduled_end>=$4
+      GROUP BY invitation.appointment_id,invitation.original_start,invitation.scheduled_start,invitation.scheduled_end`,
+    [departmentId, viewerId, appointmentIds, start, end],
+  );
+  return new Map(result.rows.map(({ appointmentId, originalStart, startsAt, endsAt, myStatus }) => [
+    occurrenceRequestKey(appointmentId, originalStart, startsAt, endsAt), myStatus,
+  ]));
 }
