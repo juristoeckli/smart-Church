@@ -21,6 +21,24 @@ export async function recordResourceBookingDecision(client: PoolClient, departme
   );
 }
 
+export async function recordResourceBookingReopened(client: PoolClient, departmentId: string, bookingId: string, actorId: string) {
+  const storage = await client.query<{ ready: boolean }>("SELECT to_regclass('public.module_notifications') IS NOT NULL AS ready");
+  if (!storage.rows[0]?.ready) return;
+  await client.query(
+    `INSERT INTO module_notifications(id,department_id,recipient_user_id,sender_user_id,kind,title,body,in_app_enabled,email_enabled)
+     SELECT $4,booking.department_id,booking.requested_by,$3,'resource_booking','Resource booking awaiting review',
+            'The schedule or quantity for your resource booking changed. Open Resources to see the updated request.',true,true
+       FROM resource_bookings booking
+       JOIN department_memberships membership ON membership.user_id=booking.requested_by AND membership.department_id=booking.department_id
+       JOIN app_users account ON account.id=membership.user_id AND account.is_enabled AND NOT account.is_service_user
+       WHERE booking.id=$1 AND booking.department_id=$2 AND booking.requested_by<>$3 AND booking.status='requested'`,
+    [bookingId, departmentId, actorId, randomUUID()],
+  );
+  if (await clearResourceBookingRequestNotices(client, departmentId, bookingId)) {
+    await recordPendingResourceBookingRequest(client, departmentId, actorId, [bookingId]);
+  }
+}
+
 export async function recordResourceBookingReassignment(client: PoolClient, departmentId: string, bookingId: string, actorId: string, requesterId: string, previousName: string, nextName: string) {
   const storage = await client.query<{ ready: boolean }>(
     "SELECT to_regclass('public.module_notifications') IS NOT NULL AS ready",
@@ -35,18 +53,27 @@ export async function recordResourceBookingReassignment(client: PoolClient, depa
       WHERE booking.department_id=$1 AND booking.id=$2 AND booking.requested_by<>$3 AND booking.status='requested'`,
     [departmentId, bookingId, actorId, `Your request for “${previousName}” was moved to “${nextName}” and is awaiting a decision.`, randomUUID()],
   );
+  if (await clearResourceBookingRequestNotices(client, departmentId, bookingId)) {
+    await recordPendingResourceBookingRequest(client, departmentId, requesterId, [bookingId]);
+  }
+}
+
+async function hasResourceBookingRequestNotices(client: PoolClient) {
   const queue = await client.query<{ ready: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.module_notifications')
       AND attname='resource_request_booking_ids' AND NOT attisdropped) AS ready`,
   );
-  if (queue.rows[0]?.ready) {
-    await client.query(
-      `UPDATE module_notifications SET resource_request_booking_ids=array_remove(resource_request_booking_ids,$2::uuid)
-        WHERE department_id=$1 AND kind='resource_booking_request' AND $2::uuid=ANY(resource_request_booking_ids)`,
-      [departmentId, bookingId],
-    );
-    await recordPendingResourceBookingRequest(client, departmentId, requesterId, [bookingId]);
-  }
+  return Boolean(queue.rows[0]?.ready);
+}
+
+async function clearResourceBookingRequestNotices(client: PoolClient, departmentId: string, bookingId: string) {
+  if (!await hasResourceBookingRequestNotices(client)) return false;
+  await client.query(
+    `UPDATE module_notifications SET resource_request_booking_ids=array_remove(resource_request_booking_ids,$2::uuid)
+      WHERE department_id=$1 AND kind='resource_booking_request' AND $2::uuid=ANY(resource_request_booking_ids)`,
+    [departmentId, bookingId],
+  );
+  return true;
 }
 
 const resourceReviewer = `
@@ -83,13 +110,7 @@ export async function recordPendingResourceBookingRequest(
   client: PoolClient, departmentId: string, actorId: string, bookingIds: string[],
 ) {
   if (!bookingIds.length) return;
-  const storage = await client.query<{ ready: boolean }>(
-    `SELECT EXISTS (
-       SELECT 1 FROM pg_attribute WHERE attrelid=to_regclass('public.module_notifications')
-         AND attname='resource_request_booking_ids' AND NOT attisdropped
-     ) AS ready`,
-  );
-  if (!storage.rows[0]?.ready) return;
+  if (!await hasResourceBookingRequestNotices(client)) return;
   await client.query(
     `WITH reviewers AS (
        SELECT member.user_id FROM department_memberships member

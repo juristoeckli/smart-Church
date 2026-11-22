@@ -1,4 +1,4 @@
-import { recordPendingResourceBookingRequest, recordResourceBookingDecision, recordResourceBookingReassignment, resourceBookingReviewers } from "../../resource-booking-notices.js";
+import { recordPendingResourceBookingRequest, recordResourceBookingDecision, recordResourceBookingReassignment, recordResourceBookingReopened, resourceBookingReviewers } from "../../resource-booking-notices.js";
 import { registerResourceCalendarSubscriptions } from "./booking-calendar-subscriptions.js";
 import { registerMyResourceBookings } from "./my-resource-bookings.js";
 import { resourceBookedDayReport } from "./booked-day-report.js";
@@ -396,14 +396,30 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   const detailsRevision = `to_char(booking.updated_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
   const detailsParams = { type: "object", additionalProperties: false, required: ["id"], properties: { id: { type: "string", format: "uuid" } } } as const;
   type BookingText = { purpose: string; subtitle: string; description: string };
+  type ScheduleInput = { startsAt: string; endsAt: string; quantity: number; allDayDate?: string };
+  type BookingDetails = BookingText & {
+    revision: string; startsAt: Date; endsAt: Date; quantity: number; maxQuantity: number;
+    status: "requested" | "approved"; canReschedule: boolean; requiresApproval: boolean;
+    allDayDate: string | null; timeZone: string;
+  };
 
   async function queryEditableBookingDetails(db: Pick<PoolClient, "query">, departmentId: string, bookingId: string, actorId: string, manager: boolean, copyable: string) {
-    const { rows: [booking] } = await db.query<BookingText & { revision: string }>(
-      `SELECT booking.purpose,booking.subtitle,booking.description,${detailsRevision} AS revision
+    const { rows: [booking] } = await db.query<BookingDetails>(
+      `SELECT booking.purpose,booking.subtitle,booking.description,${detailsRevision} AS revision,
+              booking.starts_at AS "startsAt",booking.ends_at AS "endsAt",booking.quantity,booking.status,
+              resource.requires_approval AS "requiresApproval",
+              (booking.starts_at>now() AND NOT booking.is_intake_request) AS "canReschedule",
+              COALESCE(settings.total_units,1)::int AS "maxQuantity",
+              COALESCE(series.time_zone,site.time_zone,'UTC') AS "timeZone",
+              CASE WHEN day_override.all_day IS DISTINCT FROM false THEN series.all_day_date::text END AS "allDayDate"
          FROM resource_bookings booking
          JOIN bookable_resources resource ON resource.id=booking.resource_id AND resource.department_id=booking.department_id
+         JOIN departments site ON site.id=booking.department_id
+         LEFT JOIN resource_scheduler_settings settings ON settings.resource_id=booking.resource_id AND settings.department_id=booking.department_id
          LEFT JOIN resource_booking_series_occurrences occurrence ON occurrence.resource_booking_id=booking.id AND occurrence.department_id=booking.department_id
          LEFT JOIN resource_booking_series series ON series.id=occurrence.series_id AND series.department_id=booking.department_id
+         LEFT JOIN resource_booking_series_occurrence_overrides day_override
+           ON day_override.series_id=series.id AND day_override.resource_booking_id=booking.id
         WHERE booking.id=$1 AND booking.department_id=$2 AND ${copyable} AND ${editableBookingDetails("$4")}`,
       [bookingId, departmentId, actorId, manager],
     );
@@ -417,15 +433,21 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     reply.header("Cache-Control", "private, no-store");
     const booking = await queryEditableBookingDetails(context.pool!, departmentId, request.params.id, request.authenticatedUser!.id,
       isManager(request), await copyableResourceBooking("$3", "$4"));
-    return booking ?? reply.code(404).send({ error: "This booking is no longer available to edit." });
+    if (!booking) return reply.code(404).send({ error: "This booking is no longer available to edit." });
+    const { purpose, subtitle, description, revision, ...schedule } = booking;
+    return { purpose, subtitle, description, revision, schedule: schedule.canReschedule && isValidTimeZone(schedule.timeZone) ? schedule : null };
   });
 
-  app.put<{ Params: { id: string }; Body: BookingText & { expectedRevision: string } }>(detailsPath, {
+  app.put<{ Params: { id: string }; Body: BookingText & { expectedRevision: string; schedule?: ScheduleInput } }>(detailsPath, {
     schema: { params: detailsParams, body: { type: "object", additionalProperties: false, required: ["purpose", "subtitle", "description", "expectedRevision"], properties: {
       purpose: { type: "string", minLength: 1, maxLength: 240 },
       subtitle: { type: "string", maxLength: 240 },
       description: { type: "string", maxLength: 2000 },
       expectedRevision: { type: "string", minLength: 27, maxLength: 27 },
+      schedule: { type: "object", additionalProperties: false, required: ["startsAt","endsAt","quantity"], properties: {
+        startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
+        quantity: { type: "integer", minimum: 1, maximum: 10000 }, allDayDate: { type: "string", format: "date" },
+      } },
     } } },
   }, async (request, reply) => {
     const departmentId = await location(request, reply);
@@ -440,6 +462,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const copyable = await copyableResourceBooking("$3", "$4");
     const client = await context.pool!.connect();
     let changed = false;
+    let needsApproval = false;
     try {
       await client.query("BEGIN");
       if (!await context.lockDepartmentForWrite(client, departmentId)) {
@@ -470,8 +493,75 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "The booking changed. Reopen it before saving your edits." });
       }
+      const schedule = request.body.schedule;
+      const startsAt = schedule ? new Date(schedule.startsAt) : current.startsAt;
+      const endsAt = schedule ? new Date(schedule.endsAt) : current.endsAt;
+      const quantity = schedule?.quantity ?? current.quantity;
+      const allDayDate = schedule?.allDayDate ?? null;
+      if (schedule && (!current.canReschedule || !isValidTimeZone(current.timeZone))) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ error: "Only upcoming concrete resource bookings can be rescheduled." });
+      }
+      if (schedule && (!Number.isFinite(+startsAt) || !Number.isFinite(+endsAt) || endsAt <= startsAt
+        || Boolean(allDayDate) !== Boolean(current.allDayDate))) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose a valid window that preserves the booking's timed or full-day format." });
+      }
+      const rescheduled = Boolean(schedule && (+startsAt !== +current.startsAt || +endsAt !== +current.endsAt
+        || quantity !== current.quantity || allDayDate !== current.allDayDate));
+      if (rescheduled && (startsAt.getTime() <= Date.now() || startsAt.getTime() > Date.now() + 366 * 86_400_000 || quantity > current.maxQuantity)) {
+        await client.query("ROLLBACK");
+        return reply.code(400).send({ error: "Choose a future start within twelve months and a quantity within the available units." });
+      }
+      if (rescheduled && allDayDate) {
+        let matches = false;
+        if (isoDate(allDayDate) && isValidTimeZone(current.timeZone)) {
+          try {
+            const day = fullDayBounds(allDayDate, current.timeZone);
+            matches = +day.startsAt === +startsAt && +day.endsAt === +endsAt;
+          } catch { /* The selected local day could not be resolved. */ }
+        }
+        if (!matches) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({ error: "Choose the full day in the booking's original time zone." });
+        }
+      }
       const fields = (["purpose", "subtitle", "description"] as const).filter((field) => next[field] !== current[field]);
-      if (fields.length) {
+      if (fields.length || rescheduled) {
+        if (rescheduled) {
+          needsApproval = current.status === "approved" && current.requiresApproval;
+          const nextStatus = needsApproval ? "requested" : current.status;
+          await client.query(
+            `UPDATE resource_bookings SET starts_at=$3,ends_at=$4,quantity=$5,status=$6 WHERE id=$1 AND department_id=$2`,
+            [bookingId, departmentId, startsAt, endsAt, quantity, nextStatus],
+          );
+          if (seriesId) {
+            await client.query(
+              `UPDATE resource_booking_series SET starts_at=$3,ends_at=$4,quantity=$5,all_day_date=$6
+                 WHERE id=$1 AND department_id=$2`, [seriesId, departmentId, startsAt, endsAt, quantity, allDayDate],
+            );
+            await client.query(
+              "UPDATE resource_booking_series_occurrences SET occurrence_starts_at=$3 WHERE resource_booking_id=$1 AND department_id=$2",
+              [bookingId, departmentId, startsAt],
+            );
+            await client.query(
+              "DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND resource_booking_id=$2",
+              [seriesId, bookingId],
+            );
+          }
+          await client.query(
+            `INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details)
+               VALUES($1,$2,$3,'booking_rescheduled',$4,$5,$6::jsonb)`,
+            [randomUUID(), departmentId, actor, seriesId ?? null, bookingId, JSON.stringify({
+              timeZone: current.timeZone,
+              previous: { startsAt: current.startsAt, endsAt: current.endsAt, quantity: current.quantity, status: current.status, allDayDate: current.allDayDate },
+              next: { startsAt, endsAt, quantity, status: nextStatus, allDayDate },
+            })],
+          );
+          if (needsApproval) {
+            await recordResourceBookingReopened(client, departmentId, bookingId, actor);
+          }
+        }
         await client.query(
           `UPDATE resource_bookings SET purpose=$3,subtitle=$4,description=$5,
              updated_at=GREATEST(clock_timestamp(),updated_at + interval '1 microsecond') WHERE id=$1 AND department_id=$2`,
@@ -479,7 +569,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         );
         if (seriesId) await client.query("UPDATE resource_booking_series SET purpose=$3,subtitle=$4,description=$5,updated_at=now() WHERE id=$1 AND department_id=$2",
           [seriesId, departmentId, next.purpose, next.subtitle, next.description]);
-        await client.query(
+        if (fields.length) await client.query(
           `INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,booking_id,details)
            VALUES($1,$2,$3,'booking_details_updated',$4,$5,$6::jsonb)`,
           [randomUUID(), departmentId, actor, seriesId ?? null, bookingId, JSON.stringify({ fields })],
@@ -489,12 +579,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
+      if ((error as { code?: string })?.code === "23P01") {
+        return reply.code(409).send({ error: "That time or quantity conflicts with an existing reservation. The booking was not changed." });
+      }
       throw error;
     } finally {
       client.release();
     }
     if (changed) context.realtime.publish("module:resource-scheduler:changed", departmentId, {});
-    return { updated: changed };
+    return { updated: changed, ...(needsApproval ? { needsApproval } : {}) };
   });
 
   app.get<{ Params: { id: string } }>("/api/modules/resource-scheduler/bookings/:id/copy-draft", { schema: {

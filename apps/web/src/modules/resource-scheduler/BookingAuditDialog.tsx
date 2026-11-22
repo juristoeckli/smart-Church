@@ -5,6 +5,7 @@ export type BookingAuditEntry = { id: string; action: string; details: Record<st
 
 const actionLabels: Record<string, string> = {
   booking_details_updated: "Booking details updated",
+  booking_rescheduled: "Booking rescheduled",
   booking_resource_reassigned: "Resource reassigned", booking_approved: "Booking approved", booking_declined: "Booking rejected", booking_cancelled: "Booking cancelled",
   series_created: "Series created", series_archived: "Series cancelled", series_future_edited: "Future bookings changed",
   occurrence_overridden: "Occurrence changed", occurrence_override_reset: "Occurrence reset",
@@ -26,6 +27,11 @@ function detailFields(details: Record<string, unknown>) {
   }
   if (typeof details.resourceName === "string") fields.push(["Resource", details.resourceName]);
   if (typeof details.status === "string" && statusLabels[details.status]) fields.push(["Status", statusLabels[details.status]]);
+  for (const [key,label] of [["startsAt","Starts"],["endsAt","Ends"]]) {
+    const value = details[key];
+    if (typeof value === "string" && Number.isFinite(Date.parse(value))) fields.push([label, new Date(value).toLocaleString()]);
+  }
+  if (typeof details.allDayDate === "string") fields.push(["Full day", details.allDayDate]);
   if (typeof details.date === "string") fields.push(["Date", details.date]);
   if (typeof details.fromDate === "string") fields.push(["From", details.fromDate]);
   return fields;
