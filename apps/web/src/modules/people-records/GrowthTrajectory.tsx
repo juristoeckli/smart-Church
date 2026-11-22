@@ -7,6 +7,7 @@ type Mapping = { groupId?: string; groupType?: string; role: string; stepId: str
 type Settings = { revision: number; steps: Step[]; mappings: Mapping[] };
 type Group = { id: string; name: string; type: string };
 const path = "/api/people-records/growth-trajectory";
+const suggestedSteps = ["Welcome", "Connect", "Grow", "Lead (Group)", "Lead (Division)", "Leadership (Board)"];
 
 export function GrowthTrajectorySettings({ request }: { request: Request }) {
   const [settings, setSettings] = useState<(Settings & { groups: Group[] }) | null>(null);
@@ -69,6 +70,9 @@ function GrowthTrajectoryEditor({ settings, save }: { settings: Settings & { gro
   return <form onSubmit={(event) => void submit(event)}>
     <fieldset disabled={busy}>
       <legend>Steps in order</legend>
+      {steps.length === 0 && <button type="button" onClick={() =>
+        setSteps(suggestedSteps.map(name => ({ id: crypto.randomUUID(), name })))
+      }>Use suggested steps</button>}
       <ol>{steps.map((step, index) => <li key={step.id} className="module-toolbar">
         <label>Step name<input required value={step.name} maxLength={100}
           onChange={event => setSteps(steps.map(entry => entry.id === step.id ? { ...entry, name: event.target.value } : entry))} /></label>
