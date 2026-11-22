@@ -1,4 +1,6 @@
-import type { DeviceAddress, TelnetSettings } from "./telnet.js";
+import type { DeviceAddress } from "./telnet.js";
+
+type NetLinxWebControlSettings = { host: string; username?: string; password?: string };
 
 type EmulatedButtonAction = "channelPush" | "channelRelease";
 
@@ -11,12 +13,12 @@ export class NetLinxWebControlSession {
   private cookieHeader = "";
   private readonly origin: string;
 
-  constructor(settings: Pick<TelnetSettings, "host">) {
+  constructor(settings: Pick<NetLinxWebControlSettings, "host">) {
     const host = settings.host.includes(":") && !settings.host.startsWith("[") ? `[${settings.host}]` : settings.host;
     this.origin = `http://${host}`;
   }
 
-  async connect(settings: Pick<TelnetSettings, "username" | "password">) {
+  async connect(settings: Pick<NetLinxWebControlSettings, "username" | "password">) {
     if (Boolean(settings.username) !== Boolean(settings.password)) {
       throw new Error("Enter both the existing NetLinx WebConsole username and password, or leave both blank if the controller requires no login.");
     }
@@ -36,8 +38,13 @@ export class NetLinxWebControlSession {
     // configured not to follow that redirect so we can keep the session cookie;
     // treat it as success only when the controller also supplied that cookie.
     const redirected = response.status >= 300 && response.status < 400;
-    if ((!response.ok && !redirected) || /<failed>\s*1\s*<\/failed>|invalid username|incorrect password/i.test(body) || !this.cookieHeader) {
-      throw new Error("NetLinx WebConsole did not establish a session with the saved login.");
+    const rejected = /<failed>\s*1\s*<\/failed>|invalid username|incorrect password/i.test(body);
+    if (rejected) throw new Error("NetLinx WebConsole rejected the saved WebConsole login. Check the existing WebConsole account in AMX settings.");
+    if (!response.ok && !redirected) throw new Error(`NetLinx WebConsole login returned HTTP ${response.status}. Check the controller address and existing WebConsole account.`);
+    if (!this.cookieHeader) {
+      const location = response.headers.get("location");
+      const redirectPath = location ? new URL(location, this.origin).pathname : "none";
+      throw new Error(`NetLinx WebConsole login did not create a session cookie (HTTP ${response.status}, redirect ${redirectPath}).`);
     }
   }
 
@@ -67,7 +74,7 @@ export class NetLinxWebControlSession {
   close() { this.cookieHeader = ""; }
 }
 
-export async function openNetLinxWebControlSession(settings: TelnetSettings) {
+export async function openNetLinxWebControlSession(settings: NetLinxWebControlSettings) {
   const session = new NetLinxWebControlSession(settings);
   try {
     await session.connect(settings);

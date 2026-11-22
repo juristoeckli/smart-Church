@@ -50,9 +50,9 @@ function makeAction(page: Tp4Page, object: Tp4Object): AmxMappedAction | null {
   // send an input pulse to these unknown channels.
   if (/^Button\s+\d+$/.test(object.label?.trim() || object.name?.trim() || "")
     || object.uncertainty?.some((item) => /channel role is unclear/i.test(item))) return null;
-  // TP4 channelPort describes the panel endpoint. Smart-Church targets the
-  // dedicated NetLinx device 34001, which exposes control channels on port 1.
-  const port = 1;
+  // Mirror the TP4 channel port. The master combines the dedicated virtual
+  // control device on both ports with the panel, so audio controls stay on 2.
+  const port = object.channelPort ?? 1;
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   return {
     id: `tp4-${page.id}-${object.id}`,

@@ -70,7 +70,7 @@ function detailBackground(page: PanelPage) {
 }
 // Control actions target virtual device 34001, whose channels are on port 1.
 // TP4 channelPort values remain relevant only to feedback from panel 10001.
-const portForObject = (_page: PanelPage, _object: PanelObject) => 1;
+const portForObject = (_page: PanelPage, object: PanelObject) => object.channelPort ?? 1;
 const mainAudioPage = (room: string, label: string) => {
   const prefix = roomPrefix[room] ?? (room === "Konferenz gross" || room === "Konferenzsaal" ? "Kon" : undefined);
   const suffix = label === "Volumen" ? "Volume" : label === "Mikrofon" ? "Mik" : "Lautsprecher";

@@ -8,7 +8,7 @@ import { openNetLinxWebControlSession, type NetLinxWebControlSession } from "./w
 import { readTelnetDeviceChannels, readTelnetDeviceStatus, type TelnetSettings } from "./telnet.js";
 
 type AmxAction = { id: string; name: string; command: string };
-type AmxSettings = { host: string; port: number; username: string; password: string; clearPassword: boolean; actions: AmxAction[] };
+type AmxSettings = { host: string; port: number; username: string; password: string; clearPassword: boolean; webConsoleUsername: string; webConsolePassword: string; clearWebConsolePassword: boolean; actions: AmxAction[] };
 // The running EBV program exposes and combines virtual device 33001 with the
 // existing touchpanels. Device 34001 is not present on this controller.
 const CONTROL_DEVICE = 33001;
@@ -25,7 +25,7 @@ const audioActions: AmxAction[] = amxAudioActions.map((item) => ({
   name: item.name,
   command: `ICSP[${CONTROL_DEVICE}:${item.port ?? 2}:1,${item.channel}]`,
 }));
-const defaultSettings: AmxSettings = { host: "", port: 23, username: "", password: "", clearPassword: false, actions: roomActions };
+const defaultSettings: AmxSettings = { host: "", port: 23, username: "", password: "", clearPassword: false, webConsoleUsername: "", webConsolePassword: "", clearWebConsolePassword: false, actions: roomActions };
 const roomStatusChannels: Array<[number, string]> = [
   [11, "Gemeindesaal quer"], [16, "Gemeindesaal längs"], [13, "Konferenzsaal 1"],
   [12, "Bibliothek"], [15, "Alle Räume Autonom"], [14, "Konferenz gross"],
@@ -44,9 +44,13 @@ function cleanSettings(input: AmxSettings): AmxSettings | null {
   const host = input.host.trim();
   const username = typeof input.username === "string" ? input.username.trim() : "";
   const password = typeof input.password === "string" ? input.password : "";
+  const webConsoleUsername = typeof input.webConsoleUsername === "string" ? input.webConsoleUsername.trim() : "";
+  const webConsolePassword = typeof input.webConsolePassword === "string" ? input.webConsolePassword : "";
   if (!validHost(host) || !Number.isInteger(input.port) || input.port < 1 || input.port > 65535
     || username.length > 64 || password.length > 256 || typeof input.clearPassword !== "boolean"
-    || (password && !username) || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
+    || (password && !username) || webConsoleUsername.length > 64 || webConsolePassword.length > 256
+    || typeof input.clearWebConsolePassword !== "boolean" || (webConsolePassword && !webConsoleUsername)
+    || !Array.isArray(input.actions) || input.actions.length !== roomActions.length) return null;
   const ids = new Set<string>();
   const actions: AmxAction[] = [];
   for (const action of input.actions) {
@@ -56,19 +60,19 @@ function cleanSettings(input: AmxSettings): AmxSettings | null {
     actions.push({ id: action.id, name: preset.name, command: action.command });
   }
   if (roomActions.some((preset) => !ids.has(preset.id))) return null;
-  return { host, port: input.port, username, password, clearPassword: input.clearPassword, actions: roomActions.map((preset) => actions.find((item) => item.id === preset.id)!) };
+  return { host, port: input.port, username, password, clearPassword: input.clearPassword, webConsoleUsername, webConsolePassword, clearWebConsolePassword: input.clearWebConsolePassword, actions: roomActions.map((preset) => actions.find((item) => item.id === preset.id)!) };
 }
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   const { pool, isDatabaseReady, resolveDepartmentId, validateMutation } = context;
   const heldChannels = new Map<string, { session: NetLinxWebControlSession; departmentId: string; userId: string; address: { device: number; port: number; system: number }; channel: number; timer: NodeJS.Timeout }>();
 
-  async function getTelnetSettings(departmentId: string): Promise<TelnetSettings | null> {
-    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>(
-      "SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+  async function getTelnetSettings(departmentId: string): Promise<(TelnetSettings & { webConsoleUsername: string; webConsolePassword: string }) | null> {
+    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string; webconsole_username: string; webconsole_password_ciphertext: string }>(
+      "SELECT host,port,username,password_ciphertext,webconsole_username,webconsole_password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const row = result.rows[0];
     if (!row?.host) return null;
-    return { host: row.host, port: row.port === 1319 ? 23 : row.port || 23, username: row.username ?? "", password: row.password_ciphertext ? decryptTelnetPassword(row.password_ciphertext) : "" };
+    return { host: row.host, port: row.port === 1319 ? 23 : row.port || 23, username: row.username ?? "", password: row.password_ciphertext ? decryptTelnetPassword(row.password_ciphertext) : "", webConsoleUsername: row.webconsole_username ?? "", webConsolePassword: row.webconsole_password_ciphertext ? decryptTelnetPassword(row.webconsole_password_ciphertext) : "" };
   }
 
   function releaseHeldChannel(pressId: string) {
@@ -172,16 +176,17 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   app.get("/api/modules/amx/settings", async (request, reply) => {
     const departmentId = await requireAmxDepartment(request, reply, true);
     if (!departmentId) return reply;
-    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string }>(
-      "SELECT host,port,username,password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const result = await pool!.query<{ host: string; port: number; username: string; password_ciphertext: string; webconsole_username: string; webconsole_password_ciphertext: string }>(
+      "SELECT host,port,username,password_ciphertext,webconsole_username,webconsole_password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
     const row = result.rows[0];
-    return row ? { host: row.host, port: row.port === 1319 ? 23 : row.port || 23, username: row.username ?? "", password: "", clearPassword: false, passwordConfigured: Boolean(row.password_ciphertext), actions: roomActions } : defaultSettings;
+    return row ? { host: row.host, port: row.port === 1319 ? 23 : row.port || 23, username: row.username ?? "", password: "", clearPassword: false, passwordConfigured: Boolean(row.password_ciphertext), webConsoleUsername: row.webconsole_username ?? "", webConsolePassword: "", clearWebConsolePassword: false, webConsolePasswordConfigured: Boolean(row.webconsole_password_ciphertext), actions: roomActions } : defaultSettings;
   });
 
   app.put<{ Body: AmxSettings }>("/api/modules/amx/settings", {
-    schema: { body: { type: "object", additionalProperties: false, required: ["host", "port", "username", "password", "clearPassword", "actions"], properties: {
+    schema: { body: { type: "object", additionalProperties: false, required: ["host", "port", "username", "password", "clearPassword", "webConsoleUsername", "webConsolePassword", "clearWebConsolePassword", "actions"], properties: {
       host: { type: "string", minLength: 1, maxLength: 253 }, port: { type: "integer", minimum: 1, maximum: 65535 },
       username: { type: "string", maxLength: 64 }, password: { type: "string", maxLength: 256 }, clearPassword: { type: "boolean" },
+      webConsoleUsername: { type: "string", maxLength: 64 }, webConsolePassword: { type: "string", maxLength: 256 }, clearWebConsolePassword: { type: "boolean" },
       actions: { type: "array", minItems: 6, maxItems: 6, items: { type: "object", additionalProperties: false, required: ["id", "name", "command"], properties: {
         id: { type: "string", minLength: 1, maxLength: 64 }, name: { type: "string", minLength: 1, maxLength: 80 }, command: { type: "string", maxLength: 512 },
       } } },
@@ -192,13 +197,15 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!departmentId) return reply;
     const settings = cleanSettings(request.body);
     if (!settings) return reply.code(400).send({ error: "Enter a valid NetLinx host, Telnet port, and existing login if required." });
-    const existing = await pool!.query<{ password_ciphertext: string }>("SELECT password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
-    const currentCiphertext = existing.rows[0]?.password_ciphertext ?? "";
-    const passwordCiphertext = settings.clearPassword ? "" : settings.password ? encryptTelnetPassword(settings.password) : currentCiphertext;
-    await pool!.query(`INSERT INTO amx_site_settings(department_id,host,port,username,password_ciphertext,actions) VALUES($1,$2,$3,$4,$5,$6::jsonb)
-      ON CONFLICT(department_id) DO UPDATE SET host=EXCLUDED.host,port=EXCLUDED.port,username=EXCLUDED.username,password_ciphertext=EXCLUDED.password_ciphertext,actions=EXCLUDED.actions,updated_at=now()`,
-    [departmentId, settings.host, settings.port, settings.username, passwordCiphertext, JSON.stringify(settings.actions)]);
-    return { ...settings, password: "", clearPassword: false, passwordConfigured: Boolean(passwordCiphertext) };
+    const existing = await pool!.query<{ password_ciphertext: string; webconsole_password_ciphertext: string }>("SELECT password_ciphertext,webconsole_password_ciphertext FROM amx_site_settings WHERE department_id=$1", [departmentId]);
+    const currentTelnetCiphertext = existing.rows[0]?.password_ciphertext ?? "";
+    const currentWebConsoleCiphertext = existing.rows[0]?.webconsole_password_ciphertext ?? "";
+    const passwordCiphertext = settings.clearPassword ? "" : settings.password ? encryptTelnetPassword(settings.password) : currentTelnetCiphertext;
+    const webConsolePasswordCiphertext = settings.clearWebConsolePassword ? "" : settings.webConsolePassword ? encryptTelnetPassword(settings.webConsolePassword) : currentWebConsoleCiphertext;
+    await pool!.query(`INSERT INTO amx_site_settings(department_id,host,port,username,password_ciphertext,webconsole_username,webconsole_password_ciphertext,actions) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+      ON CONFLICT(department_id) DO UPDATE SET host=EXCLUDED.host,port=EXCLUDED.port,username=EXCLUDED.username,password_ciphertext=EXCLUDED.password_ciphertext,webconsole_username=EXCLUDED.webconsole_username,webconsole_password_ciphertext=EXCLUDED.webconsole_password_ciphertext,actions=EXCLUDED.actions,updated_at=now()`,
+    [departmentId, settings.host, settings.port, settings.username, passwordCiphertext, settings.webConsoleUsername, webConsolePasswordCiphertext, JSON.stringify(settings.actions)]);
+    return { ...settings, password: "", clearPassword: false, passwordConfigured: Boolean(passwordCiphertext), webConsolePassword: "", clearWebConsolePassword: false, webConsolePasswordConfigured: Boolean(webConsolePasswordCiphertext) };
   });
 
   app.post<{ Body: { actionId: string } }>("/api/modules/amx/press", {
@@ -223,7 +230,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const channel = Number(match[2]);
     let session: NetLinxWebControlSession | undefined;
     try {
-      session = await openNetLinxWebControlSession(settings);
+      session = await openNetLinxWebControlSession({ host: settings.host, username: settings.webConsoleUsername, password: settings.webConsolePassword });
       await session.emulateButton(address, channel, "channelPush");
       const pressId = randomUUID();
       const timer = setTimeout(() => { void releaseHeldChannel(pressId).catch(() => undefined); }, 30000);
@@ -268,7 +275,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       const channel = Number(match?.[2]);
       if (!Number.isInteger(port) || !Number.isInteger(channel)) return reply.code(409).send({ error: "The confirmed Telnet mapping is invalid." });
       const address = { device: CONTROL_DEVICE, port, system: 1 };
-      const session = await openNetLinxWebControlSession(settings);
+      const session = await openNetLinxWebControlSession({ host: settings.host, username: settings.webConsoleUsername, password: settings.webConsolePassword });
       try {
         await session.emulateButton(address, channel, "channelPush");
         await new Promise((resolve) => setTimeout(resolve, 120));
