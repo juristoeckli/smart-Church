@@ -265,6 +265,12 @@ export function PeopleRecordsModule({departmentId,csrfToken,department,canManage
     return () => { current = false; };
   }, [departmentId, selected?.id, detailsSection, canManage, relationshipSearch, request]);
   const loadPerson=useCallback(async(p:Person,section="history")=>{setSelected(p);setDetailsSection(section);try{const [items,personDates]=await Promise.all([(section==="history"||section==="workload")?Promise.resolve<Extra[]>([]):request<Extra[]>(`/api/people-records/${p.id}/${section}`),request<{birthDate:string|null;weddingAnniversary:string|null}>(`/api/people-records/${p.id}/dates`)]);setExtras(items);setDates(personDates)}catch(e){setError(e instanceof Error?e.message:"Could not load person details.")}},[request]);
+  useEffect(() => {
+    if (state !== "personal-followups") return;
+    setSelected(null);
+    setTab("personal-followups");
+    onStateChange("");
+  }, [state,onStateChange]);
   useEffect(()=>{
     const match=state.match(/^person:([a-z0-9-]{1,80})(?::\d+)?$/i);
     if(!match)return;

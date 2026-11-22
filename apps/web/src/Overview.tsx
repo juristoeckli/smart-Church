@@ -1,3 +1,4 @@
+import { HomePersonalFollowups } from "./HomePersonalFollowups";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowRight, ArrowUp, Building2, CalendarDays, ContactRound, Settings2, UsersRound, X } from "lucide-react";
 import type { BookableResource, ChurchGroup, Contact, ServiceEvent } from "@smart-church/contracts";
@@ -17,7 +18,7 @@ type GroupAppointment = { appointmentId: string; occurrenceStartAt: string; occu
 type ResourceBooking = { id: string; resourceName: string; location: string; purpose: string; requesterName: string; startsAt: string; endsAt: string; isIntakeRequest?: boolean };
 type HomeBookings = { current: ResourceBooking[]; pending: ResourceBooking[] | null };
 type RecentEventFact = { eventDate: string; title: string; adults: number; children: number; checkedIn: number; firstTimeVisitors: number };
-const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts", "homeLinks"] as const;
+const dashboardWidgetIds = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts", "homeLinks", "personalFollowups"] as const;
 type DashboardWidgetId = typeof dashboardWidgetIds[number];
 const defaultDashboardWidgets = { order: [...dashboardWidgetIds], visible: [...dashboardWidgetIds] };
 type WidgetLayout = typeof defaultDashboardWidgets;
@@ -43,6 +44,7 @@ const dashboardWidgetLabels: Record<DashboardWidgetId, TranslationKey> = {
   dutyRequests: "overview.dutyRequests",
   currentPosts: "overview.currentPosts",
   homeLinks: "overview.homeLinks",
+  personalFollowups: "overview.personalFollowups",
 };
 
 function attendanceSummary(rows: RecentEventFact[]) {
@@ -63,7 +65,7 @@ async function loadHomeBookings(departmentId: string, signal?: AbortSignal) {
   return response.ok ? await response.json() as HomeBookings : null;
 }
 
-export function Overview({ departmentId, departmentLocation, timeZone, contacts, csrfToken, canManageSite, onNavigate, onOpenBooking, onOpenGroupCalendar, onOpenEvent }: {
+export function Overview({ departmentId, departmentLocation, timeZone, contacts, csrfToken, canManageSite, onNavigate, onOpenBooking, onOpenGroupCalendar, onOpenEvent, onOpenFollowupProfile, onOpenFollowups }: {
   departmentId: string;
   departmentLocation: string;
   timeZone: string;
@@ -74,6 +76,8 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
   onOpenBooking: (id: string) => void;
   onOpenGroupCalendar: () => void;
   onOpenEvent: (id: string) => void;
+  onOpenFollowupProfile?: (id: string) => void;
+  onOpenFollowups?: () => void;
 }) {
   const [events, setEvents] = useState<ServiceEvent[]>([]);
   const [groups, setGroups] = useState<ChurchGroup[]>([]);
@@ -243,6 +247,8 @@ export function Overview({ departmentId, departmentLocation, timeZone, contacts,
 
   const recordedFacts = recentEventFacts?.filter((event) => event.checkedIn > 0 || event.adults > 0 || event.children > 0).slice(0, 5);
   const widgetContent: Record<DashboardWidgetId, ReactNode> = {
+    personalFollowups: onOpenFollowupProfile && onOpenFollowups
+      ? <HomePersonalFollowups key={departmentId} departmentId={departmentId} openProfile={onOpenFollowupProfile} openOverview={onOpenFollowups} /> : null,
     dutyRequests: <HomeDutyRequests departmentId={departmentId} csrfToken={csrfToken} onOpenEvent={onOpenEvent} onOpenSchedule={() => onNavigate("Services & events")} />,
     stats: <section className="stat-grid community-overview-stats" aria-label={translate("overview.sectionLabel")}>
       {stats.map(({ label, value, detail, icon: Icon, page }) => <button className="stat-card community-stat-card" type="button" key={label} onClick={() => onNavigate(page)}><div className="stat-icon stat-icon-green"><Icon size={19} /></div><div className="stat-content"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div><ArrowRight className="community-stat-arrow" size={15} /></button>)}

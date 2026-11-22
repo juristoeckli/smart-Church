@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Pool, PoolClient } from "pg";
 
-const widgets = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts", "homeLinks"] as const;
+const widgets = ["stats", "events", "birthdays", "anniversaries", "groupAppointments", "currentBookings", "resourceApprovals", "recentEventFacts", "dutyRequests", "currentPosts", "homeLinks", "personalFollowups"] as const;
 type Widget = typeof widgets[number];
 type Layout = { order: Widget[]; visible: Widget[] };
 type StoredLayout = { widget_order: unknown; visible_widgets: unknown };
