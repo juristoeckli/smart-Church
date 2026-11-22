@@ -1,3 +1,4 @@
+import { registerCalendarTagDefinitions } from "./tag-definitions.js";
 import { registerCalendarMeetingRequests } from "./meeting-requests.js";
 import { foldIcsLine, hashFeedToken, icsEscape } from "../../calendar-feed-format.js";
 import { isResourceBookingManager } from "../../resource-booking-policy.js";
@@ -195,6 +196,7 @@ async function moveCalendarOccurrenceLinks(db: PoolClient, oldId: string, newId:
 
 export function registerModuleRoutes(app: FastifyInstance, context: ModuleServerContext) {
   registerAppointmentTemplates(app, context, canManageCalendar);
+  registerCalendarTagDefinitions(app, context, (request) => canManageCalendar(request, "community", null));
   registerCalendarMeetingRequests(app, context, canManageCalendar);
   const unavailable = (reply: Parameters<typeof responseError>[0]) => responseError(reply, 503, "The calendar is unavailable.");
   const userId = (request: FastifyRequest) => request.authenticatedUser!.id;
