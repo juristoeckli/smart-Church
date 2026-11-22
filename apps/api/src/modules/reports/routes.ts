@@ -1,3 +1,4 @@
+import { groupAttendanceByRoleSql } from "./group-attendance-by-role.js";
 import { firstContactTrendSql } from "./first-contact-trend.js";
 import { canManagePeopleFields } from "../people-records/field-privacy.js";
 import { exportFormatQuery, sendReportWorkbook, type ExportFormatQuery } from "./xlsx.js";
@@ -9,7 +10,7 @@ import { registerReportDesigner } from "./designer.js";
 import { groupGrowthSql, validGroupGrowthRange } from "./group-growth.js";
 import { canonicalTimeZone } from "../../calendar-time.js";
 
-type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
+type ReportKey = "people-directory" | "people-consent-history" | "people-status-changes" | "people-first-contact-trend" | "upcoming-birthdays" | "upcoming-anniversaries" | "group-summary" | "group-roster" | "group-leaders" | "group-hierarchy" | "group-growth" | "group-meeting-attendance" | "group-attendance-by-role" | "group-meeting-feedback" | "group-lifecycle" | "event-attendance" | "event-staffing" | "event-absence-conflicts" | "event-service-plan" | "event-registration-summary" | "event-registration-details" | "check-in-trend" | "visitor-follow-up" | "worship-song-usage" | "resource-bookings" | "resource-utilization" | "finance-account-summary" | "finance-budget-vs-actual" | "finance-donor-giving";
 type ReportFilters = { from?: string; to?: string; groupId?: string; status?: "member" | "visitor"; followUpStatus?: "needed" | "done" | "not_needed"; accountingYear?: number; period?: "month" | "week" };
 type ReportRow = Record<string, string | number | boolean | null>;
 type SavedReport = { id: string; report_key: ReportKey; name: string; filters: ReportFilters; owner_user_id: string; updated_at: Date | string; share_scope: "private" | "department"; can_edit: boolean; schedule_days: number | null; notify_when_ready: boolean; next_run_at: Date | null; last_run_at: Date | null; last_run_status: string | null; run_history: { ranAt: string; status: string }[] };
@@ -27,6 +28,7 @@ const catalog = [
   { key: "group-hierarchy" as const, title: "Group hierarchy", description: "Active groups with parent and child group names, lifecycle status, and date range.", permission: "groups" as const },
   { key: "group-growth" as const, title: "Group membership growth", description: "Net active membership gains and losses recorded by week or month.", permission: "groups" as const },
   { key: "group-meeting-attendance" as const, title: "Group meeting attendance", description: "Present, absent and excused totals by group meeting.", permission: "groups" as const },
+  { key: "group-attendance-by-role" as const, title: "Monthly group attendance by role", description: "Attendance records by month and historically recorded role. Ambiguous or uncovered roles appear under Unknown.", permission: "groups" as const },
   { key: "group-meeting-feedback" as const, title: "Group meeting feedback", description: "Leader and attendee answers by group meeting; respondent identities are omitted.", permission: "groups" as const },
   { key: "group-lifecycle" as const, title: "Group lifecycle history", description: "Group creation, edits, and deletion history with prior and updated names, descriptions, and parent links.", permission: "groups" as const },
   { key: "event-attendance" as const, title: "Event attendance", description: "Event dates, adult and child totals, and recorded check-ins.", permission: "events" as const },
@@ -149,6 +151,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
       && (item.key !== "finance-budget-vs-actual" || (state.finance && state.financeBudgets))
       && (item.key !== "finance-donor-giving" || (state.finance && state.financeDonors))
       && (item.key !== "group-meeting-attendance" || state.groupAttendance)
+      && (item.key !== "group-attendance-by-role" || (state.groupAttendance && state.groupLifecycle))
       && (item.key !== "group-meeting-feedback" || state.groupFeedback)
       && (!["group-lifecycle", "group-growth"].includes(item.key) || state.groupLifecycle)
       && (item.key !== "group-hierarchy" || state.groupHierarchy)
@@ -289,6 +292,14 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
           GROUP BY meeting.id,church_group.name ORDER BY meeting.meeting_date DESC,church_group.name LIMIT 5000`,
         [departmentId, filters.from ?? null, filters.to ?? null, filters.groupId ?? null],
       );
+      rows = result.rows;
+    } else if (reportKey === "group-attendance-by-role") {
+      if (!validGroupGrowthRange(filters.from, filters.to)) throw new Error("Choose a valid date range of up to 731 calendar days.");
+      const location = await db.query<{ time_zone: string | null }>("SELECT time_zone FROM departments WHERE id=$1", [departmentId]);
+      const timeZone = canonicalTimeZone(location.rows[0]?.time_zone) ?? "UTC";
+      columns = [{ key: "month", label: "Month" }, { key: "role", label: "Role" }, { key: "present", label: "Present" },
+        { key: "absent", label: "Absent" }, { key: "excused", label: "Excused" }];
+      const result = await db.query(groupAttendanceByRoleSql,[departmentId, filters.groupId ?? null, filters.from, filters.to, timeZone]);
       rows = result.rows;
     } else if (reportKey === "group-meeting-feedback") {
       columns = [{ key: "meetingDate", label: "Meeting date" }, { key: "groupName", label: "Group" }, { key: "meetingTitle", label: "Meeting" }, { key: "formTitle", label: "Feedback form" }, { key: "responseType", label: "Response type" }, { key: "question", label: "Question" }, { key: "answer", label: "Answer" }, { key: "submittedAt", label: "Submitted" }];
@@ -584,7 +595,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!(await installedReports(departmentId, request)).some((item) => item.key === request.body.reportKey)) return denied(reply);
     const filters = normalizeFilters(request.body.filters);
     if (filterError(filters)) return reply.code(400).send({ error: filters });
-    if (["group-growth","people-first-contact-trend"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
+    if (["group-growth","people-first-contact-trend","group-attendance-by-role"].includes(request.body.reportKey) && !validGroupGrowthRange(filters.from, filters.to)) {
       return reply.code(400).send({ error: "Choose a valid date range of up to 731 calendar days." });
     }
     const name = cleanText(request.body.name, 120);
