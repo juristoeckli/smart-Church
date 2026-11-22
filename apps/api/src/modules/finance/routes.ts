@@ -1,3 +1,4 @@
+import { allocateJournalNumber, isJournalReceiptConflict, journalReceiptConflictMessage, registerJournalNumbering } from "./journal-numbering.js";
 import { registerTransactionEvidence } from "./transaction-evidence.js";
 import { registerCostCenterTransfers } from "./cost-center-transfer.js";
 import { accountStatementSql, type AccountStatementLine, type StatementLabel } from "./account-statement.js";
@@ -12,7 +13,7 @@ import type { PoolClient } from "pg";
 import type { ModuleServerContext } from "../module-sdk.js";
 
 type FinanceLineInput = { accountId: string; costCenterId?: string | null; donorId?: string | null; debitCents: number; creditCents: number; text?: string };
-type FinanceTransactionBody = { bookingDate: string; receiptNumber: string; bookingText: string; lines: FinanceLineInput[] };
+type FinanceTransactionBody = { bookingDate: string; receiptNumber?: string; submissionId?: string; bookingText: string; lines: FinanceLineInput[] };
 type FinanceLineRow = { id: string; line_number: number; account_id: string; account_code: string; account_name: string; account_type: string; cost_center_id: string | null; cost_center_name: string | null; donor_id: string | null; donor_name: string | null; debit_cents: string | number; credit_cents: string | number; line_text: string };
 
 const uuid = { type: "string", format: "uuid" } as const;
@@ -22,8 +23,8 @@ const lineSchema = {
   properties: { accountId: uuid, costCenterId: { anyOf: [uuid, { type: "null" }] }, donorId: { anyOf: [uuid, { type: "null" }] }, debitCents: { type: "integer", minimum: 0, maximum: 9000000000000000 }, creditCents: { type: "integer", minimum: 0, maximum: 9000000000000000 }, text: { type: "string", maxLength: 500 } },
 } as const;
 const transactionSchema = {
-  type: "object", additionalProperties: false, required: ["bookingDate", "receiptNumber", "bookingText", "lines"],
-  properties: { bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
+  type: "object", additionalProperties: false, required: ["bookingDate", "bookingText", "lines"],
+  properties: { submissionId:uuid, bookingDate: { type: "string", format: "date" }, receiptNumber: { type: "string", minLength: 1, maxLength: 80 }, bookingText: { type: "string", minLength: 1, maxLength: 500 }, lines: { type: "array", minItems: 2, maxItems: 100, items: lineSchema } },
 } as const;
 
 function cleanText(value: string) { return value.trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " "); }
@@ -314,7 +315,10 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         FROM finance_donors d WHERE d.department_id=$1 ORDER BY d.display_name LIMIT 2000`, [departmentId]),
       pool!.query("SELECT accounting_year AS year FROM finance_accounting_years WHERE department_id=$1 UNION SELECT DISTINCT accounting_year AS year FROM finance_transactions WHERE department_id=$1 UNION SELECT DISTINCT accounting_year AS year FROM finance_budgets WHERE department_id=$1 ORDER BY year DESC", [departmentId]),
       pool!.query(`SELECT b.id,b.accounting_year AS "accountingYear",b.account_id AS "accountId",a.code AS "accountCode",a.name AS "accountName",b.cost_center_id AS "costCenterId",c.code AS "costCenterCode",c.name AS "costCenterName",b.amount_cents AS "amountCents",b.note FROM finance_budgets b LEFT JOIN finance_accounts a ON a.id=b.account_id AND a.department_id=b.department_id LEFT JOIN finance_cost_centers c ON c.id=b.cost_center_id AND c.department_id=b.department_id WHERE b.department_id=$1 ORDER BY b.accounting_year DESC,a.code,c.code`, [departmentId]),
-      pool!.query(`SELECT accounting_year AS "accountingYear",label,start_date AS "startDate",end_date AS "endDate",status FROM finance_accounting_years WHERE department_id=$1 ORDER BY start_date DESC`, [departmentId]),
+      pool!.query(`SELECT f.accounting_year AS "accountingYear",f.label,f.start_date AS "startDate",f.end_date AS "endDate",f.status,
+        COALESCE(n.enabled,false) AS "journalNumberingEnabled" FROM finance_accounting_years f
+        LEFT JOIN finance_journal_numbering n ON n.department_id=f.department_id AND n.accounting_year=f.accounting_year
+        WHERE f.department_id=$1 ORDER BY f.start_date DESC`, [departmentId]),
       pool!.query('SELECT id,code,name,active,rate_basis_points AS "rateBasisPoints" FROM finance_tax_types WHERE department_id=$1 ORDER BY active DESC,lower(code),id', [departmentId]),
     ]);
     return { currency: settings.rows[0]?.currencyCode ?? "CHF", accounts: accounts.rows, costCenters: costCenters.rows, donors: donors.rows, years: years.rows.map((row) => Number(row.year)), accountingYears: accountingYears.rows, budgets: budgets.rows, taxTypes: taxTypes.rows };
@@ -692,37 +696,89 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
 
   registerCostCenterTransfers(app,context,{ department,audit,publish,periodForDate,cleanText,validDateOnly });
   registerTransactionEvidence(app,context,{department,audit});
+  registerJournalNumbering(app,context,department,audit);
 
   app.post<{ Body: FinanceTransactionBody }>("/api/modules/finance/transactions", { schema: { body: transactionSchema } }, async (request, reply) => {
     const departmentId = await department(request, reply, true); if (!departmentId) return reply; if (!validateMutation(request, reply)) return reply;
-    const receiptNumber = cleanText(request.body.receiptNumber); const bookingText = cleanText(request.body.bookingText);
+    const automatic = request.body.receiptNumber === undefined && Boolean(request.body.submissionId);
+    let receiptNumber = cleanText(request.body.receiptNumber ?? "");
+    const bookingText = cleanText(request.body.bookingText);
     const lines = request.body.lines.map((line) => ({ ...line, text: cleanText(line.text ?? "") }));
-    if (!receiptNumber || !bookingText) return reply.code(400).send({ error: "Receipt number and booking text are required." });
+    if ((!automatic && !receiptNumber) || !bookingText) return reply.code(400).send({ error: "Receipt number and booking text are required." });
     if (lines.some((line) => (line.debitCents > 0) === (line.creditCents > 0))) return reply.code(400).send({ error: "Each line must contain either a debit or a credit amount." });
     const debitTotal = lines.reduce((sum, line) => sum + line.debitCents, 0); const creditTotal = lines.reduce((sum, line) => sum + line.creditCents, 0);
     if (!Number.isSafeInteger(debitTotal) || !Number.isSafeInteger(creditTotal) || debitTotal <= 0 || debitTotal !== creditTotal) return reply.code(400).send({ error: "Debits and credits must be equal and greater than zero." });
     const bookingDate = request.body.bookingDate;
-    if (new Date(`${bookingDate}T00:00:00.000Z`).toISOString().slice(0, 10) !== bookingDate) return reply.code(400).send({ error: "Booking date is invalid." });
-    const id = randomUUID(); const client = await pool!.connect(); let accountingYear = 0;
+    if (!validDateOnly(bookingDate) || bookingDate.startsWith("0000-")) return reply.code(400).send({ error: "Booking date is invalid." });
+    const id = automatic ? request.body.submissionId!.toLowerCase() : randomUUID();
+    const actorId = request.authenticatedUser?.id ?? null;
+    const submissionHash = automatic ? createHash("sha256").update(JSON.stringify([bookingDate,bookingText,
+      lines.map(line => [line.accountId.toLowerCase(),line.costCenterId?.toLowerCase() ?? null,line.donorId?.toLowerCase() ?? null,
+        line.debitCents,line.creditCents,line.text])])).digest("hex") : null;
+    const client = await pool!.connect();
+    let accountingYear = 0;
     try {
       await client.query("BEGIN");
+      if (automatic) {
+        if (!await context.lockDepartmentForWrite(client,departmentId)) {
+          await client.query("ROLLBACK");
+          return reply.code(423).send({error:"This location is read-only."});
+        }
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('finance-journal-submission:'||$1::text))",[id]);
+        const { rows:[previous] } = await client.query<{ receipt_number:string;accounting_year:number;created_by:string|null;submission_hash:string|null }>(`
+          SELECT t.receipt_number,t.accounting_year,t.created_by,(SELECT a.details->>'journalSubmissionHash' FROM finance_audit a
+            WHERE a.department_id=t.department_id AND a.record_kind='transaction' AND a.record_id=t.id AND a.action='transaction_posted'
+            ORDER BY a.created_at,a.id LIMIT 1) AS submission_hash
+          FROM finance_transactions t WHERE t.department_id=$1 AND t.id=$2`,[departmentId,id]);
+        if (previous) {
+          if (previous.created_by!==actorId || previous.submission_hash!==submissionHash) {
+            await client.query("ROLLBACK");
+            return reply.code(409).send({error:"This submission was already used. Open a new transaction before retrying with changed details."});
+          }
+          await client.query("COMMIT");
+          return reply.send({id,bookingDate,accountingYear:previous.accounting_year,receiptNumber:previous.receipt_number,
+            bookingText,status:"posted",debitCents:debitTotal,creditCents:creditTotal});
+        }
+      }
       const configured = await periodForDate(client, departmentId, bookingDate);
       if (!configured.rowCount || configured.rows[0]!.status !== "open") { await client.query("ROLLBACK"); return reply.code(409).send({ error: "The booking date must fall within an open configured accounting year." }); }
-      const accountingYear = configured.rows[0]!.accounting_year;
+      accountingYear = configured.rows[0]!.accounting_year;
       const referenced = await client.query(`SELECT count(*)::int AS count FROM finance_accounts a WHERE a.department_id=$1 AND a.active AND a.id=ANY($2::uuid[])`, [departmentId, [...new Set(lines.map((line) => line.accountId))]]);
       if (referenced.rows[0].count !== new Set(lines.map((line) => line.accountId)).size) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Select active accounts from this location." }); }
       for (const line of lines) {
         if (line.costCenterId) { const valid = await client.query("SELECT 1 FROM finance_cost_centers WHERE department_id=$1 AND id=$2 AND active", [departmentId, line.costCenterId]); if (!valid.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Select active cost centers from this location." }); } }
         if (line.donorId) { const valid = await client.query("SELECT 1 FROM finance_donors WHERE department_id=$1 AND id=$2 AND active", [departmentId, line.donorId]); if (!valid.rowCount) { await client.query("ROLLBACK"); return reply.code(400).send({ error: "Select active donors from this location." }); } }
       }
-      await client.query("INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,created_by) VALUES($1,$2,$3,$4,$5,$6,$7)", [id, departmentId, bookingDate, accountingYear, receiptNumber, bookingText, request.authenticatedUser?.id ?? null]);
+      let journalSequence: number | null=null;
+      if (automatic) {
+        const allocation=await allocateJournalNumber(client,departmentId,accountingYear);
+        if (!allocation) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({error:"An automatic receipt number is unavailable for this accounting year."});
+        }
+        receiptNumber=allocation.receiptNumber;
+        journalSequence=allocation.number;
+      }
+      const inserted=await client.query(`INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,created_by,journal_sequence)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING RETURNING id`,
+      [id,departmentId,bookingDate,accountingYear,receiptNumber,bookingText,actorId,journalSequence]);
+      if (!inserted.rows[0]) {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({error:"This submission was already used."});
+      }
       for (let index = 0; index < lines.length; index++) {
         const line = lines[index]!;
         await client.query("INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,cost_center_id,donor_id,debit_cents,credit_cents,line_text) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)", [randomUUID(), departmentId, id, index + 1, line.accountId, line.costCenterId ?? null, line.donorId ?? null, line.debitCents, line.creditCents, line.text ?? ""]);
       }
-      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length });
+      await audit(client, departmentId, request, "transaction_posted", "transaction", id, { bookingDate, accountingYear, receiptNumber, debitCents: debitTotal, creditCents: creditTotal, lineCount: lines.length, ...(submissionHash ? { journalSubmissionHash:submissionHash } : {}) });
       await client.query("COMMIT");
-    } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+    } catch (error) {
+      await client.query("ROLLBACK");
+      if (isJournalReceiptConflict(error)) {
+        return reply.code(409).send({error:journalReceiptConflictMessage});
+      }
+      throw error;
+    } finally { client.release(); }
     publish(departmentId, "transaction-posted", id); return reply.code(201).send({ id, bookingDate, accountingYear, receiptNumber, bookingText, status: "posted", debitCents: debitTotal, creditCents: creditTotal });
   });
 

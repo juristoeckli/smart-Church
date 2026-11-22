@@ -1,3 +1,4 @@
+import { isJournalReceiptConflict } from "../finance/journal-numbering.js";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import type { buildChurchToolsFinanceJournalDryRun } from "./finance-journal-dry-run.js";
@@ -53,10 +54,17 @@ export async function createFinanceDraftBatch(db: Queryable, scope: Scope, actor
   const drafts: Result["drafts"] = [];
   for (const row of plan.rows) {
     const transactionId = randomUUID();
-    await db.query(`INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,status,created_by)
-      VALUES($1,$2,$3,$4,$5,$6,'draft',$7)`,
-    [transactionId, departmentId, row.date, plan.targetYear, row.documentNumber,
-      row.split ? `ChurchTools split journal draft #${row.split.parentId}` : `ChurchTools journal draft #${row.sourceId}`, actorId]);
+    try {
+      await db.query(`INSERT INTO finance_transactions(id,department_id,booking_date,accounting_year,receipt_number,booking_text,status,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,'draft',$7)`,
+      [transactionId, departmentId, row.date, plan.targetYear, row.documentNumber,
+        row.split ? `ChurchTools split journal draft #${row.split.parentId}` : `ChurchTools journal draft #${row.sourceId}`, actorId]);
+    } catch (error) {
+      if (isJournalReceiptConflict(error)) {
+        throw new ChurchToolsFinanceReviewError("An imported receipt number matches an allocated journal number. Resolve the receipt-number conflict before retrying.");
+      }
+      throw error;
+    }
     await db.query(`INSERT INTO finance_transaction_lines(id,department_id,transaction_id,line_number,account_id,debit_cents,credit_cents)
       SELECT line.id,$1,$2,line.position,line.account_id,line.debit,line.credit
       FROM jsonb_to_recordset($3::jsonb) AS line(id uuid,position integer,account_id uuid,debit bigint,credit bigint)`,

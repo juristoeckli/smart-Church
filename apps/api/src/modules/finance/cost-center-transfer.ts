@@ -1,3 +1,4 @@
+import { isJournalReceiptConflict, journalReceiptConflictMessage } from "./journal-numbering.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { PoolClient } from "pg";
@@ -92,6 +93,7 @@ export function registerCostCenterTransfers(app: FastifyInstance, context: Modul
       return reply.code(201).send(result(period.accounting_year));
     } catch (error) {
       await client.query("ROLLBACK");
+      if (isJournalReceiptConflict(error)) return reply.code(409).send({error:journalReceiptConflictMessage});
       throw error;
     } finally {
       client.release();
