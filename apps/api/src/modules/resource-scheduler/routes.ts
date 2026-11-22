@@ -11,7 +11,7 @@ import { calendarBookingWindow, calendarOccurrenceExists, cleanLocalDateTime, lo
 import { canonicalTimeZone } from "../../calendar-time.js";
 
 type Frequency = "once" | "daily" | "weekly" | "monthly" | "yearly";
-type RepeatRule = { frequency: Frequency; interval?: number; endsOn?: string; count?: number; weekdays?: number[] };
+type RepeatRule = { frequency: Frequency; interval?: number; endsOn?: string; count?: number; weekdays?: number[]; anchorDate?: string; windowEnd?: string };
 type SeriesInput = {
   resourceId: string; purpose: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; quantity?: number;
   leadInMinutes?: number; cleanupMinutes?: number; recurrence?: RepeatRule;
@@ -25,7 +25,8 @@ type OccurrenceResourceRequest = {
   linkedAppointmentId: string; linkedOccurrenceStartAt: string; purpose: string;
   startsAt: string; endsAt: string; resources: ResourceSelection[];
 };
-type FutureEditInput = { fromDate: string; purpose: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; quantity: number; leadInMinutes: number; cleanupMinutes: number; recurrence: RepeatRule };
+type FutureRepeatRule = Omit<RepeatRule, "anchorDate" | "windowEnd" | "count" | "endsOn"> & { count?: number | null; endsOn?: string | null };
+type FutureEditInput = { fromDate: string; purpose: string; subtitle?: string; description?: string; startsAt: string; endsAt: string; quantity: number; leadInMinutes: number; cleanupMinutes: number; recurrence: FutureRepeatRule };
 
 // Match the shared-calendar management policy. These grants also allow
 // reading group calendars. Resource management by itself is insufficient.
@@ -106,41 +107,91 @@ function fullDayBounds(date: string, timeZone: string) {
   return { startsAt, endsAt: midnight() };
 }
 
+function repeatAnchor(rule: RepeatRule, startDay: number) {
+  return rule.anchorDate && isoDate(rule.anchorDate) ? Date.parse(rule.anchorDate + "T00:00:00Z") : startDay;
+}
+
+function repeatEnd(rule: RepeatRule, startDay: number) {
+  return Math.min(startDay + 366 * DAY_MS, ...[rule.endsOn, rule.windowEnd].map((date) =>
+    date && isoDate(date) ? Date.parse(date + "T00:00:00Z") : Infinity));
+}
+
+function repeatWeekdays(rule: Pick<RepeatRule, "weekdays">) {
+  return [...new Set(rule.weekdays?.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))].sort((a, b) => a - b);
+}
+
+function repeatMatches(rule: RepeatRule, date: Date, anchor: Date, weekdays: number[]) {
+  const deltaDays = (+date - +anchor) / DAY_MS;
+  const interval = Math.max(1, Math.min(366, Math.floor(Number(rule.interval) || 1)));
+  if (deltaDays < 0) return false;
+  const day = date.getUTCDay();
+  const deltaMonths = (date.getUTCFullYear() - anchor.getUTCFullYear()) * 12 + date.getUTCMonth() - anchor.getUTCMonth();
+  if (rule.frequency === "daily") return deltaDays % interval === 0;
+  if (rule.frequency === "weekly") return Math.floor(deltaDays / 7) % interval === 0 && (weekdays.length ? weekdays.includes(day) : day === anchor.getUTCDay());
+  if (rule.frequency === "monthly") return deltaMonths % interval === 0 && date.getUTCDate() === anchor.getUTCDate();
+  if (rule.frequency === "yearly") return deltaMonths % (12 * interval) === 0 && date.getUTCDate() === anchor.getUTCDate();
+  return false;
+}
+
+function futureRepeatRule(previous: RepeatRule, requested: FutureRepeatRule, previousStartDate: string, cutoffDate: string) {
+  const startDay = Date.parse(previousStartDate + "T00:00:00Z");
+  const cutoff = Date.parse(cutoffDate + "T00:00:00Z");
+  const anchor = new Date(repeatAnchor(previous, startDay));
+  const previousWeekdays = previous.frequency === "weekly" ? repeatWeekdays(previous) : [];
+  const weekdays = requested.frequency === "weekly"
+    ? repeatWeekdays(requested.weekdays === undefined && previous.frequency === "weekly" ? previous : requested)
+    : [];
+  const sameCadence = previous.frequency === requested.frequency &&
+    (previous.interval ?? 1) === (requested.interval ?? 1) && previousWeekdays.join(",") === weekdays.join(",");
+  const last = repeatEnd(previous, startDay);
+  const endChanged = requested.endsOn !== undefined && requested.endsOn !== previous.endsOn;
+  let count = requested.count ?? undefined;
+  if (requested.frequency !== "once" && requested.count === undefined && !endChanged && previous.count !== undefined && previous.frequency !== "once") {
+    if (cutoff < startDay) return null;
+    let consumed = 0;
+    for (let cursor = startDay; cursor < cutoff && cursor <= last && consumed < previous.count; cursor += DAY_MS) {
+      if (repeatMatches(previous, new Date(cursor), anchor, previousWeekdays)) consumed++;
+    }
+    count = Math.max(0, previous.count - consumed);
+  }
+  const endsOn = requested.endsOn === undefined ? previous.endsOn : requested.endsOn ?? undefined;
+  const keepWindow = requested.count === undefined && !endChanged;
+  const oldWindow = repeatEnd({ ...previous, endsOn: undefined }, startDay);
+  return {
+    frequency: requested.frequency, interval: requested.interval ?? 1,
+    ...(weekdays.length ? { weekdays } : {}),
+    ...(requested.frequency !== "once" && count !== undefined ? { count } : {}),
+    ...(requested.frequency !== "once" && endsOn ? { endsOn } : {}),
+    ...(requested.frequency !== "once" && sameCadence ? { anchorDate: anchor.toISOString().slice(0, 10) } : {}),
+    ...(requested.frequency !== "once" && keepWindow ? { windowEnd: new Date(oldWindow).toISOString().slice(0, 10) } : {}),
+  } satisfies RepeatRule;
+}
+
 function seriesDates(startsAt: Date, endsAt: Date, rule: RepeatRule, extras: string[], excluded: string[], timeZone: string | null = null) {
   if (timeZone) return seriesDatesInTimeZone(startsAt, endsAt, rule, extras, excluded, timeZone);
-  const interval = Math.max(1, Math.min(366, Math.floor(Number(rule.interval) || 1)));
-  const until = rule.endsOn ? new Date(`${rule.endsOn}T23:59:59.999Z`) : new Date(startsAt.getTime() + 366 * 86_400_000);
-  const last = new Date(Math.min(until.getTime(), startsAt.getTime() + 366 * 86_400_000));
+  const startDay = Date.UTC(startsAt.getUTCFullYear(), startsAt.getUTCMonth(), startsAt.getUTCDate());
+  const last = Math.min(repeatEnd(rule, startDay) + DAY_MS - 1, +startsAt + 366 * DAY_MS);
   const duration = endsAt.getTime() - startsAt.getTime();
   const occurrences: Date[] = [];
   const excludedSet = new Set(excluded);
-  const dayStart = (value: Date) => Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
-  const startDay = dayStart(startsAt);
-  const weekdays = rule.weekdays?.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6) ?? [];
+  const anchor = new Date(repeatAnchor(rule, startDay));
+  const weekdays = repeatWeekdays(rule);
   if (rule.frequency === "once") occurrences.push(new Date(startsAt));
   else {
-    for (let cursor = startDay, index = 0; cursor <= last.getTime() && occurrences.length < 500; cursor += 86_400_000) {
+    for (let cursor = startDay, index = 0; cursor <= last && occurrences.length < 500; cursor += DAY_MS) {
       const date = new Date(cursor);
-      const deltaDays = Math.round((cursor - startDay) / 86_400_000);
-      const deltaWeeks = Math.floor(deltaDays / 7);
-      const deltaMonths = (date.getUTCFullYear() - startsAt.getUTCFullYear()) * 12 + date.getUTCMonth() - startsAt.getUTCMonth();
-      const match = rule.frequency === "daily" ? deltaDays % interval === 0
-        : rule.frequency === "weekly" ? deltaWeeks % interval === 0 && (weekdays.length ? weekdays.includes(date.getUTCDay()) : date.getUTCDay() === startsAt.getUTCDay())
-        : rule.frequency === "monthly" ? deltaMonths >= 0 && deltaMonths % interval === 0 && date.getUTCDate() === startsAt.getUTCDate()
-        : rule.frequency === "yearly" ? date.getUTCMonth() === startsAt.getUTCMonth() && date.getUTCDate() === startsAt.getUTCDate() && (date.getUTCFullYear() - startsAt.getUTCFullYear()) % interval === 0
-        : false;
-      if (!match) continue;
+      if (!repeatMatches(rule, date, anchor, weekdays)) continue;
       index += 1;
-      if (rule.count && index > rule.count) break;
+      if (rule.count !== undefined && index > rule.count) break;
       const occurrence = new Date(date);
       occurrence.setUTCHours(startsAt.getUTCHours(), startsAt.getUTCMinutes(), startsAt.getUTCSeconds(), 0);
-      if (occurrence >= startsAt && occurrence <= last) occurrences.push(occurrence);
+      if (occurrence >= startsAt && +occurrence <= last) occurrences.push(occurrence);
     }
   }
   for (const day of extras) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
     const date = new Date(`${day}T${String(startsAt.toISOString()).slice(11, 23)}Z`);
-    if (Number.isFinite(date.getTime()) && date >= startsAt && date <= last) occurrences.push(date);
+    if (Number.isFinite(date.getTime()) && date >= startsAt && +date <= last) occurrences.push(date);
   }
   const unique = new Map<string, Date>();
   for (const start of occurrences) {
@@ -155,31 +206,23 @@ function seriesDatesInTimeZone(startsAt: Date, endsAt: Date, rule: RepeatRule, e
   const endParts = partsInTimeZone(endsAt, timeZone);
   const startDay = Date.UTC(startParts.year, startParts.month - 1, startParts.day);
   const endDayOffset = Math.round((Date.UTC(endParts.year, endParts.month - 1, endParts.day) - startDay) / DAY_MS);
-  const until = rule.endsOn ? new Date(`${rule.endsOn}T00:00:00Z`) : new Date(startDay + 366 * DAY_MS);
-  const lastDay = Math.min(until.getTime(), startDay + 366 * DAY_MS);
+  const lastDay = repeatEnd(rule, startDay);
   const occurrences = new Map<string,{ startsAt: Date; endsAt: Date; localDate: string }>();
   const excludedSet = new Set(excluded);
-  const interval = Math.max(1, Math.min(366, Math.floor(Number(rule.interval) || 1)));
-  const weekdays = rule.weekdays?.filter((day) => Number.isInteger(day) && day >= 0 && day <= 6) ?? [];
+  const anchor = new Date(repeatAnchor(rule, startDay));
+  const weekdays = repeatWeekdays(rule);
   if (rule.frequency === "once") {
     const day = localDate(startParts);
-    occurrences.set(day, { startsAt: new Date(startsAt), endsAt: new Date(endsAt), localDate: day });
+    if (!excludedSet.has(day)) occurrences.set(day, { startsAt: new Date(startsAt), endsAt: new Date(endsAt), localDate: day });
   } else {
     let count = 0;
-    for (let cursor = startDay, deltaDays = 0; cursor <= lastDay && occurrences.size < 500; cursor += DAY_MS, deltaDays++) {
+    for (let cursor = startDay; cursor <= lastDay && occurrences.size < 500; cursor += DAY_MS) {
       const date = new Date(cursor);
       const year = date.getUTCFullYear(), month = date.getUTCMonth() + 1, dayOfMonth = date.getUTCDate();
       const localDay = localDate({ year, month, day: dayOfMonth });
-      const deltaWeeks = Math.floor(deltaDays / 7);
-      const deltaMonths = (year - startParts.year) * 12 + month - startParts.month;
-      const match = rule.frequency === "daily" ? deltaDays % interval === 0
-        : rule.frequency === "weekly" ? deltaWeeks % interval === 0 && (weekdays.length ? weekdays.includes(date.getUTCDay()) : date.getUTCDay() === new Date(startDay).getUTCDay())
-        : rule.frequency === "monthly" ? deltaMonths >= 0 && deltaMonths % interval === 0 && dayOfMonth === startParts.day
-        : rule.frequency === "yearly" ? month === startParts.month && dayOfMonth === startParts.day && (year - startParts.year) % interval === 0
-        : false;
-      if (!match) continue;
+      if (!repeatMatches(rule, date, anchor, weekdays)) continue;
       count++;
-      if (rule.count && count > rule.count) break;
+      if (rule.count !== undefined && count > rule.count) break;
       if (excludedSet.has(localDay)) continue;
       if (allDay) {
         const window = fullDayBounds(localDay, timeZone);
@@ -334,7 +377,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     if (!isoDate(input.fromDate) || !Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) return { error: "Choose a valid date range and start/end time." } as const;
     if (occurrenceDateKey(startsAt, series.time_zone ?? null) !== input.fromDate) return { error: "The new series start date must match the selected future edit date." } as const;
     if (startsAt.getTime() < Date.now() - 60_000 || startsAt.getTime() > Date.now() + 366 * 86_400_000) return { error: "Choose an edit date and time in the next twelve months." } as const;
-    if (input.recurrence.endsOn && (!isoDate(input.recurrence.endsOn) || input.recurrence.endsOn < input.fromDate)) return { error: "Choose a valid repeat end date on or after the edit date." } as const;
+    if (input.recurrence.endsOn && (!isoDate(input.recurrence.endsOn) || (input.recurrence.endsOn < input.fromDate && input.recurrence.endsOn !== series.recurrence?.endsOn))) return { error: "Choose a valid repeat end date on or after the edit date." } as const;
     const resourceResult = await queryable.query("SELECT resource.calendar_required,resource.manager_booking_only,resource.visibility_group_id,resource.intake_only,COALESCE(settings.total_units,1)::int AS total_units FROM bookable_resources resource LEFT JOIN resource_scheduler_settings settings ON settings.department_id=resource.department_id AND settings.resource_id=resource.id WHERE resource.id=$1 AND resource.department_id=$2 AND resource.active=true", [series.resource_id, departmentId]);
     if (!resourceResult.rowCount) return { error: "The resource is no longer available in this location." } as const;
     if (resourceResult.rows[0].intake_only) return { error: "Intake requests are single bookings. Assign a specific resource to reschedule." } as const;
@@ -342,21 +385,28 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const dates = await queryable.query("SELECT occurrence_date::text AS date,date_type FROM resource_booking_series_dates WHERE series_id=$1", [seriesId]);
     const extras = dates.rows.filter((row: { date_type: string }) => row.date_type === "extra").map((row: { date: string }) => row.date);
     const excluded = dates.rows.filter((row: { date_type: string }) => row.date_type === "excluded").map((row: { date: string }) => row.date);
+    const previousStartDate = occurrenceDateKey(new Date(series.starts_at), series.time_zone ?? null);
+    const recurrence = futureRepeatRule(series.recurrence, input.recurrence, previousStartDate, input.fromDate);
+    if (!recurrence) return { error: "Enter a new repeat limit or end date to revise an earlier recurrence segment." } as const;
     let proposed: ReturnType<typeof seriesDates>;
-    if (series.all_day_date) {
-      try {
+    try {
+      const generate = (rule: RepeatRule, extraDates: string[]) => series.all_day_date
+        ? seriesDatesInTimeZone(startsAt, endsAt, rule, extraDates, excluded, series.time_zone, true)
+        : seriesDates(startsAt, endsAt, rule, extraDates, excluded, series.time_zone ?? null);
+      if (series.all_day_date) {
         const window = fullDayBounds(input.fromDate, series.time_zone);
         if (+window.startsAt !== +startsAt || +window.endsAt !== +endsAt) {
           return { error: "Full-day bookings must match the full calendar day in the series time zone." } as const;
         }
-        proposed = seriesDatesInTimeZone(startsAt, endsAt, input.recurrence, extras, excluded, series.time_zone, true);
-      } catch {
-        return { error: "A full-day booking date could not be resolved in the series time zone." } as const;
       }
-    } else {
-      proposed = seriesDates(startsAt, endsAt, input.recurrence, extras, excluded, series.time_zone ?? null);
+      const regular = generate(recurrence, []);
+      const extraDates = new Set(extras);
+      const manual = generate({ frequency: "once" }, extras).filter((item) => extraDates.has(item.localDate));
+      proposed = [...new Map([...regular, ...manual].map((item) => [item.localDate, item])).values()]
+        .filter((item) => item.localDate >= input.fromDate).sort((left, right) => +left.startsAt - +right.startsAt);
+    } catch {
+      return { error: "A booking date could not be resolved in the series time zone." } as const;
     }
-    proposed = proposed.filter((item) => item.localDate >= input.fromDate);
     if (!proposed.length) return { error: "This repeat rule has no future occurrences from the selected date." } as const;
     const current = await queryable.query<{
       id: string; occurrenceStartsAt: Date; occurrenceDate: string; hasOccurrenceOverride: boolean;
@@ -395,7 +445,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const requestedDates = new Set(requested.map(({ occurrenceDate }) => occurrenceDate));
     const retained = proposed.filter((item) => requestedDates.has(item.localDate)).length;
     const addedCount = proposed.filter((item) => !requestedDates.has(item.localDate) && !protectedDates.has(item.localDate)).length;
-    return { series, startsAt, endsAt, proposed, protectedDates, approvedCount, preservedApprovedCount,
+    return { series, startsAt, endsAt, recurrence, proposed, protectedDates, approvedCount, preservedApprovedCount,
       blockedApprovedCount: approvedCount - preservedApprovedCount, blockedStartedCount, requested, addedCount,
       updatedCount: retained, cancelledCount: requested.length - retained,
       calendarRequired: resourceResult.rows[0].calendar_required === true, managerBookingOnly: resourceResult.rows[0].manager_booking_only === true,
@@ -1266,7 +1316,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
   const futureEditSchema = { type: "object", additionalProperties: false, required: ["fromDate", "purpose", "startsAt", "endsAt", "quantity", "leadInMinutes", "cleanupMinutes", "recurrence"], properties: {
     fromDate: { type: "string", format: "date" }, purpose: { type: "string", minLength: 1, maxLength: 240 }, subtitle: { type: "string", maxLength: 240 }, description: { type: "string", maxLength: 2000 }, startsAt: { type: "string", format: "date-time" }, endsAt: { type: "string", format: "date-time" },
     quantity: { type: "integer", minimum: 1, maximum: 10000 }, leadInMinutes: { type: "integer", minimum: 0, maximum: 10080 }, cleanupMinutes: { type: "integer", minimum: 0, maximum: 10080 },
-    recurrence: { type: "object", additionalProperties: false, required: ["frequency"], properties: { frequency: { type: "string", enum: ["once", "daily", "weekly", "monthly", "yearly"] }, interval: { type: "integer", minimum: 1, maximum: 366 }, endsOn: { type: "string", format: "date" }, count: { type: "integer", minimum: 1, maximum: 500 }, weekdays: { type: "array", maxItems: 7, items: { type: "integer", minimum: 0, maximum: 6 } } } },
+    recurrence: { type: "object", additionalProperties: false, required: ["frequency"], properties: { frequency: { type: "string", enum: ["once", "daily", "weekly", "monthly", "yearly"] }, interval: { type: "integer", minimum: 1, maximum: 366 }, endsOn: { anyOf: [{ type: "string", format: "date" }, { type: "null" }] }, count: { anyOf: [{ type: "integer", minimum: 1, maximum: 500 }, { type: "null" }] }, weekdays: { type: "array", maxItems: 7, items: { type: "integer", minimum: 0, maximum: 6 } } } },
   } };
   app.post<{ Params: { seriesId: string }; Body: FutureEditInput }>("/api/modules/resource-scheduler/series/:seriesId/edit-preview", {
     schema: { params: { type: "object", required: ["seriesId"], properties: { seriesId: { type: "string", format: "uuid" } } }, body: futureEditSchema },
@@ -1283,7 +1333,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
     const visibilityRequired = result.addedCount > 0 && !await canViewResource(context.pool!, departmentId,
       result.visibilityGroupId, request.authenticatedUser!.id, isManager(request));
     const managerRequired = result.managerBookingOnly && result.addedCount > 0 && !isManager(request);
-    return { fromDate: request.body.fromDate, occurrenceCount: result.proposed.length, addedCount: result.addedCount,
+    return { fromDate: request.body.fromDate, occurrenceCount: result.proposed.length, remainingRegularCount: result.recurrence.count ?? null, addedCount: result.addedCount,
       updatedCount: result.updatedCount, cancelledCount: result.cancelledCount, approvedCount: result.approvedCount,
       preservedApprovedCount: result.preservedApprovedCount, blockedApprovedCount: result.blockedApprovedCount, blockedStartedCount: result.blockedStartedCount,
       blocked: result.blockedApprovedCount > 0 || result.blockedStartedCount > 0 || calendarRequired || managerRequired || visibilityRequired,
@@ -1352,7 +1402,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         await client.query("UPDATE resource_bookings SET status='cancelled',updated_at=now() WHERE department_id=$1 AND id=ANY($2::uuid[]) AND status='requested'", [departmentId, canceledIds]);
         await client.query("DELETE FROM resource_booking_series_occurrence_overrides WHERE series_id=$1 AND resource_booking_id=ANY($2::uuid[])", [request.params.seriesId, canceledIds]);
       }
-      await client.query(`UPDATE resource_booking_series SET purpose=$3,starts_at=$4,ends_at=$5,recurrence=$6::jsonb,quantity=$7,lead_in_minutes=$8,cleanup_minutes=$9,subtitle=$10,description=$11,updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.seriesId, departmentId, input.purpose.trim(), plan.startsAt, plan.endsAt, JSON.stringify(input.recurrence), input.quantity, input.leadInMinutes, input.cleanupMinutes, subtitle, description]);
+      await client.query(`UPDATE resource_booking_series SET purpose=$3,starts_at=$4,ends_at=$5,recurrence=$6::jsonb,quantity=$7,lead_in_minutes=$8,cleanup_minutes=$9,subtitle=$10,description=$11,updated_at=now() WHERE id=$1 AND department_id=$2`, [request.params.seriesId, departmentId, input.purpose.trim(), plan.startsAt, plan.endsAt, JSON.stringify(plan.recurrence), input.quantity, input.leadInMinutes, input.cleanupMinutes, subtitle, description]);
       let addedCount = 0; let updatedCount = 0;
       const extrasResult = await client.query("SELECT occurrence_date::text AS date FROM resource_booking_series_dates WHERE series_id=$1 AND date_type='extra'", [request.params.seriesId]);
       const extras = new Set(extrasResult.rows.map((row: { date: string }) => row.date));
@@ -1383,7 +1433,7 @@ export function registerModuleRoutes(app: FastifyInstance, context: ModuleServer
         }
       }
       summary = { addedCount, updatedCount, cancelledCount: canceledIds.length, preservedApprovedCount: plan.preservedApprovedCount };
-      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_future_edited',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, JSON.stringify({ fromDate: input.fromDate, previous: { purpose: plan.series.purpose, subtitle: plan.series.subtitle, description: plan.series.description, startsAt: plan.series.starts_at, endsAt: plan.series.ends_at, recurrence: plan.series.recurrence, quantity: plan.series.quantity, leadInMinutes: plan.series.lead_in_minutes, cleanupMinutes: plan.series.cleanup_minutes }, next: { ...input, subtitle, description }, ...summary })]);
+      await client.query("INSERT INTO resource_scheduler_audit(id,department_id,actor_user_id,action,series_id,details) VALUES($1,$2,$3,'series_future_edited',$4,$5::jsonb)", [randomUUID(), departmentId, request.authenticatedUser!.id, request.params.seriesId, JSON.stringify({ fromDate: input.fromDate, previous: { purpose: plan.series.purpose, subtitle: plan.series.subtitle, description: plan.series.description, startsAt: plan.series.starts_at, endsAt: plan.series.ends_at, recurrence: plan.series.recurrence, quantity: plan.series.quantity, leadInMinutes: plan.series.lead_in_minutes, cleanupMinutes: plan.series.cleanup_minutes }, next: { ...input, recurrence: plan.recurrence, subtitle, description }, ...summary })]);
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
