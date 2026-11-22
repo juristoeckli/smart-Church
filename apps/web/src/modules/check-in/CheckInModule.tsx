@@ -319,7 +319,7 @@ export function CheckInModule({ csrfToken, department, departmentId, realtime, s
   </details>;
 
   if (canManageGroupAttendance && groupAttendanceOpen) {
-    return <GroupMeetingAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken} onBack={() => setGroupAttendanceOpen(false)} />;
+    return <GroupMeetingAttendance key={departmentId} departmentId={departmentId} csrfToken={csrfToken} printOptions={printOptions} onBack={() => setGroupAttendanceOpen(false)} />;
   }
 
   const recentArrival = canManage && rosterReady && !complete && lastArrival?.scope === rosterScope

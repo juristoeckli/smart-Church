@@ -1,9 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Plus, Search } from "lucide-react";
+import { Plus, Printer, Search } from "lucide-react";
 import "./module.css";
 import { translate } from "../../i18n";
 import { GroupMeetingAddAttendee } from "./GroupMeetingAddAttendee";
 import { GroupMeetingCompletion } from "../../GroupMeetingCompletion";
+import { checkInPrintItems, readCheckInPrintOptions, writeCheckInPrintDocument, type CheckInPrintOptions } from "./printing";
 import { groupAttendanceChanges, groupAttendanceUrl, setGroupAttendanceCompletion, type CompletionFeedbackDraft, type GroupAttendanceSnapshot, type GroupAttendanceStatus } from "../../group-attendance";
 
 type Group = { id: string; name: string; status: string; importedFrom?: string };
@@ -38,11 +39,12 @@ function useData<T>(path: string, departmentId: string, label: string) {
   };
 }
 
-export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target }: {
+export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target, printOptions = readCheckInPrintOptions("") }: {
   departmentId: string;
   csrfToken: string;
   onBack: () => void;
   target?: GroupMeetingTarget;
+  printOptions?: CheckInPrintOptions;
 }) {
   const [groupId, selectGroup] = useState("");
   const groups = useData<Group[]>(target ? "" : "/api/groups", departmentId, "groups");
@@ -79,8 +81,31 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
     && (!activeRole || row.role?.trim() === activeRole)
     && (row.firstName + " " + row.lastName).toLocaleLowerCase().includes(term))
     .sort((left, right) => names.compare(left[sortBy], right[sortBy]) || names.compare(left[secondName], right[secondName]));
+  const visiblePresent = shown.filter((row) => row.status === "present");
   const loadError = groups.error ?? meetings.error ?? roster.error;
   const pending = groups.pending || meetings.pending || roster.pending;
+
+  function printLabels(attendees: typeof rows) {
+    if (!meeting || busy || !attendees.length) return;
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      setError("Allow pop-ups to open the Check-in print view.");
+      return;
+    }
+    printWindow.opener = null;
+    try {
+      const meetingLabel = [meeting.title, meeting.date].filter(Boolean).join(" · ");
+      const items = attendees.flatMap((row) => checkInPrintItems(
+        { ...row, groups: group ? [group.name] : [] }, meetingLabel, "", "labels", printOptions,
+      ));
+      writeCheckInPrintDocument(printWindow.document, "Group meeting name labels", items, printOptions);
+      printWindow.focus();
+      printWindow.print();
+    } catch {
+      printWindow.close();
+      setError("The print preview could not open. Try printing again.");
+    }
+  }
 
   function resetDraft() {
     setDraft({});
@@ -231,6 +256,9 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
         <button className="checkin-print" type="button" disabled={saving} onClick={() => { resetDraft(); roster.reload(); }}>
           {changes.length ? "Discard changes and reload" : "Reload attendance"}
         </button>
+        <button className="checkin-print" type="button" disabled={busy || !visiblePresent.length} onClick={() => printLabels(visiblePresent)}>
+          <Printer size={16} /> Print visible present labels
+        </button>
         {completedAt && <strong>Attendance completed.</strong>}
         <GroupMeetingCompletion key={departmentId + ":" + meeting.id} meetingId={meeting.id} departmentId={departmentId} completedAt={completedAt} disabled={saving || Boolean(changes.length)} buttonClass="checkin-print" onComplete={changeMeetingCompletion} />
         <button className="checkin-print" type="button" disabled={saving || Boolean(completedAt) || !changes.length} onClick={() => void saveAttendance()}>{saving ? "Saving…" : "Save attendance"}</button>
@@ -253,6 +281,8 @@ export function GroupMeetingAttendance({ departmentId, csrfToken, onBack, target
           }}>
             {statusKeys.map((status) => <option key={status} value={status}>{statuses[status]}</option>)}
           </select>
+          {row.status === "present" && <button className="checkin-print" type="button" disabled={busy}
+            aria-label={"Print label for " + row.firstName + " " + row.lastName} onClick={() => printLabels([row])}><Printer size={16} /> Print label</button>}
         </article>)}
         {!shown.length && <p className="checkin-empty">{rows.length ? "No attendees match this view." : "This meeting has no saved roster."}</p>}
       </div>
